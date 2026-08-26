@@ -1,0 +1,24 @@
+# nginx.conf.in — the MINIMAL config for the differential oracle.
+# Rendered per case by tools/wws-differential (@PORT@ and @ROOT@
+# substituted) into the case's scratch dir; every path below is
+# RELATIVE so it lands inside that scratch dir via `nginx -p` — a
+# test rig never scribbles on system paths. Loopback only, always.
+daemon off;
+pid nginx.pid;
+error_log error.log;
+
+events {
+}
+
+http {
+    access_log access.log;
+    # the binary ships without conf/mime.types; declare the one type
+    # this corpus serves instead of depending on an install tree
+    types {
+        text/html html;
+    }
+    server {
+        listen 127.0.0.1:@PORT@;
+        root @ROOT@/www;
+    }
+}

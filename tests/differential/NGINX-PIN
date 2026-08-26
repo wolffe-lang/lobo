@@ -1,0 +1,16 @@
+# NGINX-PIN — the pinned oracle for the differential harness (ws00).
+# The binary is NOT in git (tests/differential/bin/ is ignored): D33
+# forbids build-time execution in the wolf ecosystem, so building the
+# oracle is a DOCUMENTED ONE-TIME ACTION (docs/DIFFERENTIAL.md), and
+# CI builds it in a cached step keyed on this file — a CI step is not
+# a build script in the D33 sense (the wsc00 closeout records that
+# interpretation for review).
+# tools/wws-differential REFUSES, naming this pin, when the binary is
+# absent or `bin/nginx -v` disagrees with `version` below. A `-V`
+# configure-line drift is reported, not gated (the version is the
+# behavioral identity; the configure line is the build recipe).
+version = 1.30.4
+tarball = nginx-1.30.4.tar.gz
+source = https://nginx.org/download/nginx-1.30.4.tar.gz
+sha256 = 4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b
+configure = ./configure --without-http_rewrite_module --without-http_gzip_module
