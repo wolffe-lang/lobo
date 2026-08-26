@@ -1,0 +1,76 @@
+#!/bin/sh
+# wws-gauntlet — the gate. GREEN BEFORE ANY COMMIT (CLAUDE.md hard
+# rule). Make-free shell entry (the wolf-std gate is a cargo xtask;
+# this repo has no Rust, so the gate is sh — the delta and its
+# reasoning are recorded in .docs/STYLE.md). Steps, in order, each
+# named on failure:
+#   0. toolchain — pin identity (lib-toolchain.sh refuses on drift)
+#   1. manifest  — wolf.pkg parses (`wolf fmt --check` validates it)
+#   2. fmt       — canonical formatting over src/ and tests/
+#   3. tiers     — the entry builds on BOTH tiers (debug owned + release)
+#   4. wolfi     — every module surface matches its checked-in .wolfi
+#   5. corpus    — every directive test on its declared lanes, warnings denied
+#   6. differential — the pinned-nginx harness (refuses on a missing
+#                     or drifted oracle; that refusal is a red gate,
+#                     and building the oracle once per
+#                     docs/DIFFERENTIAL.md is part of entering this
+#                     repo — see CLAUDE.md)
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+step() {
+    echo ""
+    echo "=== wws-gauntlet: $1"
+}
+
+step "toolchain pin"
+. tools/lib-toolchain.sh
+echo "wolf:  $have_wolf ($($WOLF --version | sed -n 2p))"
+echo "lupin: $have_lupin"
+
+step "manifest"
+if ! "$WOLF" fmt --check wolf.pkg; then
+    echo "wws-gauntlet: FAILED at manifest — wolf.pkg does not parse/round-trip" >&2
+    exit 1
+fi
+echo "wolf.pkg ok"
+
+step "fmt --check (src, tests)"
+if ! "$WOLF" fmt --check src tests; then
+    echo "wws-gauntlet: FAILED at fmt — run \`$WOLF fmt src tests\` and re-check" >&2
+    exit 1
+fi
+echo "canonical"
+
+step "both tiers build"
+mkdir -p target
+if ! "$WOLF" build ./src/main.lu -o target/wws-debug; then
+    echo "wws-gauntlet: FAILED at tiers — the owned debug tier does not build" >&2
+    exit 1
+fi
+if ! "$WOLF" build --release ./src/main.lu -o target/wws-release; then
+    echo "wws-gauntlet: FAILED at tiers — the release tier does not build" >&2
+    exit 1
+fi
+echo "debug + release ok"
+
+step "interface freshness (.wolfi)"
+if ! tools/wws-interface --check; then
+    echo "wws-gauntlet: FAILED at wolfi — see above for the ritual" >&2
+    exit 1
+fi
+
+step "corpus (directive tests, all declared lanes)"
+if ! tools/wws-corpus; then
+    echo "wws-gauntlet: FAILED at corpus" >&2
+    exit 1
+fi
+
+step "differential (pinned nginx)"
+if ! tools/wws-differential; then
+    echo "wws-gauntlet: FAILED at differential" >&2
+    exit 1
+fi
+
+echo ""
+echo "wws-gauntlet: GREEN"
