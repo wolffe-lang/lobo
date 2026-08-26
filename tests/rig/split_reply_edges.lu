@@ -1,0 +1,26 @@
+//! check: run(exit=0, stdout="no-blank: ||raw bytes\nfull: HTTP/1.1 204 No Content|X-A: 1~X-B: 2|")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//!
+//! split_reply's seams, pure (no sockets — all three lanes): a reply
+//! with no blank line lands whole in `body`; a full reply splits into
+//! status/headers/body with the trailing blank line consumed. Written
+//! red-first against the gauntlet (the ws00 acceptance dance) — and
+//! the red run found the corpus rule this file now demonstrates:
+//! `\r` is outside the upstream directive grammar, and a header lupin
+//! cannot parse silently joins the sibling-module merge (E0302 across
+//! the directory). So CRLF-bearing output is asserted through
+//! `replace("\r\n", "~")`, and the runner refuses `\r` in a check
+//! line by name. Filed upstream.
+
+use httpc
+
+fn main() -> !int {
+    let a = httpc.split_reply("raw bytes")
+    print("no-blank: {a.status}|{a.headers}|{a.body}")
+    let b = httpc.split_reply("HTTP/1.1 204 No Content\r\nX-A: 1\r\nX-B: 2\r\n\r\n")
+    let hdrs = b.headers.replace("\r\n", "~")
+    print("full: {b.status}|{hdrs}|{b.body}")
+    0
+}

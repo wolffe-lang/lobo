@@ -6,6 +6,12 @@
 #
 # Format: wolf-lang's corpus directive header, verbatim —
 #   //! check: run(exit=N[, stdout="…"])     (\n \" \\ escapes)
+# `\r` is NOT in the upstream directive grammar (either machine), and
+# a header lupin cannot parse silently JOINS the sibling-module merge
+# (E0302 across the whole directory) — so this runner REFUSES a check
+# line spelling `\r` rather than accepting what the loaders cannot.
+# CRLF-bearing assertions print through `str.replace("\r\n", "~")`
+# (see split_reply_edges.lu). Filed upstream: a web corpus wants \r.
 #   //! phase: run
 #   //! lanes: native checked lupin           (wws delta: in-file lane
 #                                              routing; default all 3)
@@ -70,6 +76,12 @@ for f in $(find $roots -name '*.lu' | sort); do
         continue
     fi
     want_out_raw=$(printf '%s' "$check" | sed -n 's|^run(exit=[0-9]*, stdout="\(.*\)")$|\1|p')
+    case "$want_out_raw" in *'\r'*)
+        echo "corpus: FAILED — $f: \`\\r\` is outside the upstream directive grammar; lupin's loader would merge this file into its siblings (E0302). Assert CRLF via str.replace — see the runner header" >&2
+        red=$((red + 1))
+        continue
+        ;;
+    esac
 
     for lane in $lanes; do
         total=$((total + 1))
