@@ -1,0 +1,64 @@
+//! wws — a production web server in wolf (working name). Entry file:
+//! version print and argument dispatch ONLY (the ws00 contract); real
+//! verbs arrive with shell/ at ws04. `main`'s legal shapes are E0414's:
+//! no parameters — arguments come through `env_args`, which drops
+//! argv[0].
+
+use config
+use http
+use obs
+use proxy
+use serve
+use shell
+
+/// The package version. Matches wolf.pkg; the release ritual (far
+/// future) bumps both in one commit. Total; never traps.
+fn version() -> str {
+    "0.0.1"
+}
+
+/// The no-argument banner: identity plus every module's frozen
+/// interface version, which is also what keeps each stub import
+/// honestly used (E0305).
+fn banner() {
+    print("wws {version()} — a web server in wolf (working name)")
+    let mods = "config {config.version()} · http {http.version()} · obs {obs.version()} · proxy {proxy.version()} · serve {serve.version()} · shell {shell.version()}"
+    print("modules: {mods}")
+}
+
+/// One usage line; grows with shell/ at ws04.
+fn usage() {
+    print("usage: wws [-V | --version | help]")
+}
+
+fn main() -> int {
+    var mode = "banner"
+    var bad = ""
+    for a in env_args() {
+        if a == "-V" {
+            mode = "version"
+        } else if a == "--version" {
+            mode = "version"
+        } else if a == "help" {
+            mode = "help"
+        } else {
+            mode = "bad"
+            bad = a
+        }
+    }
+    if mode == "banner" {
+        banner()
+        return 0
+    }
+    if mode == "version" {
+        print("wws {version()}")
+        return 0
+    }
+    if mode == "help" {
+        usage()
+        return 0
+    }
+    eprint("wws: unknown argument `{bad}`")
+    usage()
+    2
+}
