@@ -1,0 +1,4 @@
+# The differential case files carry RAW wire bytes with CRLF line
+# endings (see docs/DIFFERENTIAL.md). git must never translate them:
+# a normalized `.case` is a lie about what went on the socket.
+tests/differential/cases/*.case -text
