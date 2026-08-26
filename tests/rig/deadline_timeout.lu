@@ -12,9 +12,8 @@
 //! send, so the verdict is deterministic on any host. This is the
 //! test that holds the rig's "deadline on every read" law, and it
 //! goes through `exchange_once` — the rig's handler-free witness
-//! path — so the tag reaches stdout under its own name on every
-//! lane (the interpreter's multi-arm net handlers take their first
-//! arm today; filed upstream, see httpc's header note).
+//! path — so the toolchain names the tag rather than a handler
+//! asserting it (the strongest evidence a row test can carry).
 
 use httpc
 

@@ -29,14 +29,14 @@ pub struct Reply {
 /// ENDS, so it stops the read loop instead of raising.
 /// The four-tag row is deliberate (W0602 allowed): it is the net
 /// builtins' own vocabulary minus `closed`, and the doc above is its
-/// one home — rig tests are the only callers.
-/// KNOWN EXPOSURE (filed upstream): the interpreter currently
-/// answers every multi-arm handler over a net builtin's row with its
-/// FIRST arm. Both handlers below put the overwhelmingly-likely tag
-/// first (`refused` at connect, `closed` at read), so the rig is
-/// correct on that lane today by ORDER, and `exchange_once` is the
-/// handler-free witness path tests use when the tag itself is the
-/// assertion. Do not reorder the arms without re-measuring.
+/// one home — rig tests are the only callers. The multi-arm handlers
+/// below discriminate correctly on all three lanes (re-measured at
+/// this pin: F-0079/wolf-interp#29 closed at lupin 0.1.13, a net
+/// handler picks the right arm across a module boundary). When a
+/// test needs the TAG ITSELF as its assertion, it goes through
+/// `exchange_once`, whose handler-free `?` path lets the toolchain
+/// name the tag rather than a handler asserting it — the strongest
+/// evidence, not a workaround for a bug.
 #[allow(w0602)]
 pub fn exchange(port: int, raw: str, deadline_ms: int) -> str ! {refused, timeout, utf8, io} {
     let c = net_connect("127.0.0.1:{port}") else |e| match e {
@@ -83,9 +83,7 @@ pub fn exchange(port: int, raw: str, deadline_ms: int) -> str ! {refused, timeou
 /// deadline. The rig's tag WITNESS path: this body has no handler at
 /// all — every outcome propagates by `?` under its own name, so the
 /// tag a test observes is the toolchain's, not an arm this repo
-/// picked (the interpreter currently answers every multi-arm net
-/// handler with its first arm — filed; `exchange` documents the
-/// exposure). Rows are the builtins' own, `closed` included: one
+/// picked. Rows are the builtins' own, `closed` included: one
 /// bounded read has no loop for `closed` to stop. On an error path
 /// the socket is left to the process's exit — this is test
 /// infrastructure, and the row must ride out unchanged.
