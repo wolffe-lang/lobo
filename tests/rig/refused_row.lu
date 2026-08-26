@@ -1,0 +1,22 @@
+//! check: run(exit=1, stdout="error: refused")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union, err.propagate
+//!
+//! Connection refused is a ROW, not a trap (D30), and the rig's
+//! client surfaces it under its own name. Deterministic without a
+//! fixed port: bind loopback port 0, learn the ephemeral port, CLOSE
+//! the listener, then dial it — nobody listens there, and no other
+//! lane can have bound it as a fixed port. `?` rides the tag out of
+//! `main`: `error: refused`, exit 1.
+
+use httpc
+
+fn main() -> !int {
+    let srv = net_listen("127.0.0.1:0")?
+    let port = net_port(srv)?
+    net_close(srv)?
+    let raw = httpc.exchange(port, "GET /nobody HTTP/1.1\r\n\r\n", 500)?
+    print("unreachable: {raw}")
+    0
+}
