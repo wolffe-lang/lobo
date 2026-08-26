@@ -1,3 +1,11 @@
 .docs/
 target/
 *.o
+# Pinned toolchain binaries (wolf, lupin, libwolf_rt.a) — vendored
+# locally per wolf-toolchain.toml's ritual, never committed.
+.wolf-bin/
+# The pinned nginx binary the differential harness vendors — built
+# once per docs/DIFFERENTIAL.md (the D33-safe one-time action).
+tests/differential/bin/
+# Compiler object/interface cache (D7).
+.lu-cache/
