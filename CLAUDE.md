@@ -34,4 +34,7 @@ never create one.
   with NAMED deltas; cert layouts/flows keep working. When wws
   behavior must differ from nginx, the delta is documented in the
   directive table and, where load-visible, linted.
+- Deferrals go in `.docs/sprints/deferrals.md` (local, gitignored)
+  under its two-kinds rule — named-gate or probed-and-routed; an
+  unrouted entry past its wave is a process failure.
 - When this repo's docs and the wolf spec disagree, the spec wins.
