@@ -1,0 +1,8 @@
+module pkg :: proxy
+  wolfi v0 · toolchain 0.1.0 · edition v1
+  export_hash 046b48c25019bcae67fa63e8d3284352af29d6ebb0b216cd26c058925e21c28b
+  pkg_hash    046b48c25019bcae67fa63e8d3284352af29d6ebb0b216cd26c058925e21c28b
+  deps: (none)
+  items:
+    [0] pub version — fn version() -> str
+

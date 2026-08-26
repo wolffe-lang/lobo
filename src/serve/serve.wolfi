@@ -1,0 +1,8 @@
+module pkg :: serve
+  wolfi v0 · toolchain 0.1.0 · edition v1
+  export_hash 1fbe58daa6beba6bb7111dc41689a5e842725a8af5f78d5886890981f2c1cfa2
+  pkg_hash    1fbe58daa6beba6bb7111dc41689a5e842725a8af5f78d5886890981f2c1cfa2
+  deps: (none)
+  items:
+    [0] pub version — fn version() -> str
+
