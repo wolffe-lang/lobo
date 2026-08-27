@@ -1,23 +1,27 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash d359c3dfc8666fbad5e7f371c2f212ee4a02e2f0b0e7a20e818526011bc52f72
-  pkg_hash    d359c3dfc8666fbad5e7f371c2f212ee4a02e2f0b0e7a20e818526011bc52f72
+  export_hash 9a7c323880e2ebbb08f550c46f5e28c456755d34141844d7d3941be8a1a7703a
+  pkg_hash    9a7c323880e2ebbb08f550c46f5e28c456755d34141844d7d3941be8a1a7703a
   deps:
     config  46e40ce27c442fc3257f65b51ccf07dcddfcb3b2e26edada020817dd00efcaec
     http  258e294adb196b8855742361c199033e4ac9863f000b7b2d1ad3bab6d7d65bbd
     proxy  c1025e7d7f4721aa4a5def23f13880b2861a255966e323e7a52c9210fa576489
   items:
     [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
-    [1] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
-    [2] pub error_body — fn error_body(code: int, server: str) -> str
-    [3] pub error_response — fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str
-    [4] pub header_too_large_body — fn header_too_large_body(server: str) -> str
-    [5] pub http_date — fn http_date(secs: int) -> str
-    [6] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
-    [7] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
-    [8] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
-    [9] pub status_phrase — fn status_phrase(code: int) -> str
-    [10] pub to_hex — fn to_hex(n: int) -> str
-    [11] pub version — fn version() -> str
-    [12] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int }
+    [1] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -) -> ρ_caller
+    [2] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
+    [3] pub error_body — fn error_body(code: int, server: str) -> str
+    [4] pub error_response — fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str
+    [5] pub header_too_large_body — fn header_too_large_body(server: str) -> str
+    [6] pub http_date — fn http_date(secs: int) -> str
+    [7] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
+    [8] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
+    [9] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
+    [10] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -) -> ρ_caller
+    [11] pub status_phrase — fn status_phrase(code: int) -> str
+    [12] pub to_hex — fn to_hex(n: int) -> str
+    [13] pub version — fn version() -> str
+    [14] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int }
+    [15] pub ReqOut — struct ReqOut { close: bool, carry: str }
+    [16] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int }
 
