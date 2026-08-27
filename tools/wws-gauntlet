@@ -78,5 +78,11 @@ if ! tools/wws-differential; then
     exit 1
 fi
 
+step "confcheck (corpus oracle parity)"
+if ! tools/wws-confcheck; then
+    echo "wws-gauntlet: FAILED at confcheck" >&2
+    exit 1
+fi
+
 echo ""
 echo "wws-gauntlet: GREEN"

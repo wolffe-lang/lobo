@@ -1,0 +1,111 @@
+#!/bin/sh
+# wws-confcheck — the corpus ORACLE-PARITY harness: every config under
+# tests/config-corpus/ is run through BOTH `nginx -t` (the pinned
+# oracle) and `wws -t`, and both exit codes must match the config's
+# checked-in annotation header:
+#   # wws-corpus: oracle-exit=N wws-exit=M [delta=<why they differ>]
+# A config with no annotation FAILS (zero silent outcomes — the
+# ratchet's other half; the wolf-side classification gate is
+# tests/config/corpus_ratchet.lu). Where oracle-exit != wws-exit the
+# annotation MUST carry a delta= reason (the named-delta discipline:
+# the pinned oracle is built --without rewrite/gzip and without
+# ssl/pcre, so several stock-nginx-clean shapes fail THERE and not in
+# wws — each such divergence is named, per config, in the file
+# itself).
+# -T is held to the -t exit on both sides (the p57 contract: same
+# verdict, dump on stdout).
+# This lives in sh because a wolf runner cannot read a child's exit
+# without os_spawn stdout capture (F-0065 → wolf-lang#129, ws00's D3).
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+NGINX="$(pwd)/tests/differential/bin/nginx"
+WWS="$(pwd)/target/wws-debug"
+pin_version=$(sed -n 's/^version = //p' tests/differential/NGINX-PIN)
+
+if [ ! -x "$NGINX" ]; then
+    echo "confcheck: REFUSED — pinned oracle missing at $NGINX (nginx/$pin_version; build per docs/DIFFERENTIAL.md)" >&2
+    exit 1
+fi
+if [ ! -x "$WWS" ]; then
+    echo "confcheck: FAILED — $WWS missing; the gauntlet's build step makes it" >&2
+    exit 1
+fi
+
+total=0
+red=0
+parity=0
+annotated_delta=0
+for dir in tests/config-corpus/*/; do
+    [ -d "$dir" ] || continue
+    name=$(basename "$dir")
+    conf="$dir/nginx.conf"
+    total=$((total + 1))
+    ann=$(grep -m1 '^# wws-corpus: oracle-exit=' "$conf" || true)
+    if [ -z "$ann" ]; then
+        echo "confcheck: FAILED — $name has no oracle annotation (# wws-corpus: oracle-exit=N wws-exit=M ...); silent corpus members are forbidden" >&2
+        red=$((red + 1))
+        continue
+    fi
+    want_oracle=$(printf '%s' "$ann" | sed -n 's/.*oracle-exit=\([0-9]*\).*/\1/p')
+    want_wws=$(printf '%s' "$ann" | sed -n 's/.*wws-exit=\([0-9]*\).*/\1/p')
+    delta=$(printf '%s' "$ann" | sed -n 's/.*delta=\(.*\)$/\1/p')
+    if [ -z "$want_oracle" ] || [ -z "$want_wws" ]; then
+        echo "confcheck: FAILED — $name: malformed annotation \`$ann\`" >&2
+        red=$((red + 1))
+        continue
+    fi
+    if [ "$want_oracle" != "$want_wws" ] && [ -z "$delta" ]; then
+        echo "confcheck: FAILED — $name: exits diverge ($want_oracle vs $want_wws) with NO delta= reason; name the divergence or fix it" >&2
+        red=$((red + 1))
+        continue
+    fi
+
+    scratch="target/confcheck/$name"
+    rm -rf "$scratch"
+    mkdir -p "$scratch/logs"
+    cp -R "$dir"/. "$scratch/"
+
+    ( cd "$scratch" && "$NGINX" -t -p "$(pwd)" -c nginx.conf -e error.log ) >/dev/null 2>"$scratch/oracle.err"
+    got_oracle=$?
+    "$WWS" -t -p "$scratch" -c nginx.conf >/dev/null 2>"$scratch/wws.err"
+    got_wws=$?
+    "$WWS" -T -p "$scratch" -c nginx.conf >"$scratch/wws.dump" 2>/dev/null
+    got_wws_T=$?
+    ( cd "$scratch" && "$NGINX" -T -p "$(pwd)" -c nginx.conf -e error.log ) >/dev/null 2>&1
+    got_oracle_T=$?
+
+    ok=1
+    if [ "$got_oracle" != "$want_oracle" ]; then
+        echo "confcheck: FAILED — $name: oracle -t exited $got_oracle, annotation says $want_oracle:" >&2
+        sed 's/^/confcheck:   oracle: /' "$scratch/oracle.err" >&2
+        ok=0
+    fi
+    if [ "$got_wws" != "$want_wws" ]; then
+        echo "confcheck: FAILED — $name: wws -t exited $got_wws, annotation says $want_wws:" >&2
+        sed 's/^/confcheck:   wws: /' "$scratch/wws.err" >&2
+        ok=0
+    fi
+    if [ "$got_wws_T" != "$got_wws" ]; then
+        echo "confcheck: FAILED — $name: wws -T exited $got_wws_T but -t exited $got_wws (p57: same verdict)" >&2
+        ok=0
+    fi
+    if [ "$got_oracle_T" != "$got_oracle" ]; then
+        echo "confcheck: FAILED — $name: oracle -T exited $got_oracle_T but -t exited $got_oracle" >&2
+        ok=0
+    fi
+    if [ "$ok" = 0 ]; then
+        red=$((red + 1))
+        continue
+    fi
+    if [ "$want_oracle" = "$want_wws" ]; then
+        parity=$((parity + 1))
+        echo "confcheck: ok — $name (oracle $got_oracle = wws $got_wws)"
+    else
+        annotated_delta=$((annotated_delta + 1))
+        echo "confcheck: ok — $name (oracle $got_oracle vs wws $got_wws; named: ${delta%%;*})"
+    fi
+done
+
+echo "confcheck: $total configs — $parity exit-parity, $annotated_delta named oracle-build deltas, $red red"
+[ "$red" = 0 ] && [ "$total" -gt 0 ] || exit 1
