@@ -957,7 +957,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
         return refused
     }
     let verify_data = bsub(fin_msg, 4, fin_msg.len)
-    let fin_ok = handshake.accept_finished(chts, th_cv, verify_data) else |_| {
+    let fin_ok = handshake.accept_finished(chts, th_sfin, verify_data) else |_| {
         send_alert_sealed(fd, shs_key, shs_iv, 4, 51)
         log_hs_fail(51, "client Finished did not verify")
         return refused
