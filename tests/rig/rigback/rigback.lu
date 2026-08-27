@@ -1,0 +1,166 @@
+//! member: true
+//! rigback — the two-sided differential's COMMON BACKEND, in wolf (the
+//! dogfood rule). Both proxies (the pinned nginx AND wws) point at an
+//! instance of this server; it RECORDS the exact request each proxy
+//! sends upstream (so the harness can byte-compare the backend-facing
+//! leg — proxy compat is unverifiable from the client side alone) and
+//! replies with a SCRIPTED response (status/headers/body/chunked/delay/
+//! close-early per case — the delay knob drives the timeout cases).
+//! RIG-PRIVATE test infrastructure; NOT serve/'s territory.
+//! Loopback only, port 0 always (the wolf-lang#121 lesson).
+//! Argv: <record-file> <reply-file> [max-exchanges]. It binds an
+//! ephemeral loopback port, prints it (the harness reads it and renders
+//! the proxy configs), then serves up to max-exchanges (default 1),
+//! appending each received request to the record file and answering
+//! from the reply file. The reply file's first line MAY be a marker:
+//!   `@delay <ms>`         sleep before replying (the read-timeout case)
+//!   `@close-early <n>`    send only the first <n> bytes, then close
+//!                         (the mid-body truncation case)
+//! otherwise the whole file is the verbatim reply.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+/// Read a full request head (up to and including CRLFCRLF) plus any
+/// Content-Length body, returning the whole received bytes. Row: io.
+fn read_request(conn: int) -> str ! {io} {
+    var buf = ""
+    loop {
+        let m = buf.find("\r\n\r\n") else -1
+        if m >= 0 {
+            let head = buf[0..m]
+            let want = content_length(head)
+            let body_start = m + 4
+            while buf.len < body_start + want {
+                let piece = net_read(conn, 4096) else |_| {
+                    return buf
+                }
+                buf = "{buf}{piece}"
+            }
+            return buf
+        }
+        if buf.len > 65536 {
+            return buf
+        }
+        let piece = net_read(conn, 4096) else |_| {
+            return buf
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// The Content-Length of a request head, or 0. Total.
+fn content_length(head: str) -> int {
+    for line in head.lines() {
+        let low = line.lower()
+        if low.starts_with("content-length:") {
+            let v = line[15..line.len]
+            let t = v.trim()
+            var n: int = 0
+            for b in t.bytes() {
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                }
+            }
+            return n
+        }
+    }
+    0
+}
+
+/// Parse a leading `@delay <ms>` / `@close-early <n>` marker from the
+/// reply text, returning (delay_ms, close_early_bytes, body). A missing
+/// marker gives (0, -1, whole). Total.
+fn parse_reply(text: str) -> (int, int, str) {
+    if text.starts_with("@delay ") {
+        let nl = text.find("\n") else text.len
+        let num = text[7..nl].trim()
+        var ms: int = 0
+        for b in num.bytes() {
+            if b >= 48 && b <= 57 {
+                ms = ms * 10 + b - 48
+            }
+        }
+        let body = text[nl + 1..text.len]
+        return (ms, -1, body)
+    }
+    if text.starts_with("@close-early ") {
+        let nl = text.find("\n") else text.len
+        let num = text[13..nl].trim()
+        var n: int = 0
+        for b in num.bytes() {
+            if b >= 48 && b <= 57 {
+                n = n * 10 + b - 48
+            }
+        }
+        let body = text[nl + 1..text.len]
+        return (0, n, body)
+    }
+    (0, -1, text)
+}
+
+fn main() -> !int {
+    var record = ""
+    var reply = ""
+    var maxex: int = 1
+    var i: int = 0
+    for a in env_args() {
+        if i == 0 {
+            record = a
+        } else if i == 1 {
+            reply = a
+        } else if i == 2 {
+            var n: int = 0
+            for b in a.bytes() {
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                }
+            }
+            maxex = n
+        }
+        i = i + 1
+    }
+    if i < 2 {
+        eprint("usage: rigback <record-file> <reply-file> [max-exchanges]")
+        return 2
+    }
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    // fresh record file
+    fs_write_text(record, "")?
+    print("{port}")
+
+    let reply_text = fs_read_text(reply)?
+    let script = parse_reply(reply_text)
+    let delay_ms = script.0
+    let close_n = script.1
+    let out_body = script.2
+
+    var served: int = 0
+    while served < maxex {
+        let conn = net_accept(l) else |_| {
+            continue
+        }
+        let got = read_request(conn) else |_| ""
+        // append the received request to the record file, separated
+        let prior = fs_read_text(record) else ""
+        fs_write_text(record, "{prior}=== EXCHANGE ===\n{got}") else |_| {}
+        if delay_ms > 0 {
+            time_sleep_ms(delay_ms)
+        }
+        if close_n >= 0 {
+            let n = close_n
+            var to_send = out_body
+            if n < out_body.len {
+                to_send = out_body[0..n]
+            }
+            net_write(conn, to_send) else |_| {}
+        } else {
+            net_write(conn, out_body) else |_| {}
+        }
+        net_close(conn) else |_| {}
+        served = served + 1
+    }
+    net_close(l) else |_| {}
+    0
+}

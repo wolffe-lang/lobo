@@ -1,0 +1,26 @@
+# wws.proxy.conf.in — the wws proxy side of the two-sided differential.
+# Mirrors nginx.proxy.conf.in exactly: same locations, same proxy_pass
+# arithmetic, same header directives, @PORT@/@BACKEND@ substituted.
+http {
+    server {
+        listen 127.0.0.1:@PORT@;
+        location /keep/ {
+            proxy_pass http://@BACKEND@;
+        }
+        location /strip/ {
+            proxy_pass http://@BACKEND@/;
+        }
+        location /rewrite/ {
+            proxy_pass http://@BACKEND@/v2/;
+        }
+        location /xff/ {
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_pass http://@BACKEND@/;
+        }
+        location /slow/ {
+            proxy_read_timeout 1s;
+            proxy_pass http://@BACKEND@/;
+        }
+    }
+}

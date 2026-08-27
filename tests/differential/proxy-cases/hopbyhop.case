@@ -1,0 +1,30 @@
+// hop-by-hop strip on the request leg: Keep-Alive and Connection removed upstream; two-sided
+--- request
+GET /strip/x HTTP/1.1
+Host: front.example
+Keep-Alive: timeout=5
+Connection: close
+
+
+--- reply
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 5
+X-App: on
+
+hello
+--- expect-client
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/plain
+Content-Length: 5
+Connection: close
+X-App: on
+
+hello
+--- expect-backend
+=== EXCHANGE ===
+GET /x HTTP/1.1
+Host: 127.0.0.1:@BPORT@
+

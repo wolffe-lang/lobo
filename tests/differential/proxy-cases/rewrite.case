@@ -1,0 +1,29 @@
+// URI '/v2/' rewrite: /rewrite/users/42 -> /v2/users/42; two-sided
+--- request
+GET /rewrite/users/42 HTTP/1.1
+Host: front.example
+Connection: close
+
+
+--- reply
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 5
+X-App: on
+
+hello
+--- expect-client
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/plain
+Content-Length: 5
+Connection: close
+X-App: on
+
+hello
+--- expect-backend
+=== EXCHANGE ===
+GET /v2/users/42 HTTP/1.1
+Host: 127.0.0.1:@BPORT@
+
