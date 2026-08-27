@@ -1,0 +1,1136 @@
+//! member: true
+//! tls — the server's use of std.x.tls (ws05): the socket
+//! conversation. std.x.tls.handshake owns the transcript, key
+//! schedule and message builders (its FROZEN HandshakeResult seam);
+//! std.x.tls.record owns sealing and opening records (the frozen
+//! given-keys seam); std.x.tls.cert owns certificate meaning; THIS
+//! module owns what travels on the fd: reading TLS records off a
+//! socket, parsing the ClientHello, driving the server flight
+//! (ServerHello .. Finished), verifying the client Finished, and the
+//! application-data session (sess_read/sess_write/sess_close) the
+//! conn seam wraps. Protocol correctness is std.x.tls's suite (RFC
+//! 8448-gated); integration is this file's.
+//! Scope, honest: TLS 1.3 only (a pre-1.3 client is answered with a
+//! protocol_version alert — the ssl_protocols table note), the
+//! ChaCha20-Poly1305 suite only (RFC 8446's MTI; the AES-GCM pair is
+//! a std.x.tls roadmap row), X25519 key shares only (a ClientHello
+//! without one gets handshake_failure — HelloRetryRequest is NAMED
+//! RESIDUE), Ed25519 CertificateVerify only (the sc22 ladder),
+//! no resumption/tickets/0-RTT (roadmap rows), no client certs
+//! (post-v1 table row), no KeyUpdate (answered unexpected_message and
+//! closed — named residue until the rekey sprint).
+//! close_notify discipline (the ws05 pitfall): every server-initiated
+//! close SENDS close_notify (sess_close); on read, an EOF without
+//! close_notify is surfaced as `closed` (the pragmatic web posture)
+//! but COUNTED on the session (`trunc` — the ws12 metric's hook):
+//! silent truncation is how response-injection hides.
+//! Never log secrets: nothing in this module prints key material,
+//! secrets, or handshake randoms at any level — the rig greps the
+//! server's logs after the TLS suite (tools/wws-tls-interop).
+//! INTERIM RANDOMNESS, NAMED LOUDLY (wolf-lang#143): the language has
+//! no entropy source at this pin (`random_seed` is typed but
+//! unlowered on every lane), so handshake randoms and the X25519
+//! ephemeral derive via HKDF-SHA256 over (the server's PRIVATE KEY
+//! seed, the client random, both clocks, the fd). Unpredictable to an
+//! outside observer only while the key stays secret, and NOT forward
+//! secret against key compromise — this is not cryptographic
+//! randomness and this module does not pretend otherwise. Loopback-
+//! only testing keeps the interim honest; real serving waits on the
+//! os_random builtin (#143), and the swap is one function.
+//! Lane note: net + crypto — the executing lane is native (the
+//! checked tier's step budget is exhausted by one scalar mult,
+//! measured at ws05); the PURE parsers (ClientHello, records-from-
+//! bytes, alert names) run everywhere and are tested on three lanes.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+use config
+use std.x.crypto.curve25519
+use std.x.crypto.sha2
+use std.x.tls.cert
+use std.x.tls.handshake
+use std.x.tls.record
+
+/// This module's interface version. Total; never traps.
+pub fn version() -> str {
+    "0.1.0"
+}
+
+// ------------------------------------------------------------------
+// byte helpers (local framing arithmetic — division/modulo, the
+// ladder's own convention; no bitwise on plain int)
+// ------------------------------------------------------------------
+
+/// Append all of `src` to `out`. Total.
+fn push_all(mut out: List[int], src: List[int]) {
+    var i: int = 0
+    let n = src.len
+    while i < n {
+        (mut out).push(src[i])
+        i = i + 1
+    }
+}
+
+/// The bytes of `b` from `from` (inclusive) to `to` (exclusive).
+/// Offsets are this module's own (validated against lengths before
+/// use). Total.
+fn bsub(b: List[int], from: int, to: int) -> List[int] {
+    var out = List[int]()
+    var i = from
+    while i < to {
+        (mut out).push(b[i])
+        i = i + 1
+    }
+    out
+}
+
+/// Big-endian uint16 at `at` (the caller has bounds-checked). Total.
+fn be16(b: List[int], at: int) -> int {
+    b[at] * 256 + b[at + 1]
+}
+
+/// Big-endian uint24 at `at`. Total.
+fn be24(b: List[int], at: int) -> int {
+    b[at] * 65536 + b[at + 1] * 256 + b[at + 2]
+}
+
+/// A big-endian uint16 as two bytes. Total for 0..65535.
+fn u16b(v: int) -> List[int] {
+    var out = List[int]()
+    (mut out).push(v / 256 % 256)
+    (mut out).push(v % 256)
+    out
+}
+
+/// `data` with a one-byte length prefix. Total (data under 256).
+fn u8p(data: List[int]) -> List[int] {
+    var out = List[int]()
+    (mut out).push(data.len)
+    push_all(mut out, data)
+    out
+}
+
+/// `data` with a big-endian uint16 length prefix. Total.
+fn u16p(data: List[int]) -> List[int] {
+    var out = u16b(data.len)
+    push_all(mut out, data)
+    out
+}
+
+/// `data` with a big-endian uint24 length prefix. Total.
+fn u24p(data: List[int]) -> List[int] {
+    var out = List[int]()
+    (mut out).push(data.len / 65536 % 256)
+    (mut out).push(data.len / 256 % 256)
+    (mut out).push(data.len % 256)
+    push_all(mut out, data)
+    out
+}
+
+/// An int in `n` big-endian bytes (clock/fd material for the interim
+/// random). Total for non-negative values.
+fn be_bytes(v: int, n: int) -> List[int] {
+    var tmp = List[int]()
+    var x = v
+    var i: int = 0
+    while i < n {
+        (mut tmp).push(x % 256)
+        x = x / 256
+        i = i + 1
+    }
+    var out = List[int]()
+    var j = n - 1
+    while j >= 0 {
+        (mut out).push(tmp[j])
+        j = j - 1
+    }
+    out
+}
+
+/// The bytes of an ASCII string. Total.
+fn ascii(s: str) -> List[int] {
+    var out = List[int]()
+    for b in s.bytes() {
+        (mut out).push(b)
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// alert vocabulary (RFC 8446 §6) — names for the log lines
+// ------------------------------------------------------------------
+
+/// The RFC 8446 §6 alert name for `code` (the log-line vocabulary —
+/// handshake failures are protocol-layer and get log lines with the
+/// alert NAME, never an HTTP response). Unknown codes answer
+/// "alert_<code>". Total.
+pub fn alert_name(code: int) -> str {
+    if code == 0 {
+        return "close_notify"
+    }
+    if code == 10 {
+        return "unexpected_message"
+    }
+    if code == 20 {
+        return "bad_record_mac"
+    }
+    if code == 22 {
+        return "record_overflow"
+    }
+    if code == 40 {
+        return "handshake_failure"
+    }
+    if code == 42 {
+        return "bad_certificate"
+    }
+    if code == 46 {
+        return "certificate_unknown"
+    }
+    if code == 47 {
+        return "illegal_parameter"
+    }
+    if code == 50 {
+        return "decode_error"
+    }
+    if code == 51 {
+        return "decrypt_error"
+    }
+    if code == 70 {
+        return "protocol_version"
+    }
+    if code == 71 {
+        return "insufficient_security"
+    }
+    if code == 80 {
+        return "internal_error"
+    }
+    if code == 90 {
+        return "user_canceled"
+    }
+    if code == 109 {
+        return "missing_extension"
+    }
+    if code == 110 {
+        return "unsupported_extension"
+    }
+    if code == 112 {
+        return "unrecognized_name"
+    }
+    if code == 120 {
+        return "no_application_protocol"
+    }
+    "alert_{code}"
+}
+
+// ------------------------------------------------------------------
+// the ClientHello parse — PURE (three-lane testable): wire bytes in,
+// the negotiation facts out
+// ------------------------------------------------------------------
+
+/// The facts a server negotiates from (parsed from one ClientHello
+/// handshake message, header included). `ok` false means the message
+/// did not parse; `alert` is the §6 code the server answers with when
+/// a REQUIRED fact is absent (0 when `ok` and servable). `kx` is the
+/// client's X25519 key-share point (32 bytes; empty = none offered).
+/// `alpn_offered`/`alpn_http11` split "no ALPN at all" (serve
+/// without) from "ALPN without an overlap" (no_application_protocol).
+pub struct Hello {
+    ok: bool,
+    alert: int,
+    reason: str,
+    random: List[int],
+    session_id: List[int],
+    has_chacha: bool,
+    has_13: bool,
+    has_ed25519: bool,
+    kx: List[int],
+    sni: str,
+    alpn_offered: bool,
+    alpn_http11: bool,
+}
+
+fn hello_bad(reason: str) -> Hello {
+    Hello {
+        ok: false,
+        alert: 50,
+        reason: reason,
+        random: List[int](),
+        session_id: List[int](),
+        has_chacha: false,
+        has_13: false,
+        has_ed25519: false,
+        kx: List[int](),
+        sni: "",
+        alpn_offered: false,
+        alpn_http11: false,
+    }
+}
+
+/// Parse one ClientHello (§4.1.2) from its complete handshake message
+/// (4-byte header included). Structure errors answer ok=false with
+/// alert decode_error(50); the negotiation gates (1.3, the suite, the
+/// key share, the signature scheme) are the CALLER's to judge — this
+/// function only collects facts. Total over arbitrary bytes (every
+/// length is validated before a read). ct: public wire material.
+pub fn parse_client_hello(msg: List[int]) -> Hello {
+    let n = msg.len
+    if n < 4 {
+        return hello_bad("short handshake header")
+    }
+    if msg[0] != 1 {
+        return hello_bad("not a ClientHello")
+    }
+    if be24(msg, 1) != n - 4 {
+        return hello_bad("handshake length mismatch")
+    }
+    var p: int = 4
+    if p + 2 + 32 + 1 > n {
+        return hello_bad("truncated hello head")
+    }
+    p = p + 2
+    let rnd = bsub(msg, p, p + 32)
+    p = p + 32
+    let sid_len = msg[p]
+    p = p + 1
+    if sid_len > 32 || p + sid_len > n {
+        return hello_bad("bad session id")
+    }
+    let sid = bsub(msg, p, p + sid_len)
+    p = p + sid_len
+    if p + 2 > n {
+        return hello_bad("truncated cipher suites")
+    }
+    let cs_len = be16(msg, p)
+    p = p + 2
+    if cs_len % 2 != 0 || p + cs_len > n {
+        return hello_bad("bad cipher suite vector")
+    }
+    var has_chacha = false
+    var q = p
+    while q < p + cs_len {
+        if be16(msg, q) == 4867 {
+            has_chacha = true
+        }
+        q = q + 2
+    }
+    p = p + cs_len
+    if p + 1 > n {
+        return hello_bad("truncated compression")
+    }
+    let comp_len = msg[p]
+    p = p + 1 + comp_len
+    if p > n {
+        return hello_bad("bad compression vector")
+    }
+    var has_13 = false
+    var has_ed = false
+    var kx = List[int]()
+    var sni = ""
+    var alpn_offered = false
+    var alpn_http = false
+    if p < n {
+        if p + 2 > n {
+            return hello_bad("truncated extensions length")
+        }
+        let ext_len = be16(msg, p)
+        p = p + 2
+        if p + ext_len != n {
+            return hello_bad("extensions length mismatch")
+        }
+        while p + 4 <= n {
+            let et = be16(msg, p)
+            let el = be16(msg, p + 2)
+            p = p + 4
+            if p + el > n {
+                return hello_bad("extension overruns")
+            }
+            let stop = p + el
+            if et == 43 {
+                // supported_versions: u8-prefixed list of uint16
+                if p < stop {
+                    let vl = msg[p]
+                    var v = p + 1
+                    if v + vl <= stop {
+                        while v + 1 < p + 1 + vl {
+                            if be16(msg, v) == 772 {
+                                has_13 = true
+                            }
+                            v = v + 2
+                        }
+                    }
+                }
+            } else if et == 51 {
+                // key_share: u16-prefixed vector of entries
+                if p + 2 <= stop {
+                    var v = p + 2
+                    while v + 4 <= stop {
+                        let grp = be16(msg, v)
+                        let gl = be16(msg, v + 2)
+                        v = v + 4
+                        if v + gl > stop {
+                            break
+                        }
+                        if grp == 29 && gl == 32 {
+                            kx = bsub(msg, v, v + 32)
+                        }
+                        v = v + gl
+                    }
+                }
+            } else if et == 13 {
+                // signature_algorithms: u16-prefixed list of uint16
+                if p + 2 <= stop {
+                    var v = p + 2
+                    while v + 1 < stop {
+                        if be16(msg, v) == 2055 {
+                            has_ed = true
+                        }
+                        v = v + 2
+                    }
+                }
+            } else if et == 0 {
+                // server_name: ServerNameList of host_name entries
+                if p + 2 <= stop {
+                    var v = p + 2
+                    while v + 3 <= stop {
+                        let ntype = msg[v]
+                        let nl = be16(msg, v + 1)
+                        v = v + 3
+                        if v + nl > stop {
+                            break
+                        }
+                        if ntype == 0 && sni.is_empty() {
+                            let raw = bsub(msg, v, v + nl)
+                            sni = str_from_utf8(raw) else ""
+                        }
+                        v = v + nl
+                    }
+                }
+            } else if et == 16 {
+                // ALPN: u16-prefixed list of u8-prefixed names
+                alpn_offered = true
+                if p + 2 <= stop {
+                    var v = p + 2
+                    while v < stop {
+                        let nl = msg[v]
+                        v = v + 1
+                        if v + nl > stop {
+                            break
+                        }
+                        let name_raw = bsub(msg, v, v + nl)
+                        let nm = str_from_utf8(name_raw) else ""
+                        if nm == "http/1.1" {
+                            alpn_http = true
+                        }
+                        v = v + nl
+                    }
+                }
+            }
+            p = stop
+        }
+    }
+    Hello {
+        ok: true,
+        alert: 0,
+        reason: "",
+        random: rnd,
+        session_id: sid,
+        has_chacha: has_chacha,
+        has_13: has_13,
+        has_ed25519: has_ed,
+        kx: kx,
+        sni: sni,
+        alpn_offered: alpn_offered,
+        alpn_http11: alpn_http,
+    }
+}
+
+// ------------------------------------------------------------------
+// the wire: records off a socket (buffered), plaintext record
+// framing, and alert sends
+// ------------------------------------------------------------------
+
+/// One wire record: the outer content type, the payload, and the RAW
+/// bytes (header included — record.open needs the exact header as
+/// AAD).
+struct RecR {
+    rtype: int,
+    body: List[int],
+    raw: List[int],
+}
+
+/// Read from `fd` until `buf` holds at least `need` bytes. Rows:
+/// `closed` (peer EOF first), `timeout` (the armed deadline fired —
+/// a stalled handshake IS this row), `io`.
+fn fill_to(fd: int, mut buf: List[int], need: int) -> () ! {closed, timeout, io} {
+    while buf.len < need {
+        // the sentinel shape (serve.write_bytes_all): a `return <tag>`
+        // that repeats a match-arm name warns W0305 under lupin, and
+        // the rig denies warnings — so route through an int and raise
+        // once at the bottom.
+        var errc = 0
+        let piece = net_read_bytes(fd, 4096) else |e| match e {
+            closed => {
+                errc = 1
+                List[int]()
+            },
+            timeout => {
+                errc = 2
+                List[int]()
+            },
+            io => {
+                errc = 3
+                List[int]()
+            },
+        }
+        if errc == 1 {
+            return closed
+        }
+        if errc == 2 {
+            return timeout
+        }
+        if errc == 3 {
+            return io
+        }
+        if piece.is_empty() {
+            return closed
+        }
+        push_all(mut buf, piece)
+    }
+}
+
+/// Take one complete TLS record off the socket (buffered through
+/// `buf`). Enforces the §5.1 ceiling (2^14 + 256 for protected
+/// records) — an overrun answers `io` after the record_overflow
+/// alert would be the caller's; at this seam the size gate is enough.
+fn rec_next(fd: int, mut buf: List[int]) -> RecR ! {closed, timeout, io} {
+    fill_to(fd, mut buf, 5)?
+    let rtype = buf[0]
+    let rlen = be16(buf, 3)
+    if rlen > 16640 {
+        return io
+    }
+    fill_to(fd, mut buf, 5 + rlen)?
+    let raw = bsub(buf, 0, 5 + rlen)
+    let body = bsub(buf, 5, 5 + rlen)
+    let rest = bsub(buf, 5 + rlen, buf.len)
+    buf = rest
+    RecR { rtype: rtype, body: body, raw: raw }
+}
+
+/// A zero record (the sentinel-shape default; see `rec_take`). Total.
+fn rec_zero() -> RecR {
+    RecR { rtype: 0, body: List[int](), raw: List[int]() }
+}
+
+/// One record with the error routed through an int code (0 ok, 1
+/// closed, 2 timeout, 3 io) — the W0305 dodge (a `return <tag>` that
+/// repeats a match-arm name warns under lupin, and the rig denies
+/// warnings; serve.write_bytes_all set the precedent). The caller
+/// maps the code to whatever its own row wants.
+fn rec_take(fd: int, mut buf: List[int]) -> (RecR, int) {
+    var code = 0
+    let r = rec_next(fd, mut buf) else |e| match e {
+        closed => {
+            code = 1
+            rec_zero()
+        },
+        timeout => {
+            code = 2
+            rec_zero()
+        },
+        io => {
+            code = 3
+            rec_zero()
+        },
+    }
+    (r, code)
+}
+
+/// Frame a PLAINTEXT record (`type || 0x0303 || len || body`) — the
+/// ServerHello's framing, and pre-key alerts. Total.
+fn plain_record(rtype: int, body: List[int]) -> List[int] {
+    var out = List[int]()
+    (mut out).push(rtype)
+    (mut out).push(3)
+    (mut out).push(3)
+    push_all(mut out, u16b(body.len))
+    push_all(mut out, body)
+    out
+}
+
+/// Send a PLAINTEXT alert (pre-key failures). Best-effort: the
+/// connection is being torn down regardless. Total.
+fn send_alert_plain(fd: int, code: int) {
+    var body = List[int]()
+    (mut body).push(2)
+    (mut body).push(code)
+    net_write_bytes(fd, plain_record(21, body)) else |_| {}
+}
+
+/// Send a SEALED alert under the given write keys. Best-effort.
+fn send_alert_sealed(fd: int, key: List[int], iv: List[int], seq: int, code: int) {
+    var body = List[int]()
+    (mut body).push(2)
+    (mut body).push(code)
+    let rec = record.seal(key, iv, seq, 21, body, 0)
+    net_write_bytes(fd, rec) else |_| {}
+}
+
+// ------------------------------------------------------------------
+// the interim random (wolf-lang#143 — read the module header)
+// ------------------------------------------------------------------
+
+/// INTERIM: `n` bytes that are unpredictable to an outside observer
+/// only while the server's key stays secret — HKDF-SHA256 over the
+/// key seed, the client's random, both clocks and the fd. NOT
+/// cryptographic randomness (no entropy source exists at this pin —
+/// wolf-lang#143 is the ask; the swap is this one function). Never
+/// logged, never sent except through the derivations below.
+fn interim_random(seedk: List[int], salt: List[int], label: str, n: int) -> List[int] {
+    var ikm = List[int]()
+    push_all(mut ikm, seedk)
+    push_all(mut ikm, salt)
+    push_all(mut ikm, be_bytes(time_unix_ms(), 8))
+    push_all(mut ikm, be_bytes(time_now_ms(), 8))
+    let prk = sha2.hkdf256_extract(ascii("wws-interim-random-v0"), ikm)
+    sha2.hkdf256_expand(prk, ascii(label), n)
+}
+
+// ------------------------------------------------------------------
+// the session
+// ------------------------------------------------------------------
+
+/// An established (or establishing) TLS session over `fd`. Read side
+/// is the CLIENT's application traffic (rkey/riv/rseq), write side
+/// the SERVER's (wkey/wiv/wseq). `plain` buffers decrypted
+/// application bytes the conn seam has not consumed; `buf` buffers
+/// raw wire bytes. `got_close` is a received close_notify; `trunc`
+/// is an EOF WITHOUT close_notify (counted, the ws12 metric hook —
+/// silent truncation is how response-injection hides). `sni` and
+/// `alpn` record the negotiation for logs and the Host semantics;
+/// `entry` is the SslConf certificate entry served. This pin has no
+/// private field, so the struct is forgeable — every consumer treats
+/// the fields as data.
+pub struct Sess {
+    fd: int,
+    up: bool,
+    rkey: List[int],
+    riv: List[int],
+    rseq: int,
+    wkey: List[int],
+    wiv: List[int],
+    wseq: int,
+    buf: List[int],
+    plain: List[int],
+    got_close: bool,
+    sent_close: bool,
+    trunc: bool,
+    sni: str,
+    alpn: str,
+    entry: int,
+}
+
+fn sess_dead() -> Sess {
+    Sess {
+        fd: -1,
+        up: false,
+        rkey: List[int](),
+        riv: List[int](),
+        rseq: 0,
+        wkey: List[int](),
+        wiv: List[int](),
+        wseq: 0,
+        buf: List[int](),
+        plain: List[int](),
+        got_close: false,
+        sent_close: false,
+        trunc: false,
+        sni: "",
+        alpn: "",
+        entry: -1,
+    }
+}
+
+/// The certificate chain DER (leaf first, concatenated) of SslConf
+/// entry `idx`. Total.
+fn chain_of(s: config.SslConf, idx: int) -> List[int] {
+    let at = s.der_at[idx]
+    bsub(s.der, at, at + s.der_n[idx])
+}
+
+/// The 32-byte key seed of SslConf entry `idx`. Total.
+fn seed_of(s: config.SslConf, idx: int) -> List[int] {
+    bsub(s.seed, idx * 32, idx * 32 + 32)
+}
+
+/// The Certificate message (§4.4.2) for a chain span: an empty
+/// request context, then one CertificateEntry per certificate in the
+/// span (cert_data + empty extensions). The multi-entry framing is
+/// this module's (std's `handshake.certificate` frames one entry);
+/// the message header is std's. A malformed span answers the empty
+/// list (the resolver validated it at load, so this is defensive).
+fn certificate_msg(chain: List[int]) -> List[int] {
+    var entries = List[int]()
+    var pos: int = 0
+    while pos < chain.len {
+        let stop = cert.cert_end(chain, pos) else |_| {
+            return List[int]()
+        }
+        let one = bsub(chain, pos, stop)
+        push_all(mut entries, u24p(one))
+        push_all(mut entries, u16p(List[int]()))
+        pos = stop
+    }
+    var body = List[int]()
+    push_all(mut body, u8p(List[int]()))
+    push_all(mut body, u24p(entries))
+    handshake.handshake(11, body)
+}
+
+/// The ALPN extension (16) selecting exactly `proto` (RFC 7301's
+/// ProtocolNameList of one). Total.
+fn ext_alpn(proto: str) -> List[int] {
+    handshake.ext(16, u16p(u8p(ascii(proto))))
+}
+
+/// Log a handshake failure with the §6 alert NAME (protocol-layer,
+/// pre-HTTP — never an HTTP response; the oracle logs these at info).
+fn log_hs_fail(code: int, why: str) {
+    eprint("wws: [info] TLS handshake failed: {alert_name(code)} ({why})")
+}
+
+/// Accept one TLS 1.3 session on `fd` (the server handshake, §4.1):
+/// read the ClientHello, negotiate (1.3 + ChaCha20-Poly1305 + X25519
+/// + Ed25519 — anything less is the NAMED alert and the `refused`
+/// row), select the certificate entry by SNI (exact server_name
+/// match; no-SNI and unmatched fall to default_server), drive the
+/// server flight through std.x.tls.handshake's builders and key
+/// schedule, seal it through std.x.tls.record, and verify the client
+/// Finished (a mismatch is decrypt_error, nothing exposed). The
+/// caller arms the read deadline BEFORE calling (deadlines span the
+/// handshake — a stalled peer is the `timeout` row, never a hang).
+/// Rows: `refused` (a named negotiation/protocol failure, alert
+/// already sent and logged), `timeout`, `io`.
+#[allow(w0602)]
+pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused, timeout, io} {
+    net_deadline(fd, deadline_ms) else |_| {}
+    var wire = List[int]()
+
+    // ---- ClientHello (plaintext record(s), type 22) --------------
+    var hsbuf = List[int]()
+    var ch_msg = List[int]()
+    var reading = true
+    while reading {
+        var need_more = false
+        if hsbuf.len >= 4 {
+            let want = 4 + be24(hsbuf, 1)
+            if hsbuf.len >= want {
+                ch_msg = bsub(hsbuf, 0, want)
+                reading = false
+            } else {
+                need_more = true
+            }
+        } else {
+            need_more = true
+        }
+        if need_more {
+            let rt = rec_take(fd, mut wire)
+            if rt.1 == 1 {
+                return refused
+            }
+            if rt.1 == 2 {
+                return timeout
+            }
+            if rt.1 == 3 {
+                return io
+            }
+            let r = rt.0
+            if r.rtype == 21 {
+                if r.body.len >= 2 {
+                    log_hs_fail(r.body[1], "client alert before ClientHello")
+                }
+                return refused
+            }
+            if r.rtype != 22 {
+                send_alert_plain(fd, 10)
+                log_hs_fail(10, "expected a handshake record")
+                return refused
+            }
+            push_all(mut hsbuf, r.body)
+        }
+    }
+
+    let hello = parse_client_hello(ch_msg)
+    if !hello.ok {
+        send_alert_plain(fd, hello.alert)
+        log_hs_fail(hello.alert, hello.reason)
+        return refused
+    }
+    if !hello.has_13 {
+        send_alert_plain(fd, 70)
+        log_hs_fail(70, "client speaks no TLS 1.3 (1.2 is the std.x.tls roadmap row)")
+        return refused
+    }
+    if !hello.has_chacha {
+        send_alert_plain(fd, 40)
+        log_hs_fail(40, "no TLS_CHACHA20_POLY1305_SHA256 in the offer (AES-GCM is a roadmap row)")
+        return refused
+    }
+    if hello.kx.len != 32 {
+        send_alert_plain(fd, 40)
+        log_hs_fail(40, "no X25519 key share (HelloRetryRequest is named residue)")
+        return refused
+    }
+    if !hello.has_ed25519 {
+        send_alert_plain(fd, 40)
+        log_hs_fail(40, "client accepts no ed25519 signature (the sc22 ladder)")
+        return refused
+    }
+    if hello.alpn_offered && !hello.alpn_http11 {
+        send_alert_plain(fd, 120)
+        log_hs_fail(120, "ALPN offered without http/1.1 (h2 is a documented post-v1 delta)")
+        return refused
+    }
+
+    // ---- certificate selection (SNI -> server entry) -------------
+    let entry = config.ssl_select(sc, hello.sni)
+    if entry < 0 {
+        send_alert_plain(fd, 80)
+        log_hs_fail(80, "no certificate entry resolved")
+        return refused
+    }
+    let seedk = seed_of(sc, entry)
+    let chain = chain_of(sc, entry)
+
+    // ---- ServerHello + key schedule ------------------------------
+    let eph = interim_random(seedk, hello.random, "x25519-ephemeral", 32)
+    let spub = curve25519.x25519_base(eph)
+    let srand = interim_random(seedk, hello.random, "server-hello-random", 32)
+    var sh_exts = List[int]()
+    push_all(mut sh_exts, handshake.ext_supported_versions_server())
+    push_all(mut sh_exts, handshake.ext_key_share_server_x25519(spub))
+    let sh = handshake.server_hello(srand, hello.session_id, 4867, sh_exts)
+
+    var tr = handshake.transcript_new()
+    handshake.transcript_add(mut tr, ch_msg)
+    handshake.transcript_add(mut tr, sh)
+    let th_sh = handshake.transcript_hash(tr)
+
+    let dh = handshake.ecdhe_shared(eph, hello.kx) else |_| {
+        send_alert_plain(fd, 47)
+        log_hs_fail(47, "all-zero X25519 shared secret (RFC 8446 §7.4.2)")
+        return refused
+    }
+    let early = handshake.early_secret()
+    let hsec = handshake.handshake_secret(early, dh)
+    let chts = handshake.client_handshake_traffic(hsec, th_sh)
+    let shts = handshake.server_handshake_traffic(hsec, th_sh)
+    let shs_key = record.traffic_key(shts, 32)
+    let shs_iv = record.traffic_iv(shts)
+    let chs_key = record.traffic_key(chts, 32)
+    let chs_iv = record.traffic_iv(chts)
+
+    // ---- the server flight ---------------------------------------
+    var ee_exts = List[int]()
+    if !hello.sni.is_empty() {
+        push_all(mut ee_exts, handshake.ext_server_name_ack())
+    }
+    var alpn = ""
+    if hello.alpn_offered {
+        alpn = "http/1.1"
+        push_all(mut ee_exts, ext_alpn("http/1.1"))
+    }
+    let ee = handshake.encrypted_extensions(ee_exts)
+    handshake.transcript_add(mut tr, ee)
+
+    let cmsg = certificate_msg(chain)
+    if cmsg.is_empty() {
+        send_alert_plain(fd, 80)
+        log_hs_fail(80, "certificate chain would not frame")
+        return refused
+    }
+    handshake.transcript_add(mut tr, cmsg)
+    let th_cert = handshake.transcript_hash(tr)
+
+    let cv_content = handshake.
+        certificate_verify_content("TLS 1.3, server CertificateVerify", th_cert)
+    let sig = curve25519.sign(seedk, cv_content)
+    let cv = handshake.certificate_verify(2055, sig)
+    handshake.transcript_add(mut tr, cv)
+    let th_cv = handshake.transcript_hash(tr)
+
+    let sfin = handshake.finished_for(shts, th_cv)
+    handshake.transcript_add(mut tr, sfin)
+    let th_sfin = handshake.transcript_hash(tr)
+
+    var flight = List[int]()
+    push_all(mut flight, plain_record(22, sh))
+    if hello.session_id.len > 0 {
+        // middlebox-compat CCS (§D.4): after ServerHello when the
+        // client sent a legacy session id
+        var ccs = List[int]()
+        (mut ccs).push(1)
+        push_all(mut flight, plain_record(20, ccs))
+    }
+    push_all(mut flight, record.seal(shs_key, shs_iv, 0, 22, ee, 0))
+    push_all(mut flight, record.seal(shs_key, shs_iv, 1, 22, cmsg, 0))
+    push_all(mut flight, record.seal(shs_key, shs_iv, 2, 22, cv, 0))
+    push_all(mut flight, record.seal(shs_key, shs_iv, 3, 22, sfin, 0))
+    net_write_bytes(fd, flight) else |_| {
+        return io
+    }
+
+    // ---- application secrets (ready before the client Finished) --
+    let master = handshake.master_secret(hsec)
+    let cats = handshake.client_application_traffic(master, th_sfin)
+    let sats = handshake.server_application_traffic(master, th_sfin)
+
+    // ---- the client Finished -------------------------------------
+    var cseq: int = 0
+    var fin_msg = List[int]()
+    var hs2 = List[int]()
+    var waiting = true
+    while waiting {
+        var need2 = false
+        if hs2.len >= 4 {
+            let want2 = 4 + be24(hs2, 1)
+            if hs2.len >= want2 {
+                fin_msg = bsub(hs2, 0, want2)
+                waiting = false
+            } else {
+                need2 = true
+            }
+        } else {
+            need2 = true
+        }
+        if need2 {
+            let rt2 = rec_take(fd, mut wire)
+            if rt2.1 == 1 {
+                return refused
+            }
+            if rt2.1 == 2 {
+                return timeout
+            }
+            if rt2.1 == 3 {
+                return io
+            }
+            let r2 = rt2.0
+            if r2.rtype == 20 {
+                continue
+            }
+            if r2.rtype == 21 {
+                if r2.body.len >= 2 {
+                    log_hs_fail(r2.body[1], "client alert during the handshake")
+                }
+                return refused
+            }
+            if r2.rtype != 23 {
+                send_alert_sealed(fd, shs_key, shs_iv, 4, 10)
+                log_hs_fail(10, "unexpected record type awaiting Finished")
+                return refused
+            }
+            let inner = record.open(chs_key, chs_iv, cseq, r2.raw) else |_| {
+                send_alert_sealed(fd, shs_key, shs_iv, 4, 20)
+                log_hs_fail(20, "record failed to deprotect awaiting Finished")
+                return refused
+            }
+            cseq = cseq + 1
+            let ct = record.content_type_of(inner)
+            let content = record.content_of(inner)
+            if ct == 21 {
+                if content.len >= 2 {
+                    log_hs_fail(content[1], "client alert during the handshake")
+                }
+                return refused
+            }
+            if ct != 22 {
+                send_alert_sealed(fd, shs_key, shs_iv, 4, 10)
+                log_hs_fail(10, "non-handshake content awaiting Finished")
+                return refused
+            }
+            push_all(mut hs2, content)
+        }
+    }
+    if fin_msg[0] != 20 {
+        send_alert_sealed(fd, shs_key, shs_iv, 4, 10)
+        log_hs_fail(10, "expected the client Finished")
+        return refused
+    }
+    let verify_data = bsub(fin_msg, 4, fin_msg.len)
+    let fin_ok = handshake.accept_finished(chts, th_cv, verify_data) else |_| {
+        send_alert_sealed(fd, shs_key, shs_iv, 4, 51)
+        log_hs_fail(51, "client Finished did not verify")
+        return refused
+    }
+    if fin_ok != 1 {
+        return refused
+    }
+
+    Sess {
+        fd: fd,
+        up: true,
+        rkey: record.traffic_key(cats, 32),
+        riv: record.traffic_iv(cats),
+        rseq: 0,
+        wkey: record.traffic_key(sats, 32),
+        wiv: record.traffic_iv(sats),
+        wseq: 0,
+        buf: wire,
+        plain: List[int](),
+        got_close: false,
+        sent_close: false,
+        trunc: false,
+        sni: hello.sni,
+        alpn: alpn,
+        entry: entry,
+    }
+}
+
+/// Read up to `max` decrypted application bytes. Pulls records until
+/// application data arrives; a received close_notify (or an EOF —
+/// counted as truncation, `z.trunc`) answers `closed` once the
+/// buffered plaintext is drained. A client KeyUpdate is NAMED
+/// RESIDUE: answered unexpected_message and `closed` (the rekey
+/// sprint lifts it). Rows: `closed`, `timeout` (the armed deadline),
+/// `io`.
+#[allow(w0602)]
+pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
+    while z.plain.len == 0 {
+        if z.got_close {
+            return closed
+        }
+        if !z.up {
+            return closed
+        }
+        var wire = z.buf
+        let rt = rec_take(z.fd, mut wire)
+        if rt.1 == 1 {
+            z.buf = List[int]()
+            z.got_close = true
+            z.trunc = true
+            eprint("wws: [info] TLS: peer EOF without close_notify (truncation, counted)")
+            return closed
+        }
+        if rt.1 == 2 {
+            z.buf = wire
+            return timeout
+        }
+        if rt.1 == 3 {
+            z.buf = wire
+            return io
+        }
+        let r = rt.0
+        z.buf = wire
+        if r.rtype == 20 {
+            continue
+        }
+        if r.rtype != 23 {
+            if r.rtype == 21 && r.body.len >= 2 && r.body[1] == 0 {
+                z.got_close = true
+                return closed
+            }
+            return io
+        }
+        let inner = record.open(z.rkey, z.riv, z.rseq, r.raw) else |_| {
+            eprint("wws: [info] TLS: record failed to deprotect ({alert_name(20)})")
+            send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 20)
+            z.wseq = z.wseq + 1
+            return io
+        }
+        z.rseq = z.rseq + 1
+        let ct = record.content_type_of(inner)
+        let content = record.content_of(inner)
+        if ct == 23 {
+            var plain = z.plain
+            push_all(mut plain, content)
+            z.plain = plain
+        } else if ct == 21 {
+            if content.len >= 2 && content[1] == 0 {
+                z.got_close = true
+            } else {
+                if content.len >= 2 {
+                    eprint("wws: [info] TLS: client alert {alert_name(content[1])}")
+                }
+                z.got_close = true
+            }
+        } else if ct == 22 {
+            // post-handshake message: KeyUpdate is named residue at
+            // this pin (the rekey sprint); anything else is equally
+            // unexpected here
+            eprint(
+                "wws: [info] TLS: post-handshake message refused ({alert_name(10)} — KeyUpdate is named residue)",
+            )
+            send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 10)
+            z.wseq = z.wseq + 1
+            z.got_close = true
+            return closed
+        }
+    }
+    var got = max
+    if got > z.plain.len {
+        got = z.plain.len
+    }
+    let out = bsub(z.plain, 0, got)
+    let rest = bsub(z.plain, got, z.plain.len)
+    z.plain = rest
+    out
+}
+
+/// Write application bytes, sealed into records of at most 2^14
+/// content bytes (§5.1). Rows: `closed` (the peer vanished), `io`.
+#[allow(w0602)]
+pub fn sess_write(mut z: Sess, data: List[int]) -> () ! {closed, io} {
+    if !z.up {
+        return io
+    }
+    var at: int = 0
+    let n = data.len
+    while at < n {
+        var stop = at + 16384
+        if stop > n {
+            stop = n
+        }
+        let piece = bsub(data, at, stop)
+        let rec = record.seal(z.wkey, z.wiv, z.wseq, 23, piece, 0)
+        z.wseq = z.wseq + 1
+        var errc = 0
+        net_write_bytes(z.fd, rec) else |e| match e {
+            closed => {
+                errc = 1
+            },
+            invalid => {
+                errc = 2
+            },
+            io => {
+                errc = 2
+            },
+        }
+        if errc == 1 {
+            return closed
+        }
+        if errc == 2 {
+            return io
+        }
+        at = stop
+    }
+}
+
+/// Close the session: send close_notify (EVERY server-initiated
+/// close does — the truncation defence's other half), then close the
+/// socket. Total; every failure is swallowed (the connection is done
+/// either way).
+pub fn sess_close(mut z: Sess) {
+    if z.up && !z.sent_close {
+        send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 0)
+        z.wseq = z.wseq + 1
+        z.sent_close = true
+    }
+    net_close(z.fd) else |_| {}
+    z.up = false
+}
+
+/// A placeholder session for a PLAINTEXT conn (the seam's other
+/// half): fd -1, nothing armed. Total.
+pub fn no_sess() -> Sess {
+    sess_dead()
+}
