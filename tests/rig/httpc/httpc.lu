@@ -37,13 +37,16 @@ pub struct Reply {
 /// `exchange_once`, whose handler-free `?` path lets the toolchain
 /// name the tag rather than a handler asserting it — the strongest
 /// evidence, not a workaround for a bug.
+/// wsm01 shape note: the read loop re-raises through an error CODE
+/// set in the arm and returned OUTSIDE the match — lupin (is23)
+/// registers a row-tag match-arm pattern as a local binding, so
+/// `timeout => { return timeout }` false-fires W0305 (the D52 shadow
+/// lint) on a shape wolfc reads clean; #48's rule says the arm is
+/// the TAG, not a binding. Filed as a lupin lint divergence; the
+/// connect re-raise is `?` (the rig's row is a superset).
 #[allow(w0602)]
 pub fn exchange(port: int, raw: str, deadline_ms: int) -> str ! {refused, timeout, utf8, io} {
-    let c = net_connect("127.0.0.1:{port}") else |e| match e {
-        refused => { return refused },
-        timeout => { return timeout },
-        io => { return io },
-    }
+    let c = net_connect("127.0.0.1:{port}")?
     net_deadline(c, deadline_ms) else |_| {
         net_close(c) else |_| {}
         return io
@@ -54,6 +57,7 @@ pub fn exchange(port: int, raw: str, deadline_ms: int) -> str ! {refused, timeou
     }
     var out = ""
     var more = true
+    var errc = 0
     while more {
         let piece = net_read(c, 4096) else |e| match e {
             closed => {
@@ -61,19 +65,32 @@ pub fn exchange(port: int, raw: str, deadline_ms: int) -> str ! {refused, timeou
                 ""
             },
             timeout => {
-                net_close(c) else |_| {}
-                return timeout
+                more = false
+                errc = 1
+                ""
             },
             utf8 => {
-                net_close(c) else |_| {}
-                return utf8
+                more = false
+                errc = 2
+                ""
             },
             io => {
-                net_close(c) else |_| {}
-                return io
+                more = false
+                errc = 3
+                ""
             },
         }
         out = "{out}{piece}"
+    }
+    if errc > 0 {
+        net_close(c) else |_| {}
+        if errc == 1 {
+            return timeout
+        }
+        if errc == 2 {
+            return utf8
+        }
+        return io
     }
     net_close(c) else |_| {}
     out
