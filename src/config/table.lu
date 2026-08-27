@@ -566,7 +566,14 @@ pub fn table() -> Table {
         "planned(ws03)",
         "conditional block — see WWS-L001 before using inside location",
     )
-    // ---- planned(ws04): process/shell tier
+    // ---- ws04: process/shell tier. The process-model DECISION: v0 is
+    // ONE os process — a master task supervising N worker task-groups,
+    // so worker_processes maps to the worker task-group count and the
+    // delta from nginx's process-per-worker is this note. Foreground is
+    // the only v0 mode (systemd/container reality; the oracle runs
+    // daemon off in every harness case), so daemon/master_process are
+    // named_error. privilege drop (user) is ws14's (run as the target
+    // user for now). control is wws-native: the loopback reload channel.
     row(
         mut t,
         "worker_processes",
@@ -574,12 +581,39 @@ pub fn table() -> Table {
         "",
         1,
         1,
-        "planned(ws04)",
-        "worker model (wws maps to task pools)",
+        "implemented",
+        "worker task-group count (delta: wws maps workers to supervised task-groups in ONE process, not process-per-worker — crash isolation is the supervision tree; ws14 revisits process isolation)",
     )
-    row(mut t, "worker_priority", "main", "", 1, 1, "planned(ws04)", "scheduling priority")
-    row(mut t, "worker_rlimit_nofile", "main", "", 1, 1, "planned(ws04)", "descriptor budget")
-    row(mut t, "pid", "main", "", 1, 1, "planned(ws04)", "pid file")
+    row(
+        mut t,
+        "worker_priority",
+        "main",
+        "",
+        1,
+        1,
+        "named_error",
+        "single-process task model — no per-worker os process to renice (ws14 revisits)",
+    )
+    row(
+        mut t,
+        "worker_rlimit_nofile",
+        "main",
+        "",
+        1,
+        1,
+        "named_error",
+        "single-process task model — one descriptor budget, not per-worker (ws14 revisits)",
+    )
+    row(
+        mut t,
+        "pid",
+        "main",
+        "",
+        1,
+        1,
+        "implemented",
+        "pid file (delta: at this pin the file records the control endpoint, not an os pid — the pin exposes no getpid/signal; #126 flips it to the os pid)",
+    )
     row(
         mut t,
         "user",
@@ -587,11 +621,39 @@ pub fn table() -> Table {
         "",
         1,
         2,
-        "planned(ws04)",
-        "worker identity (inert when unprivileged — nginx only warns)",
+        "named_error",
+        "privilege drop is ws14's — run wws as the target user for now (nginx only warns when unprivileged)",
     )
-    row(mut t, "daemon", "main", "", 1, 1, "planned(ws04)", "daemonize toggle")
-    row(mut t, "master_process", "main", "", 1, 1, "planned(ws04)", "master/worker split")
+    row(
+        mut t,
+        "daemon",
+        "main",
+        "",
+        1,
+        1,
+        "named_error",
+        "foreground-only v0 (systemd/container reality; the oracle runs daemon off in every harness case)",
+    )
+    row(
+        mut t,
+        "master_process",
+        "main",
+        "",
+        1,
+        1,
+        "named_error",
+        "foreground-only v0 — the master/worker split is the supervision tree, not an os toggle",
+    )
+    row(
+        mut t,
+        "control",
+        "main",
+        "",
+        1,
+        1,
+        "implemented",
+        "wws-native: loopback reload channel for -s (off by default; NOT an nginx directive — the oracle -t rejects it, a named delta; ws14 audits the surface)",
+    )
     // ---- planned(wsc02): the certs-carry campaign
     row(
         mut t,
