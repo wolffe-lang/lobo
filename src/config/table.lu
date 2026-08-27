@@ -1,0 +1,792 @@
+//! member: true
+//! config/table — the directive tables: one declared row per
+//! (name, context) family, the sprint's public artifact. The table is
+//! (name, context)-keyed because nginx reuses names across contexts
+//! with different shapes — `server` is a BLOCK in `http` and a simple
+//! directive in `upstream` (the ws01 contract's collision pitfall,
+//! held by tests/config/table_lookup.lu). Every directive the corpus
+//! or the obvious core speaks has a row; a directive with NO row is
+//! the parser's own named error with a nearest-name suggestion. Rows
+//! with status `named_error` are the class-C posture (report 11 §1C,
+//! as VERIFIED: nginx [emerg]s on wrong contexts and unknown names —
+//! the real footgun is legal-but-inert directives, which the linter
+//! owns): never silently ignored, never implemented by accident.
+//! `docs/directives.md` is generated from this table in the gauntlet
+//! (tools/wws-directives) — the drop-in story's public ledger, never
+//! hand-edited.
+
+/// One declared directive row. `contexts` is the space-joined set of
+/// context names that admit the directive (`any` admits all).
+/// `opens` is "" for a simple directive, a context name for a block,
+/// `same` for a block whose body stays in the surrounding context
+/// (`if`), or `opaque` for a block wws refuses but skips whole (the
+/// lua-block family). `min_args`/`max_args` bound the argument count
+/// (`max_args` -1 = unbounded — mime.types' `at_least(1)` rows).
+/// `status` is `implemented`, `planned(<sprint>)`, or `named_error`;
+/// `note` is the one line -t/-T and the docs page show.
+pub struct Spec {
+    name: str,
+    contexts: str,
+    opens: str,
+    min_args: int,
+    max_args: int,
+    status: str,
+    note: str,
+}
+
+/// The directive table, immutable once built — hot reload swaps the
+/// whole Conf, never edits it, and the table is a pure function of
+/// the build.
+pub struct Table {
+    specs: List[Spec],
+}
+
+fn row(mut t: Table, name: str, contexts: str, opens: str, lo: int, hi: int, status: str, note: str) {
+    (mut t.specs).push(Spec {
+        name: name,
+        contexts: contexts,
+        opens: opens,
+        min_args: lo,
+        max_args: hi,
+        status: status,
+        note: note,
+    })
+}
+
+/// Build the ws01 table: the structural core (implemented — the tree
+/// and include graph ARE this sprint), the serving/proxy/shell tiers
+/// (planned rows, parse-clean today, semantics at their sprint), and
+/// the named_error tier (directives wws will not implement, refused
+/// by name with the block skipped where one follows).
+pub fn table() -> Table {
+    var t = Table { specs: List[Spec]() }
+    // ---- implemented at ws01: the config model itself
+    row(
+        mut t,
+        "include",
+        "any",
+        "",
+        1,
+        1,
+        "implemented",
+        "include graph with globbing, chain-carrying spans, cycle refusal (ws01)",
+    )
+    row(
+        mut t,
+        "events",
+        "main",
+        "events",
+        0,
+        0,
+        "implemented",
+        "context block; connection tuning inside lands ws02",
+    )
+    row(mut t, "http", "main", "http", 0, 0, "implemented", "context block; serving lands ws02")
+    row(
+        mut t,
+        "server",
+        "http",
+        "server",
+        0,
+        0,
+        "implemented",
+        "virtual-server block; serving lands ws02",
+    )
+    row(
+        mut t,
+        "location",
+        "server location",
+        "location",
+        1,
+        2,
+        "implemented",
+        "location block, nested allowed; matching semantics land ws02 (regex parse-only)",
+    )
+    row(
+        mut t,
+        "upstream",
+        "http",
+        "upstream",
+        1,
+        1,
+        "implemented",
+        "upstream pool block; proxying lands ws03",
+    )
+    row(
+        mut t,
+        "map",
+        "http",
+        "map",
+        2,
+        2,
+        "implemented",
+        "map block; body rows are data entries, evaluation lands ws03",
+    )
+    row(
+        mut t,
+        "types",
+        "http server location",
+        "types",
+        0,
+        0,
+        "implemented",
+        "MIME map block; body rows are data entries (type ext...), at_least(1)",
+    )
+    // ---- planned(ws02): static serving
+    row(mut t, "listen", "server", "", 1, -1, "planned(ws02)", "bind address/port and flags")
+    row(mut t, "server_name", "server", "", 1, -1, "planned(ws02)", "host matching")
+    row(
+        mut t,
+        "root",
+        "http server location if",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "document root (URI appended)",
+    )
+    row(
+        mut t,
+        "alias",
+        "location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "path replacement for the matched location part — see WWS-L003",
+    )
+    row(mut t, "index", "http server location", "", 1, -1, "planned(ws02)", "index files")
+    row(
+        mut t,
+        "try_files",
+        "server location",
+        "",
+        2,
+        -1,
+        "planned(ws02)",
+        "existence chain; last arg is a redirect target, not a file check",
+    )
+    row(
+        mut t,
+        "error_page",
+        "http server location if",
+        "",
+        2,
+        -1,
+        "planned(ws02)",
+        "error page mapping",
+    )
+    row(
+        mut t,
+        "default_type",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "MIME type fallback",
+    )
+    row(
+        mut t,
+        "error_log",
+        "main http server location",
+        "",
+        1,
+        2,
+        "planned(ws02)",
+        "error log path and level",
+    )
+    row(
+        mut t,
+        "access_log",
+        "http server location if",
+        "",
+        1,
+        -1,
+        "planned(ws02)",
+        "access log path and format",
+    )
+    row(mut t, "log_format", "http", "", 2, -1, "planned(ws02)", "named log format")
+    row(mut t, "sendfile", "http server location", "", 1, 1, "planned(ws02)", "kernel file send")
+    row(
+        mut t,
+        "tcp_nopush",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "TCP_CORK on sendfile",
+    )
+    row(
+        mut t,
+        "tcp_nodelay",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "TCP_NODELAY on keepalive",
+    )
+    row(
+        mut t,
+        "keepalive_timeout",
+        "http server location",
+        "",
+        1,
+        2,
+        "planned(ws02)",
+        "keepalive close timer",
+    )
+    row(
+        mut t,
+        "keepalive_requests",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "keepalive request budget",
+    )
+    row(
+        mut t,
+        "server_tokens",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "version disclosure",
+    )
+    row(mut t, "etag", "http server location", "", 1, 1, "planned(ws02)", "ETag emission")
+    row(
+        mut t,
+        "expires",
+        "http server location if",
+        "",
+        1,
+        2,
+        "planned(ws02)",
+        "Expires/Cache-Control",
+    )
+    row(
+        mut t,
+        "add_header",
+        "http server location if",
+        "",
+        2,
+        3,
+        "planned(ws02)",
+        "response header — child presence drops parent set, see WWS-L002's family",
+    )
+    row(mut t, "autoindex", "http server location", "", 1, 1, "planned(ws02)", "directory listing")
+    row(mut t, "charset", "http server location if", "", 1, 1, "planned(ws02)", "response charset")
+    row(
+        mut t,
+        "open_file_cache",
+        "http server location",
+        "",
+        1,
+        2,
+        "planned(ws02)",
+        "descriptor cache",
+    )
+    row(
+        mut t,
+        "worker_connections",
+        "events",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "per-worker connection budget",
+    )
+    row(
+        mut t,
+        "return",
+        "server location if",
+        "",
+        1,
+        2,
+        "planned(ws02)",
+        "immediate response/redirect (parse-only at ws01)",
+    )
+    row(
+        mut t,
+        "gzip",
+        "http server location if",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "on-the-fly compression",
+    )
+    row(
+        mut t,
+        "gzip_types",
+        "http server location",
+        "",
+        1,
+        -1,
+        "planned(ws02)",
+        "compressible MIME set",
+    )
+    row(
+        mut t,
+        "gzip_comp_level",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "compression level",
+    )
+    row(
+        mut t,
+        "gzip_min_length",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "compression size floor",
+    )
+    row(
+        mut t,
+        "gzip_vary",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws02)",
+        "Vary: Accept-Encoding",
+    )
+    row(
+        mut t,
+        "gzip_proxied",
+        "http server location",
+        "",
+        1,
+        -1,
+        "planned(ws02)",
+        "compression for proxied replies",
+    )
+    row(
+        mut t,
+        "gzip_disable",
+        "http server location",
+        "",
+        1,
+        -1,
+        "planned(ws02)",
+        "compression opt-out by UA",
+    )
+    // ---- planned(ws03): proxying and rewriting
+    row(mut t, "proxy_pass", "location if", "", 1, 1, "planned(ws03)", "upstream handoff")
+    row(
+        mut t,
+        "proxy_set_header",
+        "http server location",
+        "",
+        2,
+        2,
+        "planned(ws03)",
+        "upstream request header — child presence drops ALL parent-level ones, see WWS-L002",
+    )
+    row(
+        mut t,
+        "proxy_http_version",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "upstream HTTP version",
+    )
+    row(
+        mut t,
+        "proxy_connect_timeout",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "upstream connect deadline",
+    )
+    row(
+        mut t,
+        "proxy_read_timeout",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "upstream read deadline",
+    )
+    row(
+        mut t,
+        "proxy_send_timeout",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "upstream send deadline",
+    )
+    row(
+        mut t,
+        "proxy_buffering",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "reply buffering",
+    )
+    row(
+        mut t,
+        "proxy_redirect",
+        "http server location",
+        "",
+        1,
+        2,
+        "planned(ws03)",
+        "Location rewrite",
+    )
+    row(mut t, "proxy_cache", "http server location", "", 1, 1, "planned(ws03)", "reply cache zone")
+    row(
+        mut t,
+        "proxy_cache_valid",
+        "http server location",
+        "",
+        1,
+        -1,
+        "planned(ws03)",
+        "cache TTLs",
+    )
+    row(
+        mut t,
+        "server",
+        "upstream",
+        "",
+        1,
+        -1,
+        "planned(ws03)",
+        "pool member address and flags — a SIMPLE directive here, not the http server block (the (name, context) key exists for exactly this)",
+    )
+    row(mut t, "keepalive", "upstream", "", 1, 1, "planned(ws03)", "idle upstream connections")
+    row(mut t, "least_conn", "upstream", "", 0, 0, "planned(ws03)", "balancing method")
+    row(mut t, "ip_hash", "upstream", "", 0, 0, "planned(ws03)", "balancing method")
+    row(
+        mut t,
+        "fastcgi_pass",
+        "location if",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "FastCGI handoff (php-fpm shape parses at ws01)",
+    )
+    row(
+        mut t,
+        "fastcgi_param",
+        "http server location",
+        "",
+        2,
+        3,
+        "planned(ws03)",
+        "FastCGI parameter",
+    )
+    row(
+        mut t,
+        "fastcgi_index",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "FastCGI index file",
+    )
+    row(
+        mut t,
+        "fastcgi_split_path_info",
+        "location",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "PATH_INFO split (regex parse-only)",
+    )
+    row(
+        mut t,
+        "upstream_keepalive_timeout",
+        "upstream",
+        "",
+        1,
+        1,
+        "planned(ws03)",
+        "idle upstream close timer",
+    )
+    row(
+        mut t,
+        "rewrite",
+        "server location if",
+        "",
+        2,
+        3,
+        "planned(ws03)",
+        "regex rewrite (parse-only at ws01)",
+    )
+    row(
+        mut t,
+        "set",
+        "server location if",
+        "",
+        2,
+        2,
+        "planned(ws03)",
+        "variable assignment (syntax only at ws01)",
+    )
+    row(
+        mut t,
+        "if",
+        "server location",
+        "same",
+        1,
+        -1,
+        "planned(ws03)",
+        "conditional block — see WWS-L001 before using inside location",
+    )
+    // ---- planned(ws04): process/shell tier
+    row(
+        mut t,
+        "worker_processes",
+        "main",
+        "",
+        1,
+        1,
+        "planned(ws04)",
+        "worker model (wws maps to task pools)",
+    )
+    row(mut t, "worker_priority", "main", "", 1, 1, "planned(ws04)", "scheduling priority")
+    row(mut t, "worker_rlimit_nofile", "main", "", 1, 1, "planned(ws04)", "descriptor budget")
+    row(mut t, "pid", "main", "", 1, 1, "planned(ws04)", "pid file")
+    row(
+        mut t,
+        "user",
+        "main",
+        "",
+        1,
+        2,
+        "planned(ws04)",
+        "worker identity (inert when unprivileged — nginx only warns)",
+    )
+    row(mut t, "daemon", "main", "", 1, 1, "planned(ws04)", "daemonize toggle")
+    row(mut t, "master_process", "main", "", 1, 1, "planned(ws04)", "master/worker split")
+    // ---- planned(wsc02): the certs-carry campaign
+    row(
+        mut t,
+        "ssl_certificate",
+        "http server",
+        "",
+        1,
+        1,
+        "planned(wsc02)",
+        "certificate chain PEM — existing layouts keep working (charter hard minimum)",
+    )
+    row(mut t, "ssl_certificate_key", "http server", "", 1, 1, "planned(wsc02)", "private key PEM")
+    row(mut t, "ssl_protocols", "http server", "", 1, -1, "planned(wsc02)", "TLS protocol set")
+    row(mut t, "ssl_ciphers", "http server", "", 1, 1, "planned(wsc02)", "cipher list")
+    row(
+        mut t,
+        "ssl_prefer_server_ciphers",
+        "http server",
+        "",
+        1,
+        1,
+        "planned(wsc02)",
+        "cipher preference",
+    )
+    row(mut t, "ssl_session_cache", "http server", "", 1, 2, "planned(wsc02)", "session cache")
+    row(mut t, "ssl_session_timeout", "http server", "", 1, 1, "planned(wsc02)", "session TTL")
+    row(mut t, "ssl_dhparam", "http server", "", 1, 1, "planned(wsc02)", "DH parameters")
+    row(mut t, "ssl_stapling", "http server", "", 1, 1, "planned(wsc02)", "OCSP stapling")
+    row(
+        mut t,
+        "ssl_stapling_verify",
+        "http server",
+        "",
+        1,
+        1,
+        "planned(wsc02)",
+        "OCSP verification",
+    )
+    // ---- named_error: refused by name, never silently
+    row(
+        mut t,
+        "content_by_lua_block",
+        "location if",
+        "opaque",
+        0,
+        0,
+        "named_error",
+        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count (a }} inside a Lua comment or long string defeats the skip)",
+    )
+    row(
+        mut t,
+        "access_by_lua_block",
+        "http server location if",
+        "opaque",
+        0,
+        0,
+        "named_error",
+        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count",
+    )
+    row(
+        mut t,
+        "init_by_lua_block",
+        "http",
+        "opaque",
+        0,
+        0,
+        "named_error",
+        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count",
+    )
+    row(
+        mut t,
+        "rewrite_by_lua_block",
+        "http server location if",
+        "opaque",
+        0,
+        0,
+        "named_error",
+        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count",
+    )
+    row(
+        mut t,
+        "lua_package_path",
+        "http",
+        "",
+        1,
+        1,
+        "named_error",
+        "OpenResty Lua — wws embeds no Lua",
+    )
+    row(
+        mut t,
+        "lua_shared_dict",
+        "http",
+        "",
+        2,
+        2,
+        "named_error",
+        "OpenResty Lua — wws embeds no Lua",
+    )
+    row(
+        mut t,
+        "perl",
+        "location if",
+        "",
+        1,
+        1,
+        "named_error",
+        "embedded Perl — out of scope permanently",
+    )
+    row(
+        mut t,
+        "perl_modules",
+        "http",
+        "",
+        1,
+        1,
+        "named_error",
+        "embedded Perl — out of scope permanently",
+    )
+    t
+}
+
+/// Find the row admitting (name, ctx). Returns the spec index, or -1
+/// when no row has the name, or -2 when rows exist but none admits
+/// this context (nginx's "not allowed here").
+pub fn find(t: Table, name: str, ctx: str) -> int {
+    var i: int = 0
+    var seen_name = false
+    while i < t.specs.len {
+        let s = copy t.specs[i]
+        if s.name == name {
+            seen_name = true
+            if s.contexts == "any" || " {s.contexts} ".contains(" {ctx} ") {
+                return i
+            }
+        }
+        i = i + 1
+    }
+    if seen_name {
+        return -2
+    }
+    -1
+}
+
+/// Copy out one row (the arena is index-addressed).
+pub fn spec_at(t: Table, i: int) -> Spec {
+    copy t.specs[i]
+}
+
+/// Number of rows.
+pub fn spec_count(t: Table) -> int {
+    t.specs.len
+}
+
+/// Levenshtein distance over bytes — the nearest-name suggestion's
+/// engine. Error path only; names are short.
+fn lev(a: str, b: str) -> int {
+    let ab = a.bytes()
+    let bb = b.bytes()
+    var prev = List[int]()
+    var j: int = 0
+    while j <= bb.len {
+        (mut prev).push(j)
+        j = j + 1
+    }
+    var i: int = 0
+    while i < ab.len {
+        var cur = List[int]()
+        (mut cur).push(i + 1)
+        j = 0
+        while j < bb.len {
+            let sub = if ab[i] == bb[j] { prev[j] } else { prev[j] + 1 }
+            var best = sub
+            if prev[j + 1] + 1 < best {
+                best = prev[j + 1] + 1
+            }
+            if cur[j] + 1 < best {
+                best = cur[j] + 1
+            }
+            (mut cur).push(best)
+            j = j + 1
+        }
+        prev = cur
+        i = i + 1
+    }
+    prev[bb.len]
+}
+
+/// The nearest known directive name to `name` — the unknown-directive
+/// error's suggestion (a wws improvement over the oracle's bare
+/// "unknown directive"; recorded as a -t output delta). Ties break to
+/// the first row; "" when nothing is within distance 3.
+pub fn nearest(t: Table, name: str) -> str {
+    var best = ""
+    var best_d: int = 4
+    var i: int = 0
+    while i < t.specs.len {
+        let cand = copy t.specs[i].name
+        let d = lev(name, cand)
+        if d < best_d {
+            best_d = d
+            best = cand
+        }
+        i = i + 1
+    }
+    best
+}

@@ -1,0 +1,42 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! The include glob's matcher, pure (all three lanes — the fs half
+//! lives in include_graph.lu). The subset is the oracle's glob(3)
+//! surface as probed: `*` any run, `?` exactly one byte (p36:
+//! site?.conf matched site1.conf and NOT site22.conf), `[...]`
+//! classes with ranges (p33: site?.co[n]f matched), `[!...]`
+//! negation per glob(3).
+
+use config
+
+fn hit(pat: str, name: str, what: str) {
+    assert(config.match_glob(pat, name), "{what}: {pat} should match {name}")
+}
+
+fn miss(pat: str, name: str, what: str) {
+    assert(!config.match_glob(pat, name), "{what}: {pat} should NOT match {name}")
+}
+
+fn main() -> int {
+    hit("*.conf", "site.conf", "star run")
+    hit("*.conf", ".conf", "star empty run")
+    hit("*.conf", "a.b.conf", "star greedy backtrack")
+    miss("*.conf", "site.confx", "star anchored at end")
+    hit("site?.conf", "site1.conf", "p36 qmark one byte")
+    miss("site?.conf", "site22.conf", "p36 qmark not two")
+    miss("site?.conf", "site.conf", "qmark not zero")
+    hit("site?.co[n]f", "site1.conf", "p33 class literal")
+    hit("[a-c]x", "bx", "class range")
+    miss("[a-c]x", "dx", "class range miss")
+    hit("[!a]x", "bx", "class negation")
+    miss("[!a]x", "ax", "class negation miss")
+    hit("a[-b]c", "a-c", "literal dash in class")
+    hit("**", "anything", "double star is star")
+    hit("*", "", "star matches empty")
+    miss("?", "", "qmark needs a byte")
+    hit("a[b", "a[b", "unterminated class is literal")
+    0
+}

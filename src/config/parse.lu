@@ -1,0 +1,590 @@
+//! member: true
+//! config/parse — the context tree, the (name, context) table checks,
+//! and the include graph with chain-carrying spans. Error messages
+//! follow the pinned oracle's shapes (probe battery, nginx/1.30.4,
+//! 2026-08-27): `unexpected ";"` (p22), `unexpected "{"` (p26),
+//! `unexpected "}"` (p25, p76), `unexpected end of file, expecting
+//! ";" or "}"` (p24) and `... expecting "}"` (p75), `unknown
+//! directive "X"` (p04 — wws appends a nearest-name suggestion, a
+//! recorded output delta), `"X" directive is not allowed here` (p39,
+//! p55), `invalid number of arguments in "X" directive` (p46, p54),
+//! `directive "X" is not terminated by ";"` (p48, p64), `directive
+//! "X" has no opening "{"` (p47), `open() "path" failed (...)` (p32).
+//! Directive-level errors cite the TERMINATOR token's line, matching
+//! the oracle (p21: a name on line 1 with its `;` on line 2 is
+//! reported at line 2).
+//! Includes: relative paths resolve against the CONF prefix — the
+//! directory of the `-c` file — not the `-p` prefix (p71 falsified
+//! the contract's "-p" claim; the battery is the spec). Globs match
+//! `*`, `?`, `[...]` in the final path segment, expansion is SORTED
+//! (p35), and a glob matching nothing is EMPTY, not an error (p31 —
+//! folklore confirmed). A cycle is a NAMED error with the chain
+//! printed; the oracle segfaults on the same input (p34, p37 — exit
+//! 139, core dumped), which is the class-A posture earning its keep.
+//! Data-entry contexts: `map` and `types` bodies are rows of data,
+//! not directives (p42 — `example.com two;` is no directive), but
+//! `include` still works inside both (p77, p78).
+//! The model is immutable after parse: hot reload builds a NEW Conf
+//! and swaps — no public surface mutates one (the ws04 prerequisite).
+
+/// The parsed config: a flat arena of directives in source order,
+/// parallel columns, tree shape carried by `parent` indices. `kinds`:
+/// "d" simple directive, "b" block, "e" data entry (map/types rows).
+/// `ctx` is the context each row SITS IN. `files`/`lines` are the
+/// leaf position; `chains` the include chain ("" for the root file,
+/// else "a.conf:1 > b.conf:3" — every hop, not just the leaf).
+/// `raws` is the verbatim source slice (name through terminator) for
+/// faithful -T. `delta_at`/`delta_note` list named_error directives
+/// met (the class-C named deltas). `err` is "" on success, else the
+/// oracle-shaped message with its file and line.
+pub struct Conf {
+    names: List[str],
+    kinds: List[str],
+    argp: List[str],
+    args_at: List[int],
+    args_n: List[int],
+    parent: List[int],
+    ctx: List[str],
+    files: List[str],
+    lines: List[int],
+    chains: List[str],
+    raws: List[str],
+    delta_at: List[int],
+    delta_note: List[str],
+    err: str,
+    err_file: str,
+    err_line: int,
+}
+
+/// Include-walk state: resolution mode and the open-file chain the
+/// cycle refusal names.
+struct Walker {
+    resolve: bool,
+    conf_prefix: str,
+    open_chain: str,
+    tbl: Table,
+}
+
+fn empty_conf() -> Conf {
+    Conf {
+        names: List[str](),
+        kinds: List[str](),
+        argp: List[str](),
+        args_at: List[int](),
+        args_n: List[int](),
+        parent: List[int](),
+        ctx: List[str](),
+        files: List[str](),
+        lines: List[int](),
+        chains: List[str](),
+        raws: List[str](),
+        delta_at: List[int](),
+        delta_note: List[str](),
+        err: "",
+        err_file: "",
+        err_line: 0,
+    }
+}
+
+fn set_err(mut c: Conf, msg: str, file: str, line: int) {
+    if c.err.is_empty() {
+        c.err = msg
+        c.err_file = file
+        c.err_line = line
+    }
+}
+
+/// Number of parsed rows.
+pub fn count(c: Conf) -> int {
+    c.names.len
+}
+
+/// True when the parse finished with no structural error (named
+/// deltas may still be present — see `delta_count`).
+pub fn ok(c: Conf) -> bool {
+    c.err.is_empty()
+}
+
+/// Number of named_error deltas the parse recorded.
+pub fn delta_count(c: Conf) -> int {
+    c.delta_at.len
+}
+
+/// Render the arena one row per line —
+/// `kind|ctx|name|args...|file:line[|via <chain>]` — the parser
+/// tests' assertion surface.
+pub fn render_conf(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < c.names.len {
+        var args = ""
+        var j: int = 0
+        while j < c.args_n[i] {
+            args = "{args} {c.argp[c.args_at[i] + j]}"
+            j = j + 1
+        }
+        var via = ""
+        if !c.chains[i].is_empty() {
+            via = "|via {c.chains[i]}"
+        }
+        out = "{out}{c.kinds[i]}|{c.ctx[i]}|{c.names[i]}{args}|{c.files[i]}:{c.lines[i]}{via}\n"
+        i = i + 1
+    }
+    if !c.err.is_empty() {
+        out = "{out}err|{c.err_file}:{c.err_line}|{c.err}\n"
+    }
+    var d: int = 0
+    while d < c.delta_at.len {
+        out = "{out}delta|{c.names[c.delta_at[d]]}|{c.delta_note[d]}\n"
+        d = d + 1
+    }
+    out
+}
+
+/// Append one arena row (args already pushed to the pool — index
+/// assignment runs on one lane only, so the row records its argument
+/// window at push time); returns its index.
+fn push_dir(
+    mut c: Conf,
+    name: str,
+    kind: str,
+    parent: int,
+    ctx: str,
+    file: str,
+    line: int,
+    chain: str,
+    raw: str,
+    args_at: int,
+    args_n: int,
+) -> int {
+    (mut c.names).push(name)
+    (mut c.kinds).push(kind)
+    (mut c.args_at).push(args_at)
+    (mut c.args_n).push(args_n)
+    (mut c.parent).push(parent)
+    (mut c.ctx).push(ctx)
+    (mut c.files).push(file)
+    (mut c.lines).push(line)
+    (mut c.chains).push(chain)
+    (mut c.raws).push(raw)
+    c.names.len - 1
+}
+
+/// Copy the argument words into the pool; returns the window start.
+fn pool_args(mut c: Conf, t: Toks, pend: List[int]) -> int {
+    let at = c.argp.len
+    var j: int = 1
+    while j < pend.len {
+        (mut c.argp).push(t.texts[pend[j]])
+        j = j + 1
+    }
+    at
+}
+
+/// The number of lines in a source text (EOF errors cite it, p24).
+fn line_count(src: str) -> int {
+    src.count("\n") + 1
+}
+
+/// Walk one file's tokens from `start` in context `ctx` under
+/// `parent`. `in_block` says a `}` CLOSES rather than errors.
+/// Returns the token index just past what was consumed, or -1 after
+/// recording an error in `c`.
+fn walk(
+    mut c: Conf,
+    mut w: Walker,
+    t: Toks,
+    src: str,
+    file: str,
+    chain: str,
+    parent: int,
+    ctx: str,
+    start: int,
+    in_block: bool,
+) -> int {
+    var i: int = start
+    var pend = List[int]()
+    while i < t.kinds.len {
+        let k = t.kinds[i]
+        if k == "w" || k == "d" || k == "s" {
+            (mut pend).push(i)
+            i = i + 1
+        } else if k == ";" {
+            if pend.is_empty() {
+                set_err(mut c, "unexpected \";\"", file, t.lines[i])
+                return -1
+            }
+            let r = emit(mut c, mut w, t, src, file, chain, parent, ctx, pend, i, false)
+            if r < 0 {
+                return -1
+            }
+            pend = List[int]()
+            i = i + 1
+        } else if k == "{{" {
+            if pend.is_empty() {
+                set_err(mut c, "unexpected \"{{\"", file, t.lines[i])
+                return -1
+            }
+            let d = emit(mut c, mut w, t, src, file, chain, parent, ctx, pend, i, true)
+            if d < 0 {
+                return -1
+            }
+            pend = List[int]()
+            // d is the arena index; its `opens` decides the body walk
+            let spec_i = find(w.tbl, c.names[d], ctx)
+            let opens = spec_at(w.tbl, spec_i).opens
+            if opens == "opaque" {
+                i = skip_opaque(mut c, t, file, i + 1)
+            } else {
+                var inner = opens
+                if inner == "same" {
+                    inner = ctx
+                }
+                i = walk(mut c, mut w, t, src, file, chain, d, inner, i + 1, true)
+            }
+            if i < 0 {
+                return -1
+            }
+        } else if k == "}}" {
+            if !pend.is_empty() {
+                set_err(mut c, "unexpected \"}}\"", file, t.lines[i])
+                return -1
+            }
+            if in_block {
+                return i + 1
+            }
+            set_err(mut c, "unexpected \"}}\"", file, t.lines[i])
+            return -1
+        } else {
+            i = i + 1
+        }
+    }
+    if !pend.is_empty() {
+        set_err(mut c, "unexpected end of file, expecting \";\" or \"}}\"", file, line_count(src))
+        return -1
+    }
+    if in_block {
+        set_err(mut c, "unexpected end of file, expecting \"}}\"", file, line_count(src))
+        return -1
+    }
+    i
+}
+
+/// Consume a refused (named_error) block's body by token-level brace
+/// counting — quotes already protected by the lexer; a `}` inside a
+/// Lua comment or long string defeats this, which the table row's
+/// note says out loud.
+fn skip_opaque(mut c: Conf, t: Toks, file: str, start: int) -> int {
+    var depth: int = 1
+    var i: int = start
+    while i < t.kinds.len {
+        if t.kinds[i] == "{{" {
+            depth = depth + 1
+        } else if t.kinds[i] == "}}" {
+            depth = depth - 1
+            if depth == 0 {
+                return i + 1
+            }
+        }
+        i = i + 1
+    }
+    set_err(mut c, "unexpected end of file, expecting \"}}\"", file, t.lines[t.kinds.len - 1])
+    -1
+}
+
+/// Emit one directive/entry from the pending word tokens. Returns
+/// the arena index, or -1 after recording an error. `term` is the
+/// terminator token (`;` or `{`) — errors cite ITS line, matching
+/// the oracle (p21).
+fn emit(
+    mut c: Conf,
+    mut w: Walker,
+    t: Toks,
+    src: str,
+    file: str,
+    chain: str,
+    parent: int,
+    ctx: str,
+    pend: List[int],
+    term: int,
+    block: bool,
+) -> int {
+    let name = t.texts[pend[0]]
+    let eline = t.lines[term]
+    let raw = src[t.starts[pend[0]]..t.ends[term]]
+    let nline = t.lines[pend[0]]
+
+    // map/types bodies are data entries — except include (p77, p78).
+    if (ctx == "map" || ctx == "types") && name != "include" {
+        if block {
+            set_err(mut c, "unexpected \"{{\"", file, t.lines[term])
+            return -1
+        }
+        let at = pool_args(mut c, t, pend)
+        return push_dir(mut c, name, "e", parent, ctx, file, nline, chain, raw, at, pend.len - 1)
+    }
+
+    let spec_i = find(w.tbl, name, ctx)
+    if spec_i == -1 {
+        let sugg = nearest(w.tbl, name)
+        if sugg.is_empty() {
+            set_err(mut c, "unknown directive \"{name}\"", file, eline)
+        } else {
+            set_err(mut c, "unknown directive \"{name}\" (did you mean \"{sugg}\"?)", file, eline)
+        }
+        return -1
+    }
+    if spec_i == -2 {
+        set_err(mut c, "\"{name}\" directive is not allowed here", file, eline)
+        return -1
+    }
+    let spec = spec_at(w.tbl, spec_i)
+    if block && spec.opens.is_empty() {
+        set_err(mut c, "directive \"{name}\" is not terminated by \";\"", file, eline)
+        return -1
+    }
+    if !block && !spec.opens.is_empty() {
+        set_err(mut c, "directive \"{name}\" has no opening \"{{\"", file, eline)
+        return -1
+    }
+    let argc = pend.len - 1
+    if argc < spec.min_args || spec.max_args != -1 && argc > spec.max_args {
+        set_err(mut c, "invalid number of arguments in \"{name}\" directive", file, eline)
+        return -1
+    }
+
+    var kind = "d"
+    if block {
+        kind = "b"
+    }
+    let at = pool_args(mut c, t, pend)
+    let d = push_dir(mut c, name, kind, parent, ctx, file, nline, chain, raw, at, pend.len - 1)
+
+    if spec.status == "named_error" {
+        (mut c.delta_at).push(d)
+        (mut c.delta_note).push(spec.note)
+    }
+
+    if name == "include" && !block && w.resolve {
+        let hop = if chain.is_empty() { "{file}:{nline}" } else { "{chain} > {file}:{nline}" }
+        let target = c.argp[c.args_at[d]]
+        if process_include(mut c, mut w, target, file, eline, hop, parent, ctx) < 0 {
+            return -1
+        }
+    }
+    d
+}
+
+/// Resolve and parse one include target (literal or glob).
+fn process_include(
+    mut c: Conf,
+    mut w: Walker,
+    target: str,
+    file: str,
+    eline: int,
+    hop: str,
+    parent: int,
+    ctx: str,
+) -> int {
+    var path = target
+    if !path.starts_with("/") {
+        path = "{w.conf_prefix}/{target}"
+    }
+    let cut = path.rfind("/") else -1
+    let dir = if cut < 0 { "." } else { path[0..cut] }
+    let base = if cut < 0 { path } else { path[cut + 1..path.len] }
+    if has_glob(dir) {
+        set_err(
+            mut c,
+            "include \"{target}\": glob characters in a directory segment are not supported (ws01 names the limit rather than guessing)",
+            file,
+            eline,
+        )
+        return -1
+    }
+    if has_glob(base) {
+        // Sorted expansion (p35); a glob matching nothing is EMPTY,
+        // not an error (p31).
+        let names = fs_read_dir(dir) else |_| {
+            // A missing glob DIRECTORY: nothing matches — empty, like
+            // the oracle's empty glob.
+            return 0
+        }
+        for nm in names {
+            if match_glob(base, nm) {
+                if parse_file(mut c, mut w, "{dir}/{nm}", hop, parent, ctx) < 0 {
+                    return -1
+                }
+            }
+        }
+        return 0
+    }
+    if !fs_exists(path) {
+        set_err(mut c, "open() \"{path}\" failed (2: No such file or directory)", file, eline)
+        return -1
+    }
+    parse_file(mut c, mut w, path, hop, parent, ctx)
+}
+
+/// Parse one file into the arena (the include graph's node). The
+/// open-file chain refuses cycles by name — the oracle dumps core on
+/// the same input (p34/p37).
+fn parse_file(mut c: Conf, mut w: Walker, path: str, chain: str, parent: int, ctx: str) -> int {
+    if w.open_chain.contains("|{path}|") {
+        set_err(
+            mut c,
+            "include cycle: \"{path}\" is already being loaded (chain: {chain})",
+            path,
+            0,
+        )
+        return -1
+    }
+    let src = fs_read_text(path) else |e| match e {
+        not_found => {
+            set_err(mut c, "open() \"{path}\" failed (2: No such file or directory)", path, 0)
+            return -1
+        },
+        denied => {
+            set_err(mut c, "open() \"{path}\" failed (13: Permission denied)", path, 0)
+            return -1
+        },
+        io => {
+            set_err(mut c, "open() \"{path}\" failed (io)", path, 0)
+            return -1
+        },
+        utf8 => {
+            set_err(
+                mut c,
+                "read() \"{path}\": the file is not UTF-8 (wws configs are UTF-8; the oracle reads bytes — recorded delta)",
+                path,
+                0,
+            )
+            return -1
+        },
+    }
+    let t = lex(src)
+    if !t.err.is_empty() {
+        set_err(mut c, t.err, path, t.err_line)
+        return -1
+    }
+    let held = w.open_chain
+    w.open_chain = "{held}|{path}|"
+    let r = walk(mut c, mut w, t, src, path, chain, parent, ctx, 0, false)
+    w.open_chain = held
+    r
+}
+
+/// True when `s` carries a glob metacharacter.
+fn has_glob(s: str) -> bool {
+    s.contains("*") || s.contains("?") || s.contains("[")
+}
+
+/// fnmatch-lite over bytes: `*` any run, `?` one byte, `[...]` a
+/// class with ranges and leading `!` negation — the oracle's glob(3)
+/// subset the include graph speaks (p33, p36).
+pub fn match_glob(pat: str, name: str) -> bool {
+    glob_at(pat.bytes(), name.bytes(), 0, 0)
+}
+
+fn glob_at(p: List[int], n: List[int], pi0: int, ni0: int) -> bool {
+    var pi = pi0
+    var ni = ni0
+    while pi < p.len {
+        let pc = p[pi]
+        if pc == 42 {
+            // `*`: try every split (names are short; backtracking is
+            // linear enough here)
+            var k = ni
+            while k <= n.len {
+                if glob_at(p, n, pi + 1, k) {
+                    return true
+                }
+                k = k + 1
+            }
+            return false
+        }
+        if ni >= n.len {
+            return false
+        }
+        if pc == 63 {
+            pi = pi + 1
+            ni = ni + 1
+        } else if pc == 91 {
+            var j = pi + 1
+            var neg = false
+            if j < p.len && p[j] == 33 {
+                neg = true
+                j = j + 1
+            }
+            var hit = false
+            var first = true
+            while j < p.len && (first || p[j] != 93) {
+                if j + 2 < p.len && p[j + 1] == 45 && p[j + 2] != 93 {
+                    if n[ni] >= p[j] && n[ni] <= p[j + 2] {
+                        hit = true
+                    }
+                    j = j + 3
+                } else {
+                    if n[ni] == p[j] {
+                        hit = true
+                    }
+                    j = j + 1
+                }
+                first = false
+            }
+            if j >= p.len {
+                // unterminated class: literal `[`
+                if n[ni] != 91 {
+                    return false
+                }
+                pi = pi + 1
+                ni = ni + 1
+            } else {
+                if hit == neg {
+                    return false
+                }
+                pi = j + 1
+                ni = ni + 1
+            }
+        } else {
+            if n[ni] != pc {
+                return false
+            }
+            pi = pi + 1
+            ni = ni + 1
+        }
+    }
+    ni == n.len
+}
+
+/// Parse a single source text, pure — includes are recorded as
+/// directives but never followed (the three-lane unit surface; the
+/// fs-facing `load` is the two-lane integration surface).
+pub fn parse_str(src: str, file: str) -> Conf {
+    var c = empty_conf()
+    var w = Walker { resolve: false, conf_prefix: ".", open_chain: "", tbl: table() }
+    let t = lex(src)
+    if !t.err.is_empty() {
+        set_err(mut c, t.err, file, t.err_line)
+        return c
+    }
+    walk(mut c, mut w, t, src, file, "", -1, "main", 0, false)
+    c
+}
+
+/// Load a config through the include graph. `prefix` is the -p
+/// prefix; `conf_rel` the -c path (absolute, or resolved against the
+/// prefix). Relative INCLUDES resolve against the conf file's own
+/// directory — the conf prefix — per the oracle (p71).
+pub fn load(prefix: str, conf_rel: str) -> Conf {
+    var c = empty_conf()
+    var conf = conf_rel
+    if !conf.starts_with("/") {
+        conf = "{prefix}/{conf_rel}"
+    }
+    let cut = conf.rfind("/") else -1
+    let cprefix = if cut < 0 { "." } else { conf[0..cut] }
+    var w = Walker { resolve: true, conf_prefix: cprefix, open_chain: "", tbl: table() }
+    parse_file(mut c, mut w, conf, "", -1, "main")
+    c
+}
