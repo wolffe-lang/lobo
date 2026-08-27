@@ -1,0 +1,94 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! The pid-file lifecycle (native+checked — fs; lupin has no fs). The
+//! path resolves from the `pid` directive under the prefix (else
+//! nginx's logs/nginx.pid default); the write is atomic (write-rename,
+//! the contract pitfall); a removed file reads `none`; a dead endpoint
+//! is not alive (stale-detection's probe). At this pin the file records
+//! the CONTROL ENDPOINT, not an os pid (no getpid; #126) — so liveness
+//! is a connect, which is a thing the pin can express and a signal is
+//! not. Idempotent: cleared at the START (the rig stages once, runs two
+//! lanes in the one directory).
+
+use config
+use shell
+
+fn main() -> !int {
+    let scratch = "ws04_pid"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all(scratch)?
+
+    // path resolution: default, relative directive, absolute directive
+    let plain = config.parse_str("http {{\n  server {{ listen 8080; }}\n}}\n", "t.conf")
+    assert(
+        shell.pid_path(plain, scratch) == "ws04_pid/logs/nginx.pid",
+        "default pid path is logs/nginx.pid under the prefix",
+    )
+
+    let rel = config.parse_str("pid wws.pid;\nhttp {{\n}}\n", "t.conf")
+    assert(
+        shell.pid_path(rel, scratch) == "ws04_pid/wws.pid",
+        "relative pid directive under prefix",
+    )
+
+    let abs = config.parse_str("pid /run/wws.pid;\nhttp {{\n}}\n", "t.conf")
+    assert(shell.pid_path(abs, scratch) == "/run/wws.pid", "absolute pid directive verbatim")
+
+    // write (atomic) then read back
+    let path = "ws04_pid/wws.pid"
+    shell.pid_write(path, "127.0.0.1:4321")?
+    let ep = shell.pid_read(path)?
+    assert(ep == "127.0.0.1:4321", "read back the written endpoint: {ep}")
+    assert(fs_exists(path), "pid file exists after write")
+    assert(!fs_exists("{path}.new"), "the temp file was renamed, not left behind")
+
+    // overwrite is atomic too (a second write-rename)
+    shell.pid_write(path, "127.0.0.1:9999")?
+    assert(shell.pid_read(path)? == "127.0.0.1:9999", "atomic overwrite")
+
+    // remove → the file reads `none`
+    shell.pid_remove(path)?
+    assert(!fs_exists(path), "pid file gone after remove")
+    var got_none = false
+    let after = shell.pid_read(path) else |e| match e {
+        none => {
+            got_none = true
+            ""
+        },
+        io => {
+            ""
+        },
+    }
+    assert(got_none, "a removed pid file reads none")
+    assert(after.is_empty(), "the none path yields no endpoint")
+
+    // remove is idempotent (a missing file is not an error)
+    shell.pid_remove(path)?
+
+    // stale-detection's liveness probe: an empty or dead endpoint is
+    // not alive. Bind a port, learn it, close it — now nobody listens.
+    assert(!shell.control_alive(""), "empty endpoint is not alive")
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    net_close(l) else |_| {}
+    assert(!shell.control_alive("127.0.0.1:{port}"), "a closed port is not alive (refused)")
+
+    // control_send to the closed port raises `refused`, not io
+    var got_refused = false
+    let _r = shell.control_send("127.0.0.1:{port}", "ping") else |e| match e {
+        refused => {
+            got_refused = true
+            ""
+        },
+        io => {
+            ""
+        },
+    }
+    assert(got_refused, "control_send to nobody is refused")
+
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

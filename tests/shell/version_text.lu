@@ -1,0 +1,47 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! The text builders — nginx's one-fact-per-line shapes with wws's own
+//! identity (probed against the oracle 2026-08-27: `nginx version:
+//! nginx/1.30.4`, the `-V` build lines, and the two-line Usage). Pure,
+//! every lane. Also the signal-word table (stop=TERM, quit=QUIT,
+//! reload=HUP, reopen=USR1) the deferred receiver will honor.
+
+use shell
+
+fn main() -> int {
+    assert(shell.version_token() == "wws/0.1.0", "identity token")
+    assert(shell.version_report() == "wws version: wws/0.1.0", "version line (nginx shape)")
+
+    let v = shell.version_verbose()
+    assert(v.starts_with("wws version: wws/0.1.0\n"), "-V first line is the version report")
+    assert(v.contains("built with wolf 0.1.0 (wolfgang)"), "-V names the toolchain")
+    assert(v.contains("tier: two-tier"), "-V names the tier posture")
+    assert(v.contains("modules:"), "-V names the module set")
+
+    let u = shell.usage_text()
+    assert(
+        u.contains("Usage: wws [-?hvVtTq] [-s signal] [-p prefix]"),
+        "usage line 1 (nginx shape)",
+    )
+    assert(u.contains("[-e filename] [-c filename] [-g directives]"), "usage line 2")
+    assert(u.contains("serve | directives-md"), "usage names the wws verbs")
+
+    // the signal words and their unix mapping
+    assert(shell.signal_ok("stop"), "stop is a verb")
+    assert(shell.signal_ok("quit"), "quit is a verb")
+    assert(shell.signal_ok("reload"), "reload is a verb")
+    assert(shell.signal_ok("reopen"), "reopen is a verb")
+    assert(!shell.signal_ok("bogus"), "bogus is not a verb")
+    assert(!shell.signal_ok(""), "empty is not a verb")
+
+    assert(shell.signal_unix("stop") == "TERM", "stop=TERM")
+    assert(shell.signal_unix("quit") == "QUIT", "quit=QUIT")
+    assert(shell.signal_unix("reload") == "HUP", "reload=HUP")
+    assert(shell.signal_unix("reopen") == "USR1", "reopen=USR1")
+    assert(shell.signal_unix("bogus") == "", "unknown verb → no signal")
+
+    0
+}

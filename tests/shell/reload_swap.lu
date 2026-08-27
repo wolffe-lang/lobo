@@ -1,0 +1,83 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config http
+//!
+//! The reload SWAP — the sprint's hard invariant, at the model level
+//! (native+checked: config.load reads the file). A reload parses the
+//! config FRESH, and on success freezes the new model and bumps the
+//! generation; a connection that captured the OLD generation routes
+//! under the OLD model, a new one under the NEW (the frozen-model
+//! discipline — the config is immutable after parse, so this is data,
+//! not a race). On ANY parse error the OLD generation KEEPS serving
+//! (the nginx contract — the reason `-t` exists) and the generation
+//! does not move. The generation counter (ws08 surfaces old-gen
+//! connection counts against it) lands here.
+
+use config
+use http
+use shell
+
+fn main() -> !int {
+    let root = "ws04_reload"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/A")?
+    fs_create_dir_all("{root}/B")?
+    fs_write_text("{root}/A/index.html", "generation A\n")?
+    fs_write_text("{root}/B/index.html", "generation B\n")?
+
+    // generation 1 routes into A
+    fs_write_text(
+        "{root}/wws.conf",
+        "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
+    )?
+    let g1 = shell.gen_new(config.load(root, "wws.conf"))
+    assert(g1.gen == 1, "first generation is 1")
+    assert(g1.ok, "generation 1 loaded ok")
+    let d1 = http.route(g1.conf, "/index.html")
+    assert(d1.fs_path == "ws04_reload/A/index.html", "gen1 routes into A: {d1.fs_path}")
+
+    // rewrite the config to route into B, then reload → generation 2
+    fs_write_text(
+        "{root}/wws.conf",
+        "http {{\n  server {{ listen 8080; root ws04_reload/B; }}\n}}\n",
+    )?
+    let g2 = shell.reload(root, "wws.conf", g1)
+    assert(g2.ok, "reload succeeded")
+    assert(g2.gen == 2, "generation bumped to 2")
+    let d2 = http.route(g2.conf, "/index.html")
+    assert(d2.fs_path == "ws04_reload/B/index.html", "gen2 routes into B: {d2.fs_path}")
+
+    // THE INVARIANT: an in-flight request holding the OLD generation
+    // still routes into A — the swap did not reach through the frozen
+    // model it captured.
+    let d1_after = http.route(g1.conf, "/index.html")
+    assert(d1_after.fs_path == "ws04_reload/A/index.html", "old generation still routes into A")
+
+    // reload a BROKEN config: the old generation KEEPS serving, the
+    // generation does not move (nginx contract).
+    fs_write_text("{root}/wws.conf", "http {{\n  server {{ listen\n")?
+    let g3 = shell.reload(root, "wws.conf", g2)
+    assert(!g3.ok, "a broken reload is rejected")
+    assert(g3.gen == 2, "a rejected reload keeps the generation at 2")
+    let d3 = http.route(g3.conf, "/index.html")
+    assert(
+        d3.fs_path == "ws04_reload/B/index.html",
+        "after a rejected reload, gen2's model still serves B",
+    )
+
+    // a good reload after a bad one advances again (to 3)
+    fs_write_text(
+        "{root}/wws.conf",
+        "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
+    )?
+    let g4 = shell.reload(root, "wws.conf", g3)
+    assert(g4.ok && g4.gen == 3, "a good reload after a bad one advances to 3")
+    assert(
+        http.route(g4.conf, "/index.html").fs_path == "ws04_reload/A/index.html",
+        "gen3 back to A",
+    )
+
+    fs_remove_dir_all(root) else |_| {}
+    0
+}
