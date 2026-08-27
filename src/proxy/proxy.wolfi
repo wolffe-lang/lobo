@@ -1,8 +1,31 @@
 module pkg :: proxy
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 046b48c25019bcae67fa63e8d3284352af29d6ebb0b216cd26c058925e21c28b
-  pkg_hash    046b48c25019bcae67fa63e8d3284352af29d6ebb0b216cd26c058925e21c28b
-  deps: (none)
+  export_hash c1025e7d7f4721aa4a5def23f13880b2861a255966e323e7a52c9210fa576489
+  pkg_hash    c1025e7d7f4721aa4a5def23f13880b2861a255966e323e7a52c9210fa576489
+  deps:
+    config  46e40ce27c442fc3257f65b51ccf07dcddfcb3b2e26edada020817dd00efcaec
+    http  258e294adb196b8855742361c199033e4ac9863f000b7b2d1ad3bab6d7d65bbd
   items:
-    [0] pub version — fn version() -> str
+    [0] pub build_upstream — fn build_upstream(c: config.Conf, req: http.Request, pl: self.Plan, phost: str, pport: int, remote_addr: str, body: str) -> str · regions (ρ1, ρ2, ρ3, -, -, -, -) -> -
+    [1] pub expand_var — fn expand_var(v: str, host: str, remote_addr: str, proxy_host: str, inbound_xff: str) -> str
+    [2] pub is_hop_by_hop — fn is_hop_by_hop(lname: str) -> bool
+    [3] pub parse_pass — fn parse_pass(c: config.Conf, arg: str) -> self.PassTarget · regions (ρ1, -) -> ρ_caller
+    [4] pub parse_response — fn parse_response(head: str) -> self.UpResponse · regions (-) -> ρ_caller
+    [5] pub peer_count — fn peer_count(p: self.UpPool) -> int · regions (ρ1) -> -
+    [6] pub peer_down — fn peer_down(fails: int, last_fail_ms: int, max_fails: int, fail_ms: int, now_ms: int) -> bool
+    [7] pub plan — fn plan(c: config.Conf, path: str) -> self.Plan · regions (ρ1, -) -> ρ_caller
+    [8] pub pool_named — fn pool_named(c: config.Conf, name: str) -> self.UpPool · regions (ρ1, -) -> ρ_caller
+    [9] pub relay_response — fn relay_response(up: self.UpResponse, body: str, token: str, date: str, keep: bool) -> str · regions (ρ1, -, -, -, -) -> -
+    [10] pub rewrite_target — fn rewrite_target(matched: str, has_uri: bool, uri: str, path: str, query: str) -> str
+    [11] pub run — fn run(client: int, c: config.Conf, req: http.Request, body: str, pl: self.Plan, remote_addr: str, token: str, date: str, keep: bool) -> bool ! {closed, io} · regions (-, ρ1, ρ2, -, ρ3, -, -, -, -) -> -
+    [12] pub set_headers — fn set_headers(c: config.Conf, loc: int, srv: int, http_blk: int) -> (prelude.List[str], prelude.List[str]) · regions (ρ1, -, -, -) -> ρ_caller
+    [13] pub status_code — fn status_code(status_line: str) -> int
+    [14] pub swrr_new — fn swrr_new(n: int) -> self.Swrr · regions (-) -> ρ_caller
+    [15] pub swrr_pick — fn swrr_pick(mut s: self.Swrr, weights: prelude.List[int], up: prelude.List[bool]) -> int · regions (ρ1, ρ2, ρ3) -> -
+    [16] pub version — fn version() -> str
+    [17] pub PassTarget — struct PassTarget { scheme: str, authority: str, is_pool: bool, has_uri: bool, uri: str, err: str }
+    [18] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int }
+    [19] pub Swrr — struct Swrr { current: prelude.List[int] }
+    [20] pub UpPool — struct UpPool { name: str, hosts: prelude.List[str], ports: prelude.List[int], weights: prelude.List[int], max_fails: prelude.List[int], fail_ms: prelude.List[int], backup: prelude.List[bool] }
+    [21] pub UpResponse — struct UpResponse { status_line: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int }
 
