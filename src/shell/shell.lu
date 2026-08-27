@@ -366,18 +366,24 @@ pub fn control_addr(c: config.Conf) -> str {
 /// dead/absent master, which `-s` and stale-detection read as "not
 /// alive"), `io` for every other net trouble. The reply is trimmed
 /// (allow w0602: deliberate API — refused and other failures differ).
+/// wsm01 shape note: the connect handler maps tags to sentinel codes
+/// and re-raises OUTSIDE the match — lupin (is23) registers a row-tag
+/// arm pattern as a local binding, so `refused => {return refused}`
+/// false-fires W0305 on a shape wolfc reads clean (#48 says the arm
+/// is the TAG). Filed as a lupin lint divergence; same-tag arm
+/// re-raise returns when it closes.
 #[allow(w0602)]
 pub fn control_send(addr: str, line: str) -> str ! {refused, io} {
     let c = net_connect(addr) else |e| match e {
-        refused => {
-            return refused
-        },
-        timeout => {
-            return io
-        },
-        io => {
-            return io
-        },
+        refused => -1,
+        timeout => -2,
+        io => -2,
+    }
+    if c == -1 {
+        return refused
+    }
+    if c < 0 {
+        return io
     }
     net_deadline(c, 2000) else |_| {
         net_close(c) else |_| {}
@@ -752,16 +758,18 @@ fn bool_word(b: bool) -> str {
 /// reply keeps its interior newlines; the trailing newline is trimmed.
 #[allow(w0602)]
 pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
+    // Sentinel-code connect handler — the W0305 dodge control_send
+    // documents (lupin is23 reads a row-tag arm as a binding).
     let c = net_connect(addr) else |e| match e {
-        refused => {
-            return refused
-        },
-        timeout => {
-            return io
-        },
-        io => {
-            return io
-        },
+        refused => -1,
+        timeout => -2,
+        io => -2,
+    }
+    if c == -1 {
+        return refused
+    }
+    if c < 0 {
+        return io
     }
     net_deadline(c, 2000) else |_| {
         net_close(c) else |_| {}
