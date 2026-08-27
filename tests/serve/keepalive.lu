@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native
 //! conforms: conc.task.spawn, err.union, err.propagate
-//! stage-src: serve http config
+//! stage-src: serve proxy http config
 //!
 //! The keepalive lifecycle: TWO requests on ONE connection (1.1
 //! default-on), the connection reused between them, then a third with

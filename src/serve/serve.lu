@@ -18,6 +18,7 @@
 
 use config
 use http
+use proxy
 
 /// This module's interface version. Total; never traps.
 pub fn version() -> str {
@@ -366,10 +367,12 @@ fn read_head(conn: int, carry: str, limits: http.Limits) -> HeadRead ! {io} {
 /// Read exactly `want` more bytes beyond what `carry` already holds,
 /// for a fixed-length body (consumed and discarded — a static GET
 /// carries no meaning in its body, but a persistent connection must
-/// drain it to find the next request). Returns the leftover after the
-/// body. Rows: net `io`; a `closed`/`timeout`/`utf8` mid-body is a
-/// broken request → the caller closes, so they ride out as `io`.
-fn drain_length(conn: int, carry: str, want: int) -> str ! {io} {
+/// drain it to find the next request, and a proxied request FORWARDS
+/// it upstream). Rows: net `io`; a `closed`/`timeout`/`utf8` mid-body
+/// is a broken request → the caller closes, so they ride out as `io`.
+/// Read exactly `want` bytes of a fixed-length body, returning
+/// (body, leftover-after-body).
+fn take_length(conn: int, carry: str, want: int) -> (str, str) ! {io} {
     var buf = carry
     while buf.len < want {
         let piece = net_read(conn, 4096) else |_| {
@@ -377,7 +380,7 @@ fn drain_length(conn: int, carry: str, want: int) -> str ! {io} {
         }
         buf = "{buf}{piece}"
     }
-    buf[want..buf.len]
+    (buf[0..want], buf[want..buf.len])
 }
 
 // ------------------------------------------------------------------
@@ -728,10 +731,12 @@ pub fn serve_conn(conn: int, c: config.Conf, opts: ServerOpts, limits: http.Limi
             },
         }
 
-        // body framing: drain a fixed-length body, validate a chunked
+        // body framing: buffer a fixed-length body (a proxied request
+        // forwards it; a static one discards it), validate a chunked
         // one; an over-size length body is 413 with the half-close
         // drain (the client must still read the 413)
         var rest = hr.rest
+        var body = ""
         if req.body_mode == "length" {
             if req.content_length > limits.max_body {
                 send_err(conn, 413, false, opts.token)
@@ -739,10 +744,12 @@ pub fn serve_conn(conn: int, c: config.Conf, opts: ServerOpts, limits: http.Limi
                 net_close(conn) else |_| {}
                 return
             }
-            rest = drain_length(conn, rest, req.content_length) else |_| {
+            let taken = take_length(conn, rest, req.content_length) else |_| {
                 net_close(conn) else |_| {}
                 return
             }
+            body = taken.0
+            rest = taken.1
         } else if req.body_mode == "chunked" {
             rest = read_chunked(conn, rest, limits) else |e| match e {
                 bad => {
@@ -782,9 +789,23 @@ pub fn serve_conn(conn: int, c: config.Conf, opts: ServerOpts, limits: http.Limi
         }
 
         let keep = req.keepalive && served + 1 < opts.keepalive_requests
-        should_close = handle_request(conn, c, req, norm, opts.token, keep, local_port) else |_| {
-            net_close(conn) else |_| {}
-            return
+
+        // proxy dispatch: a matched location with a proxy_pass hands the
+        // exchange to proxy/ (the upstream leg); otherwise serve the fs.
+        // The client address is 127.0.0.1 — loopback-only, and net has
+        // no peer-address builtin yet (a named delta for $remote_addr).
+        let pplan = proxy.plan(c, norm)
+        if pplan.is_proxy {
+            should_close = proxy.
+                run(conn, c, req, body, pplan, "127.0.0.1", opts.token, now_date(), keep) else |_| {
+                net_close(conn) else |_| {}
+                return
+            }
+        } else {
+            should_close = handle_request(conn, c, req, norm, opts.token, keep, local_port) else |_| {
+                net_close(conn) else |_| {}
+                return
+            }
         }
         served = served + 1
         if should_close || !keep {
