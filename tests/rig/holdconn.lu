@@ -1,0 +1,84 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked
+//! conforms: err.propagate
+//!
+//! holdconn — rig DRIVER (the corpus lane runs it bare, which
+//! exercises exactly the no-argument usage path: exit 2). The signal
+//! witness's connection holder (wsm01): argv is `<port> <hold_ms>`;
+//! dial 127.0.0.1:<port>, send one keep-alive GET, read one reply
+//! chunk, then HOLD the connection open for `hold_ms` before closing —
+//! long enough for tools/wws-signal to send a real SIGHUP and watch
+//! the generation that owns this connection DRAIN (live=1) while a
+//! new generation serves, then watch it RETIRE when this process
+//! closes. Loopback only, forever. Failures ride out of `main` as
+//! their own tags (the rig convention: the toolchain names the tag).
+
+/// Parse a decimal port from argv — `io` on anything not 1..65535 (a
+/// driver argument error, not a case outcome).
+fn to_port(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 {
+            return io
+        }
+        if b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 65535 {
+            return io
+        }
+    }
+    if n == 0 {
+        return io
+    }
+    n
+}
+
+/// Parse a nonnegative decimal ms count — `io` past ~60s (the rig's
+/// per-test ceiling; a longer hold is a harness bug).
+fn to_ms(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 {
+            return io
+        }
+        if b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 60000 {
+            return io
+        }
+    }
+    n
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len != 2 {
+        eprint("usage: holdconn <port> <hold_ms>")
+        return 2
+    }
+    let port = to_port(args[0])?
+    let hold = to_ms(args[1])?
+    let c = net_connect("127.0.0.1:{port}")?
+    net_deadline(c, 5000)?
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n")?
+    let piece = net_read(c, 4096)?
+    if piece.is_empty() {
+        net_close(c) else |_| {}
+        return 1
+    }
+    time_sleep_ms(hold)
+    net_close(c)?
+    print("held")
+    0
+}
