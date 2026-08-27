@@ -1,0 +1,19 @@
+# map-and-if — map blocks parse as data and `set` is planned(ws03):
+# the notes say so; the routed decision is the plain root+index shape.
+args: --request 'GET http://site.example.org/'
+exit: 0
+--- expect
+== request: GET http://site.example.org/
+listener: 127.0.0.1:8080
+server: tests/config-corpus/map-and-if/nginx.conf:22 [server_name maps.example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+location: / (tests/config-corpus/map-and-if/nginx.conf:26)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location / (tests/config-corpus/map-and-if/nginx.conf:26) — won: the longest matching prefix wins (1 bytes)
+  candidate location /img (tests/config-corpus/map-and-if/nginx.conf:34) — lost: the path does not start with this prefix
+effective directives (the winning chain, with provenance):
+  listen 8080;  # from tests/config-corpus/map-and-if/nginx.conf:23
+  server_name maps.example.org;  # from tests/config-corpus/map-and-if/nginx.conf:24
+  set $trace "$is_bot:$backend_pool";  # from tests/config-corpus/map-and-if/nginx.conf:30
+  root /srv/www/site;  # from tests/config-corpus/map-and-if/nginx.conf:31
+  note: parsed but not implemented at this pin, so they do not shape this decision: `server_name`, `set` (statuses: docs/directives.md)
+decision: directory request — would map to /srv/www/site/ and try index files: index.html (not checked; 403 if none exists)

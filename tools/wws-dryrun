@@ -1,0 +1,238 @@
+#!/bin/sh
+# wws-dryrun — the ws07 gate, two phases.
+#
+# PHASE 1, probe snapshots (offline): every file under
+# tests/dryrun/probes/<config>[.<case>].probe replays its `args:` line
+# against `wws -t` over tests/config-corpus/<config>/ and byte-diffs
+# STDOUT against the checked-in `--- expect` stanza (snapshot-reviewed
+# — regenerating one is deliberate: rerun the command, read the diff,
+# commit the new stanza). `exit:` pins the exit code, so the
+# lua-openresty probe pins "a config -t refuses gets NO prediction,
+# exit 1, empty stdout". Every corpus config must carry at least one
+# probe (the contract's corpus seam); the count itself is ratcheted in
+# tests/dryrun/probe_ratchet.lu.
+#
+# PHASE 2, the predicted-vs-live CROSS CHECK (the anti-drift gate):
+# the dry-run PREDICTS, a live server VERIFIES —
+#   static: predict `GET /index.html` over the differential's own
+#     wws.conf.in (decision kind, mapped path, --stat existence), then
+#     start the real server on the same rendered config, send the same
+#     request, and assert the live status matches AND the live body is
+#     byte-identical to the file at the PREDICTED path. A missing path
+#     is predicted 404-under---stat and must answer a live 404.
+#   proxy: predict `GET /rewrite/a` over the proxy differential's
+#     wws.proxy.conf.in (upstream URL through ws03's rewrite
+#     arithmetic), then run the real proxy against a rig backend and
+#     assert the request line the backend RECORDED is exactly the
+#     predicted outbound target. The prediction is falsifiable or it
+#     is marketing.
+# Loopback only, port 0 everywhere, deadlines on every read (the rig's
+# rules). Uses the debug binary for predictions (same model, faster
+# build cycle) and the release binary for the live side (what the
+# differential serves with).
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+WWS=target/wws-debug
+WWS_LIVE=target/wws-release
+DIFF_DIR=tests/differential
+PROBES=tests/dryrun/probes
+
+[ -x "$WWS" ] || { echo "dryrun: FAILED — $WWS missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+[ -x "$WWS_LIVE" ] || { echo "dryrun: FAILED — $WWS_LIVE missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+
+red=0
+
+# ---------------------------------------------------------------
+# phase 1 — probe snapshots
+# ---------------------------------------------------------------
+probes=0
+for pf in "$PROBES"/*.probe; do
+    [ -f "$pf" ] || continue
+    probes=$((probes + 1))
+    base=$(basename "$pf" .probe)
+    conf=${base%%.*}
+    confdir="tests/config-corpus/$conf"
+    if [ ! -d "$confdir" ]; then
+        echo "dryrun: FAILED — $pf names corpus config \"$conf\", which does not exist" >&2
+        red=$((red + 1)); continue
+    fi
+    args=$(sed -n 's/^args: //p' "$pf")
+    want_exit=$(sed -n 's/^exit: //p' "$pf")
+    if [ -z "$args" ] || [ -z "$want_exit" ]; then
+        echo "dryrun: FAILED — $pf is missing its args:/exit: header" >&2
+        red=$((red + 1)); continue
+    fi
+    scratch="target/dryrun/$base"
+    rm -rf "$scratch"; mkdir -p "$scratch"
+    awk 'insec { print } /^--- expect$/ { insec = 1 }' "$pf" > "$scratch/expect"
+    eval "set -- $args"
+    "$WWS" -t -p "$confdir" -c nginx.conf "$@" > "$scratch/got" 2> "$scratch/err"
+    got_exit=$?
+    if [ "$got_exit" != "$want_exit" ]; then
+        echo "dryrun: FAILED — $base: exit $got_exit, probe pins $want_exit (stderr: $scratch/err)" >&2
+        red=$((red + 1)); continue
+    fi
+    if ! diff -u "$scratch/expect" "$scratch/got" > "$scratch/diff"; then
+        echo "dryrun: FAILED — $base: the stanza drifted from its reviewed snapshot:" >&2
+        cat "$scratch/diff" >&2
+        red=$((red + 1)); continue
+    fi
+    echo "dryrun: ok — probe $base (exit $want_exit, stanza matches)"
+done
+if [ "$probes" = 0 ]; then
+    echo "dryrun: FAILED — no probe files under $PROBES" >&2
+    exit 1
+fi
+# every corpus config carries at least one probe
+for dir in tests/config-corpus/*/; do
+    name=$(basename "$dir")
+    if ! ls "$PROBES/$name".*probe "$PROBES/$name.probe" >/dev/null 2>&1; then
+        echo "dryrun: FAILED — corpus config $name has no dry-run probe (the contract: every entry gains one)" >&2
+        red=$((red + 1))
+    fi
+done
+
+# ---------------------------------------------------------------
+# phase 2 — predicted vs live
+# ---------------------------------------------------------------
+free_port() {
+    for _ in 1 2 3 4 5; do
+        p=$("$WOLF" run ./tests/rig/freeport.lu 2>/dev/null)
+        case "$p" in '' | *[!0-9]*) continue ;; esac
+        echo "$p"; return 0
+    done
+    return 1
+}
+send() { # send <port> <reqfile> <outfile>
+    for _poll in $(seq 1 50); do
+        if "$WOLF" run ./tests/rig/diffsend.lu "$1" "$2" > "$3" 2> "$3.err"; then
+            return 0
+        fi
+        grep -q 'error: refused' "$3.err" || return 1
+        sleep 0.1
+    done
+    return 1
+}
+jqr() { # jqr <file> <expr>
+    jq -r "$2" "$1" 2>/dev/null
+}
+
+# ---- static: predict, then serve and verify ----
+cross_static() {
+    scratch="target/dryrun/cross-static"
+    rm -rf "$scratch"; mkdir -p "$scratch/logs"
+    cp -r "$DIFF_DIR/www" "$scratch/www"
+    port=$(free_port) || { echo "dryrun: FAILED — no free port for the static cross check" >&2; return 1; }
+    sed -e "s|@PORT@|$port|" -e "s|@ROOT@|$(pwd)/$scratch|" "$DIFF_DIR/wws.conf.in" > "$scratch/wws.conf"
+
+    # the prediction, offline (--stat is the fs half of the claim)
+    "$WWS" -t -p "$(pwd)/$scratch" -c wws.conf \
+        --request "GET http://127.0.0.1/index.html" \
+        --request "GET http://127.0.0.1/missing.html" \
+        --stat --format json > "$scratch/predict.json" 2> "$scratch/predict.err" || {
+        echo "dryrun: FAILED — static prediction refused (see $scratch/predict.err)" >&2; return 1; }
+    kind=$(jqr "$scratch/predict.json" '.requests[0].decision.kind')
+    ppath=$(jqr "$scratch/predict.json" '.requests[0].decision.path')
+    pstat=$(jqr "$scratch/predict.json" '.requests[0].stat')
+    mkind=$(jqr "$scratch/predict.json" '.requests[1].decision.kind')
+    mstat=$(jqr "$scratch/predict.json" '.requests[1].stat')
+    [ "$kind" = "serve" ] || { echo "dryrun: FAILED — static predicts kind \"$kind\", wanted serve" >&2; return 1; }
+    [ "$ppath" = "$(pwd)/$scratch/www/index.html" ] || {
+        echo "dryrun: FAILED — static predicts path \"$ppath\"" >&2; return 1; }
+    case "$pstat" in *readable*) : ;; *)
+        echo "dryrun: FAILED — --stat on the present file says \"$pstat\", wanted readable" >&2; return 1 ;; esac
+    [ "$mkind" = "serve" ] || { echo "dryrun: FAILED — missing-file mapping predicts kind \"$mkind\"" >&2; return 1; }
+    case "$mstat" in *404*) : ;; *)
+        echo "dryrun: FAILED — --stat on the missing file says \"$mstat\", wanted the 404 sentence" >&2; return 1 ;; esac
+
+    # the live side: the same config, the same requests, on the wire
+    printf 'GET /index.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$scratch/req1.raw"
+    printf 'GET /missing.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$scratch/req2.raw"
+    "$WWS_LIVE" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/wws.conf" 2> "$scratch/wws.err" &
+    livepid=$!
+    ok=1
+    if send "$port" "$scratch/req1.raw" "$scratch/live1"; then
+        status=$(head -1 "$scratch/live1" | awk '{print $2}')
+        [ "$status" = "200" ] || { echo "dryrun: FAILED — live served $status for the predicted-serve path" >&2; ok=0; }
+        # the live body must be byte-identical to the file at the PREDICTED path
+        awk 'insec { print } { if ($0 == "\r") insec = 1 }' "$scratch/live1" > "$scratch/live1.body"
+        if ! diff -q "$scratch/live1.body" "$ppath" >/dev/null 2>&1; then
+            echo "dryrun: FAILED — the live body differs from the file at the predicted path $ppath" >&2; ok=0
+        fi
+    else
+        echo "dryrun: FAILED — the live static server never answered (see $scratch/wws.err)" >&2; ok=0
+    fi
+    if send "$port" "$scratch/req2.raw" "$scratch/live2"; then
+        status=$(head -1 "$scratch/live2" | awk '{print $2}')
+        [ "$status" = "404" ] || { echo "dryrun: FAILED — live answered $status where --stat predicted 404" >&2; ok=0; }
+    else
+        echo "dryrun: FAILED — the live server never answered the missing-file request" >&2; ok=0
+    fi
+    kill "$livepid" 2>/dev/null; wait "$livepid" 2>/dev/null
+    [ "$ok" = 1 ] || return 1
+    echo "dryrun: ok — cross static (predicted serve:$ppath + 404; the live server demonstrated both)"
+}
+
+# ---- proxy: predict the outbound target, then catch it at a backend ----
+cross_proxy() {
+    scratch="target/dryrun/cross-proxy"
+    rm -rf "$scratch"; mkdir -p "$scratch"
+    printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok' > "$scratch/reply.raw"
+    "$WOLF" run ./tests/rig/rigback/rigback.lu "$scratch/record" "$scratch/reply.raw" 1 > "$scratch/bport" 2> "$scratch/rigback.err" &
+    backpid=$!
+    bport=""
+    for _ in $(seq 1 50); do
+        bport=$(head -1 "$scratch/bport" 2>/dev/null)
+        case "$bport" in '' | *[!0-9]*) sleep 0.1; continue ;; esac
+        break
+    done
+    case "$bport" in '' | *[!0-9]*)
+        echo "dryrun: FAILED — rigback never printed its port (see $scratch/rigback.err)" >&2
+        kill "$backpid" 2>/dev/null; return 1 ;; esac
+    fport=$(free_port) || { echo "dryrun: FAILED — no free front port" >&2; kill "$backpid" 2>/dev/null; return 1; }
+    sed -e "s|@PORT@|$fport|" -e "s|@BACKEND@|127.0.0.1:$bport|" \
+        "$DIFF_DIR/wws.proxy.conf.in" > "$scratch/wws.conf"
+
+    # the prediction: the outbound target through ws03's rewrite arithmetic
+    "$WWS" -t -p "$(pwd)/$scratch" -c wws.conf \
+        --request "GET http://127.0.0.1/rewrite/a" --format json > "$scratch/predict.json" 2> "$scratch/predict.err" || {
+        echo "dryrun: FAILED — proxy prediction refused (see $scratch/predict.err)" >&2
+        kill "$backpid" 2>/dev/null; return 1; }
+    kind=$(jqr "$scratch/predict.json" '.requests[0].decision.kind')
+    upstream=$(jqr "$scratch/predict.json" '.requests[0].decision.upstream')
+    [ "$kind" = "proxy" ] || { echo "dryrun: FAILED — proxy predicts kind \"$kind\"" >&2; kill "$backpid" 2>/dev/null; return 1; }
+    want_target="/v2/a"
+    [ "$upstream" = "http://127.0.0.1:$bport$want_target" ] || {
+        echo "dryrun: FAILED — predicted upstream \"$upstream\", wanted http://127.0.0.1:$bport$want_target" >&2
+        kill "$backpid" 2>/dev/null; return 1; }
+
+    # the live side: run the exchange, then read what the backend RECORDED
+    printf 'GET /rewrite/a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$scratch/req.raw"
+    "$WWS_LIVE" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/wws.conf" 2> "$scratch/wws.err" &
+    livepid=$!
+    ok=1
+    if send "$fport" "$scratch/req.raw" "$scratch/live"; then
+        status=$(head -1 "$scratch/live" | awk '{print $2}')
+        [ "$status" = "200" ] || { echo "dryrun: FAILED — live proxy answered $status" >&2; ok=0; }
+    else
+        echo "dryrun: FAILED — the live proxy never answered (see $scratch/wws.err)" >&2; ok=0
+    fi
+    kill "$livepid" 2>/dev/null; wait "$livepid" 2>/dev/null
+    wait "$backpid" 2>/dev/null
+    # rigback's record opens each exchange with a marker line; the
+    # request line is the first line after it
+    got_line=$(sed -n '2p' "$scratch/record" 2>/dev/null | tr -d '\r')
+    [ "$got_line" = "GET $want_target HTTP/1.1" ] || {
+        echo "dryrun: FAILED — the backend recorded \"$got_line\"; the dry-run predicted target $want_target" >&2; ok=0; }
+    [ "$ok" = 1 ] || return 1
+    echo "dryrun: ok — cross proxy (predicted upstream target $want_target; the backend recorded exactly that)"
+}
+
+if ! cross_static; then red=$((red + 1)); fi
+if ! cross_proxy; then red=$((red + 1)); fi
+
+echo "dryrun: $probes probe(s) + 2 cross check(s), $red red"
+[ "$red" = 0 ] || exit 1
+echo "dryrun: GREEN — the prediction matches the demonstration"

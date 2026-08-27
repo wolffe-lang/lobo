@@ -49,6 +49,7 @@
 
 use config
 use conn
+use dryrun
 use http
 use obs
 use proxy
@@ -67,7 +68,7 @@ fn version() -> str {
 /// honestly used (E0305).
 fn banner() {
     print("wws {version()} — a web server in wolf (working name)")
-    let mods = "config {config.version()} · http {http.version()} · obs {obs.version()} · proxy {proxy.version()} · serve {serve.version()} · shell {shell.version()}"
+    let mods = "config {config.version()} · dryrun {dryrun.version()} · http {http.version()} · obs {obs.version()} · proxy {proxy.version()} · serve {serve.version()} · shell {shell.version()}"
     print("modules: {mods}")
 }
 
@@ -952,6 +953,82 @@ fn check_globals(globals: str) -> int {
     0
 }
 
+/// The ws07 dry-run: `-t --request` answers what the config would DO
+/// with each probe — matched server, matched location with the
+/// why-it-lost trace, effective directives with provenance, terminal
+/// decision — offline (the ONLY fs is the -t surface itself: config
+/// files and, under --stat, the one mapped path; no socket ever
+/// opens — dryrun/ imports no io module, and its pure core runs on
+/// the fs-less, socket-less interpreter lane as the standing proof).
+/// Exit is the -t verdict: a config that fails -t fails here, with
+/// the same [emerg] lines; probes answer on stdout (text stanzas or
+/// the schema-versioned JSON twin).
+fn dryrun_main(cli: shell.Cli) -> int {
+    // the -t half first, verbatim (stderr verdict lines included)
+    let verdict = config.check(cli.prefix, cli.conf, false)
+    if verdict != 0 {
+        return verdict
+    }
+    let c = config.load(cli.prefix, cli.conf)
+    let plain_addr = serve.listen_addr_plain(c)
+    let tls_addr = ssl_listen_addr(c)
+    // TLS-selection inputs: certificates are config files — the -t
+    // fs surface, nothing beyond it
+    var s = config.ssl_none()
+    if !tls_addr.is_empty() {
+        s = config.ssl_resolve(c, cli.prefix)
+    }
+    let json = cli.format == "json"
+    var out = ""
+    if json {
+        out = dryrun.json_open()
+    }
+    var first = true
+    for spec in cli.requests {
+        let p = dryrun.probe_request(spec)
+        if !p.input_err.is_empty() {
+            eprint("wws: {p.input_err}")
+            return 1
+        }
+        var tr = http.trace_new()
+        var listener = plain_addr
+        if p.scheme == "https" {
+            listener = tls_addr
+        }
+        let v = dryrun.decide(c, p, plain_addr, tls_addr, mut tr)
+        var tls_line = ""
+        if p.scheme == "https" && !tls_addr.is_empty() {
+            tls_line = dryrun.tls_note(s, cli.sni)
+        }
+        var stat_line = ""
+        if cli.stat {
+            stat_line = dryrun.stat_note(v, p.path)
+        }
+        if json {
+            let obj = dryrun.stanza_json(c, p, tr, v, listener, tls_line, stat_line, cli.client)
+            if first {
+                out = "{out}{obj}"
+                first = false
+            } else {
+                out = "{out},{obj}"
+            }
+        } else {
+            let st = dryrun.stanza(c, p, tr, v, listener, tls_line, stat_line, cli.client)
+            if first {
+                first = false
+            } else {
+                print("")
+            }
+            print_raw(st)
+        }
+    }
+    if json {
+        out = "{out}{dryrun.json_close()}"
+        print(out)
+    }
+    0
+}
+
 fn main() -> int {
     let cli = shell.parse_cli(env_args())
     if cli.mode == "error" {
@@ -979,6 +1056,9 @@ fn main() -> int {
         return gbad
     }
     if cli.mode == "check" {
+        if cli.requests.len > 0 {
+            return dryrun_main(cli)
+        }
         return config.check(cli.prefix, cli.conf, false)
     }
     if cli.mode == "dump" {

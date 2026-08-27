@@ -1,7 +1,7 @@
 module pkg :: http
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 0799ad135eafd30286c8dfe663b8a6ef5ea9892be307487f74ce904cbb88676c
-  pkg_hash    0799ad135eafd30286c8dfe663b8a6ef5ea9892be307487f74ce904cbb88676c
+  export_hash 47faf7571c8e9cb705ad5560e499afd21cd8a502c8eeaad6b82811b644de584c
+  pkg_hash    47faf7571c8e9cb705ad5560e499afd21cd8a502c8eeaad6b82811b644de584c
   deps:
     config  d0125ffaf32b2e05c7fd6e59d71dc467a909bd3766fc0420063e918bece00fed
   items:
@@ -18,8 +18,11 @@ module pkg :: http
     [10] pub parse_request — fn parse_request(head: str, limits: self.Limits) -> self.Request ! {malformed, too_large, unimplemented, uri_too_long} · regions (-, ρ1) -> ρ_caller
     [11] pub percent_decode — fn percent_decode(s: str) -> str ! {invalid, malformed}
     [12] pub route — fn route(c: config.Conf, path: str) -> self.Decision · regions (ρ1, -) -> ρ_caller
-    [13] pub version — fn version() -> str
-    [14] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str }
-    [15] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int }
-    [16] pub Request — struct Request { method: str, target: str, version: str, host: str, path: str, query: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int, keepalive: bool }
+    [13] pub route_traced — fn route_traced(c: config.Conf, path: str, mut tr: self.RouteTrace, want: bool) -> self.Decision · regions (ρ1, -, ρ2, -) -> ρ_caller
+    [14] pub trace_new — fn trace_new() -> self.RouteTrace · regions () -> ρ_caller
+    [15] pub version — fn version() -> str
+    [16] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str }
+    [17] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int }
+    [18] pub Request — struct Request { method: str, target: str, version: str, host: str, path: str, query: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int, keepalive: bool }
+    [19] pub RouteTrace — struct RouteTrace { kinds: prelude.List[str], rows: prelude.List[int], mods: prelude.List[str], prefixes: prelude.List[str], outcomes: prelude.List[str], whys: prelude.List[str], details: prelude.List[str] }
 

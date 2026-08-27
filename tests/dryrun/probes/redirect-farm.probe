@@ -1,0 +1,18 @@
+# redirect-farm — a config built of `return` directives, which are
+# parse-only at this pin: the chain notes NAME that above the 404
+# decision (never a silently wrong redirect prediction).
+args: --request 'GET http://old.example.org/blog/post'
+exit: 0
+--- expect
+== request: GET http://old.example.org/blog/post
+listener: 127.0.0.1:8080
+server: tests/config-corpus/redirect-farm/nginx.conf:10 [server_name example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+  candidate server tests/config-corpus/redirect-farm/nginx.conf:16 [server_name old.example.org legacy.example.org] — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
+location: (none matched — the server block's own directives apply)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+effective directives (the winning chain, with provenance):
+  listen 8080;  # from tests/config-corpus/redirect-farm/nginx.conf:11
+  server_name example.org;  # from tests/config-corpus/redirect-farm/nginx.conf:12
+  return 301 https://www.example.org$request_uri;  # from tests/config-corpus/redirect-farm/nginx.conf:13
+  note: parsed but not implemented at this pin, so they do not shape this decision: `server_name`, `return` (statuses: docs/directives.md)
+decision: would answer 404 — no root/alias maps this path to the filesystem — the live server answers 404

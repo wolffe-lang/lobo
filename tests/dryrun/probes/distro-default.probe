@@ -1,0 +1,24 @@
+# distro-default — nginx's own shipped default: one server, root html,
+# index; a "/" probe is the directory/index shape.
+args: --request 'GET http://localhost/'
+exit: 0
+--- expect
+== request: GET http://localhost/
+listener: 127.0.0.1:18080
+server: tests/config-corpus/distro-default/nginx.conf:37 [server_name localhost] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+location: / (tests/config-corpus/distro-default/nginx.conf:43)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location / (tests/config-corpus/distro-default/nginx.conf:43) — won: the longest matching prefix wins (1 bytes)
+  candidate location = /50x.html (tests/config-corpus/distro-default/nginx.conf:53) — lost: the path is not exactly this location's `=` argument
+effective directives (the winning chain, with provenance):
+  include       mime.types;  # from tests/config-corpus/distro-default/nginx.conf:20
+  default_type  application/octet-stream;  # from tests/config-corpus/distro-default/nginx.conf:21
+  sendfile        on;  # from tests/config-corpus/distro-default/nginx.conf:29
+  keepalive_timeout  65;  # from tests/config-corpus/distro-default/nginx.conf:33
+  listen       18080;  # from tests/config-corpus/distro-default/nginx.conf:38
+  server_name  localhost;  # from tests/config-corpus/distro-default/nginx.conf:39
+  error_page   500 502 503 504  /50x.html;  # from tests/config-corpus/distro-default/nginx.conf:52
+  root   html;  # from tests/config-corpus/distro-default/nginx.conf:44
+  index  index.html index.htm;  # from tests/config-corpus/distro-default/nginx.conf:45
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout`, `server_name`, `error_page` (statuses: docs/directives.md)
+decision: directory request — would map to html/ and try index files: index.html, index.htm (not checked; 403 if none exists)

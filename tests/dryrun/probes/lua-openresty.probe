@@ -1,0 +1,7 @@
+# lua-openresty — the named-delta config: -t fails (lua_shared_dict is
+# refused BY NAME), so the dry-run refuses to predict anything at all:
+# exit 1, the emerg on stderr, NOTHING on stdout. A dry-run over a
+# config the server would not load would be fiction.
+args: --request 'GET http://cache.example.org/'
+exit: 1
+--- expect

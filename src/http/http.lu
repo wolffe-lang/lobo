@@ -947,6 +947,82 @@ fn first_server(c: config.Conf) -> int {
     -1
 }
 
+/// The route trace (ws07): every candidate the matcher CONSIDERED,
+/// with the reason it won or lost — the operator's real question.
+/// Parallel primitive lists on purpose: a List of a bool-mixing
+/// struct is refused on the native tier (wolf-lang#144), and the
+/// flat shape is the house Conf idiom anyway. `whys` carries STABLE
+/// reason codes (dryrun/ owns the operator prose table, so wording
+/// edits never smear routing diffs); `details` carries the
+/// per-candidate specifics ("" when there are none).
+pub struct RouteTrace {
+    kinds: List[str],
+    rows: List[int],
+    mods: List[str],
+    prefixes: List[str],
+    outcomes: List[str],
+    whys: List[str],
+    details: List[str],
+}
+
+/// An empty trace collector for `route_traced`. Total.
+pub fn trace_new() -> RouteTrace {
+    RouteTrace {
+        kinds: List[str](),
+        rows: List[int](),
+        mods: List[str](),
+        prefixes: List[str](),
+        outcomes: List[str](),
+        whys: List[str](),
+        details: List[str](),
+    }
+}
+
+/// Append one candidate row to a trace. Total.
+fn trace_push(
+    mut tr: RouteTrace,
+    kind: str,
+    row: int,
+    modi: str,
+    prefix: str,
+    outcome: str,
+    why: str,
+    detail: str,
+) {
+    (mut tr.kinds).push(kind)
+    (mut tr.rows).push(row)
+    (mut tr.mods).push(modi)
+    (mut tr.prefixes).push(prefix)
+    (mut tr.outcomes).push(outcome)
+    (mut tr.whys).push(why)
+    (mut tr.details).push(detail)
+}
+
+/// The space-joined `server_name` arguments of server block `srv`
+/// ("" when the block declares none). Total.
+fn server_names_join(c: config.Conf, srv: int) -> str {
+    var out = ""
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "server_name" && c.parent[i] == srv {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 0
+            while j < nn {
+                if out.is_empty() {
+                    out = c.argp[at + j]
+                } else {
+                    out = "{out} {c.argp[at + j]}"
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
 /// Route a decoded, normalized request `path` against the config
 /// model. PURE. Never traps: a config with no root yields a decision
 /// whose `fs_path` is empty and `status` 0, which serve/ answers 404
@@ -956,6 +1032,19 @@ fn first_server(c: config.Conf) -> int {
 /// replaces the matched prefix (the WWS-L003 slash class applied at
 /// runtime).
 pub fn route(c: config.Conf, path: str) -> Decision {
+    var tr = trace_new()
+    route_traced(c, path, mut tr, false)
+}
+
+/// `route` with its trace collector exposed (ws07's dry-run seam).
+/// ONE matcher: `route` delegates here with `want` false, so the
+/// serving hot path pays a single dead branch per candidate and no
+/// allocation (pin with the ws15 bench when it lands). The trace is
+/// filled AFTER the decision, classifying every candidate RELATIVE
+/// to the matcher's own outcome — probe-shaped from the real
+/// precedence implementation, never a parallel re-derivation of the
+/// winner.
+pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -> Decision {
     var d = Decision {
         status: 0,
         fs_path: "",
@@ -1039,6 +1128,93 @@ pub fn route(c: config.Conf, path: str) -> Decision {
         idx = index_list(c, srv)
     }
     d.index = idx
+
+    // ---- the trace (ws07): explain every candidate the matcher saw,
+    // relative to the decision ABOVE — the winner is the matcher's,
+    // never re-derived here. Skipped entirely on the serving path.
+    if want {
+        // server candidates: the first server block wins at this pin
+        // (server_name/Host selection is parse-only — a named delta)
+        var si: int = 0
+        while si < total {
+            if c.names[si] == "server" && c.kinds[si] == "b" && c.ctx[si] == "http" {
+                let names = server_names_join(c, si)
+                if si == srv {
+                    trace_push(mut tr, "server", si, "", names, "won", "first-server", "")
+                } else {
+                    trace_push(mut tr, "server", si, "", names, "lost", "not-first-server", "")
+                }
+            }
+            si = si + 1
+        }
+        // location candidates under the winning server
+        let won_len = matched_prefix.len
+        var li: int = 0
+        while li < total {
+            if c.names[li] == "location" && c.kinds[li] == "b" && c.parent[li] == srv {
+                let key = location_key(c, li)
+                let modi = key.0
+                let prefix = key.1
+                if li == exact_hit {
+                    trace_push(mut tr, "location", li, modi, prefix, "won", "exact-match", "")
+                } else if li == loc && best >= 0 && exact_hit < 0 {
+                    trace_push(
+                        mut tr,
+                        "location",
+                        li,
+                        modi,
+                        prefix,
+                        "won",
+                        "longest-prefix",
+                        "{prefix.len} bytes",
+                    )
+                } else if modi == "=" {
+                    trace_push(mut tr, "location", li, modi, prefix, "lost", "exact-miss", "")
+                } else if modi == "~" || modi == "~*" {
+                    trace_push(mut tr, "location", li, modi, prefix, "lost", "regex-parse-only", "")
+                } else if modi == "@" {
+                    trace_push(mut tr, "location", li, modi, prefix, "lost", "named-location", "")
+                } else if !path.starts_with(prefix) {
+                    trace_push(mut tr, "location", li, modi, prefix, "lost", "prefix-miss", "")
+                } else if exact_hit >= 0 {
+                    let ekey = location_key(c, exact_hit)
+                    trace_push(
+                        mut tr,
+                        "location",
+                        li,
+                        modi,
+                        prefix,
+                        "lost",
+                        "lost-to-exact",
+                        "= {ekey.1}",
+                    )
+                } else if prefix.len < won_len {
+                    trace_push(
+                        mut tr,
+                        "location",
+                        li,
+                        modi,
+                        prefix,
+                        "lost",
+                        "shorter-prefix",
+                        "{prefix.len} < {won_len}",
+                    )
+                } else {
+                    trace_push(
+                        mut tr,
+                        "location",
+                        li,
+                        modi,
+                        prefix,
+                        "lost",
+                        "tie-first-wins",
+                        "{prefix.len} bytes",
+                    )
+                }
+            }
+            li = li + 1
+        }
+    }
 
     d
 }

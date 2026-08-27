@@ -1,0 +1,91 @@
+//! check: run(exit=0, stdout="trace ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! The ws07 trace seam: route_traced is route WITH its candidate
+//! trace exposed — ONE matcher, the trace classified RELATIVE to the
+//! matcher's own outcome (never a re-derivation of the winner). This
+//! file pins (1) decision identity: route and route_traced answer
+//! byte-identically, (2) the hot path pays nothing: want=false leaves
+//! the trace EMPTY, (3) every why-code the classifier can emit, on the
+//! config shapes that produce it: longest-prefix, shorter-prefix,
+//! exact-match, lost-to-exact, exact-miss, prefix-miss,
+//! regex-parse-only, first-server, not-first-server.
+
+use config
+use http
+
+fn why_of(tr: http.RouteTrace, kind: str, key: str) -> str {
+    var i: int = 0
+    for k in tr.kinds {
+        if k == kind && tr.prefixes[i] == key {
+            return "{tr.outcomes[i]}/{tr.whys[i]}"
+        }
+        i = i + 1
+    }
+    "absent"
+}
+
+fn main() -> int {
+    let src = "http {{\n  server {{\n    root /var/www;\n    location / {{\n    }}\n    location /img/ {{\n      alias /data/img/;\n    }}\n    location = /health {{\n      root /special;\n    }}\n  }}\n  server {{\n    server_name other.example;\n    root /elsewhere;\n  }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    assert(config.ok(c), "the trace fixture config must parse: {c.err}")
+
+    // (1) decision identity + (2) the silent hot path
+    var quiet = http.trace_new()
+    let d0 = http.route(c, "/img/cat.png")
+    let d1 = http.route_traced(c, "/img/cat.png", mut quiet, false)
+    assert(d0.fs_path == d1.fs_path, "route and route_traced must agree on fs_path")
+    assert(d0.matched == d1.matched, "route and route_traced must agree on matched")
+    assert(
+        quiet.kinds.len == 0,
+        "want=false must leave the trace empty (the hot path pays nothing)",
+    )
+
+    // (3a) longest prefix wins; the shorter matching prefix says so
+    var tr = http.trace_new()
+    let d = http.route_traced(c, "/img/cat.png", mut tr, true)
+    assert(d.fs_path == "/data/img/cat.png", "alias resolution unchanged under trace")
+    assert(why_of(tr, "location", "/img/") == "won/longest-prefix", "winner: longest prefix")
+    assert(
+        why_of(tr, "location", "/") == "lost/shorter-prefix",
+        "the shorter prefix names its loss",
+    )
+    assert(
+        why_of(tr, "location", "/health") == "lost/exact-miss",
+        "an = location off its exact path",
+    )
+    assert(why_of(tr, "server", "") == "won/first-server", "the first server block wins")
+    assert(
+        why_of(tr, "server", "other.example") == "lost/not-first-server",
+        "the second server loses by the named delta, its server_name carried",
+    )
+
+    // (3b) exact beats prefix; the matching prefix knows what beat it
+    var tre = http.trace_new()
+    let de = http.route_traced(c, "/health", mut tre, true)
+    assert(de.fs_path == "/special/health", "exact location routes unchanged under trace")
+    assert(why_of(tre, "location", "/health") == "won/exact-match", "winner: exact")
+    assert(
+        why_of(tre, "location", "/") == "lost/lost-to-exact",
+        "the prefix lost TO the exact match",
+    )
+    assert(why_of(tre, "location", "/img/") == "lost/prefix-miss", "a prefix the path misses")
+
+    // (3c) a regex location never wins and says why
+    let rsrc = "http {{\n  server {{\n    root /w;\n    location ~ [.]php$ {{\n      root /php;\n    }}\n  }}\n}}\n"
+    let rc = config.parse_str(rsrc, "r.conf")
+    assert(config.ok(rc), "the regex fixture config must parse: {rc.err}")
+    var trr = http.trace_new()
+    let dr = http.route_traced(rc, "/index.php", mut trr, true)
+    assert(dr.fs_path == "/w/index.php", "a regex location never routes at this pin")
+    assert(
+        why_of(trr, "location", "[.]php$") == "lost/regex-parse-only",
+        "the regex candidate names the parse-only delta",
+    )
+
+    print("trace ok")
+    0
+}

@@ -1,0 +1,972 @@
+//! member: true
+//! dryrun — the config dry-run that means something (ws07). Answers
+//! *what would this config DO with this request*: the matched server,
+//! the matched location with a WHY-IT-LOST trace for every candidate
+//! considered, the effective directives with provenance, and the
+//! terminal decision — offline, no sockets, no fs, deterministic.
+//! nginx's -t checks syntax; this checks MEANING.
+//!
+//! PURITY IS THE DESIGN: this module imports config, http and proxy
+//! ONLY — never conn/serve/tls/net — and every function except
+//! `stat_note` (the --stat opt-in) is a pure function of the model.
+//! The routing answer comes from http.route_traced (ws02's one
+//! matcher, instrumented — never a parallel reimplementation) and
+//! proxy.plan/set_headers/rewrite_target (ws03's real decision
+//! logic). The purity witness is the lupin lane: the interpreter has
+//! no sockets and no fs by design, so the dry-run tests running there
+//! IS the no-listener/no-fs proof.
+//!
+//! Tense discipline (contract target 3): decision inputs the offline
+//! run cannot know render UNRESOLVED with their names — never guessed
+//! values. The mapped file path is REPORTED, not stat'd ("not
+//! checked"); checking is the --stat opt-in.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+use config
+use http
+use proxy
+
+/// This module's interface version. Total; never traps.
+pub fn version() -> str {
+    "0.1.0"
+}
+
+/// The dry-run JSON schema version — a public tooling surface from
+/// day one (the ws08/ws12 convention: version it before anyone
+/// depends on it). Total.
+pub fn schema() -> int {
+    1
+}
+
+// ------------------------------------------------------------------
+// the probe: one --request argument, parsed by the REAL target parser
+// ------------------------------------------------------------------
+
+/// One parsed `--request` probe. `input_err` non-empty means the
+/// OPERATOR's spelling is wrong (exit 1, nothing predicted);
+/// `refuse_status` non-zero means the request PARSED as input but the
+/// live server would refuse it before routing (400/414/501) — which
+/// is itself the prediction. `path` is decoded + normalized (the
+/// serve/ order: percent-decode once, then dot-segment normalize).
+pub struct Probe {
+    input_err: str,
+    refuse_status: int,
+    refuse_why: str,
+    method: str,
+    scheme: str,
+    host: str,
+    target: str,
+    path: str,
+    query: str,
+}
+
+fn empty_probe() -> Probe {
+    Probe {
+        input_err: "",
+        refuse_status: 0,
+        refuse_why: "",
+        method: "",
+        scheme: "",
+        host: "",
+        target: "",
+        path: "",
+        query: "",
+    }
+}
+
+/// Parse one `--request '<method> <scheme>://<host>/<path>'` probe
+/// through ws02's request parser (the absolute-form code path — the
+/// one target parser this codebase has; never a second URL parser).
+/// The parser's named rejections become PREDICTED refusals: the same
+/// request on the wire would get the same status from the live
+/// server, in the same order (parse -> decode -> normalize -> route).
+pub fn probe_request(spec: str) -> Probe {
+    var p = empty_probe()
+    let trimmed = spec.trim()
+    let sp = trimmed.find(" ") else -1
+    if sp <= 0 {
+        p.input_err = "--request wants '<method> <scheme>://<host>/<path>' (got \"{trimmed}\")"
+        return p
+    }
+    let method = trimmed[0..sp]
+    let url = trimmed[sp + 1..trimmed.len].trim()
+    if url.lower().starts_with("https://") {
+        p.scheme = "https"
+    } else if url.lower().starts_with("http://") {
+        p.scheme = "http"
+    } else {
+        p.input_err = "--request wants an absolute-form URL (http:// or https://), got \"{url}\" — the dry-run reuses the ws02 target parser's absolute-form path"
+        return p
+    }
+    p.method = method
+    p.target = url
+    // ONE synthetic request line; absolute-form carries its own
+    // authority, so no Host header is needed (RFC 9112 §3.2.2 — the
+    // authority wins over Host, which parse_request enforces)
+    let head = "{method} {url} HTTP/1.1"
+    let r = http.parse_request(head, http.default_limits()) else |e| match e {
+        malformed => {
+            p.refuse_status = 400
+            p.refuse_why = "the request line does not parse (RFC 9112) — the live server answers 400 before routing"
+            return p
+        },
+        uri_too_long => {
+            p.refuse_status = 414
+            p.refuse_why = "the request-target exceeds the request-line limit — the live server answers 414 before routing"
+            return p
+        },
+        too_large => {
+            p.refuse_status = 400
+            p.refuse_why = "the request exceeds a header limit — the live server answers 400 before routing"
+            return p
+        },
+        unimplemented => {
+            p.refuse_status = 501
+            p.refuse_why = "the HTTP version is not implemented — the live server answers 501 before routing"
+            return p
+        },
+    }
+    p.host = r.host
+    p.query = r.query
+    // the serve/ traversal defence, in ITS order: decode once, gate
+    // controls, then normalize dot-segments — a refusal here is the
+    // same 400 the wire request would get
+    let decoded = http.percent_decode(r.path) else |_| {
+        p.refuse_status = 400
+        p.refuse_why = "the path carries a bad percent-escape — the live server answers 400 before routing"
+        return p
+    }
+    if http.has_control(decoded) {
+        p.refuse_status = 400
+        p.refuse_why = "the decoded path carries a control byte (NUL/CR/LF class) — the live server answers 400 before routing"
+        return p
+    }
+    let norm = http.normalize_path(decoded) else {
+        p.refuse_status = 400
+        p.refuse_why = "the path escapes the root through dot-segments — the live server answers 400 before routing"
+        return p
+    }
+    p.path = norm
+    p
+}
+
+// ------------------------------------------------------------------
+// the verdict: the terminal decision, predicted offline
+// ------------------------------------------------------------------
+
+/// The dry-run's terminal decision. `kind` is one of:
+///   "serve"   — a static answer: `fs_path` is the mapped file
+///               (REPORTED, not stat'd; a directory request carries
+///               the `index` candidates the live server would try)
+///   "proxy"   — hand the exchange upstream: `upstream` is the
+///               outbound URL, `pool`/`peers` the upstream block
+///   "refuse"  — a NAMED refusal with an HTTP status (`status`) and
+///               the reason in `note`
+///   "none"    — no HTTP answer at all (no listener for the scheme):
+///               `status` 0, reason in `note`
+/// `srv`/`loc` are Conf row indexes (-1 = none).
+pub struct Verdict {
+    kind: str,
+    status: int,
+    fs_path: str,
+    is_alias: bool,
+    index: List[str],
+    matched: str,
+    srv: int,
+    loc: int,
+    upstream: str,
+    pool: str,
+    peers: str,
+    http_blk: int,
+    note: str,
+}
+
+fn empty_verdict() -> Verdict {
+    Verdict {
+        kind: "refuse",
+        status: 0,
+        fs_path: "",
+        is_alias: false,
+        index: List[str](),
+        matched: "",
+        srv: -1,
+        loc: -1,
+        upstream: "",
+        pool: "",
+        peers: "",
+        http_blk: -1,
+        note: "",
+    }
+}
+
+/// The winning server row from a filled trace (-1 when none won).
+pub fn trace_won(tr: http.RouteTrace, kind: str) -> int {
+    var i: int = 0
+    for k in tr.kinds {
+        if k == kind && tr.outcomes[i] == "won" {
+            return tr.rows[i]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// Render an upstream pool's peer set: "host:port weight=N" rows,
+/// "backup" flagged, semicolon-joined. Pure; "" for an empty pool.
+fn peers_text(pool: proxy.UpPool) -> str {
+    var out = ""
+    var i: int = 0
+    for h in pool.hosts {
+        var row = "{h}:{pool.ports[i]} weight={pool.weights[i]}"
+        if pool.backup[i] {
+            row = "{row} backup"
+        }
+        if out.is_empty() {
+            out = row
+        } else {
+            out = "{out}; {row}"
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Decide what the config would DO with the probe — the offline twin
+/// of serve_conn_cn's dispatch, built from the SAME decision
+/// functions (http.route_traced, proxy.plan/rewrite_target/
+/// pool_named), never a re-derivation. `plain_addr`/`ssl_addr` are
+/// the listener bind strings ("" = no such listener); the caller
+/// computes them (main wires serve.listen_addr_plain) so this module
+/// never grows an io-adjacent scan of its own. Fills `tr` with the
+/// why-it-lost trace. PURE.
+pub fn decide(c: config.Conf, p: Probe, plain_addr: str, ssl_addr: str, mut tr: http.RouteTrace) -> Verdict {
+    var v = empty_verdict()
+    // listener first: a request whose scheme has no listener never
+    // reaches parse on the live server (the connection is refused)
+    if p.scheme == "https" && ssl_addr.is_empty() {
+        v.kind = "none"
+        v.note = "this config has no `listen ... ssl` — an https:// request has nowhere to connect (no prediction beyond that)"
+        return v
+    }
+    if p.scheme == "http" && plain_addr.is_empty() {
+        v.kind = "none"
+        v.note = "this config has no plaintext listener (every `listen` carries `ssl`) — an http:// request has nowhere to connect"
+        return v
+    }
+    // parse-stage refusal: predicted before any routing
+    if p.refuse_status != 0 {
+        v.kind = "refuse"
+        v.status = p.refuse_status
+        v.note = p.refuse_why
+        return v
+    }
+
+    // ws02's one matcher, trace on
+    let d = http.route_traced(c, p.path, mut tr, true)
+    v.srv = trace_won(tr, "server")
+    v.loc = trace_won(tr, "location")
+    v.matched = d.matched
+
+    if v.srv < 0 {
+        v.kind = "refuse"
+        v.status = 404
+        v.note = "no server block in this config — there is nothing to route to; the live server answers 404"
+        return v
+    }
+
+    // ws03's proxy decision (same location precedence, same model)
+    let pl = proxy.plan(c, p.path)
+    if pl.is_proxy {
+        v.loc = pl.loc
+        v.matched = pl.matched
+        v.http_blk = pl.http_blk
+        if !pl.pt.err.is_empty() {
+            v.kind = "refuse"
+            v.status = 502
+            v.note = "proxy_pass is a named refusal here: {pl.pt.err} — the live server answers 502"
+            return v
+        }
+        let out_target = proxy.rewrite_target(pl.matched, pl.pt.has_uri, pl.pt.uri, p.path, p.query)
+        v.upstream = "http://{pl.pt.authority}{out_target}"
+        if pl.pt.is_pool {
+            v.pool = pl.pt.authority
+            let pool = proxy.pool_named(c, pl.pt.authority)
+            v.peers = peers_text(pool)
+            if proxy.peer_count(pool) == 0 {
+                v.kind = "refuse"
+                v.status = 502
+                v.note = "upstream pool \"{v.pool}\" has no servers — the live server answers 502"
+                return v
+            }
+        }
+        if p.scheme == "https" {
+            v.kind = "refuse"
+            v.status = 502
+            v.note = "proxy_pass over a TLS listener is not wired at this pin (ws05 residue: the response would bypass encryption) — the live server answers a NAMED 502"
+            return v
+        }
+        v.kind = "proxy"
+        return v
+    }
+
+    // static path: serve/'s method gate, then the mapped path
+    if p.method != "GET" && p.method != "HEAD" {
+        v.kind = "refuse"
+        v.status = 405
+        v.note = "method {p.method} on a static location — the live server serves GET and HEAD only and answers 405"
+        return v
+    }
+    if d.fs_path.is_empty() {
+        v.kind = "refuse"
+        v.status = 404
+        v.note = "no root/alias maps this path to the filesystem — the live server answers 404"
+        return v
+    }
+    v.kind = "serve"
+    v.status = 200
+    v.fs_path = d.fs_path
+    v.is_alias = d.is_alias
+    if p.path.ends_with("/") {
+        var idxs = d.index
+        if idxs.is_empty() {
+            (mut idxs).push("index.html")
+        }
+        v.index = idxs
+    }
+    v
+}
+
+// ------------------------------------------------------------------
+// the operator prose table — ONE place for the why-it-lost wording,
+// so ws-docs reuse it and wording edits never smear routing diffs
+// (the trace itself carries stable CODES)
+// ------------------------------------------------------------------
+
+/// The operator sentence for a trace reason code. nginx location
+/// precedence is folklore; these lines teach it. Total — an unknown
+/// code renders as itself (a new code without prose is a test
+/// failure, not a silent blank).
+pub fn why_prose(code: str) -> str {
+    if code == "first-server" {
+        return "the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)"
+    }
+    if code == "not-first-server" {
+        return "not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)"
+    }
+    if code == "exact-match" {
+        return "exact match — `location =` beats every prefix and regex"
+    }
+    if code == "exact-miss" {
+        return "the path is not exactly this location's `=` argument"
+    }
+    if code == "longest-prefix" {
+        return "the longest matching prefix wins"
+    }
+    if code == "shorter-prefix" {
+        return "the prefix matches, but a longer prefix won"
+    }
+    if code == "lost-to-exact" {
+        return "the prefix matches, but an exact `location =` takes precedence"
+    }
+    if code == "prefix-miss" {
+        return "the path does not start with this prefix"
+    }
+    if code == "regex-parse-only" {
+        return "regex locations are parse-only at this pin — they never win a route (a named delta)"
+    }
+    if code == "named-location" {
+        return "a named (@) location is only reachable by internal redirect, never by a URL"
+    }
+    if code == "tie-first-wins" {
+        return "an equal-length prefix — the earlier block wins"
+    }
+    code
+}
+
+/// The one-line precedence summary the stanza teaches. nginx's real
+/// order is `=` exact, then `^~`/plain longest prefix, then regex in
+/// file order, then plain longest prefix; wws at this pin has no
+/// regex matching, so the effective order is the first two. Total.
+pub fn precedence_prose() -> str {
+    "= exact > longest prefix (regex is parse-only at this pin and never wins)"
+}
+
+// ------------------------------------------------------------------
+// effective directives: the ws01 -T provenance machinery, filtered to
+// the winning chain
+// ------------------------------------------------------------------
+
+/// The block-ancestry of `loc` (outermost first), as Conf row
+/// indexes. `loc` -1 yields an empty chain. Pure.
+fn chain_rows(c: config.Conf, loc: int) -> List[int] {
+    var up = List[int]()
+    var cur = loc
+    var guard: int = 0
+    while cur >= 0 && guard < 64 {
+        (mut up).push(cur)
+        cur = c.parent[cur]
+        guard = guard + 1
+    }
+    // reverse into outermost-first
+    var out = List[int]()
+    var i: int = up.len - 1
+    while i >= 0 {
+        (mut out).push(up[i])
+        i = i - 1
+    }
+    out
+}
+
+/// The effective directives along the winning chain (http block ->
+/// server -> location), each with its -T provenance (`# from
+/// file:line`, `(via chain)` for included hops). Directives only —
+/// sibling blocks and their contents are not on the chain. Pure.
+pub fn effective_directives(c: config.Conf, loc: int) -> str {
+    var out = ""
+    let chain = chain_rows(c, loc)
+    for blk in chain {
+        var i: int = 0
+        let total = c.names.len
+        while i < total {
+            if c.parent[i] == blk && c.kinds[i] != "b" {
+                var via = ""
+                if !c.chains[i].is_empty() {
+                    via = " (via {c.chains[i]})"
+                }
+                out = "{out}  {c.raws[i]}  # from {c.files[i]}:{c.lines[i]}{via}\n"
+            }
+            i = i + 1
+        }
+    }
+    out
+}
+
+/// The honesty note for the winning chain: every directive on it
+/// whose table row is not `implemented` is parsed and validated but
+/// does NOT shape this decision — say so BY NAME, in one aggregated
+/// line (an operator reading `return 301` above a 404 decision
+/// deserves the reason; seventeen one-line repetitions would drown
+/// it). Statuses live in docs/directives.md. Pure; "" when the whole
+/// chain is implemented.
+pub fn chain_notes(c: config.Conf, loc: int) -> str {
+    let t = config.table()
+    var names = ""
+    let chain = chain_rows(c, loc)
+    for blk in chain {
+        var i: int = 0
+        let total = c.names.len
+        while i < total {
+            if c.parent[i] == blk && c.kinds[i] != "b" {
+                let name = c.names[i]
+                if !names.contains("`{name}`") {
+                    let at = config.find(t, name, c.ctx[i])
+                    if at >= 0 {
+                        let sp = config.spec_at(t, at)
+                        if sp.status != "implemented" {
+                            if names.is_empty() {
+                                names = "`{name}`"
+                            } else {
+                                names = "{names}, `{name}`"
+                            }
+                        }
+                    }
+                }
+            }
+            i = i + 1
+        }
+    }
+    if names.is_empty() {
+        return ""
+    }
+    "  note: parsed but not implemented at this pin, so they do not shape this decision: {names} (statuses: docs/directives.md)\n"
+}
+
+// ------------------------------------------------------------------
+// variables stay honest: resolved where the model knows, UNRESOLVED
+// by name where it cannot — never guessed
+// ------------------------------------------------------------------
+
+/// The proxy_set_header rows of the winning chain (ws03's REAL
+/// inheritance — proxy.set_headers), each value resolved through
+/// proxy.expand_var where the dry-run knows the input, UNRESOLVED
+/// with the variable's name where it cannot: `$remote_addr` without
+/// --client, `$proxy_add_x_forwarded_for` always (it depends on the
+/// inbound X-Forwarded-For header, which an offline run does not
+/// have — tense discipline: never a guessed value). Returns
+/// (names, shown values, unresolved reasons — "" when resolved).
+/// Pure.
+fn header_rows(c: config.Conf, v: Verdict, host: str, client: str) -> (
+    List[str],
+    List[str],
+    List[str],
+) {
+    var names = List[str]()
+    var shown = List[str]()
+    var reasons = List[str]()
+    if v.upstream.is_empty() {
+        return (names, shown, reasons)
+    }
+    let hs = proxy.set_headers(c, v.loc, v.srv, v.http_blk)
+    let hn = hs.0
+    let hv = hs.1
+    var i: int = 0
+    for name in hn {
+        let value = hv[i]
+        i = i + 1
+        (mut names).push(name)
+        if value.contains("$") {
+            if value == "$proxy_add_x_forwarded_for" {
+                (mut shown).push(value)
+                (mut reasons).push("depends on the inbound X-Forwarded-For header")
+            } else if value == "$remote_addr" && client.is_empty() {
+                (mut shown).push(value)
+                (mut reasons).push("the client address; pass --client to supply one")
+            } else {
+                let expanded = proxy.expand_var(value, host, client, authority_of(v.upstream), "")
+                if expanded == value {
+                    (mut shown).push(value)
+                    (mut reasons).push("this variable is outside the dry-run's knowledge")
+                } else {
+                    (mut shown).push(expanded)
+                    (mut reasons).push("")
+                }
+            }
+        } else {
+            (mut shown).push(value)
+            (mut reasons).push("")
+        }
+    }
+    (names, shown, reasons)
+}
+
+/// The authority (host:port) of an outbound upstream URL. Pure.
+fn authority_of(upstream: str) -> str {
+    var rest = upstream
+    if rest.starts_with("http://") {
+        rest = rest[7..rest.len]
+    }
+    let slash = rest.find("/") else -1
+    if slash < 0 {
+        return rest
+    }
+    rest[0..slash]
+}
+
+// ------------------------------------------------------------------
+// TLS selection without TLS: the ws05 selection logic, offline
+// ------------------------------------------------------------------
+
+/// What the TLS layer would present for `sni` — config.ssl_select
+/// (the ws05 selection logic) over an ALREADY-RESOLVED SslConf (the
+/// caller loads it; certificates are config files, the one fs the
+/// dry-run's -t half may read). Pure over its inputs.
+pub fn tls_note(s: config.SslConf, sni: str) -> str {
+    if !s.on {
+        return ""
+    }
+    let at = config.ssl_select(s, sni)
+    if at < 0 {
+        return "  tls: no certificate entries resolved"
+    }
+    var who = "sni \"{sni}\""
+    if sni.is_empty() {
+        who = "no sni (pass --sni to exercise selection)"
+    }
+    var chosen = "certificate entry {at}"
+    if at == s.default_at {
+        chosen = "certificate entry {at} (the default)"
+    }
+    "  tls: {who} -> {chosen} [server_name {s.names[at]}] {s.cert_path[at]}"
+}
+
+// ------------------------------------------------------------------
+// --stat: the opt-in that actually looks (fs — NOT on the pure path;
+// lupin never calls this, and the offline default never stats)
+// ------------------------------------------------------------------
+
+/// Stat the mapped path and report existence and what the live
+/// server's fs dispatch would then do (file -> serve; directory
+/// without trailing slash -> 301; directory with slash -> index scan
+/// or 403; absent -> 404). Readability is probed with a real open
+/// (there is no permission-bits builtin at this pin — a named gap).
+/// The ONLY fs in this module, behind the --stat flag.
+pub fn stat_note(v: Verdict, req_path: str) -> str {
+    if v.fs_path.is_empty() {
+        return ""
+    }
+    if fs_is_dir(v.fs_path) {
+        if !req_path.ends_with("/") {
+            return "  stat: directory — the live answer is a 301 redirect to {req_path}/"
+        }
+        for name in v.index {
+            var cand = v.fs_path
+            if !cand.ends_with("/") {
+                cand = "{cand}/"
+            }
+            cand = "{cand}{name}"
+            if fs_is_file(cand) {
+                return "  stat: directory; index \"{name}\" exists — the live answer serves {cand}"
+            }
+        }
+        return "  stat: directory; no index file exists — the live answer is 403 (autoindex off)"
+    }
+    if fs_is_file(v.fs_path) {
+        let size = fs_size(v.fs_path) else -1
+        let fd = fs_open(v.fs_path) else |_| {
+            return "  stat: file, {size} bytes, NOT readable — the live answer is 403"
+        }
+        fs_close(fd) else |_| {}
+        return "  stat: file, {size} bytes, readable"
+    }
+    "  stat: does not exist — the live answer is 404"
+}
+
+// ------------------------------------------------------------------
+// the stanza — human first, JSON twin second, one shape each
+// ------------------------------------------------------------------
+
+/// The space-joined server_name arguments of server block `srv` (""
+/// when none) — display only; the MATCHING story is the trace's.
+fn names_of_server(c: config.Conf, srv: int) -> str {
+    var out = ""
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "server_name" && c.parent[i] == srv {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 0
+            while j < nn {
+                if out.is_empty() {
+                    out = c.argp[at + j]
+                } else {
+                    out = "{out} {c.argp[at + j]}"
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// "file:line" provenance of Conf row `i`. Total.
+fn at_of(c: config.Conf, i: int) -> str {
+    if i < 0 {
+        return "?"
+    }
+    "{c.files[i]}:{c.lines[i]}"
+}
+
+/// The decision line of a stanza — one sentence, tense-honest. Pure.
+pub fn decision_text(v: Verdict) -> str {
+    if v.kind == "none" {
+        return "decision: no answer — {v.note}"
+    }
+    if v.kind == "refuse" {
+        return "decision: would answer {v.status} — {v.note}"
+    }
+    if v.kind == "proxy" {
+        return "decision: would proxy to {v.upstream}"
+    }
+    // serve
+    if v.index.len > 0 {
+        var idx = ""
+        for name in v.index {
+            if idx.is_empty() {
+                idx = name
+            } else {
+                idx = "{idx}, {name}"
+            }
+        }
+        return "decision: directory request — would map to {v.fs_path} and try index files: {idx} (not checked; 403 if none exists)"
+    }
+    var alias = ""
+    if v.is_alias {
+        alias = "; via alias"
+    }
+    "decision: would serve: {v.fs_path} (not checked{alias})"
+}
+
+/// The human stanza for one probe. `listener` is the bind string the
+/// scheme selects, `tls_line`/`stat_line` are precomputed ("" =
+/// absent — tls needs the resolved SslConf, stat needs --stat).
+/// Pure.
+pub fn stanza(
+    c: config.Conf,
+    p: Probe,
+    tr: http.RouteTrace,
+    v: Verdict,
+    listener: str,
+    tls_line: str,
+    stat_line: str,
+    client: str,
+) -> str {
+    var out = "== request: {p.method} {p.target}\n"
+    if v.kind == "none" {
+        out = "{out}{decision_text(v)}\n"
+        return out
+    }
+    var lst = "listener: {listener}"
+    if p.scheme == "https" {
+        lst = "{lst} (ssl)"
+    }
+    out = "{out}{lst}\n"
+    if !tls_line.is_empty() {
+        out = "{out}{tls_line}\n"
+    }
+    if v.status == 400 || v.status == 414 || v.status == 501 {
+        if v.srv < 0 {
+            // refused before routing: no chain to explain
+            out = "{out}{decision_text(v)}\n"
+            return out
+        }
+    }
+    if v.srv >= 0 {
+        var sn = names_of_server(c, v.srv)
+        if !sn.is_empty() {
+            sn = " [server_name {sn}]"
+        }
+        out = "{out}server: {at_of(c, v.srv)}{sn} — {why_prose("first-server")}\n"
+        // the losing servers, from the trace
+        var i: int = 0
+        for k in tr.kinds {
+            if k == "server" && tr.outcomes[i] == "lost" {
+                let row = tr.rows[i]
+                var names = tr.prefixes[i]
+                if !names.is_empty() {
+                    names = " [server_name {names}]"
+                }
+                out = "{out}  candidate server {at_of(c, row)}{names} — lost: {why_prose(tr.whys[i])}\n"
+            }
+            i = i + 1
+        }
+        // the location story
+        if v.loc >= 0 && v.loc != v.srv {
+            out = "{out}location: {v.matched} ({at_of(c, v.loc)})\n"
+        } else {
+            out = "{out}location: (none matched — the server block's own directives apply)\n"
+        }
+        out = "{out}  precedence: {precedence_prose()}\n"
+        var j: int = 0
+        for k in tr.kinds {
+            if k == "location" {
+                let row = tr.rows[j]
+                var key = tr.prefixes[j]
+                if !tr.mods[j].is_empty() {
+                    key = "{tr.mods[j]} {key}"
+                }
+                var detail = ""
+                if !tr.details[j].is_empty() {
+                    detail = " ({tr.details[j]})"
+                }
+                out = "{out}  candidate location {key} ({at_of(c, row)}) — {tr.outcomes[j]}: {why_prose(tr.whys[j])}{detail}\n"
+            }
+            j = j + 1
+        }
+        // the effective directives of the winning chain
+        var chain_tip = v.loc
+        if chain_tip < 0 {
+            chain_tip = v.srv
+        }
+        let dirs = effective_directives(c, chain_tip)
+        if !dirs.is_empty() {
+            out = "{out}effective directives (the winning chain, with provenance):\n{dirs}"
+        }
+        out = "{out}{chain_notes(c, chain_tip)}"
+        // proxy headers, variables kept honest
+        let hr = header_rows(c, v, p.host, client)
+        let hnames = hr.0
+        let hshown = hr.1
+        let hwhy = hr.2
+        if hnames.len > 0 {
+            out = "{out}proxy headers (sent upstream):\n"
+            var h: int = 0
+            for name in hnames {
+                if hwhy[h].is_empty() {
+                    out = "{out}  {name}: {hshown[h]}\n"
+                } else {
+                    out = "{out}  {name}: {hshown[h]} -> UNRESOLVED ({hwhy[h]})\n"
+                }
+                h = h + 1
+            }
+        }
+        if !v.pool.is_empty() {
+            out = "{out}upstream pool \"{v.pool}\": {v.peers}\n"
+        }
+    }
+    out = "{out}{decision_text(v)}\n"
+    if !stat_line.is_empty() {
+        out = "{out}{stat_line}\n"
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// the JSON twin — schema-versioned, hand-built like the ws08 status
+// surface (std.x.json validates it in the tests; the emitter stays
+// dependency-thin and three-lane)
+// ------------------------------------------------------------------
+
+/// JSON-escape a string value: backslash, quote, and the whitespace
+/// controls a config file can realistically carry (tab, CR, LF).
+/// Raw UTF-8 passes through (valid JSON). Other C0 controls cannot
+/// reach this: the config lexer and the request path gates refuse
+/// them upstream. Total.
+fn jstr(s: str) -> str {
+    var out = s.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    out
+}
+
+/// The document opener for `--format json`: everything before the
+/// first request object. The stream is one object per probe inside
+/// `requests`, comma-joined by the caller, closed by `json_close`.
+/// Total.
+pub fn json_open() -> str {
+    "{{\"schema\":{schema()},\"tool\":\"wws --request\",\"requests\":["
+}
+
+/// The document closer. Total.
+pub fn json_close() -> str {
+    "]}}"
+}
+
+/// One probe's JSON object (the machine twin of `stanza` — same
+/// inputs, same knowledge, the same UNRESOLVED honesty). Pure.
+pub fn stanza_json(
+    c: config.Conf,
+    p: Probe,
+    tr: http.RouteTrace,
+    v: Verdict,
+    listener: str,
+    tls_line: str,
+    stat_line: str,
+    client: str,
+) -> str {
+    var out = "{{\"request\":{{\"method\":\"{jstr(p.method)}\",\"scheme\":\"{jstr(p.scheme)}\",\"host\":\"{jstr(p.host)}\",\"target\":\"{jstr(p.target)}\",\"path\":\"{jstr(p.path)}\",\"query\":\"{jstr(p.query)}\"}}"
+    out = "{out},\"listener\":\"{jstr(listener)}\""
+    out = "{out},\"tls\":\"{jstr(tls_line.trim())}\""
+    // server + location
+    if v.srv >= 0 {
+        out = "{out},\"server\":{{\"row\":{v.srv},\"file\":\"{jstr(c.files[v.srv])}\",\"line\":{c.lines[v.srv]},\"server_name\":\"{jstr(names_of_server(c, v.srv))}\"}}"
+    } else {
+        out = "{out},\"server\":null"
+    }
+    if v.loc >= 0 && v.loc != v.srv {
+        out = "{out},\"location\":{{\"row\":{v.loc},\"matched\":\"{jstr(v.matched)}\",\"file\":\"{jstr(c.files[v.loc])}\",\"line\":{c.lines[v.loc]}}}"
+    } else {
+        out = "{out},\"location\":null"
+    }
+    // the considered list — the why-it-lost trace, codes AND prose
+    out = "{out},\"considered\":["
+    var first = true
+    var i: int = 0
+    for k in tr.kinds {
+        var obj = "{{\"kind\":\"{jstr(k)}\",\"row\":{tr.rows[i]},\"file\":\"{jstr(c.files[tr.rows[i]])}\",\"line\":{c.lines[tr.rows[i]]}"
+        obj = "{obj},\"modifier\":\"{jstr(tr.mods[i])}\",\"key\":\"{jstr(tr.prefixes[i])}\",\"outcome\":\"{jstr(tr.outcomes[i])}\""
+        obj = "{obj},\"why\":\"{jstr(tr.whys[i])}\",\"detail\":\"{jstr(tr.details[i])}\",\"prose\":\"{jstr(why_prose(tr.whys[i]))}\"}}"
+        if first {
+            out = "{out}{obj}"
+            first = false
+        } else {
+            out = "{out},{obj}"
+        }
+        i = i + 1
+    }
+    out = "{out}]"
+    // effective directives with provenance
+    out = "{out},\"directives\":["
+    var chain_tip = v.loc
+    if chain_tip < 0 {
+        chain_tip = v.srv
+    }
+    if chain_tip >= 0 {
+        let chain = chain_rows(c, chain_tip)
+        var dfirst = true
+        for blk in chain {
+            var di: int = 0
+            let total = c.names.len
+            while di < total {
+                if c.parent[di] == blk && c.kinds[di] != "b" {
+                    var dobj = "{{\"raw\":\"{jstr(c.raws[di])}\",\"file\":\"{jstr(c.files[di])}\",\"line\":{c.lines[di]},\"via\":\"{jstr(c.chains[di])}\"}}"
+                    if dfirst {
+                        out = "{out}{dobj}"
+                        dfirst = false
+                    } else {
+                        out = "{out},{dobj}"
+                    }
+                }
+                di = di + 1
+            }
+        }
+    }
+    out = "{out}]"
+    if chain_tip >= 0 {
+        out = "{out},\"notes\":\"{jstr(chain_notes(c, chain_tip).trim())}\""
+    } else {
+        out = "{out},\"notes\":\"\""
+    }
+    // proxy headers + the unresolved list
+    let hr = header_rows(c, v, p.host, client)
+    let hnames = hr.0
+    let hshown = hr.1
+    let hwhy = hr.2
+    out = "{out},\"headers\":["
+    var hfirst = true
+    var h: int = 0
+    for name in hnames {
+        var hobj = "{{\"name\":\"{jstr(name)}\",\"value\":\"{jstr(hshown[h])}\""
+        if hwhy[h].is_empty() {
+            hobj = "{hobj},\"resolved\":true}}"
+        } else {
+            hobj = "{hobj},\"resolved\":false,\"unresolved\":\"{jstr(hwhy[h])}\"}}"
+        }
+        if hfirst {
+            out = "{out}{hobj}"
+            hfirst = false
+        } else {
+            out = "{out},{hobj}"
+        }
+        h = h + 1
+    }
+    out = "{out}]"
+    // the decision
+    var dec = "{{\"kind\":\"{jstr(v.kind)}\",\"status\":{v.status}"
+    if !v.fs_path.is_empty() {
+        dec = "{dec},\"path\":\"{jstr(v.fs_path)}\",\"checked\":false"
+        if v.is_alias {
+            dec = "{dec},\"alias\":true"
+        }
+    }
+    if v.index.len > 0 {
+        dec = "{dec},\"index\":["
+        var ifirst = true
+        for name in v.index {
+            if ifirst {
+                dec = "{dec}\"{jstr(name)}\""
+                ifirst = false
+            } else {
+                dec = "{dec},\"{jstr(name)}\""
+            }
+        }
+        dec = "{dec}]"
+    }
+    if !v.upstream.is_empty() {
+        dec = "{dec},\"upstream\":\"{jstr(v.upstream)}\""
+    }
+    if !v.pool.is_empty() {
+        dec = "{dec},\"pool\":\"{jstr(v.pool)}\",\"peers\":\"{jstr(v.peers)}\""
+    }
+    if !v.note.is_empty() {
+        dec = "{dec},\"note\":\"{jstr(v.note)}\""
+    }
+    dec = "{dec}}}"
+    out = "{out},\"decision\":{dec}"
+    out = "{out},\"stat\":\"{jstr(stat_line.trim())}\"}}"
+    out
+}

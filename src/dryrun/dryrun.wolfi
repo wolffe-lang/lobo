@@ -1,0 +1,28 @@
+module pkg :: dryrun
+  wolfi v0 · toolchain 0.1.0 · edition v1
+  export_hash 8b67a8279dd50cbfe87c3eb430fa256743fdc381d5f35e19e5f3bd406a482891
+  pkg_hash    8b67a8279dd50cbfe87c3eb430fa256743fdc381d5f35e19e5f3bd406a482891
+  deps:
+    config  d0125ffaf32b2e05c7fd6e59d71dc467a909bd3766fc0420063e918bece00fed
+    http  47faf7571c8e9cb705ad5560e499afd21cd8a502c8eeaad6b82811b644de584c
+    proxy  f1ffb62c633a4513e1dde8ba5357c1db6b86915ec7c09f7223e36a0607f917ae
+  items:
+    [0] pub chain_notes — fn chain_notes(c: config.Conf, loc: int) -> str · regions (ρ1, -) -> -
+    [1] pub decide — fn decide(c: config.Conf, p: self.Probe, plain_addr: str, ssl_addr: str, mut tr: http.RouteTrace) -> self.Verdict · regions (ρ1, ρ2, -, -, ρ3) -> ρ_caller
+    [2] pub decision_text — fn decision_text(v: self.Verdict) -> str · regions (ρ1) -> -
+    [3] pub effective_directives — fn effective_directives(c: config.Conf, loc: int) -> str · regions (ρ1, -) -> -
+    [4] pub json_close — fn json_close() -> str
+    [5] pub json_open — fn json_open() -> str
+    [6] pub precedence_prose — fn precedence_prose() -> str
+    [7] pub probe_request — fn probe_request(spec: str) -> self.Probe · regions (-) -> ρ_caller
+    [8] pub schema — fn schema() -> int
+    [9] pub stanza — fn stanza(c: config.Conf, p: self.Probe, tr: http.RouteTrace, v: self.Verdict, listener: str, tls_line: str, stat_line: str, client: str) -> str · regions (ρ1, ρ2, ρ3, ρ4, -, -, -, -) -> -
+    [10] pub stanza_json — fn stanza_json(c: config.Conf, p: self.Probe, tr: http.RouteTrace, v: self.Verdict, listener: str, tls_line: str, stat_line: str, client: str) -> str · regions (ρ1, ρ2, ρ3, ρ4, -, -, -, -) -> -
+    [11] pub stat_note — fn stat_note(v: self.Verdict, req_path: str) -> str · regions (ρ1, -) -> -
+    [12] pub tls_note — fn tls_note(s: config.SslConf, sni: str) -> str · regions (ρ1, -) -> -
+    [13] pub trace_won — fn trace_won(tr: http.RouteTrace, kind: str) -> int · regions (ρ1, -) -> -
+    [14] pub version — fn version() -> str
+    [15] pub why_prose — fn why_prose(code: str) -> str
+    [16] pub Probe — struct Probe { input_err: str, refuse_status: int, refuse_why: str, method: str, scheme: str, host: str, target: str, path: str, query: str }
+    [17] pub Verdict — struct Verdict { kind: str, status: int, fs_path: str, is_alias: bool, index: prelude.List[str], matched: str, srv: int, loc: int, upstream: str, pool: str, peers: str, http_blk: int, note: str }
+
