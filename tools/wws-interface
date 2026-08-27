@@ -29,11 +29,14 @@ fi
 
 # Split the stream into one file per module. `module pkg :: (root)`
 # becomes root.wolfi; `module pkg :: http` becomes http.wolfi.
+# `std.*` modules are the PINNED std tree's surfaces (ws05's [std] in
+# wolf-toolchain.toml) — upstream's contract, not this repo's; they are
+# skipped, exactly as the toolchain binaries are not re-described here.
 awk -v out="$tmp" '
     /^module pkg :: / {
         name = $4
         gsub(/[()]/, "", name)
-        file = out "/" name ".wolfi"
+        if (name ~ /^std\./) { file = "" } else { file = out "/" name ".wolfi" }
     }
     file != "" { print > file }
 ' "$tmp/stream"
