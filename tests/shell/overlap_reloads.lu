@@ -1,0 +1,245 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! THREE OVERLAPPING RELOADS (ws08 contract §3, the rig case). Hold a
+//! connection open on each of three successive generations, reload
+//! across all of them, and watch THREE generations drain at once — each
+//! visible in `wws status`, each retiring in order as its connection
+//! closes, the counts exact. This is the observable drain at depth: not
+//! one old generation but a stack of them, the operator seeing every
+//! one. Ten-run (the outcome is fixed; only the poll wait is elastic).
+//!
+//! Loopback only, OS-chosen ports, scratch cleared at the START.
+
+use shell
+
+fn gen_live(status: str, gen: int) -> int {
+    let key = "generation {gen}: "
+    let at = status.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    let tail = status[at..status.len]
+    let lk = tail.find("live=") else -1
+    if lk < 0 {
+        return -1
+    }
+    let after = tail[lk + 5..tail.len]
+    var v: int = 0
+    for b in after.bytes() {
+        if b < 48 || b > 57 {
+            return v
+        }
+        v = v * 10 + (b - 48)
+    }
+    v
+}
+
+fn gen_in_state(status: str, gen: int, state: str) -> bool {
+    let line = "generation {gen}: {state} "
+    status.contains(line)
+}
+
+fn status_of(ep: str) -> str {
+    shell.control_fetch(ep, "status") else |_| {
+        return ""
+    }
+}
+
+fn wait_live(ep: str, gen: int, want: int) -> str {
+    var i: int = 0
+    var last = ""
+    while i < 160 {
+        last = status_of(ep)
+        if gen_live(last, gen) == want {
+            return last
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    last
+}
+
+fn wait_gone(ep: str, gen: int) -> str {
+    var i: int = 0
+    var last = ""
+    while i < 160 {
+        last = status_of(ep)
+        if gen_live(last, gen) < 0 {
+            return last
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    last
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Open a keepalive connection, send a GET, drain the reply, hold it
+/// open. Row: net io.
+fn open_held(port: int) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        if buf.contains("\r\n\r\n") {
+            reading = false
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                reading = false
+                ""
+            }
+            if piece.is_empty() {
+                reading = false
+            } else {
+                buf = "{buf}{piece}"
+            }
+        }
+    }
+    c
+}
+
+fn reload_to(ep: str, want_gen: int) -> () ! {io} {
+    let r = shell.control_send(ep, "reload") else |_| {
+        return io
+    }
+    if !r.contains("generation {want_gen}") {
+        return io
+    }
+}
+
+fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
+    let text = "pid ws08_overlap/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    fs_write_text(path, text)?
+}
+
+fn main() -> !int {
+    let scratch = "ws08_overlap"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/w")?
+    fs_write_text("{scratch}/w/index.html", "OVERLAP\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let confp = "{scratch}/wws.conf"
+    // three distinct roots so each reload is a real content change, but
+    // all present, so every generation serves; only the id differs
+    fs_create_dir_all("{scratch}/w2")?
+    fs_create_dir_all("{scratch}/w3")?
+    fs_create_dir_all("{scratch}/w4")?
+    fs_write_text("{scratch}/w2/index.html", "OVERLAP\n")?
+    fs_write_text("{scratch}/w3/index.html", "OVERLAP\n")?
+    fs_write_text("{scratch}/w4/index.html", "OVERLAP\n")?
+    write_conf(confp, hp, cp, "ws08_overlap/w")?
+
+    var argv = List[str]()
+    (mut argv).push("target/wws-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| {
+            0
+        }
+        assert(false, "the spawned wws never became alive")
+    }
+
+    var held = List[int]()
+    // gen1: hold a connection
+    (mut held).push(open_held(hp)?)
+    let _ = wait_live(ep, 1, 1)
+    // reload → gen2, hold one on gen2
+    write_conf(confp, hp, cp, "ws08_overlap/w2")?
+    reload_to(ep, 2)?
+    (mut held).push(open_held(hp)?)
+    let _ = wait_live(ep, 2, 1)
+    // reload → gen3, hold one on gen3
+    write_conf(confp, hp, cp, "ws08_overlap/w3")?
+    reload_to(ep, 3)?
+    (mut held).push(open_held(hp)?)
+    let _ = wait_live(ep, 3, 1)
+    // reload → gen4 (current); now gens 1,2,3 all draining at once
+    write_conf(confp, hp, cp, "ws08_overlap/w4")?
+    reload_to(ep, 4)?
+
+    let s = wait_live(ep, 3, 1)
+    assert(gen_in_state(s, 1, "draining"), "gen1 draining: {s}")
+    assert(gen_in_state(s, 2, "draining"), "gen2 draining: {s}")
+    assert(gen_in_state(s, 3, "draining"), "gen3 draining: {s}")
+    assert(gen_in_state(s, 4, "current"), "gen4 current: {s}")
+    assert(gen_live(s, 1) == 1, "gen1 holds exactly 1: {s}")
+    assert(gen_live(s, 2) == 1, "gen2 holds exactly 1: {s}")
+    assert(gen_live(s, 3) == 1, "gen3 holds exactly 1: {s}")
+
+    // retire in order: close gen1's connection, then gen2's, then gen3's
+    net_close(held[0]) else |_| {}
+    let a = wait_gone(ep, 1)
+    assert(gen_live(a, 1) < 0, "gen1 retired first: {a}")
+    assert(gen_in_state(a, 2, "draining"), "gen2 still draining after gen1 retired: {a}")
+    assert(gen_in_state(a, 3, "draining"), "gen3 still draining after gen1 retired: {a}")
+
+    net_close(held[1]) else |_| {}
+    let b = wait_gone(ep, 2)
+    assert(gen_live(b, 2) < 0, "gen2 retired second: {b}")
+    assert(gen_in_state(b, 3, "draining"), "gen3 still draining after gen2 retired: {b}")
+
+    net_close(held[2]) else |_| {}
+    let d = wait_gone(ep, 3)
+    assert(gen_live(d, 3) < 0, "gen3 retired last: {d}")
+    assert(gen_in_state(d, 4, "current"), "gen4 alone and current at the end: {d}")
+
+    let rs = shell.control_send(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control stop failed")
+        ""
+    }
+    assert(rs.contains("shutting down"), "stop reply: {rs}")
+    let _code = os_wait(child) else |_| {
+        0
+    }
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

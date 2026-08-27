@@ -1,0 +1,184 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! THE DRAIN-AWARE QUIT (ws08 contract §4). `-s quit` is "drain
+//! everything, then exit" — the same machinery as a reload's drain,
+//! reused. While a quit is in flight the status stanza shows
+//! `quitting: true` and the generation draining; when the last
+//! connection closes, the master drains to empty and exits, removing its
+//! pid file. Ten-run (outcome fixed; the poll wait is elastic).
+//!
+//! Loopback only, OS-chosen ports, scratch cleared at the START.
+
+use shell
+
+fn gen_live(status: str, gen: int) -> int {
+    let key = "generation {gen}: "
+    let at = status.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    let tail = status[at..status.len]
+    let lk = tail.find("live=") else -1
+    if lk < 0 {
+        return -1
+    }
+    let after = tail[lk + 5..tail.len]
+    var v: int = 0
+    for b in after.bytes() {
+        if b < 48 || b > 57 {
+            return v
+        }
+        v = v * 10 + (b - 48)
+    }
+    v
+}
+
+fn status_of(ep: str) -> str {
+    shell.control_fetch(ep, "status") else |_| {
+        return ""
+    }
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn open_held(port: int) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        if buf.contains("\r\n\r\n") {
+            reading = false
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                reading = false
+                ""
+            }
+            if piece.is_empty() {
+                reading = false
+            } else {
+                buf = "{buf}{piece}"
+            }
+        }
+    }
+    c
+}
+
+fn write_conf(path: str, hp: int, cp: int) -> () ! {not_found, denied, io} {
+    let text = "pid ws08_quit/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root ws08_quit/w; }}\n}}\n"
+    fs_write_text(path, text)?
+}
+
+fn main() -> !int {
+    let scratch = "ws08_quit"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/w")?
+    fs_write_text("{scratch}/w/index.html", "QUITME\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let confp = "{scratch}/wws.conf"
+    let pidp = "{scratch}/wws.pid"
+    write_conf(confp, hp, cp)?
+
+    var argv = List[str]()
+    (mut argv).push("target/wws-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| {
+            0
+        }
+        assert(false, "the spawned wws never became alive")
+    }
+
+    // hold a connection on generation 1, then quit
+    let held = open_held(hp)?
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces the drain: {rq}")
+
+    // the status stanza shows the quit posture and the draining gen
+    var s = ""
+    var i: int = 0
+    var saw = false
+    while i < 100 {
+        s = status_of(ep)
+        if s.contains("quitting: true") && gen_live(s, 1) == 1 {
+            saw = true
+            i = 100
+        } else {
+            time_sleep_ms(50)
+            i = i + 1
+        }
+    }
+    assert(saw, "status during quit shows quitting:true with gen1 draining 1: {s}")
+
+    // close the held connection — the master drains to empty and exits
+    net_close(held) else |_| {}
+    let _code = os_wait(child) else |_| {
+        0
+    }
+    // the pid file is gone once the master has exited
+    var j: int = 0
+    var removed = false
+    while j < 100 {
+        if !fs_exists(pidp) {
+            removed = true
+            j = 100
+        } else {
+            time_sleep_ms(50)
+            j = j + 1
+        }
+    }
+    assert(removed, "the master removed its pid file after draining to exit")
+
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

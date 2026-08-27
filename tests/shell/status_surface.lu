@@ -1,0 +1,92 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! The status surface and the log-event vocabulary, PURE — the shapes
+//! ws09 (JSON logs) and ws12 (metrics) reuse, pinned here so a change
+//! to a name or a field is a red test, not a silent break. Runs on all
+//! three lanes (no net, no fs — just string building over a parsed
+//! model). The counting itself is witnessed against the live binary in
+//! drain_watch / overlap_reloads / counter_integrity.
+
+use config
+use shell
+
+fn main() -> !int {
+    // ---- the generation id: content hash, deterministic + sensitive
+    let ca = config.parse_str("http {{ server {{ listen 8080; root a; }} }}\n", "a")
+    let cb = config.parse_str("http {{ server {{ listen 8080; root b; }} }}\n", "b")
+    let ha = shell.conf_hash(ca)
+    assert(ha == shell.conf_hash(ca), "conf_hash is deterministic for one model")
+    assert(!(ha == shell.conf_hash(cb)), "conf_hash changes when the model changes")
+    assert(ha.len == 16, "the id is 16 hex chars: {ha}")
+
+    // ---- worker_shutdown_timeout parsing (nginx units)
+    let c30s = config.parse_str("worker_shutdown_timeout 30s;\nhttp {{ }}\n", "x")
+    assert(shell.shutdown_timeout_ms(c30s) == 30000, "30s → 30000ms")
+    let c500 = config.parse_str("worker_shutdown_timeout 500ms;\nhttp {{ }}\n", "x")
+    assert(shell.shutdown_timeout_ms(c500) == 500, "500ms → 500ms")
+    let cbare = config.parse_str("worker_shutdown_timeout 5;\nhttp {{ }}\n", "x")
+    assert(shell.shutdown_timeout_ms(cbare) == 5000, "bare 5 → 5000ms (seconds default)")
+    assert(shell.shutdown_timeout_ms(ca) == 0, "absent → 0 (drain fully)")
+
+    // ---- the FROZEN log-event vocabulary (names + field keys)
+    assert(
+        shell.ev_generation_loaded(2, "deadbeef") == "generation-loaded gen=2 id=deadbeef",
+        "generation-loaded shape",
+    )
+    assert(
+        shell.ev_generation_activated(2) == "generation-activated gen=2",
+        "generation-activated shape",
+    )
+    assert(
+        shell.ev_generation_draining(1, 3) == "generation-draining gen=1 held=3",
+        "generation-draining shape",
+    )
+    assert(
+        shell.ev_connection_retired(1, 2) == "connection-retired gen=1 remaining=2",
+        "connection-retired shape",
+    )
+    assert(
+        shell.ev_generation_retired(1, 5, 2, 1234) ==
+            "generation-retired gen=1 drained=5 aborted=2 age-ms=1234",
+        "generation-retired shape (drained + aborted + age)",
+    )
+
+    // ---- the status stanza (human text)
+    assert(shell.status_schema() == 1, "schema version 1")
+    let head = shell.status_head_text(2, false)
+    assert(head.contains("wws status\n"), "text header identity line")
+    assert(head.contains("current generation: 2\n"), "text names the current generation")
+    assert(head.contains("quitting: false\n"), "text carries the quit posture")
+    let cur_line = shell.status_line_text(2, 0, "current", 100, "abcd", -1)
+    assert(
+        cur_line == "generation 2: current live=0 age-ms=100 id=abcd\n",
+        "current line omits the shutdown remaining: {cur_line}",
+    )
+    let dr_line = shell.status_line_text(1, 2, "draining", 800, "beef", 29200)
+    assert(
+        dr_line == "generation 1: draining live=2 age-ms=800 id=beef shutdown-in-ms=29200\n",
+        "draining line carries the shutdown remaining: {dr_line}",
+    )
+
+    // ---- the status stanza (versioned JSON, single line)
+    let jopen = shell.status_json_open(2, true)
+    assert(
+        jopen == "{{\"schema\":1,\"current\":2,\"quitting\":true,\"generations\":[",
+        "json open with schema + quitting: {jopen}",
+    )
+    let jobj = shell.status_json_obj(1, "draining", 2, 800, "beef", 29200)
+    assert(
+        jobj ==
+            "{{\"gen\":1,\"state\":\"draining\",\"live\":2,\"age_ms\":800,\"id\":\"beef\",\"shutdown_remaining_ms\":29200}}",
+        "json object shape: {jobj}",
+    )
+    assert(shell.status_json_close() == "]}}", "json close")
+    // assemble a full object and check it has no stray newline
+    let full = "{jopen}{jobj}{shell.status_json_close()}"
+    assert(!full.contains("\n"), "the JSON stanza is a single line")
+
+    0
+}

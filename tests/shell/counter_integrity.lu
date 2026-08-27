@@ -1,0 +1,248 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! COUNTER INTEGRITY (ws08 contract §5 — the sprint's correctness
+//! heart). The per-generation live counter must decrement on EVERY exit
+//! path or a generation becomes immortal. Drive a connection out each
+//! way — a normal 200 close, a 404, a malformed-request 400, a served
+//! keepalive then close — and assert the current generation's live
+//! count returns to ZERO. Then the ABORT path (contract §3): a
+//! worker_shutdown_timeout, a held connection on a draining generation,
+//! and the generation retires ANYWAY when the timeout bites — the
+//! operator's "retired: N aborted". The never-negative assertion in the
+//! decrement path stays in every profile (checked-arithmetic spirit).
+//!
+//! Loopback only, OS-chosen ports, scratch cleared at the START.
+
+use shell
+
+fn gen_live(status: str, gen: int) -> int {
+    let key = "generation {gen}: "
+    let at = status.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    let tail = status[at..status.len]
+    let lk = tail.find("live=") else -1
+    if lk < 0 {
+        return -1
+    }
+    let after = tail[lk + 5..tail.len]
+    var v: int = 0
+    for b in after.bytes() {
+        if b < 48 || b > 57 {
+            return v
+        }
+        v = v * 10 + (b - 48)
+    }
+    v
+}
+
+fn status_of(ep: str) -> str {
+    shell.control_fetch(ep, "status") else |_| {
+        return ""
+    }
+}
+
+fn wait_live(ep: str, gen: int, want: int) -> str {
+    var i: int = 0
+    var last = ""
+    while i < 200 {
+        last = status_of(ep)
+        if gen_live(last, gen) == want {
+            return last
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    last
+}
+
+fn wait_gone(ep: str, gen: int) -> str {
+    var i: int = 0
+    var last = ""
+    while i < 200 {
+        last = status_of(ep)
+        if gen_live(last, gen) < 0 {
+            return last
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    last
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Send raw request bytes over a fresh Connection: close socket and
+/// return the whole reply. Row: net io.
+fn raw_reply(port: int, req: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, req) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// Open a keepalive connection, send a GET, drain the reply, hold it
+/// open. Row: net io.
+fn open_held(port: int) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        if buf.contains("\r\n\r\n") {
+            reading = false
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                reading = false
+                ""
+            }
+            if piece.is_empty() {
+                reading = false
+            } else {
+                buf = "{buf}{piece}"
+            }
+        }
+    }
+    c
+}
+
+fn write_conf(path: str, hp: int, cp: int) -> () ! {not_found, denied, io} {
+    let text = "worker_shutdown_timeout 300ms;\npid ws08_counter/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root ws08_counter/w; }}\n}}\n"
+    fs_write_text(path, text)?
+}
+
+fn main() -> !int {
+    let scratch = "ws08_counter"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/w")?
+    fs_write_text("{scratch}/w/index.html", "HELLO\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let confp = "{scratch}/wws.conf"
+    write_conf(confp, hp, cp)?
+
+    var argv = List[str]()
+    (mut argv).push("target/wws-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| {
+            0
+        }
+        assert(false, "the spawned wws never became alive")
+    }
+
+    // EVERY EXIT PATH on the current generation (gen1):
+    // 1. a normal 200 + Connection: close
+    let r200 = raw_reply(hp, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r200.contains("200") && r200.contains("HELLO"), "normal 200 close served: {r200}")
+    // 2. a 404
+    let r404 = raw_reply(hp, "GET /nope HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r404.contains("404"), "404 exit path: {r404}")
+    // 3. a malformed request → 400, connection closed
+    let r400 = raw_reply(hp, "GARBAGE LINE\r\n\r\n")?
+    assert(r400.contains("400"), "malformed → 400 exit path: {r400}")
+    // 4. a served keepalive that the client then closes
+    let ka = open_held(hp)?
+    net_close(ka) else |_| {}
+
+    // after every exit shape, the current generation leaks NOTHING
+    let z = wait_live(ep, 1, 0)
+    assert(gen_live(z, 1) == 0, "gen1 live count is exactly 0 after every exit path: {z}")
+
+    // THE ABORT PATH: hold a connection, reload it into draining, and
+    // let worker_shutdown_timeout retire it WITHOUT the client closing.
+    let stuck = open_held(hp)?
+    let _s1 = wait_live(ep, 1, 1)
+    let rr = shell.control_send(ep, "reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "reload failed")
+        ""
+    }
+    assert(rr.contains("generation 2"), "reload advanced to gen2: {rr}")
+    // gen1 is now draining, holding the stuck connection — the timeout
+    // (300ms) aborts it and retires the generation on its own
+    let gone = wait_gone(ep, 1)
+    assert(gen_live(gone, 1) < 0, "worker_shutdown_timeout retired the draining generation: {gone}")
+    assert(gen_live(gone, 2) == 0, "generation 2 holds no leaked connections: {gone}")
+
+    net_close(stuck) else |_| {}
+    let rs = shell.control_send(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control stop failed")
+        ""
+    }
+    assert(rs.contains("shutting down"), "stop reply: {rs}")
+    let _code = os_wait(child) else |_| {
+        0
+    }
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

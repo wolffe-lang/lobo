@@ -1,27 +1,34 @@
 //! wws — a production web server in wolf (working name). Entry file:
 //! the operator shell. The CLI grammar, the text builders, the pid
 //! lifecycle, the control channel and the reload verbs are shell/'s
-//! (ws04); main is the thin dispatch over them plus the two acting
-//! loops (serve, signal-send) that wire net/fs to the model.
+//! (ws04); main is the thin dispatch over them plus the acting paths
+//! (the drain-aware serve loop, signal-send, and `status`) that wire
+//! net/fs to the model and own the per-generation drain bookkeeping
+//! (ws08).
 //!
 //! `main`'s legal shapes are E0414's: no parameters — arguments come
 //! through `env_args`, which drops argv[0].
 //!
 //! The signal split (ws04 §3). The pin exposes no getpid, no
 //! arbitrary-pid signal SEND, and no signal RECEPTION (wolf-lang #126
-//! / s114) — so `-s` drives the CONTROL CHANNEL, the pid file records
-//! the control endpoint, and the four verbs are reached the same way a
-//! real signal will reach them when #126 lands (shell.dispatch is the
-//! one verb layer). The receiver is the campaign's named deferral.
+//! / s114 — the wws pin is s109, which does NOT include it) — so `-s`
+//! drives the CONTROL CHANNEL, the pid file records the control
+//! endpoint, and the verbs are reached the same way a real signal will
+//! reach them when #126 lands (the loop's verb dispatch is the one
+//! layer). The receiver is the campaign's named deferral.
 //!
 //! Serve is SPAWN-FREE (D7: the LLVM release tier refuses a task
-//! entry's func.addr, and the gauntlet builds both tiers) — one loop
-//! polls the http listener and the control listener with short accept
-//! deadlines. Sequential serving is the honest v0; reload happens
-//! between connections, and a connection that started under the old
-//! generation finishes on its captured frozen model (the reload-under-
-//! load invariant, pinned by the rig). File-header note (F-0016):
-//! comments never sit directly above a dotted call.
+//! entry's func.addr, and the gauntlet builds both tiers) — ONE poll
+//! loop multiplexes the http listener, the control channel, and every
+//! open connection, each stepped a slice at a time under a short
+//! deadline (serve.conn_step) so no single connection blocks the loop.
+//! That is what makes the DRAIN WATCHABLE (ws08): a per-generation live
+//! counter in the loop's own bookkeeping lets an operator see an old
+//! generation drain — via `wws status` and log events — while a new one
+//! serves. A reloaded-away generation keeps its FROZEN model and its
+//! open connections finish on it (the reload-under-load invariant,
+//! pinned by the rig). File-header note (F-0016): comments never sit
+//! directly above a dotted call.
 
 use config
 use http
@@ -77,39 +84,282 @@ fn read_command(conn: int) -> str {
     buf.trim()
 }
 
-/// The serve loop's outcome after processing a control connection: the
-/// (possibly new) generation and whether the loop should stop.
-struct Tick {
-    g: shell.Gen,
-    stop: bool,
+// ------------------------------------------------------------------
+// the generation table (ws08) — the drain you can watch. One row per
+// LIVE generation (current + every still-draining old one), each
+// carrying its FROZEN model, its live-connection count, its state, and
+// the accounting a retirement reports. The counter is here, in the
+// poll loop's own bookkeeping — spawn-free, no concurrent tasks (D7 /
+// ws04). The table is a local List[GenRow]: a List of an IMPORTED
+// struct is refused in the checked tier, but a List of a LOCAL struct
+// is fine, so the row type lives here and shell formats it one field at
+// a time. Rows are never mutated in place (index-assignment is a
+// one-lane shape) — every update REBUILDS the list, which is cheap: a
+// server holds a handful of generations, never more.
+// ------------------------------------------------------------------
+
+/// One live generation. `state` is "current" (the one accepting new
+/// connections) or "draining" (a reloaded-away generation still holding
+/// connections). `loaded_ms` is when it was created, `since_ms` when it
+/// began draining (0 while current). `drained`/`aborted` accumulate its
+/// retirement accounting; `shash` is its content-hash id.
+struct GenRow {
+    conf: config.Conf,
+    gen: int,
+    live: int,
+    state: str,
+    loaded_ms: int,
+    since_ms: int,
+    drained: int,
+    aborted: int,
+    shash: str,
 }
 
-/// Dispatch one control verb against the current generation. THE verb
-/// layer's server side — a real signal will call the same words when
-/// #126 lands. `reload` reparses fresh and swaps on success (keeps the
-/// old generation on any error, the nginx contract); `stop`/`quit` end
-/// the loop; `reopen` cycles log outputs (obs stub — ws09 consumes);
-/// `ping` is the liveness probe. Writes the one-line reply to `conn`.
-fn dispatch(conn: int, verb: str, prefix: str, conf: str, g: shell.Gen) -> Tick {
-    if verb == "ping" {
-        net_write(conn, "pong\n") else |_| {}
-        return Tick { g: g, stop: false }
+/// The generation number of the current (accepting) row, or -1. Total.
+fn current_gen(gens: List[GenRow]) -> int {
+    for g in gens {
+        if g.state == "current" {
+            return g.gen
+        }
     }
-    if verb == "stop" || verb == "quit" {
-        net_write(conn, "{verb}: shutting down (generation {g.gen})\n") else |_| {}
-        return Tick { g: g, stop: true }
+    -1
+}
+
+/// The index of the row for `gen`, or -1. Total.
+fn index_of(gens: List[GenRow], gen: int) -> int {
+    var i: int = 0
+    let n = gens.len
+    while i < n {
+        if gens[i].gen == gen {
+            return i
+        }
+        i = i + 1
     }
-    if verb == "reopen" {
-        net_write(conn, "reopen: log outputs cycled (generation {g.gen})\n") else |_| {}
-        return Tick { g: g, stop: false }
+    -1
+}
+
+/// The frozen model a connection tagged `gen` serves under — full
+/// fidelity, so a request arriving on a draining connection routes
+/// under the model it was accepted on (the frozen-model discipline,
+/// ws04). Falls back to the current row, then to an empty model, for a
+/// generation that cannot be found (never happens while it holds a
+/// connection — a generation retires only at zero). Total.
+fn conf_for(gens: List[GenRow], gen: int) -> config.Conf {
+    let i = index_of(gens, gen)
+    if i >= 0 {
+        return gens[i].conf
     }
-    if verb == "reload" {
-        let ng = shell.reload(prefix, conf, g)
-        net_write(conn, "{ng.note}\n") else |_| {}
-        return Tick { g: ng, stop: false }
+    if gens.len > 0 {
+        return gens[0].conf
     }
-    net_write(conn, "unknown verb \"{verb}\"\n") else |_| {}
-    Tick { g: g, stop: false }
+    config.parse_str("http {{\n}}\n", "empty")
+}
+
+/// A generation's age in ms in its current role: since load while
+/// current, since drain start while draining. Total.
+fn gen_age(g: GenRow, now: int) -> int {
+    if g.state == "current" {
+        return now - g.loaded_ms
+    }
+    now - g.since_ms
+}
+
+/// The worker_shutdown_timeout remaining for a DRAINING generation, or
+/// -1 when none applies (a current generation, or no timeout). Clamped
+/// at 0. Total.
+fn gen_remaining(g: GenRow, shutdown_ms: int, now: int) -> int {
+    if g.state != "draining" || shutdown_ms <= 0 {
+        return -1
+    }
+    let rem = shutdown_ms - (now - g.since_ms)
+    if rem < 0 {
+        return 0
+    }
+    rem
+}
+
+/// Rebuild `gens` with `gen`'s live count changed by `delta`. Total.
+fn bump_live(gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
+    var out = List[GenRow]()
+    for g in gens {
+        if g.gen == gen {
+            (mut out).push(GenRow {
+                conf: g.conf,
+                gen: g.gen,
+                live: g.live + delta,
+                state: g.state,
+                loaded_ms: g.loaded_ms,
+                since_ms: g.since_ms,
+                drained: g.drained,
+                aborted: g.aborted,
+                shash: g.shash,
+            })
+        } else {
+            (mut out).push(g)
+        }
+    }
+    out
+}
+
+/// Account one closed connection on `gen`: decrement its live count and,
+/// when the generation is DRAINING, tally it (`aborted` on a timeout
+/// force-close, else `drained`) and emit `connection-retired`. THE
+/// never-negative assertion lives here and stays in every profile
+/// (checked-arithmetic spirit — a leak that made a generation immortal
+/// would be loud). Returns the rebuilt table. Total unless the
+/// invariant breaks (then it traps, by design).
+fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool) -> List[GenRow] {
+    var out = List[GenRow]()
+    for g in gens {
+        if g.gen == gen {
+            let nlive = g.live - 1
+            assert(nlive >= 0, "generation {gen} live-connection count went negative")
+            var nd = g.drained
+            var na = g.aborted
+            if g.state == "draining" {
+                if aborted {
+                    na = na + 1
+                } else {
+                    nd = nd + 1
+                }
+                eprint("wws: [notice] {shell.ev_connection_retired(gen, nlive)}")
+            }
+            (mut out).push(GenRow {
+                conf: g.conf,
+                gen: g.gen,
+                live: nlive,
+                state: g.state,
+                loaded_ms: g.loaded_ms,
+                since_ms: g.since_ms,
+                drained: nd,
+                aborted: na,
+                shash: g.shash,
+            })
+        } else {
+            (mut out).push(g)
+        }
+    }
+    out
+}
+
+/// Retire every DRAINING generation that has reached zero connections:
+/// emit `generation-retired` with its accounting and drop it from the
+/// table. Total.
+fn retire_zero(gens: List[GenRow], now: int) -> List[GenRow] {
+    var out = List[GenRow]()
+    for g in gens {
+        if g.state == "draining" && g.live == 0 {
+            let age = now - g.since_ms
+            eprint("wws: [notice] {shell.ev_generation_retired(g.gen, g.drained, g.aborted, age)}")
+        } else {
+            (mut out).push(g)
+        }
+    }
+    out
+}
+
+/// Begin a reload: mark the current generation draining (as of `now`)
+/// and append the freshly frozen `newconf` as the new current
+/// generation `newgen`. Total.
+fn start_reload(
+    gens: List[GenRow],
+    curgen: int,
+    newconf: config.Conf,
+    newgen: int,
+    newhash: str,
+    now: int,
+) -> List[GenRow] {
+    var out = List[GenRow]()
+    for g in gens {
+        if g.gen == curgen {
+            (mut out).push(GenRow {
+                conf: g.conf,
+                gen: g.gen,
+                live: g.live,
+                state: "draining",
+                loaded_ms: g.loaded_ms,
+                since_ms: now,
+                drained: g.drained,
+                aborted: g.aborted,
+                shash: g.shash,
+            })
+        } else {
+            (mut out).push(g)
+        }
+    }
+    (mut out).push(GenRow {
+        conf: newconf,
+        gen: newgen,
+        live: 0,
+        state: "current",
+        loaded_ms: now,
+        since_ms: 0,
+        drained: 0,
+        aborted: 0,
+        shash: newhash,
+    })
+    out
+}
+
+/// Mark `gen` draining (as of `now`) without creating a successor — the
+/// quit path (drain everything, then exit). Total.
+fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
+    var out = List[GenRow]()
+    for g in gens {
+        if g.gen == gen && g.state == "current" {
+            (mut out).push(GenRow {
+                conf: g.conf,
+                gen: g.gen,
+                live: g.live,
+                state: "draining",
+                loaded_ms: g.loaded_ms,
+                since_ms: now,
+                drained: g.drained,
+                aborted: g.aborted,
+                shash: g.shash,
+            })
+        } else {
+            (mut out).push(g)
+        }
+    }
+    out
+}
+
+/// Build the status stanza (contract §1): the generation table with
+/// per-generation live counts, ages, ids, and worker_shutdown_timeout
+/// remaining, plus the quit posture. `json` selects the versioned
+/// single-line JSON (ws07 convention, ws12 reuses it); otherwise the
+/// human, one-fact-per-line text. The read races the generation swap by
+/// design — a torn read across generations is acceptable and each
+/// count is monotone-correct per generation (documented in docs/). The
+/// snapshot is one pass over the table reference. Total.
+fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: bool) -> str {
+    let now = time_unix_ms()
+    let cur = current_gen(gens)
+    if json {
+        var s = shell.status_json_open(cur, quitting)
+        var first = true
+        for g in gens {
+            let sep = if first { "" } else { "," }
+            first = false
+            let obj = shell.
+                status_json_obj(
+                g.gen,
+                g.state,
+                g.live,
+                gen_age(g, now),
+                g.shash,
+                gen_remaining(g, shutdown_ms, now),
+            )
+            s = "{s}{sep}{obj}"
+        }
+        return "{s}{shell.status_json_close()}"
+    }
+    var s = shell.status_head_text(cur, quitting)
+    for g in gens {
+        s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now))}"
+    }
+    s
 }
 
 // ------------------------------------------------------------------
@@ -118,12 +368,14 @@ fn dispatch(conn: int, verb: str, prefix: str, conf: str, g: shell.Gen) -> Tick 
 
 /// The serving verb. Loads and freezes the config (generation 1),
 /// refuses to start if a live master already holds the pid file
-/// (stale-pid detection: a file whose control endpoint answers `ping`
-/// is a running server; one that does not is stale — removed with a
-/// warning), writes the pid file (its content is the control endpoint
-/// at this pin), then runs the control-aware accept loop. Returns 1 on
-/// a config error, a failed bind, or a refused start; the loop itself
-/// runs until a `stop`/`quit` verb. Loopback only.
+/// (stale-pid detection), writes the pid file (its content is the
+/// control endpoint at this pin), then runs the DRAIN-AWARE poll loop
+/// (ws08): one spawn-free loop multiplexes the http listener, the
+/// control channel, and every open connection, keeping a per-generation
+/// live counter so an operator can WATCH an old generation drain while a
+/// new one serves. Returns 1 on a config error, a failed bind, or a
+/// refused start; the loop runs until `stop`, or until `quit` has
+/// drained everything. Loopback only.
 fn serve_main(prefix: str, conf: str) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
@@ -180,15 +432,42 @@ fn serve_main(prefix: str, conf: str) -> int {
 
     let opts = serve.default_opts()
     let lim = http.default_limits()
+    let shutdown_ms = shell.shutdown_timeout_ms(c0)
     eprint("wws: [notice] serving on {addr}, control {ctrl_ep}, pid file {pidp}")
 
-    var g = shell.gen_new(c0)
+    // generation 1 is current
+    let h1 = shell.conf_hash(c0)
+    var gens = List[GenRow]()
+    (mut gens).push(GenRow {
+        conf: c0,
+        gen: 1,
+        live: 0,
+        state: "current",
+        loaded_ms: time_unix_ms(),
+        since_ms: 0,
+        drained: 0,
+        aborted: 0,
+        shash: h1,
+    })
+    eprint("wws: [notice] {shell.ev_generation_loaded(1, h1)}")
+    eprint("wws: [notice] {shell.ev_generation_activated(1)}")
+
+    // the connection table (parallel primitive lists — a List of a
+    // local/primitive type constructs on every lane; rebuilt each pass)
+    var cfds = List[int]()
+    var cgens = List[int]()
+    var ccarry = List[str]()
+    var cserved = List[int]()
+    var cidle = List[int]()
+
     var running = true
+    var quitting = false
     while running {
-        // poll the control listener first (short deadline), so a
-        // reload/stop is picked up between connections
+        let now = time_unix_ms()
+
+        // 1. poll the control channel (short deadline)
         if have_ctrl {
-            net_deadline(cl, 40) else |_| {}
+            net_deadline(cl, 25) else |_| {}
             var got_ctrl = true
             let cc = net_accept(cl) else |_| {
                 got_ctrl = false
@@ -197,32 +476,152 @@ fn serve_main(prefix: str, conf: str) -> int {
             if got_ctrl {
                 net_deadline(cc, 2000) else |_| {}
                 let verb = read_command(cc)
-                let tick = dispatch(cc, verb, prefix, conf, g)
-                net_close(cc) else |_| {}
-                g = tick.g
-                if tick.stop {
+                let curgen = current_gen(gens)
+                if verb == "ping" {
+                    net_write(cc, "pong\n") else |_| {}
+                } else if verb == "status" {
+                    let body = status_stanza(gens, shutdown_ms, quitting, false)
+                    net_write(cc, "{body}\n") else |_| {}
+                } else if verb == "status json" {
+                    let body = status_stanza(gens, shutdown_ms, quitting, true)
+                    net_write(cc, "{body}\n") else |_| {}
+                } else if verb == "stop" {
+                    net_write(cc, "stop: shutting down (generation {curgen})\n") else |_| {}
                     running = false
+                } else if verb == "quit" {
+                    net_write(cc, "quit: draining then exiting (generation {curgen})\n") else |_| {}
+                    quitting = true
+                    let held = held_of(gens, curgen)
+                    gens = mark_draining(gens, curgen, now)
+                    eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
+                    gens = retire_zero(gens, now)
+                } else if verb == "reopen" {
+                    net_write(cc, "reopen: log outputs cycled (generation {curgen})\n") else |_| {}
+                } else if verb == "reload" {
+                    let ci = index_of(gens, curgen)
+                    let prev = shell.Gen {
+                        conf: copy gens[ci].conf,
+                        gen: curgen,
+                        ok: true,
+                        note: "",
+                    }
+                    let ng = shell.reload(prefix, conf, prev)
+                    if ng.ok && ng.gen > curgen {
+                        let held = gens[ci].live
+                        let nhash = shell.conf_hash(ng.conf)
+                        gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
+                        eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
+                        eprint("wws: [notice] {shell.ev_generation_loaded(ng.gen, nhash)}")
+                        eprint("wws: [notice] {shell.ev_generation_activated(ng.gen)}")
+                        gens = retire_zero(gens, now)
+                    }
+                    net_write(cc, "{ng.note}\n") else |_| {}
+                } else {
+                    net_write(cc, "unknown verb \"{verb}\"\n") else |_| {}
                 }
+                net_close(cc) else |_| {}
             }
         }
-        if running {
-            net_deadline(hl, 40) else |_| {}
+
+        // 2. accept a new http connection (unless winding down) — it is
+        // tagged with the CURRENT generation and bumps that counter
+        if running && !quitting {
+            net_deadline(hl, 25) else |_| {}
             var got_conn = true
             let conn = net_accept(hl) else |_| {
                 got_conn = false
                 0
             }
             if got_conn {
-                serve.serve_conn(conn, g.conf, opts, lim, hport)
+                let curgen = current_gen(gens)
+                gens = bump_live(gens, curgen, 1)
+                (mut cfds).push(conn)
+                (mut cgens).push(curgen)
+                (mut ccarry).push("")
+                (mut cserved).push(0)
+                (mut cidle).push(now)
             }
+        }
+
+        // 3. give every open connection ONE short poll step, rebuilding
+        // the table without the ones that finished. A close decrements
+        // the owning generation; a draining generation past its
+        // worker_shutdown_timeout has its remainder aborted.
+        var nfds = List[int]()
+        var ngens = List[int]()
+        var ncarry = List[str]()
+        var nserved = List[int]()
+        var nidle = List[int]()
+        var k: int = 0
+        let ktot = cfds.len
+        while k < ktot {
+            let fd = cfds[k]
+            let cg = cgens[k]
+            let car = ccarry[k]
+            let sv = cserved[k]
+            let idle0 = cidle[k]
+            let cconf = conf_for(gens, cg)
+            let st = serve.conn_step(fd, cconf, opts, lim, hport, car, sv, 12)
+            var close_it = st.close
+            var new_idle = idle0
+            if st.active {
+                new_idle = now
+            }
+            var aborted_flag = false
+            if !close_it && !st.active && now - new_idle >= opts.keepalive_timeout_ms {
+                close_it = true
+            }
+            if !close_it && shutdown_ms > 0 {
+                let gi = index_of(gens, cg)
+                if gi >= 0 && gens[gi].state == "draining" && now - gens[gi].since_ms >= shutdown_ms {
+                    close_it = true
+                    aborted_flag = true
+                }
+            }
+            if close_it {
+                net_close(fd) else |_| {}
+                gens = on_conn_close(gens, cg, aborted_flag)
+            } else {
+                (mut nfds).push(fd)
+                (mut ngens).push(cg)
+                (mut ncarry).push(st.carry)
+                (mut nserved).push(st.served)
+                (mut nidle).push(new_idle)
+            }
+            k = k + 1
+        }
+        cfds = nfds
+        cgens = ngens
+        ccarry = ncarry
+        cserved = nserved
+        cidle = nidle
+
+        // 4. retire drained generations, 5. finish a quit once empty
+        gens = retire_zero(gens, now)
+        if quitting && cfds.len == 0 {
+            running = false
         }
     }
 
+    // shutdown: close any still-open connections, the listeners, pid
+    for fd in cfds {
+        net_close(fd) else |_| {}
+    }
     net_close(hl) else |_| {}
     if have_ctrl {
         net_close(cl) else |_| {}
     }
     shell.pid_remove(pidp) else |_| {}
+    0
+}
+
+/// The live-connection count `gen` currently holds, or 0. Total.
+fn held_of(gens: List[GenRow], gen: int) -> int {
+    for g in gens {
+        if g.gen == gen {
+            return g.live
+        }
+    }
     0
 }
 
@@ -263,6 +662,51 @@ fn signal_main(cli: shell.Cli) -> int {
         },
     }
     print(reply)
+    0
+}
+
+// ------------------------------------------------------------------
+// status — `wws status [--format json]` reads the drain you can watch
+// off the running master's control channel (ws08)
+// ------------------------------------------------------------------
+
+/// `wws status [--format json]`: read the running master's control
+/// endpoint from the pid file, fetch the status stanza over the control
+/// channel (read to close — the stanza is multi-line), and print it.
+/// nginx has no status command; this is wws-native, the observable
+/// drain's operator surface. Exit codes mirror `-s`: a missing pid file
+/// or a refused/dead endpoint is exit 1 with an nginx-shaped alert.
+fn status_main(cli: shell.Cli) -> int {
+    let c = config.load(cli.prefix, cli.conf)
+    let pidp = shell.pid_path(c, cli.prefix)
+    let ep = shell.pid_read(pidp) else |e| match e {
+        none => {
+            eprint("wws: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
+            return 1
+        },
+        io => {
+            eprint("wws: [alert] could not read pid file \"{pidp}\"")
+            return 1
+        },
+    }
+    let verb = if cli.format == "json" {
+        "status json"
+    } else {
+        "status"
+    }
+    let reply = shell.control_fetch(ep, verb) else |e| match e {
+        refused => {
+            eprint(
+                "wws: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
+            )
+            return 1
+        },
+        io => {
+            eprint("wws: [error] control channel error to {ep}")
+            return 1
+        },
+    }
+    print_raw("{reply}\n")
     0
 }
 
@@ -325,6 +769,9 @@ fn main() -> int {
     }
     if cli.mode == "signal" {
         return signal_main(cli)
+    }
+    if cli.mode == "status" {
+        return status_main(cli)
     }
     if cli.mode == "serve" {
         return serve_main(cli.prefix, cli.conf)
