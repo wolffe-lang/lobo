@@ -1,0 +1,38 @@
+# nginx.proxy.conf.in — the ORACLE proxy side of the two-sided
+# differential. Rendered per case (@PORT@ the front port, @BACKEND@ the
+# rig backend's host:port) into the case scratch dir. Loopback only.
+# One config, many locations: the case's request PATH selects the leg.
+daemon off;
+pid nginx.pid;
+error_log error.log;
+events {
+}
+http {
+    access_log access.log;
+    server {
+        listen 127.0.0.1:@PORT@;
+        # no-URI proxy_pass: request path forwarded unchanged
+        location /keep/ {
+            proxy_pass http://@BACKEND@;
+        }
+        # URI "/" replaces the matched prefix
+        location /strip/ {
+            proxy_pass http://@BACKEND@/;
+        }
+        # URI "/v2/" replaces the matched prefix
+        location /rewrite/ {
+            proxy_pass http://@BACKEND@/v2/;
+        }
+        # X-Forwarded-For append + X-Real-IP
+        location /xff/ {
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_pass http://@BACKEND@/;
+        }
+        # short read timeout for the 504 case
+        location /slow/ {
+            proxy_read_timeout 1s;
+            proxy_pass http://@BACKEND@/;
+        }
+    }
+}

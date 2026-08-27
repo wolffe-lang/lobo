@@ -78,6 +78,12 @@ if ! tools/wws-differential; then
     exit 1
 fi
 
+step "proxy differential (two-sided: client AND backend legs)"
+if ! tools/wws-proxy-differential; then
+    echo "wws-gauntlet: FAILED at proxy-differential" >&2
+    exit 1
+fi
+
 step "confcheck (corpus oracle parity)"
 if ! tools/wws-confcheck; then
     echo "wws-gauntlet: FAILED at confcheck" >&2

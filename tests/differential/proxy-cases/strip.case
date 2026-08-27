@@ -1,0 +1,29 @@
+// URI '/' rewrite: /strip/thing -> /thing; a plain 200 relayed two-sided
+--- request
+GET /strip/thing HTTP/1.1
+Host: front.example
+Connection: close
+
+
+--- reply
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 5
+X-App: on
+
+hello
+--- expect-client
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/plain
+Content-Length: 5
+Connection: close
+X-App: on
+
+hello
+--- expect-backend
+=== EXCHANGE ===
+GET /thing HTTP/1.1
+Host: 127.0.0.1:@BPORT@
+

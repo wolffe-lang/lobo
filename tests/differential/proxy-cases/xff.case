@@ -1,0 +1,32 @@
+// XFF append: pre-existing 10.9.8.7 + client 127.0.0.1; X-Real-IP set; Host default; two-sided
+--- request
+GET /xff/api HTTP/1.1
+Host: front.example
+X-Forwarded-For: 10.9.8.7
+Connection: close
+
+
+--- reply
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 5
+X-App: on
+
+hello
+--- expect-client
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/plain
+Content-Length: 5
+Connection: close
+X-App: on
+
+hello
+--- expect-backend
+=== EXCHANGE ===
+GET /api HTTP/1.1
+X-Forwarded-For: 10.9.8.7, 127.0.0.1
+X-Real-IP: 127.0.0.1
+Host: 127.0.0.1:@BPORT@
+

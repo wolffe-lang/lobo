@@ -1,0 +1,77 @@
+//! check: run(exit=0, stdout="504 ok\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: proxy http config obs serve
+//!
+//! The 504 path, live: wws proxies to an upstream that ACCEPTS but
+//! never replies (a listener left un-accepted — the kernel completes
+//! the handshake in the backlog, so connect and write succeed and the
+//! READ leg times out). With proxy_read_timeout small, wws must answer
+//! "504 Gateway Time-out" with the gateway shape (probed oracle: text/
+//! html, Connection close, the nginx page modulo the identity footer).
+//! No spawn: the un-accepted backlog connection is the whole trick.
+//! Determinism: a 500ms proxy_read_timeout against a peer that will
+//! never send is bounded and stable; the read deadline is the failure
+//! detector, so ten runs give the same verdict.
+
+use config
+use http
+use proxy
+
+fn status_line(reply: str) -> str {
+    let eol = reply.find("\r\n") else reply.len
+    reply[0..eol]
+}
+
+fn main() -> !int {
+    // the silent upstream: bind, learn the port, NEVER accept
+    let up = net_listen("127.0.0.1:0")?
+    let uport = net_port(up)?
+
+    let src = "http {{ server {{ listen 127.0.0.1:8080; location / {{ proxy_read_timeout 500ms; proxy_pass http://127.0.0.1:{uport}/; }} }} }}"
+    let c = config.parse_str(src, "slow.conf")
+    let lim = http.default_limits()
+    let req = http.parse_request("GET /x HTTP/1.1\r\nHost: front", lim) else |_| {
+        assert(false, "req parse")
+        return 1
+    }
+    let pl = proxy.plan(c, "/x")
+    assert(pl.is_proxy, "must be a proxy location")
+    assert(pl.read_ms == 500, "proxy_read_timeout 500ms should parse to 500, got {pl.read_ms}")
+
+    // loopback pair for the client leg (dial then accept)
+    let l = net_listen("127.0.0.1:0")?
+    let lport = net_port(l)?
+    let cli = net_connect("127.0.0.1:{lport}")?
+    let rd = net_accept(l)?
+
+    let date = "Thu, 01 Jan 2026 00:00:00 GMT"
+    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "wws/0.1.0", date, false) else |_| {
+        assert(false, "proxy.run should not raise on a read timeout")
+        return 1
+    }
+    assert(close, "a 504 always closes the connection")
+    net_close(cli)?
+
+    net_deadline(rd, 3000)?
+    var reply = ""
+    var more = true
+    while more {
+        let piece = net_read(rd, 4096) else |_| {
+            more = false
+            ""
+        }
+        reply = "{reply}{piece}"
+    }
+    net_close(rd)?
+    net_close(l)?
+    net_close(up)?
+
+    assert(status_line(reply) == "HTTP/1.1 504 Gateway Time-out", "status: {status_line(reply)}")
+    assert(reply.contains("Content-Type: text/html"), "504 must be text/html")
+    assert(reply.contains("<title>504 Gateway Time-out</title>"), "504 nginx page shape")
+
+    print("504 ok")
+    0
+}

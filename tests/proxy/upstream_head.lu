@@ -1,0 +1,61 @@
+//! check: run(exit=0, stdout="head ok\n")
+//! phase: run
+//! lanes: lupin
+//! conforms: err.union
+//! stage-src: proxy http config
+//!
+//! The upstream request BYTES, pinned against the pinned oracle. This
+//! builds a config + a parsed request and asserts proxy.build_upstream
+//! emits the EXACT head nginx/1.30.4 sent to the backend for the XFF
+//! case (probed transcript in the sprint status):
+//!   GET /x HTTP/1.1
+//!   X-Forwarded-For: 10.9.8.7, 127.0.0.1
+//!   X-Real-IP: 127.0.0.1
+//!   Host: 127.0.0.1:9401
+//! It proves, together and byte-for-byte: the rewrite (/xff/x → /x via
+//! proxy_pass .../), the proxy_set_header set (config order, variables
+//! $proxy_add_x_forwarded_for and $remote_addr expanded), the Host
+//! default ($proxy_host), the XFF APPEND onto a pre-existing value, and
+//! the hop-by-hop/override drop of the client's own Host and XFF.
+//! Lane: lupin (config model + request parse; CRLF asserted via
+//! replace, per the corpus runner's no-`\r`-in-directives rule).
+
+use config
+use http
+use proxy
+
+fn main() -> int {
+    // DOUBLED braces: a `"""` block is an f-string (D6).
+    let src = """
+http {{
+  server {{
+    listen 127.0.0.1:8080;
+    location /xff/ {{
+      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+      proxy_set_header X-Real-IP $remote_addr;
+      proxy_pass http://127.0.0.1:9401/;
+    }}
+  }}
+}}
+"""
+    let c = config.parse_str(src, "up.conf")
+    let lim = http.default_limits()
+    let head = "GET /xff/x HTTP/1.1\r\nHost: front.example\r\nX-Forwarded-For: 10.9.8.7"
+    let req = http.parse_request(head, lim) else |_| {
+        assert(false, "request must parse")
+        return 1
+    }
+    let pl = proxy.plan(c, "/xff/x")
+    assert(pl.is_proxy, "must be a proxy location")
+
+    let up = proxy.build_upstream(c, req, pl, "127.0.0.1", 9401, "127.0.0.1", "")
+    let want = "GET /x HTTP/1.1\r\nX-Forwarded-For: 10.9.8.7, 127.0.0.1\r\nX-Real-IP: 127.0.0.1\r\nHost: 127.0.0.1:9401\r\n\r\n"
+    // compare with CRLF rendered visible (the runner forbids \r in
+    // directive assertions; the string compare itself is exact)
+    let got_v = up.replace("\r\n", "|")
+    let want_v = want.replace("\r\n", "|")
+    assert(got_v == want_v, "upstream head:\n got: {got_v}\nwant: {want_v}")
+
+    print("head ok")
+    0
+}

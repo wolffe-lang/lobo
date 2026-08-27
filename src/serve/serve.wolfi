@@ -1,10 +1,11 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 120a2029d01e2647ac58832c770890de48faa018a1fd9395aab45dbfd1139d8c
-  pkg_hash    120a2029d01e2647ac58832c770890de48faa018a1fd9395aab45dbfd1139d8c
+  export_hash d359c3dfc8666fbad5e7f371c2f212ee4a02e2f0b0e7a20e818526011bc52f72
+  pkg_hash    d359c3dfc8666fbad5e7f371c2f212ee4a02e2f0b0e7a20e818526011bc52f72
   deps:
     config  46e40ce27c442fc3257f65b51ccf07dcddfcb3b2e26edada020817dd00efcaec
     http  258e294adb196b8855742361c199033e4ac9863f000b7b2d1ad3bab6d7d65bbd
+    proxy  c1025e7d7f4721aa4a5def23f13880b2861a255966e323e7a52c9210fa576489
   items:
     [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
     [1] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller

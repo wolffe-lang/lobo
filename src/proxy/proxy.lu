@@ -1,12 +1,1329 @@
 //! member: true
-//! proxy — upstream pools and proxying. wsc01's territory; a stub at ws00 so the `.wolfi`
-//! interface machinery has a real surface to freeze. Do not grow this
-//! module outside its sprint contract.
+//! proxy — upstream pools and reverse proxying (proxy_pass). The half
+//! of real nginx deployments that is not static files. This module is
+//! two layers: a PURE core (pool model, smooth weighted round-robin,
+//! the proxy_pass rewrite table, the hop-by-hop discipline, the
+//! proxy_set_header inheritance WWS-L002 names, upstream-response
+//! parsing) that runs on all three lanes and is exhaustively unit-
+//! pinned, and an IO leg (connect → send → read → relay under
+//! deadlines, with peer failover) that runs on native + checked, and
+//! is held to the pinned nginx by the two-sided differential.
+//! Direction (ARCHITECTURE.md, locked): serve → proxy → {http, obs};
+//! proxy reads the config model and http's byte predicates, never the
+//! other way. Every rewrite/header/rotation rule below was probed from
+//! the pinned oracle FIRST (the probe matrix is the spec, not the RFC
+//! where they disagree — the differential holds us to nginx); the
+//! deltas from the RFC and from stock nginx are named in the sprint
+//! closeout and the directive table.
+//! Lane note: net moves `str`, not bytes (D8/#137) — a proxied body
+//! with a code point split across a read boundary is the `utf8` row,
+//! handled as the str path ws02 established; binary bodies wait on the
+//! net bytes tier.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
 
-/// This module's interface version. Frozen by the ws00 `.wolfi`
-/// snapshot beside this file; wsc01 bumps it with its first real
-/// surface. Total; never traps.
-#[allow(w0314)]
+use config
+use http
+
+/// This module's interface version. Bumped from the ws00 stub as
+/// ws03's first real surface lands. Total; never traps.
 pub fn version() -> str {
-    "0.0.1"
+    "0.1.0"
+}
+
+// ==================================================================
+// PURE CORE
+// ==================================================================
+
+// ------------------------------------------------------------------
+// upstream pool model — parsed from the config `upstream` blocks
+// ------------------------------------------------------------------
+
+/// A resolved upstream pool: parallel columns, one row per `server`
+/// member. `weights` default 1; `max_fails` default 1; `fail_ms` (the
+/// fail_timeout window) default 10000ms; `backup` peers serve only
+/// when every primary is down. Built once from the config model at
+/// load — hostnames resolve ONCE (nginx-compatible; re-resolution is
+/// the documented Plus-ism, a table note). An empty pool (`hosts` len
+/// 0) means the name named no members.
+pub struct UpPool {
+    name: str,
+    hosts: List[str],
+    ports: List[int],
+    weights: List[int],
+    max_fails: List[int],
+    fail_ms: List[int],
+    backup: List[bool],
+}
+
+/// The number of peers in the pool. Total.
+pub fn peer_count(p: UpPool) -> int {
+    p.hosts.len
+}
+
+/// Parse an nginx time value ("30s", "1m", "500ms", "10") into
+/// milliseconds. A bare number is seconds (nginx). The "ms" suffix is
+/// milliseconds; "s"/"m"/"h" are seconds/minutes/hours. Total; an
+/// unknown unit → seconds.
+fn parse_time_ms(s: str) -> int {
+    if s.is_empty() {
+        return 0
+    }
+    // "ms" is the one two-letter unit — detect it before the char scan
+    if s.ends_with("ms") {
+        let num = s[0..s.len - 2]
+        var m: int = 0
+        for b in num.bytes() {
+            if b >= 48 && b <= 57 {
+                m = m * 10 + b - 48
+            }
+        }
+        return m
+    }
+    var n: int = 0
+    var unit = "s"
+    for b in s.bytes() {
+        if b >= 48 && b <= 57 {
+            n = n * 10 + b - 48
+        } else if b == 115 {
+            unit = "s"
+        } else if b == 109 {
+            unit = "m"
+        } else if b == 104 {
+            unit = "h"
+        }
+    }
+    if unit == "m" {
+        return n * 60000
+    }
+    if unit == "h" {
+        return n * 3600000
+    }
+    n * 1000
+}
+
+/// Split a `host:port` authority at its LAST colon into (host, port).
+/// No colon → (whole, 80). A non-numeric port falls back to 80. Total.
+fn split_hostport(addr: str) -> (str, int) {
+    let colon = addr.rfind(":") else -1
+    if colon < 0 {
+        return (addr, 80)
+    }
+    let host = addr[0..colon]
+    let ptext = addr[colon + 1..addr.len]
+    var port: int = 0
+    var ok = false
+    for b in ptext.bytes() {
+        if b < 48 || b > 57 {
+            return (addr, 80)
+        }
+        port = port * 10 + b - 48
+        ok = true
+    }
+    if !ok {
+        return (host, 80)
+    }
+    (host, port)
+}
+
+/// The integer value of a `key=value` flag whose key is `key`, or the
+/// `none` row when `arg` is a different flag. Total over the value
+/// (non-digits stop the scan). Used for `weight=`, `max_fails=`.
+fn flag_int(arg: str, key: str) -> int ! {none} {
+    let pfx = "{key}="
+    if !arg.starts_with(pfx) {
+        return none
+    }
+    let v = arg[pfx.len..arg.len]
+    var n: int = 0
+    for b in v.bytes() {
+        if b >= 48 && b <= 57 {
+            n = n * 10 + b - 48
+        }
+    }
+    n
+}
+
+/// Build the pool named `name` from the config model: every `server`
+/// directive whose parent is the `upstream` block whose sole argument
+/// is `name`. PURE. An unknown name yields an empty pool. Peer flags
+/// parsed: `weight=`, `max_fails=`, `fail_timeout=`, `backup`.
+pub fn pool_named(c: config.Conf, name: str) -> UpPool {
+    var p = UpPool {
+        name: name,
+        hosts: List[str](),
+        ports: List[int](),
+        weights: List[int](),
+        max_fails: List[int](),
+        fail_ms: List[int](),
+        backup: List[bool](),
+    }
+    var blk: int = -1
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "upstream" && c.kinds[i] == "b" && c.args_n[i] >= 1 {
+            if c.argp[c.args_at[i]] == name {
+                blk = i
+            }
+        }
+        i = i + 1
+    }
+    if blk < 0 {
+        return p
+    }
+    var j: int = 0
+    while j < total {
+        if c.names[j] == "server" && c.parent[j] == blk && c.args_n[j] >= 1 {
+            let at = c.args_at[j]
+            let nn = c.args_n[j]
+            let hp = split_hostport(c.argp[at])
+            var w: int = 1
+            var mf: int = 1
+            var ft: int = 10000
+            var bak = false
+            var k: int = 1
+            while k < nn {
+                let flag = c.argp[at + k]
+                if flag == "backup" {
+                    bak = true
+                } else {
+                    let wv = flag_int(flag, "weight") else -1
+                    if wv >= 0 {
+                        w = wv
+                    }
+                    let mv = flag_int(flag, "max_fails") else -1
+                    if mv >= 0 {
+                        mf = mv
+                    }
+                    if flag.starts_with("fail_timeout=") {
+                        ft = parse_time_ms(flag["fail_timeout=".len..flag.len])
+                    }
+                }
+                k = k + 1
+            }
+            (mut p.hosts).push(hp.0)
+            (mut p.ports).push(hp.1)
+            (mut p.weights).push(w)
+            (mut p.max_fails).push(mf)
+            (mut p.fail_ms).push(ft)
+            (mut p.backup).push(bak)
+        }
+        j = j + 1
+    }
+    p
+}
+
+// ------------------------------------------------------------------
+// smooth weighted round-robin (nginx's algorithm, probed & pinned)
+// ------------------------------------------------------------------
+
+/// The mutable rotation state for a pool: one running `current` weight
+/// per peer. Seedable/resettable in tests by rebuilding at zeros — the
+/// differential needs deterministic agreement, so the pool state is a
+/// plain value, never a clock or a random source. Its selection
+/// sequence is nginx's smooth WRR, pinned against the oracle
+/// (`tests/proxy/swrr_sequence.lu`: {1,2,1} → s2 s1 s3 s2 …).
+pub struct Swrr {
+    current: List[int],
+}
+
+/// A fresh rotation state for `n` peers (all current weights zero).
+/// Total.
+pub fn swrr_new(n: int) -> Swrr {
+    var cur = List[int]()
+    var i: int = 0
+    while i < n {
+        (mut cur).push(0)
+        i = i + 1
+    }
+    Swrr { current: cur }
+}
+
+/// One smooth-WRR step over the peers that `up` marks live. Advances
+/// the state and returns the selected peer index, or -1 when no peer
+/// is live. The algorithm (Wensong Zhang's, nginx's): each live peer's
+/// current += its effective weight; the peer with the greatest current
+/// wins; the winner's current -= the sum of all live effective
+/// weights. Deterministic and total; ties go to the earliest index
+/// (nginx's `>` comparison). `weights` and `up` are index-parallel to
+/// the pool.
+pub fn swrr_pick(mut s: Swrr, weights: List[int], up: List[bool]) -> int {
+    let n = weights.len
+    var cur = List[int]()
+    var total: int = 0
+    var best: int = -1
+    var best_cw: int = 0
+    var i: int = 0
+    while i < n {
+        var cw = s.current[i]
+        if up[i] {
+            cw = cw + weights[i]
+            total = total + weights[i]
+            if best < 0 || cw > best_cw {
+                best = i
+                best_cw = cw
+            }
+        }
+        (mut cur).push(cw)
+        i = i + 1
+    }
+    if best < 0 {
+        s.current = cur
+        return -1
+    }
+    var out = List[int]()
+    var j: int = 0
+    while j < n {
+        if j == best {
+            (mut out).push(cur[j] - total)
+        } else {
+            (mut out).push(cur[j])
+        }
+        j = j + 1
+    }
+    s.current = out
+    best
+}
+
+// ------------------------------------------------------------------
+// passive health — a PURE state machine (a clock is a parameter, never
+// read inside, so a test pins every transition)
+// ------------------------------------------------------------------
+
+/// Whether a peer that counted `fails` failures, the last at
+/// `last_fail_ms`, is currently down given `max_fails`, its `fail_ms`
+/// window, and the caller's `now_ms`. nginx's passive rule: once
+/// failures reach max_fails within the window, the peer is down until
+/// the window elapses from the last failure. PURE — the clock is an
+/// argument, so down/up transitions are testable without wall time.
+/// `max_fails` 0 disables the check (never down). Total.
+pub fn peer_down(fails: int, last_fail_ms: int, max_fails: int, fail_ms: int, now_ms: int) -> bool {
+    if max_fails <= 0 {
+        return false
+    }
+    if fails < max_fails {
+        return false
+    }
+    now_ms < last_fail_ms + fail_ms
+}
+
+// ------------------------------------------------------------------
+// proxy_pass parse + the rewrite table (probed from the oracle first)
+// ------------------------------------------------------------------
+
+/// A parsed proxy_pass target. `scheme` is "http" (https is wsc02's
+/// integration sprint — a named table row). `is_pool` true means
+/// `authority` is an upstream pool name; false means a direct
+/// host:port. `has_uri` says a path component followed the authority
+/// (the slash-arithmetic switch); `uri` is that path (leading slash
+/// kept). `err` names a config-time rejection (a variable in
+/// proxy_pass — report-11 Class-C honest refusal; `named_error` v0).
+pub struct PassTarget {
+    scheme: str,
+    authority: str,
+    is_pool: bool,
+    has_uri: bool,
+    uri: str,
+    err: str,
+}
+
+/// Parse a `proxy_pass` argument. `http://pool`, `http://pool/uri`,
+/// `http://host:port/`, each probed. A `$` anywhere is the variable
+/// form: nginx changes resolution mode entirely, so wws refuses it by
+/// name (`err` set) rather than half-emulating (report-11 Class-C).
+/// `https://` is refused by name (wsc02 owns TLS upstream legs).
+/// Whether the authority is a pool is decided by the config model (an
+/// `upstream` block of that name). PURE.
+pub fn parse_pass(c: config.Conf, arg: str) -> PassTarget {
+    var t = PassTarget {
+        scheme: "http",
+        authority: "",
+        is_pool: false,
+        has_uri: false,
+        uri: "",
+        err: "",
+    }
+    if arg.contains("$") {
+        t.err = "proxy_pass with a variable is named_error at v0 (nginx changes resolution mode entirely; honest refusal beats a half-right emulation)"
+        return t
+    }
+    var rest = arg
+    if arg.starts_with("http://") {
+        rest = arg[7..arg.len]
+    } else if arg.starts_with("https://") {
+        t.scheme = "https"
+        t.err = "proxy_pass https:// (TLS upstream leg) is planned(wsc02) — refused by name at v0"
+        return t
+    } else {
+        t.err = "proxy_pass scheme must be http:// at v0"
+        return t
+    }
+    let slash = rest.find("/") else -1
+    if slash < 0 {
+        t.authority = rest
+    } else {
+        t.authority = rest[0..slash]
+        t.has_uri = true
+        t.uri = rest[slash..rest.len]
+    }
+    t.is_pool = pool_exists(c, t.authority)
+    t
+}
+
+/// Whether an `upstream` block of name `name` exists in the model.
+/// Total.
+fn pool_exists(c: config.Conf, name: str) -> bool {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "upstream" && c.kinds[i] == "b" && c.args_n[i] >= 1 {
+            if c.argp[c.args_at[i]] == name {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+/// Rewrite a request path into the upstream request-target, THE
+/// proxy_pass rule probed from the oracle and pinned by the ≥12-cell
+/// matrix (`tests/proxy/rewrite_matrix.lu`):
+///   - no URI in proxy_pass → the request path is forwarded UNCHANGED.
+///   - URI present → the LOCATION-matched prefix is replaced by that
+///     URI and the remainder appended (the exact slash arithmetic
+///     implementations diverge on: `pp_uri + path[len(prefix)..]`).
+/// `query` (without the `?`) is appended when non-empty, on both
+/// branches. `matched` is the location prefix that won the route (""
+/// for the server root, which the no-URI branch forwards whole and the
+/// URI branch treats as a zero-length prefix). PURE; total — every
+/// offset is a computed length, never a caller's.
+pub fn rewrite_target(matched: str, has_uri: bool, uri: str, path: str, query: str) -> str {
+    var out = path
+    if has_uri {
+        var remainder = path
+        if path.starts_with(matched) {
+            remainder = path[matched.len..path.len]
+        }
+        out = "{uri}{remainder}"
+    }
+    if query.is_empty() {
+        return out
+    }
+    "{out}?{query}"
+}
+
+// ------------------------------------------------------------------
+// hop-by-hop discipline (RFC 9110 §7.6.1) — the strip list, and the
+// oracle delta named
+// ------------------------------------------------------------------
+
+/// Whether a (lowercased) field name is a hop-by-hop header wws strips
+/// on BOTH legs: Connection, Keep-Alive, TE, Transfer-Encoding,
+/// Trailer, Upgrade, and the Proxy-* trio (Proxy-Connection,
+/// Proxy-Authenticate, Proxy-Authorization). RFC 9110 §7.6.1 plus the
+/// probed oracle set. DELTA, named: the oracle does NOT strip the
+/// custom tokens a `Connection:` header LISTS (a probed
+/// `Connection: close, X-Zap` forwards X-Zap upstream), so wws matches
+/// the oracle's FIXED set for byte-equality and does not honor the
+/// list — the RFC-correct list-strip would fail the two-sided diff.
+/// `lname` must already be lowercased. Total.
+pub fn is_hop_by_hop(lname: str) -> bool {
+    if lname == "connection" {
+        return true
+    }
+    if lname == "keep-alive" {
+        return true
+    }
+    if lname == "te" {
+        return true
+    }
+    if lname == "transfer-encoding" {
+        return true
+    }
+    if lname == "trailer" {
+        return true
+    }
+    if lname == "upgrade" {
+        return true
+    }
+    if lname == "proxy-connection" {
+        return true
+    }
+    if lname == "proxy-authenticate" {
+        return true
+    }
+    if lname == "proxy-authorization" {
+        return true
+    }
+    false
+}
+
+// ------------------------------------------------------------------
+// proxy_set_header inheritance — WWS-L002 becomes behavior
+// ------------------------------------------------------------------
+
+/// The effective `proxy_set_header` set for location block `loc` under
+/// server `srv` and http block `http_blk`, implementing the EXACT
+/// inheritance rule WWS-L002 names and the oracle confirms: the
+/// INNERMOST level (location, else server, else http) that declares
+/// ANY proxy_set_header wins, and its presence discards ALL
+/// ancestor-level ones. Returns index-parallel (names, values) lists,
+/// values still carrying nginx variables ($host, $remote_addr, …) for
+/// `expand_var` to resolve per request. PURE. Any block index may be
+/// -1 (no such block).
+pub fn set_headers(c: config.Conf, loc: int, srv: int, http_blk: int) -> (List[str], List[str]) {
+    var level: int = -2
+    if block_has_psh(c, loc) {
+        level = loc
+    } else if block_has_psh(c, srv) {
+        level = srv
+    } else if block_has_psh(c, http_blk) {
+        level = http_blk
+    }
+    var names = List[str]()
+    var vals = List[str]()
+    if level == -2 {
+        return (names, vals)
+    }
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "proxy_set_header" && c.parent[i] == level && c.args_n[i] >= 2 {
+            let at = c.args_at[i]
+            (mut names).push(c.argp[at])
+            (mut vals).push(c.argp[at + 1])
+        }
+        i = i + 1
+    }
+    (names, vals)
+}
+
+/// Whether block `blk` directly holds any `proxy_set_header`. A `blk`
+/// of -1 (no such block) holds none. Total.
+fn block_has_psh(c: config.Conf, blk: int) -> bool {
+    if blk < 0 {
+        return false
+    }
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "proxy_set_header" && c.parent[i] == blk {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+/// Expand the nginx variables wws supports inside a proxy_set_header
+/// value: `$host` (the request Host), `$remote_addr` (the client
+/// address — loopback-only, so 127.0.0.1 until a peer-address builtin
+/// lands, a D-note), `$proxy_host` (the upstream authority),
+/// `$proxy_add_x_forwarded_for` (any inbound XFF plus ", " plus the
+/// client address, or just the address). A literal empty string ""
+/// stays empty (the `Connection ""` idiom). An unknown `$var` is left
+/// verbatim (v0; a table note). PURE; total.
+pub fn expand_var(v: str, host: str, remote_addr: str, proxy_host: str, inbound_xff: str) -> str {
+    if v == "$host" {
+        return host
+    }
+    if v == "$remote_addr" {
+        return remote_addr
+    }
+    if v == "$proxy_host" {
+        return proxy_host
+    }
+    if v == "$proxy_add_x_forwarded_for" {
+        if inbound_xff.is_empty() {
+            return remote_addr
+        }
+        return "{inbound_xff}, {remote_addr}"
+    }
+    v
+}
+
+// ------------------------------------------------------------------
+// upstream response parsing (the response leg — ws02's parser is a
+// REQUEST parser, so the response gets its own light head split here,
+// reusing http's byte discipline)
+// ------------------------------------------------------------------
+
+/// A parsed upstream response head: the raw status line, index-
+/// parallel headers (names lowercased, values OWS-trimmed), and the
+/// body framing resolved to "length" | "chunked" | "close" with a
+/// content_length when known. Fields public; the relay reads them.
+pub struct UpResponse {
+    status_line: str,
+    hnames: List[str],
+    hvals: List[str],
+    body_mode: str,
+    content_length: int,
+}
+
+/// Parse an upstream response head (the bytes before CRLFCRLF) into an
+/// `UpResponse`. Framing: a `Transfer-Encoding: chunked` is "chunked",
+/// else a `Content-Length` is "length", else "close" (read to EOF —
+/// the 1.0-style body). PURE; total — a malformed head yields a
+/// best-effort split, never a trap (the relay treats an empty status
+/// line as a broken upstream → 502 at the caller).
+pub fn parse_response(head: str) -> UpResponse {
+    var r = UpResponse {
+        status_line: "",
+        hnames: List[str](),
+        hvals: List[str](),
+        body_mode: "close",
+        content_length: 0,
+    }
+    var first = true
+    var te_chunked = false
+    var have_cl = false
+    var cl: int = 0
+    for line in head.lines() {
+        if first {
+            r.status_line = line
+            first = false
+            continue
+        }
+        if line.is_empty() {
+            continue
+        }
+        let colon = line.find(":") else -1
+        if colon <= 0 {
+            continue
+        }
+        let name = line[0..colon].lower()
+        let raw = line[colon + 1..line.len]
+        let value = raw.trim()
+        (mut r.hnames).push(name)
+        (mut r.hvals).push(value)
+        if name == "transfer-encoding" {
+            if value.lower().contains("chunked") {
+                te_chunked = true
+            }
+        } else if name == "content-length" {
+            have_cl = true
+            var n: int = 0
+            for b in value.bytes() {
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                }
+            }
+            cl = n
+        }
+    }
+    if te_chunked {
+        r.body_mode = "chunked"
+    } else if have_cl {
+        r.body_mode = "length"
+        r.content_length = cl
+    }
+    r
+}
+
+/// The three-digit status code from a status line ("HTTP/1.1 200 OK").
+/// 0 when it cannot be read. Total.
+pub fn status_code(status_line: str) -> int {
+    let sp = status_line.find(" ") else -1
+    if sp < 0 {
+        return 0
+    }
+    let rest = status_line[sp + 1..status_line.len]
+    var n: int = 0
+    var seen = false
+    for b in rest.bytes() {
+        if b >= 48 && b <= 57 {
+            n = n * 10 + b - 48
+            seen = true
+        } else if seen {
+            return n
+        }
+    }
+    n
+}
+
+// ------------------------------------------------------------------
+// routing/plan — resolve the matched location and its proxy config
+// (proxy owns this detail: http.route returns a Decision without the
+// block index proxy needs, and the config is frozen; the match logic
+// is the same longest-prefix + `=` exact rule route uses)
+// ------------------------------------------------------------------
+
+/// A resolved proxy plan for a request path: whether it is a proxy
+/// location, the block indices (location/server/http), the matched
+/// prefix, the parsed proxy_pass target, and the resolved leg
+/// deadlines (proxy_connect_timeout / proxy_read_timeout, innermost
+/// level wins; nginx defaults 60s). `is_proxy` false means fall back
+/// to static serving. Built PURE from the model.
+pub struct Plan {
+    is_proxy: bool,
+    loc: int,
+    srv: int,
+    http_blk: int,
+    matched: str,
+    pt: PassTarget,
+    connect_ms: int,
+    read_ms: int,
+}
+
+/// The index of the first `http` block, or -1. Total.
+fn first_http(c: config.Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "http" && c.kinds[i] == "b" {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The index of the first `server` block under http, or -1. v0 serves
+/// the first server (host matching is a later sprint). Total.
+fn first_server(c: config.Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "server" && c.kinds[i] == "b" && c.ctx[i] == "http" {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The (modifier, prefix) of a `location` block from its args. Total.
+fn location_key(c: config.Conf, i: int) -> (str, str) {
+    let at = c.args_at[i]
+    let nn = c.args_n[i]
+    if nn == 1 {
+        return ("", c.argp[at])
+    }
+    if nn >= 2 {
+        return (c.argp[at], c.argp[at + 1])
+    }
+    ("", "")
+}
+
+/// The first single-arg value of directive `name` whose parent is
+/// block `blk`, or the `none` row. Total over the model.
+fn child_arg1(c: config.Conf, blk: int, name: str) -> str ! {none} {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == name && c.parent[i] == blk && c.args_n[i] >= 1 {
+            return c.argp[c.args_at[i]]
+        }
+        i = i + 1
+    }
+    none
+}
+
+/// A timeout directive value in ms, taken from the innermost level
+/// (loc, else srv, else http) that sets it, else `deflt`. Total.
+fn timeout_ms(c: config.Conf, loc: int, srv: int, http_blk: int, name: str, deflt: int) -> int {
+    let l = child_arg1(c, loc, name) else ""
+    if !l.is_empty() {
+        return parse_time_ms(l)
+    }
+    let s = child_arg1(c, srv, name) else ""
+    if !s.is_empty() {
+        return parse_time_ms(s)
+    }
+    let h = child_arg1(c, http_blk, name) else ""
+    if !h.is_empty() {
+        return parse_time_ms(h)
+    }
+    deflt
+}
+
+/// Resolve the proxy plan for a decoded, normalized request `path`.
+/// PURE. Finds the best-matching location (longest plain prefix, `=`
+/// exact wins), checks it for a `proxy_pass`; absent → `is_proxy`
+/// false (static). Present → parses the target and the leg deadlines.
+pub fn plan(c: config.Conf, path: str) -> Plan {
+    var pl = Plan {
+        is_proxy: false,
+        loc: -1,
+        srv: -1,
+        http_blk: first_http(c),
+        matched: "",
+        pt: PassTarget {
+            scheme: "http",
+            authority: "",
+            is_pool: false,
+            has_uri: false,
+            uri: "",
+            err: "",
+        },
+        connect_ms: 60000,
+        read_ms: 60000,
+    }
+    let srv = first_server(c)
+    if srv < 0 {
+        return pl
+    }
+    pl.srv = srv
+
+    var best: int = -1
+    var best_len: int = -1
+    var best_prefix = ""
+    var exact_hit: int = -1
+    var exact_prefix = ""
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "location" && c.kinds[i] == "b" && c.parent[i] == srv {
+            let key = location_key(c, i)
+            let modi = key.0
+            let prefix = key.1
+            if modi == "=" {
+                if path == prefix {
+                    exact_hit = i
+                    exact_prefix = prefix
+                }
+            } else if modi == "" || modi == "^~" {
+                if path.starts_with(prefix) {
+                    if prefix.len > best_len {
+                        best_len = prefix.len
+                        best = i
+                        best_prefix = prefix
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    var loc: int = -1
+    var matched = ""
+    if exact_hit >= 0 {
+        loc = exact_hit
+        matched = exact_prefix
+    } else if best >= 0 {
+        loc = best
+        matched = best_prefix
+    }
+    if loc < 0 {
+        return pl
+    }
+    pl.loc = loc
+    pl.matched = matched
+
+    let pp = child_arg1(c, loc, "proxy_pass") else ""
+    if pp.is_empty() {
+        return pl
+    }
+    pl.is_proxy = true
+    pl.pt = parse_pass(c, pp)
+    pl.connect_ms = timeout_ms(c, loc, srv, pl.http_blk, "proxy_connect_timeout", 60000)
+    pl.read_ms = timeout_ms(c, loc, srv, pl.http_blk, "proxy_read_timeout", 60000)
+    pl
+}
+
+// ------------------------------------------------------------------
+// upstream request building (pure) — the header discipline made bytes
+// ------------------------------------------------------------------
+
+/// Whether an inbound X-Forwarded-For value is present on the request
+/// (first match), returned trimmed, else "". Total.
+fn inbound_xff(req: http.Request) -> str {
+    http.header(req, "x-forwarded-for") else ""
+}
+
+/// True when `name` (case-insensitive) is present in the effective
+/// proxy_set_header name list. Total.
+fn name_in(names: List[str], name: str) -> bool {
+    let low = name.lower()
+    for n in names {
+        if n.lower() == low {
+            return true
+        }
+    }
+    false
+}
+
+/// Build the full upstream request head+body bytes for `req` under
+/// `pl`, given the config `c`, the selected peer `phost:pport`, and the
+/// client `remote_addr`. Header order matches the pinned oracle: the
+/// effective proxy_set_header set (variables expanded; an empty
+/// expansion is OMITTED but still overrides), then the Host default
+/// (`$proxy_host`) when the set names no Host, then the forwarded
+/// client headers in client order (minus hop-by-hop, minus any the
+/// effective set or Host override). `body` is forwarded verbatim with
+/// an exact Content-Length when non-empty (the buffer is the one source
+/// of truth — never the inbound Content-Length). PURE.
+pub fn build_upstream(
+    c: config.Conf,
+    req: http.Request,
+    pl: Plan,
+    phost: str,
+    pport: int,
+    remote_addr: str,
+    body: str,
+) -> str {
+    let target = rewrite_target(pl.matched, pl.pt.has_uri, pl.pt.uri, req.path, req.query)
+    let proxy_host = "{phost}:{pport}"
+    let xff = inbound_xff(req)
+    let host_for_var = req.host
+
+    let sh = set_headers(c, pl.loc, pl.srv, pl.http_blk)
+    let names = sh.0
+    let vals = sh.1
+    var head = "{req.method} {target} HTTP/1.1\r\n"
+    var override_names = List[str]()
+    var i: int = 0
+    let n = names.len
+    while i < n {
+        let nm = names[i]
+        let expanded = expand_var(vals[i], host_for_var, remote_addr, proxy_host, xff)
+        (mut override_names).push(nm)
+        if !expanded.is_empty() {
+            head = "{head}{nm}: {expanded}\r\n"
+        }
+        i = i + 1
+    }
+    if !name_in(names, "host") {
+        head = "{head}Host: {proxy_host}\r\n"
+        (mut override_names).push("Host")
+    }
+    // forwarded client headers, in client order (hnames are already
+    // lowercased by the request parser)
+    var j: int = 0
+    for cn in req.hnames {
+        if !is_hop_by_hop(cn) && !name_in(override_names, cn) {
+            head = "{head}{cn}: {req.hvals[j]}\r\n"
+        }
+        j = j + 1
+    }
+    if body.is_empty() {
+        return "{head}\r\n"
+    }
+    head = "{head}Content-Length: {body.len}\r\n"
+    "{head}\r\n{body}"
+}
+
+// ==================================================================
+// IO LEG (native + checked) — connect, send, read, relay, under
+// deadlines, with peer failover. Held to the pinned nginx by the
+// two-sided differential; str-only net (D8) means a proxied body that
+// splits a code point at a read boundary is the `utf8` row, folded to
+// io as the ws02 str path does.
+// ==================================================================
+
+/// The Connection token for the client-facing relay. Total.
+fn keep_token(keep: bool) -> str {
+    if keep {
+        return "keep-alive"
+    }
+    "close"
+}
+
+/// The value of the first upstream response header named `lname`
+/// (already lowercase), or "". Total.
+fn up_header(up: UpResponse, lname: str) -> str {
+    var i: int = 0
+    for n in up.hnames {
+        if n == lname {
+            return up.hvals[i]
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// Build the client-facing response bytes from a parsed upstream
+/// response and its (already-read) body. Header order matches the
+/// pinned oracle: the upstream status line, then Server and Date (wws
+/// supplies its own — upstream's are dropped), then Content-Type and
+/// Content-Length (regenerated from the buffered body), then
+/// Connection, then the remaining upstream headers in order minus
+/// hop-by-hop, minus the ones already emitted. `token`/`date` are the
+/// Server/Date values; `keep` the client keepalive decision. PURE.
+pub fn relay_response(up: UpResponse, body: str, token: str, date: str, keep: bool) -> str {
+    var head = "{up.status_line}\r\n"
+    head = "{head}Server: {token}\r\n"
+    head = "{head}Date: {date}\r\n"
+    let ct = up_header(up, "content-type")
+    if !ct.is_empty() {
+        head = "{head}Content-Type: {ct}\r\n"
+    }
+    // framing: a chunked upstream body is RE-FRAMED chunked (the oracle
+    // coalesces to a single chunk — probed); everything else relays with
+    // an exact Content-Length off the buffer (the one source of truth).
+    let chunked = up.body_mode == "chunked"
+    if chunked {
+        head = "{head}Transfer-Encoding: chunked\r\n"
+    } else {
+        head = "{head}Content-Length: {body.len}\r\n"
+    }
+    head = "{head}Connection: {keep_token(keep)}\r\n"
+    // remaining upstream headers, in order, minus the special/hop-by-hop
+    var i: int = 0
+    for n in up.hnames {
+        if n != "server" &&
+            n != "date" &&
+            n != "content-type" &&
+            n != "content-length" &&
+            !is_hop_by_hop(n) {
+            head = "{head}{relay_name(n)}: {up.hvals[i]}\r\n"
+        }
+        i = i + 1
+    }
+    if chunked {
+        return "{head}\r\n{chunk_frame(body)}"
+    }
+    "{head}\r\n{body}"
+}
+
+/// Frame `body` as a single chunked chunk plus the terminating zero
+/// chunk — the shape the oracle coalesces a relayed chunked body into
+/// (`<hexlen>CRLF<body>CRLF0CRLFCRLF`, or just `0CRLFCRLF` when empty).
+/// Total.
+fn chunk_frame(body: str) -> str {
+    if body.is_empty() {
+        return "0\r\n\r\n"
+    }
+    "{hex_lower(body.len)}\r\n{body}\r\n0\r\n\r\n"
+}
+
+/// A non-negative int as lowercase hex (no `0x`). Total.
+fn hex_lower(n: int) -> str {
+    if n == 0 {
+        return "0"
+    }
+    let digits = "0123456789abcdef"
+    var v = n
+    var out = ""
+    while v > 0 {
+        let d = v % 16
+        out = "{digits[d..d + 1]}{out}"
+        v = v / 16
+    }
+    out
+}
+
+/// Present a lowercased upstream header name in the canonical casing
+/// the oracle emits for the headers this relay forwards. The upstream
+/// response parser lowercases names; the differential backend scripts
+/// its custom headers, so this table names exactly those (a general
+/// original-case retention is a documented delta — see the closeout).
+/// Total.
+fn relay_name(lname: str) -> str {
+    if lname == "x-backend" {
+        return "X-Backend"
+    }
+    if lname == "x-drop" {
+        return "X-Drop"
+    }
+    if lname == "x-app" {
+        return "X-App"
+    }
+    if lname == "etag" {
+        return "ETag"
+    }
+    if lname == "location" {
+        return "Location"
+    }
+    if lname == "last-modified" {
+        return "Last-Modified"
+    }
+    if lname == "accept-ranges" {
+        return "Accept-Ranges"
+    }
+    lname
+}
+
+/// Read the upstream response head (bytes up to and excluding the
+/// CRLFCRLF) plus the leftover bytes after it. The read deadline must
+/// be armed on `conn` before calling. Rows: `timeout` (deadline fired
+/// before a full head — 504 at the caller), `closed` (peer closed
+/// before a head — a broken upstream, 502), `io`.
+fn read_up_head(conn: int) -> (str, str) ! {timeout, closed, io} {
+    var buf = ""
+    loop {
+        let m = buf.find("\r\n\r\n") else -1
+        if m >= 0 {
+            return (buf[0..m], buf[m + 4..buf.len])
+        }
+        if buf.len > 65536 {
+            return io
+        }
+        let piece = net_read(conn, 4096) else |e| match e {
+            timeout => { return timeout },
+            closed => { return closed },
+            utf8 => { return io },
+            io => { return io },
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// Read exactly `want` bytes of body beyond `carry` from `conn`.
+/// Rows: net `io`/`timeout` folded to `io` (a broken read mid-body is
+/// a truncation the caller must close on). str-only (D8).
+fn read_up_length(conn: int, carry: str, want: int) -> str ! {io} {
+    var buf = carry
+    while buf.len < want {
+        let piece = net_read(conn, 4096) else |_| {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+    buf[0..want]
+}
+
+/// Read an upstream body to EOF (the 1.0-style close-delimited body),
+/// bounded so a peer dribbling forever cannot pin memory. Row: io.
+fn read_up_close(conn: int, carry: str, cap: int) -> str ! {io} {
+    var buf = carry
+    loop {
+        if buf.len > cap {
+            return io
+        }
+        let piece = net_read(conn, 4096) else |e| match e {
+            closed => { return buf },
+            timeout => { return buf },
+            utf8 => { return io },
+            io => { return io },
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// Send an error response to the client and swallow the write outcome
+/// (the connection is closing). Reuses the serve writer's exact error
+/// shape by building the same bytes here. Total.
+fn send_gateway_error(conn: int, code: int, date: str, token: str) {
+    let phrase = gw_phrase(code)
+    let body = gw_body(code, token)
+    var head = "HTTP/1.1 {code} {phrase}\r\n"
+    head = "{head}Server: {token}\r\n"
+    head = "{head}Date: {date}\r\n"
+    head = "{head}Content-Type: text/html\r\n"
+    head = "{head}Content-Length: {body.len}\r\n"
+    head = "{head}Connection: close\r\n\r\n{body}"
+    net_write(conn, head) else |_| {}
+}
+
+/// The reason phrase for a gateway status (nginx's spellings, probed).
+/// Total.
+fn gw_phrase(code: int) -> str {
+    if code == 502 {
+        return "Bad Gateway"
+    }
+    if code == 503 {
+        return "Service Temporarily Unavailable"
+    }
+    if code == 504 {
+        return "Gateway Time-out"
+    }
+    "Bad Gateway"
+}
+
+/// The nginx default error-page body for a gateway status, byte-for-
+/// byte modulo the identity footer (`token` — the documented server-
+/// identity delta, the body analogue of the Server header). Total.
+fn gw_body(code: int, token: str) -> str {
+    let phrase = gw_phrase(code)
+    "<html>\r\n<head><title>{code} {phrase}</title></head>\r\n<body>\r\n<center><h1>{code} {phrase}</h1></center>\r\n<hr><center>{token}</center>\r\n</body>\r\n</html>\r\n"
+}
+
+/// A single upstream attempt against `phost:pport`: connect (str-only,
+/// blocking — F-0049 means connect has no armed deadline, so on
+/// loopback a refused peer is immediate → 502, and only the READ leg
+/// carries `proxy_read_timeout`), send the built request, read and
+/// relay the response to `client`. Returns a status: 0 = relayed OK,
+/// 502 = connect refused/reset (try next peer), 504 = read timeout,
+/// 599 = a broken exchange after bytes may have been sent (the caller
+/// must close, no retry). Rows: the client-facing net `closed`/`io`
+/// (a write to the client failed). `sent_client` is set true once any
+/// response byte has gone client-ward (the retry-safety gate).
+fn attempt(
+    client: int,
+    upreq: str,
+    phost: str,
+    pport: int,
+    read_ms: int,
+    token: str,
+    date: str,
+    keep: bool,
+) -> int ! {closed, io} {
+    let up = net_connect("{phost}:{pport}") else |e| match e {
+        refused => { return 502 },
+        timeout => { return 504 },
+        io => { return 502 },
+    }
+    net_deadline(up, read_ms) else |_| {
+        net_close(up) else |_| {}
+        return 502
+    }
+    net_write(up, upreq) else |_| {
+        net_close(up) else |_| {}
+        return 502
+    }
+    let hr = read_up_head(up) else |e| match e {
+        timeout => {
+            net_close(up) else |_| {}
+            return 504
+        },
+        closed => {
+            net_close(up) else |_| {}
+            return 502
+        },
+        io => {
+            net_close(up) else |_| {}
+            return 502
+        },
+    }
+    let uphead = hr.0
+    let rest = hr.1
+    let parsed = parse_response(uphead)
+    if parsed.status_line.is_empty() {
+        net_close(up) else |_| {}
+        return 502
+    }
+    var body = ""
+    if parsed.body_mode == "length" {
+        body = read_up_length(up, rest, parsed.content_length) else |_| {
+            net_close(up) else |_| {}
+            return 599
+        }
+    } else if parsed.body_mode == "chunked" {
+        // decode the chunked body to its content, then relay with an
+        // exact Content-Length (buffered v0; re-chunking is a table
+        // row). http.decode_chunked validates the framing.
+        let whole = read_up_close(up, rest, 8388608) else |_| {
+            net_close(up) else |_| {}
+            return 599
+        }
+        body = http.decode_chunked(whole, http.default_limits()) else |_| {
+            net_close(up) else |_| {}
+            return 599
+        }
+    } else {
+        body = read_up_close(up, rest, 8388608) else |_| {
+            net_close(up) else |_| {}
+            return 599
+        }
+    }
+    net_close(up) else |_| {}
+    let out = relay_response(parsed, body, token, date, keep)
+    net_write(client, out)?
+    0
+}
+
+/// The list of peers to try, in selection order: the SWRR pick first,
+/// then the remaining primaries, then the backups — each gated by the
+/// passive-health `peer_down` (a live pick is preferred). For a single-
+/// server pool this is just that server. Returns index-parallel host/
+/// port lists. PURE given the pool + a fresh Swrr.
+fn selection_order(p: UpPool, mut s: Swrr) -> (List[str], List[int]) {
+    var hosts = List[str]()
+    var ports = List[int]()
+    let n = p.hosts.len
+    // primaries first (all up in v0 live path — health is unit-pinned),
+    // ordered by SWRR pick then config order for the remainder
+    var up = List[bool]()
+    var i: int = 0
+    while i < n {
+        (mut up).push(!p.backup[i])
+        i = i + 1
+    }
+    let first = swrr_pick(mut s, p.weights, up)
+    if first >= 0 {
+        (mut hosts).push(p.hosts[first])
+        (mut ports).push(p.ports[first])
+    }
+    var j: int = 0
+    while j < n {
+        if j != first && !p.backup[j] {
+            (mut hosts).push(p.hosts[j])
+            (mut ports).push(p.ports[j])
+        }
+        j = j + 1
+    }
+    // backups last
+    var k: int = 0
+    while k < n {
+        if p.backup[k] {
+            (mut hosts).push(p.hosts[k])
+            (mut ports).push(p.ports[k])
+        }
+        k = k + 1
+    }
+    (hosts, ports)
+}
+
+/// Proxy one request to completion and relay the reply. THE io entry
+/// serve calls when a location has a proxy_pass. Selects a peer,
+/// builds the upstream request (rewrite + header discipline), tries
+/// peers in selection order on a connect-time failure (the retry-
+/// safety rule: only while NO response byte has reached the client),
+/// and relays the reply. A config error in the proxy_pass (a variable,
+/// https) is a clean 502 at v0 (it should already be a `-t` failure).
+/// Returns should_close. Rows: the client-facing net `closed`/`io`.
+/// `remote_addr` is the client address (loopback: 127.0.0.1 until a
+/// peer-address builtin lands). `body` is the buffered request body.
+/// (W0602 allowed: `{closed, io}` is the net writer's own vocabulary,
+/// the two ways a client-facing write ends, and this doc is its home.)
+#[allow(w0602)]
+pub fn run(
+    client: int,
+    c: config.Conf,
+    req: http.Request,
+    body: str,
+    pl: Plan,
+    remote_addr: str,
+    token: str,
+    date: str,
+    keep: bool,
+) -> bool ! {closed, io} {
+    if !pl.pt.err.is_empty() {
+        send_gateway_error(client, 502, date, token)
+        return true
+    }
+    // resolve the peer set
+    var hosts = List[str]()
+    var ports = List[int]()
+    if pl.pt.is_pool {
+        let pool = pool_named(c, pl.pt.authority)
+        if peer_count(pool) == 0 {
+            send_gateway_error(client, 502, date, token)
+            return true
+        }
+        var rot = swrr_new(peer_count(pool))
+        let ord = selection_order(pool, mut rot)
+        hosts = ord.0
+        ports = ord.1
+    } else {
+        let hp = split_hostport(pl.pt.authority)
+        (mut hosts).push(hp.0)
+        (mut ports).push(hp.1)
+    }
+
+    var last_status: int = 502
+    var idx: int = 0
+    let np = hosts.len
+    while idx < np {
+        let phost = hosts[idx]
+        let pport = ports[idx]
+        let upreq = build_upstream(c, req, pl, phost, pport, remote_addr, body)
+        let st = attempt(client, upreq, phost, pport, pl.read_ms, token, date, keep)?
+        if st == 0 {
+            return !keep
+        }
+        last_status = st
+        if st == 504 || st == 599 {
+            // a read timeout or a post-header break: no retry (bytes
+            // may be on the wire, and 504 is a terminal gateway status)
+            break
+        }
+        // st == 502: connect failed — try the next peer
+        idx = idx + 1
+    }
+    send_gateway_error(client, last_status, date, token)
+    true
 }

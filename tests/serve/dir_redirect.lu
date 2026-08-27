@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: serve http config
+//! stage-src: serve proxy http config
 //!
 //! A directory with no trailing slash → 301 with an absolute Location
 //! (nginx's shape: http://<host>:<port>/<path>/ — the port appended

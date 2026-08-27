@@ -1,0 +1,33 @@
+// response-leg hop-by-hop: Keep-Alive stripped, X-Drop (Connection-named) relayed; two-sided
+--- request
+GET /strip/r HTTP/1.1
+Host: front.example
+Connection: close
+
+
+--- reply
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Content-Length: 3
+X-Backend: yes
+Connection: close, X-Drop
+X-Drop: shouldgo
+Keep-Alive: timeout=9
+
+abc
+--- expect-client
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/plain
+Content-Length: 3
+Connection: close
+X-Backend: yes
+X-Drop: shouldgo
+
+abc
+--- expect-backend
+=== EXCHANGE ===
+GET /r HTTP/1.1
+Host: 127.0.0.1:@BPORT@
+

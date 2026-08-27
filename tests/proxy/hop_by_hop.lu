@@ -1,0 +1,53 @@
+//! check: run(exit=0, stdout="hop ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: proxy http config
+//!
+//! The hop-by-hop strip list (RFC 9110 §7.6.1) as behavior. Every name
+//! wws removes on BOTH legs is asserted stripped; representative end-
+//! to-end names are asserted kept. The oracle-delta is pinned too: a
+//! custom token NAMED in a Connection list (X-Zap) is NOT stripped —
+//! the pinned nginx forwards it (probed), so wws matches for byte-
+//! equality and this test documents that the list is not honored.
+//! PURE (proxy.is_hop_by_hop over lowercased names); all three lanes.
+
+use proxy
+
+fn strip(name: str) {
+    assert(proxy.is_hop_by_hop(name), "{name} MUST be hop-by-hop")
+}
+
+fn keep(name: str) {
+    assert(!proxy.is_hop_by_hop(name), "{name} MUST be end-to-end")
+}
+
+fn main() -> int {
+    // the fixed hop-by-hop set (RFC 9110 §7.6.1 + the Proxy-* trio)
+    strip("connection")
+    strip("keep-alive")
+    strip("te")
+    strip("transfer-encoding")
+    strip("trailer")
+    strip("upgrade")
+    strip("proxy-connection")
+    strip("proxy-authenticate")
+    strip("proxy-authorization")
+
+    // end-to-end headers pass
+    keep("host")
+    keep("content-type")
+    keep("content-length")
+    keep("x-forwarded-for")
+    keep("x-real-ip")
+    keep("cookie")
+    keep("authorization")
+    keep("accept")
+    // the oracle delta: a Connection-listed custom token is end-to-end
+    // to wws (the pinned nginx forwards it; the RFC list-strip would
+    // fail the two-sided diff — the delta is named in the module doc)
+    keep("x-zap")
+
+    print("hop ok")
+    0
+}

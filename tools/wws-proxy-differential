@@ -1,0 +1,215 @@
+#!/bin/sh
+# wws-proxy-differential — the TWO-SIDED proxy differential (ws03). A
+# reverse proxy's compat is unverifiable from the client side alone, so
+# this harness runs BOTH the pinned nginx AND wws as the FRONT PROXY,
+# each against its own instance of the SAME rig backend (tests/rig/
+# rigback), and byte-compares BOTH legs of each exchange:
+#   - the CLIENT-facing response (Server/Date normalized, as ws02), and
+#   - the BACKEND-recorded request the proxy actually sent upstream
+#     (the backend port normalized to @BPORT@ — the one dynamic value).
+# A case is green only when nginx AND wws agree with the case's pinned
+# `--- expect-client` and `--- expect-backend`. W3 declares on this.
+#
+# REFUSES, naming the pin, when the oracle is absent/drifted. Loopback
+# only, port 0 everywhere (the #121 lesson), deadline on every read.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+DIFF_DIR=tests/differential
+BIN=$DIFF_DIR/bin/nginx
+WWS=target/wws-release
+RIGBACK=./tests/rig/rigback/rigback.lu
+pin_version=$(sed -n 's/^version = //p' $DIFF_DIR/NGINX-PIN)
+
+if [ ! -x "$BIN" ]; then
+    echo "proxy-differential: REFUSED — pinned nginx missing at $BIN (nginx/$pin_version; build per docs/DIFFERENTIAL.md)" >&2
+    exit 1
+fi
+have_version=$("$BIN" -v 2>&1 | sed -n 's|^nginx version: nginx/||p')
+if [ "$have_version" != "$pin_version" ]; then
+    echo "proxy-differential: REFUSED — $BIN is nginx/$have_version, the pin is nginx/$pin_version" >&2
+    exit 1
+fi
+if [ ! -x "$WWS" ]; then
+    echo "proxy-differential: REFUSED — wws release binary missing at $WWS (the gauntlet's tiers step builds it)" >&2
+    exit 1
+fi
+
+# normalize <in >out : replace the VALUE of every NORMALIZE-named
+# response header with <normalized>, header section only (client leg).
+normalize() {
+    awk -v listfile="$DIFF_DIR/NORMALIZE" '
+        BEGIN {
+            while ((getline l < listfile) > 0) {
+                sub(/#.*/, "", l); gsub(/^[ \t]+|[ \t]+$/, "", l)
+                if (l != "") norm[tolower(l)] = 1
+            }
+            hdr = 1
+        }
+        {
+            line = $0
+            if (hdr) {
+                probe = line; sub(/\r$/, "", probe)
+                if (probe == "") { hdr = 0; print line; next }
+                n = index(probe, ":")
+                if (n > 1 && tolower(substr(probe, 1, n - 1)) in norm) {
+                    print substr(probe, 1, n - 1) ": <normalized>\r"; next
+                }
+            }
+            print line
+        }'
+}
+
+# section <name> <casefile> : print a case section's raw bytes.
+section() {
+    awk -v want="--- $1" '
+        { probe = $0; sub(/\r$/, "", probe)
+          if (probe ~ /^--- /) { in_s = (probe == want); next }
+          if (in_s) print }' "$2"
+}
+
+# free front port via the wolf rig.
+free_port() {
+    for _ in 1 2 3 4 5; do
+        p=$("$WOLF" run ./tests/rig/freeport.lu 2>/dev/null)
+        case "$p" in '' | *[!0-9]*) continue ;; esac
+        echo "$p"; return 0
+    done
+    return 1
+}
+
+# start_backend <record> <reply> <portfile> <errfile> : launch rigback,
+# echo its pid; the caller polls <portfile> for the chosen port.
+start_backend() {
+    "$WOLF" run "$RIGBACK" "$1" "$2" 1 >"$3" 2>"$4" &
+    echo $!
+}
+
+# wait_port <portfile> : poll for a numeric port, echo it (or fail).
+wait_port() {
+    for _ in $(seq 1 50); do
+        p=$(head -1 "$1" 2>/dev/null)
+        case "$p" in '' | *[!0-9]*) sleep 0.1; continue ;; esac
+        echo "$p"; return 0
+    done
+    return 1
+}
+
+# send <port> <reqfile> <outfile> : replay the client request, capture
+# the reply (retry against the not-ready window).
+send() {
+    for _poll in $(seq 1 50); do
+        if "$WOLF" run ./tests/rig/diffsend.lu "$1" "$2" >"$3" 2>"$3.err"; then
+            return 0
+        fi
+        grep -q 'error: refused' "$3.err" || return 1
+        sleep 0.1
+    done
+    return 1
+}
+
+# run_side <which> <bin-invocation...> — sets globals via files. Too
+# many moving parts for a function return; inlined per side below.
+
+failures=0
+cases=0
+for case in "$DIFF_DIR"/proxy-cases/*.case; do
+    [ -f "$case" ] || continue
+    cases=$((cases + 1))
+    name=$(basename "$case" .case)
+    scratch="target/proxy-differential/$name"
+    rm -rf "$scratch"; mkdir -p "$scratch"
+    section request "$case" >"$scratch/request.raw"
+    section reply "$case" >"$scratch/reply.raw"
+    section expect-client "$case" >"$scratch/expect-client.raw"
+    section expect-backend "$case" >"$scratch/expect-backend.raw"
+    normalize <"$scratch/expect-client.raw" >"$scratch/expect-client.norm"
+    # expect-backend is stored pre-normalized (port already @BPORT@)
+    cp "$scratch/expect-backend.raw" "$scratch/expect-backend.norm"
+
+    ok=1
+
+    # ---------- the ORACLE side ----------
+    ng_ok=0
+    for attempt in 1 2 3; do
+        rm -f "$scratch/ng.record"
+        ngpid=$(start_backend "$scratch/ng.record" "$scratch/reply.raw" "$scratch/ng.bport" "$scratch/ng.rb.err")
+        bport=$(wait_port "$scratch/ng.bport") || { kill "$ngpid" 2>/dev/null; continue; }
+        fport=$(free_port) || { kill "$ngpid" 2>/dev/null; continue; }
+        sed -e "s|@PORT@|$fport|" -e "s|@BACKEND@|127.0.0.1:$bport|" \
+            "$DIFF_DIR/nginx.proxy.conf.in" >"$scratch/nginx.conf"
+        "$BIN" -p "$(pwd)/$scratch" -c nginx.conf -e error.log &
+        proxypid=$!
+        if send "$fport" "$scratch/request.raw" "$scratch/ng.client"; then ng_ok=1; fi
+        kill "$proxypid" 2>/dev/null; wait "$proxypid" 2>/dev/null
+        kill "$ngpid" 2>/dev/null; wait "$ngpid" 2>/dev/null
+        ng_bport=$bport
+        [ "$ng_ok" = 1 ] && break
+    done
+
+    # ---------- the wws side ----------
+    wws_ok=0
+    for attempt in 1 2 3; do
+        rm -f "$scratch/wws.record"
+        wwsbpid=$(start_backend "$scratch/wws.record" "$scratch/reply.raw" "$scratch/wws.bport" "$scratch/wws.rb.err")
+        bport=$(wait_port "$scratch/wws.bport") || { kill "$wwsbpid" 2>/dev/null; continue; }
+        fport=$(free_port) || { kill "$wwsbpid" 2>/dev/null; continue; }
+        sed -e "s|@PORT@|$fport|" -e "s|@BACKEND@|127.0.0.1:$bport|" \
+            "$DIFF_DIR/wws.proxy.conf.in" >"$scratch/wws.conf"
+        "$WWS" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/wws.conf" 2>"$scratch/wws.err" &
+        proxypid=$!
+        if send "$fport" "$scratch/request.raw" "$scratch/wws.client"; then wws_ok=1; fi
+        kill "$proxypid" 2>/dev/null; wait "$proxypid" 2>/dev/null
+        kill "$wwsbpid" 2>/dev/null; wait "$wwsbpid" 2>/dev/null
+        wws_bport=$bport
+        [ "$wws_ok" = 1 ] && break
+    done
+
+    if [ "$ng_ok" != 1 ]; then
+        echo "proxy-differential: FAILED — $name: nginx never answered" >&2
+        failures=$((failures + 1)); continue
+    fi
+    if [ "$wws_ok" != 1 ]; then
+        echo "proxy-differential: FAILED — $name: wws never answered (see $scratch/wws.err)" >&2
+        failures=$((failures + 1)); continue
+    fi
+
+    # normalize the client legs (Server/Date) and the backend legs
+    # (the dynamic backend port → @BPORT@)
+    normalize <"$scratch/ng.client" >"$scratch/ng.client.norm"
+    normalize <"$scratch/wws.client" >"$scratch/wws.client.norm"
+    sed "s|127.0.0.1:$ng_bport|127.0.0.1:@BPORT@|g" "$scratch/ng.record" >"$scratch/ng.record.norm"
+    sed "s|127.0.0.1:$wws_bport|127.0.0.1:@BPORT@|g" "$scratch/wws.record" >"$scratch/wws.record.norm"
+
+    # ---- the four comparisons ----
+    if ! diff -u "$scratch/expect-client.norm" "$scratch/ng.client.norm" >"$scratch/d1" 2>&1; then
+        echo "proxy-differential: FAILED — $name: ORACLE client leg diverged from expect (pin stale?):" >&2
+        cat "$scratch/d1" >&2; ok=0
+    fi
+    if ! diff -u "$scratch/expect-client.norm" "$scratch/wws.client.norm" >"$scratch/d2" 2>&1; then
+        echo "proxy-differential: FAILED — $name: WWS client leg diverged from expect:" >&2
+        cat "$scratch/d2" >&2; ok=0
+    fi
+    if ! diff -u "$scratch/expect-backend.norm" "$scratch/ng.record.norm" >"$scratch/d3" 2>&1; then
+        echo "proxy-differential: FAILED — $name: ORACLE backend leg diverged from expect (pin stale?):" >&2
+        cat "$scratch/d3" >&2; ok=0
+    fi
+    if ! diff -u "$scratch/expect-backend.norm" "$scratch/wws.record.norm" >"$scratch/d4" 2>&1; then
+        echo "proxy-differential: FAILED — $name: WWS backend leg diverged from expect:" >&2
+        cat "$scratch/d4" >&2; ok=0
+    fi
+
+    if [ "$ok" = 1 ]; then
+        echo "proxy-differential: ok — $name (nginx + wws agree, client AND backend legs, on loopback)"
+    else
+        failures=$((failures + 1))
+    fi
+done
+
+if [ "$cases" = 0 ]; then
+    echo "proxy-differential: FAILED — no case files under $DIFF_DIR/proxy-cases/" >&2
+    exit 1
+fi
+echo "proxy-differential: $((cases - failures))/$cases case(s) green (two-sided: oracle + wws vs expect, both legs)"
+[ "$failures" = 0 ] || exit 1

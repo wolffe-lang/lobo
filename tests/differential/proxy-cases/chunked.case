@@ -1,0 +1,36 @@
+// chunked upstream body relayed to the client; two-sided
+--- request
+GET /strip/c HTTP/1.1
+Host: front.example
+Connection: close
+
+
+--- reply
+HTTP/1.1 200 OK
+Content-Type: text/plain
+Transfer-Encoding: chunked
+
+5
+hello
+6
+ world
+0
+
+
+--- expect-client
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/plain
+Transfer-Encoding: chunked
+Connection: close
+
+b
+hello world
+0
+
+--- expect-backend
+=== EXCHANGE ===
+GET /c HTTP/1.1
+Host: 127.0.0.1:@BPORT@
+

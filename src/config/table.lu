@@ -382,7 +382,16 @@ pub fn table() -> Table {
         "compression opt-out by UA",
     )
     // ---- planned(ws03): proxying and rewriting
-    row(mut t, "proxy_pass", "location if", "", 1, 1, "planned(ws03)", "upstream handoff")
+    row(
+        mut t,
+        "proxy_pass",
+        "location if",
+        "",
+        1,
+        1,
+        "implemented",
+        "upstream handoff; URI rewrite per the ws03 probe matrix; variable/https forms are named_error",
+    )
     row(
         mut t,
         "proxy_set_header",
@@ -390,8 +399,8 @@ pub fn table() -> Table {
         "",
         2,
         2,
-        "planned(ws03)",
-        "upstream request header — child presence drops ALL parent-level ones, see WWS-L002",
+        "implemented",
+        "upstream request header — child presence drops ALL parent-level ones (WWS-L002, honored at runtime)",
     )
     row(
         mut t,
@@ -420,8 +429,8 @@ pub fn table() -> Table {
         "",
         1,
         1,
-        "planned(ws03)",
-        "upstream read deadline",
+        "implemented",
+        "upstream read deadline (expiry -> 504)",
     )
     row(
         mut t,
@@ -471,8 +480,8 @@ pub fn table() -> Table {
         "",
         1,
         -1,
-        "planned(ws03)",
-        "pool member address and flags — a SIMPLE directive here, not the http server block (the (name, context) key exists for exactly this)",
+        "implemented",
+        "pool member address and flags (weight/max_fails/fail_timeout/backup); smooth weighted round-robin, probed against the oracle",
     )
     row(mut t, "keepalive", "upstream", "", 1, 1, "planned(ws03)", "idle upstream connections")
     row(mut t, "least_conn", "upstream", "", 0, 0, "planned(ws03)", "balancing method")

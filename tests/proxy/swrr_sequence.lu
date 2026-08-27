@@ -1,0 +1,79 @@
+//! check: run(exit=0, stdout="swrr ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: proxy http config
+//!
+//! Smooth weighted round-robin, PINNED against the pinned oracle. A
+//! 3-server pool with weights {s1=1, s2=2, s3=1} was probed against
+//! nginx/1.30.4 (a backend per peer, logging which one each request
+//! hit); the oracle's rotation is s2 s1 s3 s2, period 4, repeating.
+//! This asserts proxy.swrr_pick reproduces it EXACTLY over ten steps —
+//! the determinism the differential needs — and that resetting the
+//! state (a fresh Swrr) replays the identical sequence (seedable).
+//! PURE: no clock, no random; runs on all three lanes.
+
+use proxy
+
+/// Run `steps` picks over weights {1,2,1} (all peers up) and return the
+/// 1-based peer sequence as a space-joined string ("s2 s1 s3 …").
+fn sequence(steps: int) -> str {
+    var w = List[int]()
+    (mut w).push(1)
+    (mut w).push(2)
+    (mut w).push(1)
+    var up = List[bool]()
+    (mut up).push(true)
+    (mut up).push(true)
+    (mut up).push(true)
+    var s = proxy.swrr_new(3)
+    var out = ""
+    var i: int = 0
+    while i < steps {
+        let pick = proxy.swrr_pick(mut s, w, up)
+        out = "{out}s{pick + 1} "
+        i = i + 1
+    }
+    out.trim()
+}
+
+fn main() -> int {
+    let want = "s2 s1 s3 s2 s2 s1 s3 s2 s2 s1"
+    let got = sequence(10)
+    assert(got == want, "swrr sequence: got `{got}` want `{want}`")
+
+    // seedable/resettable: a fresh state replays the identical prefix
+    let again = sequence(4)
+    assert(again == "s2 s1 s3 s2", "swrr reset replay: got `{again}`")
+
+    // a downed peer (s2) is skipped: {1,-,1} round-robins s1 s3 s1 s3
+    var w = List[int]()
+    (mut w).push(1)
+    (mut w).push(2)
+    (mut w).push(1)
+    var up = List[bool]()
+    (mut up).push(true)
+    (mut up).push(false)
+    (mut up).push(true)
+    var s = proxy.swrr_new(3)
+    var seq = ""
+    var i: int = 0
+    while i < 4 {
+        let pick = proxy.swrr_pick(mut s, w, up)
+        seq = "{seq}s{pick + 1} "
+        i = i + 1
+    }
+    assert(seq.trim() == "s1 s3 s1 s3", "swrr with s2 down: got `{seq}`")
+
+    // no peer up → -1
+    var alldown = List[bool]()
+    (mut alldown).push(false)
+    (mut alldown).push(false)
+    (mut alldown).push(false)
+    var s2 = proxy.swrr_new(3)
+    let none_pick = proxy.swrr_pick(mut s2, w, alldown)
+    assert(none_pick == -1, "swrr all down should be -1, got {none_pick}")
+
+    print("swrr ok")
+    0
+}
