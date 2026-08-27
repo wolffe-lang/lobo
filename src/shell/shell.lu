@@ -17,13 +17,21 @@
 //! reload story (contract §3).
 //!
 //! Design (contract §3 sketch): every trigger — a control command
-//! today, a real signal when #126 lands — dispatches into the SAME
-//! verb layer (`dispatch`), so the paths are interchangeable and join
-//! the same tests. The config model is FROZEN after parse (ws01): a
-//! reload builds a NEW model and SWAPS the reference; serving code
-//! never mutates config state, so an in-flight request finishing on
-//! the old generation and a new request routing the new one is data,
-//! not a race (contract pitfall — the frozen-model discipline).
+//! today, a real signal when #126 lands — flows through the SAME verb
+//! dispatch (in the entry's poll loop), so the paths are
+//! interchangeable and join the same tests. The config model is FROZEN
+//! after parse (ws01): a reload builds a NEW model and SWAPS the
+//! reference; serving code never mutates config state, so an in-flight
+//! request finishing on the old generation and a new request routing
+//! the new one is data, not a race (contract pitfall — the
+//! frozen-model discipline).
+//!
+//! ws08 lives here as the PURE reporting surface for the drain the
+//! entry's loop counts: the generation-id content hash, the
+//! worker_shutdown_timeout parse, the FROZEN log-event vocabulary
+//! (ws09/ws12 reuse the names), and the status stanza builders (human
+//! text + versioned JSON), plus `control_fetch` for the multi-line
+//! status reply. The counter itself is the loop's; the words are here.
 //!
 //! Lane note: the CLI grammar and the text builders are PURE and run
 //! on all three lanes; the pid lifecycle is fs (native+checked); the
@@ -48,12 +56,14 @@ pub fn version() -> str {
 
 /// The parsed command line. `mode` is the verb the entry dispatches:
 /// banner | version | version_verbose | help | check | dump | docs |
-/// serve | signal | error. `signal` carries the validated verb when
-/// `mode == "signal"`. `err_msg` is the nginx-shaped diagnostic (own
-/// identity: "wws: …" for "nginx: …") and `exit_code` the code to
-/// return when `mode == "error"` (or a terminal mode's code). The
-/// path knobs (`prefix`, `conf`, `errlog`, `globals`) and `quiet`
-/// carry through to the acting modes.
+/// serve | signal | status | error. `signal` carries the validated
+/// verb when `mode == "signal"`. `format` is the `--format` value
+/// (default "text", "json" for the machine-readable `wws status`).
+/// `err_msg` is the nginx-shaped diagnostic (own identity: "wws: …" for
+/// "nginx: …") and `exit_code` the code to return when `mode ==
+/// "error"` (or a terminal mode's code). The path knobs (`prefix`,
+/// `conf`, `errlog`, `globals`) and `quiet` carry through to the acting
+/// modes.
 pub struct Cli {
     mode: str,
     signal: str,
@@ -64,6 +74,7 @@ pub struct Cli {
     quiet: bool,
     err_msg: str,
     exit_code: int,
+    format: str,
 }
 
 /// True when `name` is one of nginx's four signal words. Total.
@@ -106,6 +117,7 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var errlog = ""
     var globals = ""
     var quiet = false
+    var format = "text"
     var want = ""
     var want_kind = ""
     var err_msg = ""
@@ -130,6 +142,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 errlog = a
             } else if want == "g" {
                 globals = a
+            } else if want == "format" {
+                format = a
             }
             want = ""
             want_kind = ""
@@ -162,10 +176,15 @@ pub fn parse_cli(args: List[str]) -> Cli {
             want_kind = "parameter"
         } else if a == "--version" {
             mode = "version"
+        } else if a == "--format" {
+            want = "format"
+            want_kind = "parameter"
         } else if a == "directives-md" {
             mode = "docs"
         } else if a == "serve" {
             mode = "serve"
+        } else if a == "status" {
+            mode = "status"
         } else if a.starts_with("-") {
             errored = true
             let letter = a[1..a.len]
@@ -195,6 +214,7 @@ pub fn parse_cli(args: List[str]) -> Cli {
         quiet: quiet,
         err_msg: err_msg,
         exit_code: code,
+        format: format,
     }
 }
 
@@ -522,4 +542,248 @@ pub fn listen_removed(old: List[str], new: List[str]) -> List[str] {
         }
     }
     out
+}
+
+// ------------------------------------------------------------------
+// ws08 — the drain you can watch. The generation id (a content hash of
+// the frozen model), the worker_shutdown_timeout knob, the log-event
+// vocabulary (FROZEN — ws09's JSON logs and ws12's metrics reuse these
+// names), and the status surface (text + versioned JSON). All PURE and
+// total — they run on all three lanes; the counting itself lives in the
+// entry's poll loop (a per-generation live counter, spawn-free).
+// ------------------------------------------------------------------
+
+/// A non-negative int as zero-padded 8-digit lowercase hex. Total for
+/// `0 <= n < 2^32`.
+fn hex8(n: int) -> str {
+    let digits = "0123456789abcdef"
+    var v = n
+    var out = ""
+    var i: int = 0
+    while i < 8 {
+        let d = v % 16
+        out = "{digits[d..d + 1]}{out}"
+        v = v / 16
+        i = i + 1
+    }
+    out
+}
+
+/// The generation id: a content hash of the FROZEN config model
+/// (`render_conf`'s canonical text), rendered as 16 hex chars. Two
+/// checked-arithmetic polynomial rolls (no bit ops — the checked tier
+/// refuses `&`/`^`/`>>` on plain int, and `wrapping[u64]` is refused at
+/// this pin, F-WS08-clock's sibling) folded to 8 hex each. A reload to
+/// an IDENTICAL config yields the SAME id — an operator can see a reload
+/// changed nothing — and any content change changes it. Total.
+pub fn conf_hash(c: config.Conf) -> str {
+    let text = config.render_conf(c)
+    var a: int = 0
+    var b: int = 0
+    for x in text.bytes() {
+        a = (a * 131 + x) % 2147483647
+        b = (b * 1000003 + x + 7) % 2147483647
+    }
+    "{hex8(a)}{hex8(b)}"
+}
+
+/// Parse an nginx-style duration into milliseconds: a trailing `ms` is
+/// milliseconds, a trailing `s` is seconds, a bare number is seconds
+/// (nginx's default unit for time directives). A malformed value is 0.
+/// Total.
+fn parse_dur_ms(raw: str) -> int {
+    let s = raw.trim()
+    if s.is_empty() {
+        return 0
+    }
+    if s.ends_with("ms") {
+        return digits_val(s.strip_suffix("ms") else "")
+    }
+    if s.ends_with("s") {
+        return digits_val(s.strip_suffix("s") else "") * 1000
+    }
+    digits_val(s) * 1000
+}
+
+/// A run of ASCII digits as a non-negative int; any non-digit byte
+/// stops the scan (so `30s` already stripped to `30` parses, and junk
+/// yields what parsed so far). Total.
+fn digits_val(s: str) -> int {
+    var v: int = 0
+    for x in s.bytes() {
+        if x < 48 || x > 57 {
+            return v
+        }
+        v = v * 10 + (x - 48)
+    }
+    v
+}
+
+/// The `worker_shutdown_timeout` in milliseconds — the deadline a
+/// DRAINING generation gets before its remaining connections are
+/// aborted and it retires anyway (contract §3). 0 (the nginx default,
+/// and the absence of the directive) means NO forced timeout: a
+/// generation drains fully, however long that takes. Total.
+pub fn shutdown_timeout_ms(c: config.Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "worker_shutdown_timeout" && c.args_n[i] >= 1 {
+            return parse_dur_ms(c.argp[c.args_at[i]])
+        }
+        i = i + 1
+    }
+    0
+}
+
+// ---- the log-event vocabulary (FROZEN; documented in docs/) ---------
+// Each builder returns the event BODY: a stable name then space-
+// separated key=value fields. The entry prefixes "wws: [notice] " and
+// emits through the logging seam (eprint, ws02); ws09 reformats these
+// names into JSON and ws12 into metrics, so the NAMES and FIELD KEYS
+// are a contract, not decoration.
+
+/// A new config generation was parsed and frozen (a reload succeeded).
+pub fn ev_generation_loaded(gen: int, hash: str) -> str {
+    "generation-loaded gen={gen} id={hash}"
+}
+
+/// A generation became the live, accepting one.
+pub fn ev_generation_activated(gen: int) -> str {
+    "generation-activated gen={gen}"
+}
+
+/// A generation stopped accepting and began draining, still holding
+/// `held` connections.
+pub fn ev_generation_draining(gen: int, held: int) -> str {
+    "generation-draining gen={gen} held={held}"
+}
+
+/// One connection on a draining generation closed; `remaining` are the
+/// connections that generation still holds.
+pub fn ev_connection_retired(gen: int, remaining: int) -> str {
+    "connection-retired gen={gen} remaining={remaining}"
+}
+
+/// A draining generation reached zero connections (or its
+/// worker_shutdown_timeout expired): `drained` closed cleanly,
+/// `aborted` were force-closed by the timeout, over `age_ms`.
+pub fn ev_generation_retired(gen: int, drained: int, aborted: int, age_ms: int) -> str {
+    "generation-retired gen={gen} drained={drained} aborted={aborted} age-ms={age_ms}"
+}
+
+// ---- the status surface --------------------------------------------
+// SCALAR builders, not List-of-struct: the checked tier refuses a
+// `List[<imported struct>]()` construction (generic data across a
+// module boundary), so the generation TABLE is built in the entry over
+// its own local row type and formatted one line at a time here. Every
+// builder is pure and total, so the shape is unit-tested off the socket
+// on all three lanes.
+
+/// The JSON status schema version (the ws07 convention — a versioned,
+/// machine-readable surface ws12's metrics endpoint serves too). Bumped
+/// only on a breaking shape change. Total.
+pub fn status_schema() -> int {
+    1
+}
+
+/// The human status stanza's header (`wws status`): the identity line,
+/// the current generation, and the quit posture — one fact per line,
+/// nginx's shape. The entry appends one `status_line_text` per
+/// generation. Read over the control channel to the peer's close (the
+/// stanza is multi-line), so `control_fetch` reads it. Total.
+pub fn status_head_text(current: int, quitting: bool) -> str {
+    var s = "wws status\n"
+    s = "{s}current generation: {current}\n"
+    s = "{s}quitting: {bool_word(quitting)}\n"
+    s
+}
+
+/// One generation's line in the human status table. `remaining_ms` is
+/// the worker_shutdown_timeout remaining for a draining generation, or
+/// -1 when none applies (a current generation, or no timeout). Includes
+/// the trailing newline. Total.
+pub fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int) -> str {
+    var line = "generation {gen}: {state} live={live} age-ms={age_ms} id={hash}"
+    if remaining_ms >= 0 {
+        line = "{line} shutdown-in-ms={remaining_ms}"
+    }
+    "{line}\n"
+}
+
+/// The JSON status stanza's open: `{"schema":1,"current":N,
+/// "quitting":b,"generations":[` (no newlines). The entry appends
+/// comma-separated `status_json_obj`s then `status_json_close`. ws12's
+/// metrics endpoint serves this same object. Total.
+pub fn status_json_open(current: int, quitting: bool) -> str {
+    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"generations\":["
+}
+
+/// One generation as a JSON object (no leading comma, no newline) — the
+/// entry joins these with commas. Total.
+pub fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int) -> str {
+    "{{\"gen\":{gen},\"state\":\"{state}\",\"live\":{live},\"age_ms\":{age_ms},\"id\":\"{hash}\",\"shutdown_remaining_ms\":{remaining_ms}}}"
+}
+
+/// The JSON status stanza's close: `]}`. Total.
+pub fn status_json_close() -> str {
+    "]}}"
+}
+
+/// "true"/"false" — the shared spelling for the human stanza and the
+/// JSON wire (JSON's booleans are the same two words). Total.
+fn bool_word(b: bool) -> str {
+    if b {
+        return "true"
+    }
+    "false"
+}
+
+// ------------------------------------------------------------------
+// control_fetch — the read-to-close variant of control_send, for a
+// MULTI-LINE reply (the status stanza). control_send stops at the first
+// newline (a one-line verb reply); status needs the whole body, which
+// the server writes and then closes, so the client reads to the close.
+// ------------------------------------------------------------------
+
+/// Send one command line and read the reply until the peer closes
+/// (ignoring interior newlines — the status stanza is multi-line). Rows
+/// mirror control_send: `refused` (no master), `io` otherwise. The
+/// reply keeps its interior newlines; the trailing newline is trimmed.
+#[allow(w0602)]
+pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
+    let c = net_connect(addr) else |e| match e {
+        refused => {
+            return refused
+        },
+        timeout => {
+            return io
+        },
+        io => {
+            return io
+        },
+    }
+    net_deadline(c, 2000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "{line}\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf.trim()
 }
