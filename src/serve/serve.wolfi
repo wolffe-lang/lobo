@@ -1,9 +1,10 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 77100dc5e7f45048a8a7ee0996b8b66e6aace05084553db0599c5dd45062939b
-  pkg_hash    77100dc5e7f45048a8a7ee0996b8b66e6aace05084553db0599c5dd45062939b
+  export_hash 7f4735720c693ffea3384f3b80bea21d42cf3571bc8eda9a727b3569d02bd828
+  pkg_hash    7f4735720c693ffea3384f3b80bea21d42cf3571bc8eda9a727b3569d02bd828
   deps:
     config  d0125ffaf32b2e05c7fd6e59d71dc467a909bd3766fc0420063e918bece00fed
+    conn  feccdb33d942d9ea2bea6a7c29518a33d802d7c26e76cd5887b9c98f30b4dee5
     http  0799ad135eafd30286c8dfe663b8a6ef5ea9892be307487f74ce904cbb88676c
     proxy  ff910ca1d4bfe181b354d799d8907709bbafc98c5178087454172f2da3ce3cae
   items:
@@ -15,13 +16,15 @@ module pkg :: serve
     [5] pub header_too_large_body — fn header_too_large_body(server: str) -> str
     [6] pub http_date — fn http_date(secs: int) -> str
     [7] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
-    [8] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
-    [9] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
-    [10] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -) -> ρ_caller
-    [11] pub status_phrase — fn status_phrase(code: int) -> str
-    [12] pub to_hex — fn to_hex(n: int) -> str
-    [13] pub version — fn version() -> str
-    [14] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int }
-    [15] pub ReqOut — struct ReqOut { close: bool, carry: str }
-    [16] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int }
+    [8] pub listen_addr_plain — fn listen_addr_plain(c: config.Conf) -> str · regions (ρ1) -> -
+    [9] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
+    [10] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
+    [11] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (ρ1, ρ2, ρ3, ρ4, -) -> -
+    [12] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -) -> ρ_caller
+    [13] pub status_phrase — fn status_phrase(code: int) -> str
+    [14] pub to_hex — fn to_hex(n: int) -> str
+    [15] pub version — fn version() -> str
+    [16] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int }
+    [17] pub ReqOut — struct ReqOut { close: bool, carry: str }
+    [18] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int }
 
