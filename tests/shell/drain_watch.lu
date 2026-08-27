@@ -1,0 +1,295 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! THE OBSERVABLE DRAIN (ws08, report 11 §2 item 3 — the "finally!").
+//! nginx's `-s reload` is a shrug: the operator cannot see the old
+//! workers draining. wws narrates it. This is the witness the whole
+//! sprint exists for: spawn the real binary, hold keepalive connections
+//! on generation 1, reload, and WATCH — through `wws status` over the
+//! control channel — generation 1 drain (its live count falling) while
+//! generation 2 serves brand-new connections, and generation 1 RETIRE
+//! the moment its last connection closes.
+//!
+//! Determinism where scheduling could flap: after each close the loop
+//! needs a few poll passes to notice, so every count is reached by
+//! POLLING status until it settles (generous ceilings), never by a bare
+//! sleep — the outcome is fixed, only the wait is elastic. Ten-run.
+//!
+//! Loopback only, OS-chosen ports, scratch cleared at the START.
+
+use shell
+
+/// The live-connection count `status` reports for `gen`, or -1 when the
+/// generation is not in the table (retired/absent). Parses the human
+/// stanza's `generation N: STATE live=K` line. Total.
+fn gen_live(status: str, gen: int) -> int {
+    let key = "generation {gen}: "
+    let at = status.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    let tail = status[at..status.len]
+    let lk = tail.find("live=") else -1
+    if lk < 0 {
+        return -1
+    }
+    let after = tail[lk + 5..tail.len]
+    var v: int = 0
+    for b in after.bytes() {
+        if b < 48 || b > 57 {
+            return v
+        }
+        v = v * 10 + (b - 48)
+    }
+    v
+}
+
+/// True when `status` shows `gen` in `state`. Total.
+fn gen_in_state(status: str, gen: int, state: str) -> bool {
+    let line = "generation {gen}: {state} "
+    status.contains(line)
+}
+
+/// The status stanza (human text) from the master at `ep`. "" on any
+/// control trouble. Total.
+fn status_of(ep: str) -> str {
+    shell.control_fetch(ep, "status") else |_| {
+        return ""
+    }
+}
+
+/// Poll status until `gen`'s live count equals `want`, up to ~8s.
+/// Returns the last status seen (so a failing assertion can print it).
+/// Total.
+fn wait_live(ep: str, gen: int, want: int) -> str {
+    var i: int = 0
+    var last = ""
+    while i < 160 {
+        last = status_of(ep)
+        if gen_live(last, gen) == want {
+            return last
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    last
+}
+
+/// Poll status until `gen` has left the table (retired), up to ~8s.
+/// Total.
+fn wait_gone(ep: str, gen: int) -> str {
+    var i: int = 0
+    var last = ""
+    while i < 160 {
+        last = status_of(ep)
+        if gen_live(last, gen) < 0 {
+            return last
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    last
+}
+
+/// Poll the control endpoint until it answers `ping`, up to ~6s. Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// A free loopback port (bind :0, read it, release it). Row: net io.
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Open a keepalive connection, send one GET, read the reply, and
+/// return the still-open socket (the caller holds it, then closes it to
+/// drive the drain). Asserts the body carries `want`. Row: net io.
+fn open_held(port: int, want: str) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        if buf.contains(want) {
+            reading = false
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                reading = false
+                ""
+            }
+            if piece.is_empty() {
+                reading = false
+            } else {
+                buf = "{buf}{piece}"
+            }
+        }
+    }
+    assert(buf.contains(want), "held connection served {want}: {buf}")
+    c
+}
+
+/// A one-shot Connection: close GET, returning the body. Row: net io.
+fn http_get(port: int, path: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    let m = buf.find("\r\n\r\n") else -1
+    if m < 0 {
+        return io
+    }
+    buf[m + 4..buf.len]
+}
+
+fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
+    let text = "pid ws08_drain/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    fs_write_text(path, text)?
+}
+
+fn main() -> !int {
+    let scratch = "ws08_drain"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/A")?
+    fs_create_dir_all("{scratch}/B")?
+    fs_write_text("{scratch}/A/index.html", "GEN-A-BODY\n")?
+    fs_write_text("{scratch}/B/index.html", "GEN-B-BODY\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let confp = "{scratch}/wws.conf"
+    write_conf(confp, hp, cp, "ws08_drain/A")?
+
+    var argv = List[str]()
+    (mut argv).push("target/wws-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn of target/wws-debug failed — is the debug tier built?")
+        0
+    }
+
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| {
+            0
+        }
+        assert(false, "the spawned wws never became alive on {ep}")
+    }
+
+    // three keepalive connections, all on generation 1, held open
+    var held = List[int]()
+    (mut held).push(open_held(hp, "GEN-A-BODY")?)
+    (mut held).push(open_held(hp, "GEN-A-BODY")?)
+    (mut held).push(open_held(hp, "GEN-A-BODY")?)
+    let s0 = wait_live(ep, 1, 3)
+    assert(gen_live(s0, 1) == 3, "generation 1 holds 3 live connections: {s0}")
+    assert(gen_in_state(s0, 1, "current"), "generation 1 is current before reload: {s0}")
+
+    // reload to B — generation 1 begins draining, generation 2 serves
+    write_conf(confp, hp, cp, "ws08_drain/B")?
+    let r = shell.control_send(ep, "reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control reload failed")
+        ""
+    }
+    assert(r.contains("generation 2"), "reload advanced to generation 2: {r}")
+
+    let s1 = wait_live(ep, 1, 3)
+    assert(gen_in_state(s1, 1, "draining"), "generation 1 is DRAINING after reload: {s1}")
+    assert(gen_live(s1, 1) == 3, "draining generation 1 still holds its 3 connections: {s1}")
+    assert(gen_in_state(s1, 2, "current"), "generation 2 is the new current: {s1}")
+
+    // generation 2 serves NEW connections while generation 1 drains
+    let b2 = http_get(hp, "/index.html")?
+    assert(b2.contains("GEN-B-BODY"), "generation 2 serves new connections while gen1 drains: {b2}")
+    // and a request on a HELD generation-1 connection still routes the
+    // OLD model (the frozen-model discipline, live)
+    let s_still = status_of(ep)
+    assert(
+        gen_live(s_still, 1) == 3,
+        "gen1 still draining 3 while gen2 served a new one: {s_still}",
+    )
+
+    // close them one at a time and WATCH the count fall — the drain
+    net_close(held[0]) else |_| {}
+    let d2 = wait_live(ep, 1, 2)
+    assert(gen_live(d2, 1) == 2, "closing one connection dropped gen1 to 2: {d2}")
+
+    net_close(held[1]) else |_| {}
+    let d1 = wait_live(ep, 1, 1)
+    assert(gen_live(d1, 1) == 1, "closing another dropped gen1 to 1: {d1}")
+
+    // the last close RETIRES generation 1
+    net_close(held[2]) else |_| {}
+    let gone = wait_gone(ep, 1)
+    assert(gen_live(gone, 1) < 0, "generation 1 RETIRED when its last connection closed: {gone}")
+    assert(
+        gen_in_state(gone, 2, "current"),
+        "generation 2 keeps serving after gen1 retired: {gone}",
+    )
+
+    // stop cleanly
+    let rs = shell.control_send(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control stop failed")
+        ""
+    }
+    assert(rs.contains("shutting down"), "stop reply: {rs}")
+    let _code = os_wait(child) else |_| {
+        0
+    }
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

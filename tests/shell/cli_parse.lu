@@ -58,6 +58,20 @@ fn main() -> int {
     assert(shell.parse_cli(one("serve")).mode == "serve", "serve verb")
     assert(shell.parse_cli(one("directives-md")).mode == "docs", "docs verb")
 
+    // ws08: the status verb and its --format modifier
+    assert(shell.parse_cli(one("status")).mode == "status", "status verb")
+    assert(shell.parse_cli(one("status")).format == "text", "status default format is text")
+    var stj = List[str]()
+    (mut stj).push("status")
+    (mut stj).push("--format")
+    (mut stj).push("json")
+    let sjson = shell.parse_cli(stj)
+    assert(sjson.mode == "status", "status --format json → status mode")
+    assert(sjson.format == "json", "--format json captured")
+    let need_fmt = shell.parse_cli(one("--format"))
+    assert(need_fmt.mode == "error", "--format with no argument → error")
+    assert(need_fmt.exit_code == 1, "--format no arg exit 1")
+
     // the quiet modifier does not change the mode
     let q = shell.parse_cli(two("-q", "-t"))
     assert(q.mode == "check", "-q -t → check")
