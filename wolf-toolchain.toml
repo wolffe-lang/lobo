@@ -14,23 +14,29 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang trunk at the s109 merge (nested rows flatten, declared
-# tags resolve wider). ≥ 1b149ba as the ws00 contract requires: net
-# with `net_deadline` on every lane this repo runs, json/process
-# native, E0414's legal main shapes. Build:
+# wolf-lang trunk at the s115 merge (the wsm01 bump, from 87405ac /
+# s109). What the bump brings wws: s114 SIGNAL RECEPTION
+# (os_signal_listen/wait/raise — the real SIGHUP/TERM/QUIT trigger;
+# ws04/ws08's D1/D14 deferral retires), s115 net byte paths
+# (net_read_bytes/net_write_bytes, no utf8 hazard on binary bodies)
+# and D56 cast semantics, s113's casts, s112's constant-time tier,
+# D54 (integer literals adopt float expectations). Trunk at wsm01
+# launch was 4727bfb (c22 dyn-ABI, mid-campaign); the pin takes the
+# contract's named s115 merge. Build:
 #   cargo build --release -p wolf_driver -p wolf_rt
 # and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ —
 # the native tier needs the staticlib beside the driver.
 repo = "wolffe-lang/wolf-lang"
-rev = "87405aca88bbdd1d571e7b3ef8da638e64fbd57a"
+rev = "64a38f3c2d33f75ced7c96f3b5d5f968b9f513a6"
 version_line = "wolf 0.1.0 (wolfgang)"
 
 [lupin]
-# wolf-interp trunk at the is18 merge: the interpreter runs the net
-# family (spawn-accept, deadline/timeout, refused) — measured with
-# wolf-lang's own corpus/net files before this pin was taken. Build:
+# wolf-interp trunk at the is23 merge: D54 literal-adoption PARITY in
+# the interpreter (int literals adopt float expectations, byte-agreed
+# against wolfc's litmus) — bumped together with [wolf] so both
+# machines read wsm01's numerics the same way. Build:
 #   cargo build --release --bin lupin
 # and stage target/release/lupin into .wolf-bin/.
 repo = "wolffe-lang/wolf-interp"
-rev = "e2dbd40d56717b5bf9a836edb9cc354c61ffae6e"
-version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 1b149ba)"
+rev = "b682bcf38416e7db878b881276c89611ee7bbd5d"
+version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 77466a3)"
