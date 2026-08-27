@@ -1,13 +1,28 @@
 module pkg :: config
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 8772455fcc0b32a0a67c3e809a7516b6e340d2fa961881dd640046d138a85408
-  pkg_hash    8772455fcc0b32a0a67c3e809a7516b6e340d2fa961881dd640046d138a85408
+  export_hash d7269e678a6f84ff2b39cb35b5d9f4a66764180f7e63f7ca45672637879fe9ad
+  pkg_hash    d7269e678a6f84ff2b39cb35b5d9f4a66764180f7e63f7ca45672637879fe9ad
   deps: (none)
   items:
-    [0] pub lex — fn lex(src: str) -> self.Toks · regions (-) -> ρ_caller
-    [1] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
-    [2] pub render_spans — fn render_spans(t: self.Toks) -> str · regions (ρ1) -> -
-    [3] pub version — fn version() -> str
-    [4] pub word_segments — fn word_segments(text: str) -> str
-    [5] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
+    [0] pub count — fn count(c: self.Conf) -> int · regions (ρ1) -> -
+    [1] pub delta_count — fn delta_count(c: self.Conf) -> int · regions (ρ1) -> -
+    [2] pub find — fn find(t: self.Table, name: str, ctx: str) -> int · regions (ρ1, -, -) -> -
+    [3] pub lex — fn lex(src: str) -> self.Toks · regions (-) -> ρ_caller
+    [4] pub load — fn load(prefix: str, conf_rel: str) -> self.Conf · regions (-, -) -> ρ_caller
+    [5] pub match_glob — fn match_glob(pat: str, name: str) -> bool
+    [6] pub nearest — fn nearest(t: self.Table, name: str) -> str · regions (ρ1, -) -> -
+    [7] pub ok — fn ok(c: self.Conf) -> bool · regions (ρ1) -> -
+    [8] pub parse_str — fn parse_str(src: str, file: str) -> self.Conf · regions (-, -) -> ρ_caller
+    [9] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
+    [10] pub render_conf — fn render_conf(c: self.Conf) -> str · regions (ρ1) -> -
+    [11] pub render_spans — fn render_spans(t: self.Toks) -> str · regions (ρ1) -> -
+    [12] pub spec_at — fn spec_at(t: self.Table, i: int) -> self.Spec · regions (ρ1, -) -> ρ_caller
+    [13] pub spec_count — fn spec_count(t: self.Table) -> int · regions (ρ1) -> -
+    [14] pub table — fn table() -> self.Table · regions () -> ρ_caller
+    [15] pub version — fn version() -> str
+    [16] pub word_segments — fn word_segments(text: str) -> str
+    [17] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int }
+    [18] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
+    [19] pub Table — struct Table { specs: prelude.List[self.Spec] }
+    [20] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
 
