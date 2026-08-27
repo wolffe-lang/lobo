@@ -21,6 +21,19 @@
 # failure (the house deny-warnings rule; conform-run still has no
 # --deny-warnings upstream).
 #
+#   //! stage-src: config [...]               (ws01: stage the named
+#                                              src/ modules beside the
+#                                              test and run the staged
+#                                              copy)
+# The loader's package root is the ENTRY FILE's directory, so a test
+# under tests/ cannot `use` a src/ module in place. A committed
+# symlink would work on the dev host and be a unixism in the tree, so
+# the runner STAGES instead: copy the test plus each named src module
+# into target/corpus-stage/<mangled-path>/ and run that entry. The
+# staged copy is remade on every run — it cannot drift. cwd stays the
+# repo root on every lane, so relative fs paths in tests still name
+# repo paths.
+#
 #   tools/wws-corpus [tests/...]    default: every .lu under tests/
 set -u
 cd "$(dirname "$0")/.." || exit 2
@@ -83,9 +96,30 @@ for f in $(find $roots -name '*.lu' | sort); do
         ;;
     esac
 
+    entry="./$f"
+    stage_mods=$(grep -m1 '^//! stage-src: ' "$f" | sed 's|^//! stage-src: ||')
+    if [ -n "$stage_mods" ]; then
+        sdir="target/corpus-stage/$(printf '%s' "$f" | tr '/' '_')"
+        rm -rf "$sdir"
+        mkdir -p "$sdir"
+        cp "$f" "$sdir/"
+        stage_bad=0
+        for m in $stage_mods; do
+            if [ ! -d "src/$m" ]; then
+                echo "corpus: FAILED — $f: stage-src names src/$m, which does not exist" >&2
+                red=$((red + 1))
+                stage_bad=1
+                break
+            fi
+            cp -R "src/$m" "$sdir/$m"
+        done
+        [ "$stage_bad" = 1 ] && continue
+        entry="./$sdir/$(basename "$f")"
+    fi
+
     for lane in $lanes; do
         total=$((total + 1))
-        rec=$(run_lane "$lane" "./$f")
+        rec=$(run_lane "$lane" "$entry")
         if [ -z "$rec" ]; then
             echo "corpus: FAILED — $f [$lane]: no observation record (crash or 60s ceiling)" >&2
             red=$((red + 1))

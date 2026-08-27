@@ -1,0 +1,55 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! Variable SYNTAX in words (evaluation is later sprints' — the token
+//! model records segmentation so -T can print faithfully and later
+//! sprints get spans for free). Oracle battery (nginx/1.30.4,
+//! 2026-08-27):
+//!   p27 `include a$v.conf;` → open() "a$v.conf" failed — `$` is word
+//!       bytes; include never evaluates, the token carries it.
+//!   p63 `include a${v}b.conf;` → open() "a${v}b.conf" — `{` directly
+//!       after `$` is consumed into the word WITH its closing `}`.
+//!   p67 `include a${v.conf;` → open() "a${v.conf" — but `;` still
+//!       terminates even inside an unclosed `${`.
+//!   p70 `include a$v{b.conf;` → directive "include" is not
+//!       terminated by ";" — `{` after a variable NAME (not directly
+//!       after `$`) still opens a block.
+//!   p69 `include a$v}b.conf;` → open() "a$v}b.conf" — `}` mid-word
+//!       stays literal with or without a `$` before it.
+
+use config
+
+fn check(src: str, want: str, what: str) {
+    let got = config.render(config.lex(src))
+    assert(got == want, "{what}: got\n{got}\nwant\n{want}")
+}
+
+fn segs(text: str, want: str, what: str) {
+    let got = config.word_segments(text)
+    assert(got == want, "{what}: got\n{got}\nwant\n{want}")
+}
+
+fn main() -> int {
+    // p27: `$` is word bytes.
+    check("include a$v.conf;", "w|include\nw|a$v.conf\n;\n", "p27 dollar word")
+    // p63: `${` consumed with its `}`.
+    check("include a${{v}}b.conf;", "w|include\nw|a${{v}}b.conf\n;\n", "p63 dollar brace")
+    // p67: `;` terminates even inside `${`.
+    check("include a${{v.conf;", "w|include\nw|a${{v.conf\n;\n", "p67 unclosed dollar brace")
+    // p70: `{` after `$v` opens a block.
+    check("include a$v{{b.conf;", "w|include\nw|a$v\n{{\nw|b.conf\n;\n", "p70 brace after var name")
+    // p69: `}` literal after a variable.
+    check("include a$v}}b.conf;", "w|include\nw|a$v}}b.conf\n;\n", "p69 rbrace after var")
+
+    // Segmentation: the token model's reading of the word values.
+    segs("a$v.conf", "lit|a\nvar|v\nlit|.conf\n", "seg $name")
+    segs("a${{v}}b.conf", "lit|a\nvar|v\nlit|b.conf\n", "seg dollar-brace name")
+    segs("a${{v.conf", "lit|a${{v.conf\n", "seg unclosed dollar-brace is literal")
+    segs("$host$request_uri", "var|host\nvar|request_uri\n", "seg adjacent vars")
+    segs("plain.conf", "lit|plain.conf\n", "seg no vars")
+    segs("a$", "lit|a$\n", "seg trailing dollar")
+    segs("$1", "var|1\n", "seg capture digit")
+    0
+}
