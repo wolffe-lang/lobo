@@ -1,14 +1,27 @@
 //! wws — a production web server in wolf (working name). Entry file:
-//! version print and argument dispatch. ws01 adds the nginx shell's
-//! config half: `-t`/`-T` with `-c <conf>` and `-p <prefix>`, exit
-//! codes per the oracle (0 ok / 1 failed), plus the maintenance verb
-//! `directives-md` the gauntlet's docs generator drives. `main`'s
-//! legal shapes are E0414's: no parameters — arguments come through
-//! `env_args`, which drops argv[0].
-//! Defaults: prefix "." and conf "conf/nginx.conf" under it (nginx
-//! defaults to its compile-time prefix; wws has no compile-time
-//! paths by design — recorded shell delta, harnesses always pass
-//! -p/-c explicitly).
+//! the operator shell. The CLI grammar, the text builders, the pid
+//! lifecycle, the control channel and the reload verbs are shell/'s
+//! (ws04); main is the thin dispatch over them plus the two acting
+//! loops (serve, signal-send) that wire net/fs to the model.
+//!
+//! `main`'s legal shapes are E0414's: no parameters — arguments come
+//! through `env_args`, which drops argv[0].
+//!
+//! The signal split (ws04 §3). The pin exposes no getpid, no
+//! arbitrary-pid signal SEND, and no signal RECEPTION (wolf-lang #126
+//! / s114) — so `-s` drives the CONTROL CHANNEL, the pid file records
+//! the control endpoint, and the four verbs are reached the same way a
+//! real signal will reach them when #126 lands (shell.dispatch is the
+//! one verb layer). The receiver is the campaign's named deferral.
+//!
+//! Serve is SPAWN-FREE (D7: the LLVM release tier refuses a task
+//! entry's func.addr, and the gauntlet builds both tiers) — one loop
+//! polls the http listener and the control listener with short accept
+//! deadlines. Sequential serving is the honest v0; reload happens
+//! between connections, and a connection that started under the old
+//! generation finishes on its captured frozen model (the reload-under-
+//! load invariant, pinned by the rig). File-header note (F-0016):
+//! comments never sit directly above a dotted call.
 
 use config
 use http
@@ -32,109 +45,290 @@ fn banner() {
     print("modules: {mods}")
 }
 
-/// One usage line; grows with shell/ at ws04.
-fn usage() {
-    print(
-        "usage: wws [-V | --version | help | -t | -T | serve] [-c <conf>] [-p <prefix>] [directives-md]",
-    )
+// ------------------------------------------------------------------
+// the control loop's line reader and verb dispatch
+// ------------------------------------------------------------------
+
+/// Read one newline-terminated command line from `conn` (bounded — a
+/// control peer sends one short verb). Returns the line without the
+/// newline. Swallows net trouble into "" (the loop then replies with
+/// an error and moves on). Total.
+fn read_command(conn: int) -> str {
+    var buf = ""
+    var reading = true
+    while reading {
+        let nl = buf.find("\n") else -1
+        if nl >= 0 {
+            return buf[0..nl].trim()
+        }
+        if buf.len > 4096 {
+            return buf.trim()
+        }
+        let piece = net_read(conn, 512) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    buf.trim()
 }
 
-/// The serving verb: load the config through the include graph, bind
-/// its first `listen`, and serve. The per-connection UNIT is
-/// serve.serve_conn (the full keepalive lifecycle); the shipped binary
-/// drives it through serve.accept_loop, which serves connections
-/// sequentially. Task-per-connection (scope + spawn per accept) is the
-/// intended concurrent posture and is proven on the DEBUG tier and the
-/// native rig lane (tests/serve/keepalive.lu spawns serve_conn), but
-/// the LLVM RELEASE tier currently refuses this task entry's func.addr
-/// ("the conservatism ledger, not a bug in your program"), and the
-/// gauntlet builds BOTH tiers — so the release binary is sequential at
-/// v0. Deferral D7 owns the gap (filed upstream). Loopback only.
-/// Returns 1 on a config error or a failed bind; the serve loop itself
-/// does not return — it is the server.
+/// The serve loop's outcome after processing a control connection: the
+/// (possibly new) generation and whether the loop should stop.
+struct Tick {
+    g: shell.Gen,
+    stop: bool,
+}
+
+/// Dispatch one control verb against the current generation. THE verb
+/// layer's server side — a real signal will call the same words when
+/// #126 lands. `reload` reparses fresh and swaps on success (keeps the
+/// old generation on any error, the nginx contract); `stop`/`quit` end
+/// the loop; `reopen` cycles log outputs (obs stub — ws09 consumes);
+/// `ping` is the liveness probe. Writes the one-line reply to `conn`.
+fn dispatch(conn: int, verb: str, prefix: str, conf: str, g: shell.Gen) -> Tick {
+    if verb == "ping" {
+        net_write(conn, "pong\n") else |_| {}
+        return Tick { g: g, stop: false }
+    }
+    if verb == "stop" || verb == "quit" {
+        net_write(conn, "{verb}: shutting down (generation {g.gen})\n") else |_| {}
+        return Tick { g: g, stop: true }
+    }
+    if verb == "reopen" {
+        net_write(conn, "reopen: log outputs cycled (generation {g.gen})\n") else |_| {}
+        return Tick { g: g, stop: false }
+    }
+    if verb == "reload" {
+        let ng = shell.reload(prefix, conf, g)
+        net_write(conn, "{ng.note}\n") else |_| {}
+        return Tick { g: ng, stop: false }
+    }
+    net_write(conn, "unknown verb \"{verb}\"\n") else |_| {}
+    Tick { g: g, stop: false }
+}
+
+// ------------------------------------------------------------------
+// serve — bind, write the pid file, and run the poll loop
+// ------------------------------------------------------------------
+
+/// The serving verb. Loads and freezes the config (generation 1),
+/// refuses to start if a live master already holds the pid file
+/// (stale-pid detection: a file whose control endpoint answers `ping`
+/// is a running server; one that does not is stale — removed with a
+/// warning), writes the pid file (its content is the control endpoint
+/// at this pin), then runs the control-aware accept loop. Returns 1 on
+/// a config error, a failed bind, or a refused start; the loop itself
+/// runs until a `stop`/`quit` verb. Loopback only.
 fn serve_main(prefix: str, conf: str) -> int {
-    let c = config.load(prefix, conf)
-    if !config.ok(c) {
-        eprint("wws: configuration file test failed")
+    let c0 = config.load(prefix, conf)
+    if !config.ok(c0) {
+        eprint("wws: [emerg] configuration file {conf} test failed")
         return 1
     }
-    let addr = serve.listen_addr(c)
+    let ctrl = shell.control_addr(c0)
+    let pidp = shell.pid_path(c0, prefix)
+
+    // stale-pid detection: an existing pid file whose endpoint is
+    // alive means a master is already running (refuse, nginx-shaped);
+    // a dead endpoint is a stale file (replace with a warning).
+    let existing = shell.pid_read(pidp) else |_| ""
+    if !existing.is_empty() {
+        if shell.control_alive(existing) {
+            eprint("wws: [emerg] a wws master is already running (control {existing})")
+            return 1
+        }
+        eprint("wws: [warn] removing stale pid file \"{pidp}\" (control {existing} not responding)")
+    }
+
+    let addr = serve.listen_addr(c0)
+    let hl = net_listen(addr) else |_| {
+        eprint("wws: [emerg] bind() to {addr} failed")
+        return 1
+    }
+    let hport = net_port(hl) else |_| {
+        eprint("wws: [emerg] could not read the listen port")
+        return 1
+    }
+
+    // the control endpoint is what the pid file records (so -s and the
+    // next start's stale-check can reach us). No control directive →
+    // no channel; the pid file still records the http addr as identity.
+    var have_ctrl = false
+    var cl: int = 0
+    var ctrl_ep = addr
+    if !ctrl.is_empty() {
+        cl = net_listen(ctrl) else |_| {
+            eprint("wws: [emerg] bind() to control {ctrl} failed")
+            return 1
+        }
+        let cport = net_port(cl) else |_| {
+            return 1
+        }
+        ctrl_ep = "127.0.0.1:{cport}"
+        have_ctrl = true
+    }
+
+    shell.pid_write(pidp, ctrl_ep) else |_| {
+        eprint("wws: [emerg] could not write pid file \"{pidp}\"")
+        return 1
+    }
+
     let opts = serve.default_opts()
     let lim = http.default_limits()
-    serve.accept_loop(c, addr, opts, lim) else |_| {
-        eprint("wws: could not bind {addr}")
+    eprint("wws: [notice] serving on {addr}, control {ctrl_ep}, pid file {pidp}")
+
+    var g = shell.gen_new(c0)
+    var running = true
+    while running {
+        // poll the control listener first (short deadline), so a
+        // reload/stop is picked up between connections
+        if have_ctrl {
+            net_deadline(cl, 40) else |_| {}
+            var got_ctrl = true
+            let cc = net_accept(cl) else |_| {
+                got_ctrl = false
+                0
+            }
+            if got_ctrl {
+                net_deadline(cc, 2000) else |_| {}
+                let verb = read_command(cc)
+                let tick = dispatch(cc, verb, prefix, conf, g)
+                net_close(cc) else |_| {}
+                g = tick.g
+                if tick.stop {
+                    running = false
+                }
+            }
+        }
+        if running {
+            net_deadline(hl, 40) else |_| {}
+            var got_conn = true
+            let conn = net_accept(hl) else |_| {
+                got_conn = false
+                0
+            }
+            if got_conn {
+                serve.serve_conn(conn, g.conf, opts, lim, hport)
+            }
+        }
+    }
+
+    net_close(hl) else |_| {}
+    if have_ctrl {
+        net_close(cl) else |_| {}
+    }
+    shell.pid_remove(pidp) else |_| {}
+    0
+}
+
+// ------------------------------------------------------------------
+// signal-send — `-s verb` reaches the running master through the
+// control channel (the pin has no arbitrary-pid signal send; #126)
+// ------------------------------------------------------------------
+
+/// `-s <verb>`: read the pid file for the running master's control
+/// endpoint (nginx reads it for the pid), connect, send the verb, and
+/// print the reply. nginx exit codes: a missing pid file is exit 1
+/// with the open() diagnostic; a refused endpoint (stale file, dead
+/// master) is exit 1. Loads the config first, as nginx does, to
+/// resolve the pid path.
+fn signal_main(cli: shell.Cli) -> int {
+    let c = config.load(cli.prefix, cli.conf)
+    let pidp = shell.pid_path(c, cli.prefix)
+    let ep = shell.pid_read(pidp) else |e| match e {
+        none => {
+            eprint("wws: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
+            return 1
+        },
+        io => {
+            eprint("wws: [alert] could not read pid file \"{pidp}\"")
+            return 1
+        },
+    }
+    let reply = shell.control_send(ep, cli.signal) else |e| match e {
+        refused => {
+            eprint(
+                "wws: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
+            )
+            return 1
+        },
+        io => {
+            eprint("wws: [error] control channel error to {ep}")
+            return 1
+        },
+    }
+    print(reply)
+    0
+}
+
+// ------------------------------------------------------------------
+// the -g feed and the main dispatch
+// ------------------------------------------------------------------
+
+/// Validate `-g "directives"` through the ws01 parser (same table,
+/// same named errors). v0 delta: the globals are VALIDATED but not
+/// merged into the served model (recorded — a full merge is a later
+/// sprint). Returns 0 when clean, 1 with an nginx-shaped diagnostic
+/// otherwise.
+fn check_globals(globals: str) -> int {
+    if globals.is_empty() {
+        return 0
+    }
+    let g = config.parse_str("{globals}\n", "command-line")
+    if !config.ok(g) {
+        eprint("wws: [emerg] {g.err} in the -g command-line directives")
         return 1
     }
     0
 }
 
 fn main() -> int {
-    var mode = "banner"
-    var bad = ""
-    var prefix = "."
-    var conf = "conf/nginx.conf"
-    var want = ""
-    for a in env_args() {
-        if want == "c" {
-            conf = a
-            want = ""
-        } else if want == "p" {
-            prefix = a
-            want = ""
-        } else if a == "-V" {
-            mode = "version"
-        } else if a == "--version" {
-            mode = "version"
-        } else if a == "help" {
-            mode = "help"
-        } else if a == "-t" {
-            mode = "check"
-        } else if a == "-T" {
-            mode = "dump"
-        } else if a == "-c" {
-            want = "c"
-        } else if a == "-p" {
-            want = "p"
-        } else if a == "directives-md" {
-            mode = "docs"
-        } else if a == "serve" {
-            mode = "serve"
-        } else {
-            mode = "bad"
-            bad = a
-        }
+    let cli = shell.parse_cli(env_args())
+    if cli.mode == "error" {
+        eprint("wws: {cli.err_msg}")
+        return cli.exit_code
     }
-    if !want.is_empty() {
-        eprint("wws: option -{want} requires an argument")
-        usage()
-        return 2
-    }
-    if mode == "banner" {
+    if cli.mode == "banner" {
         banner()
         return 0
     }
-    if mode == "version" {
-        print("wws {version()}")
+    if cli.mode == "version" {
+        eprint(shell.version_report())
         return 0
     }
-    if mode == "help" {
-        usage()
+    if cli.mode == "version_verbose" {
+        eprint_raw(shell.version_verbose())
         return 0
     }
-    if mode == "check" {
-        return config.check(prefix, conf, false)
+    if cli.mode == "help" {
+        eprint_raw(shell.usage_text())
+        return 0
     }
-    if mode == "dump" {
-        return config.check(prefix, conf, true)
+    let gbad = check_globals(cli.globals)
+    if gbad != 0 {
+        return gbad
     }
-    if mode == "docs" {
+    if cli.mode == "check" {
+        return config.check(cli.prefix, cli.conf, false)
+    }
+    if cli.mode == "dump" {
+        return config.check(cli.prefix, cli.conf, true)
+    }
+    if cli.mode == "docs" {
         print_raw(config.directives_markdown())
         return 0
     }
-    if mode == "serve" {
-        return serve_main(prefix, conf)
+    if cli.mode == "signal" {
+        return signal_main(cli)
     }
-    eprint("wws: unknown argument `{bad}`")
-    usage()
-    2
+    if cli.mode == "serve" {
+        return serve_main(cli.prefix, cli.conf)
+    }
+    banner()
+    0
 }
