@@ -2,3 +2,7 @@
 # endings (see docs/DIFFERENTIAL.md). git must never translate them:
 # a normalized `.case` is a lie about what went on the socket.
 tests/differential/cases/*.case -text
+
+# The CVE-corpus raw inputs are byte-exact wire shapes (bare LF,
+# CRLF, NUL escapes). git must never translate them.
+tests/cve-corpus/inputs/*.http -text

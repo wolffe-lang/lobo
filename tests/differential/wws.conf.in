@@ -1,0 +1,15 @@
+# wws.conf.in — the wws side of the differential, rendered per case by
+# tools/wws-differential (@PORT@ and @ROOT@ substituted) into the
+# case's scratch dir. Mirrors nginx.conf.in: the same one type, the
+# same root, loopback only. wws runs beside the pinned oracle and both
+# replies go through the one differ (ws02).
+http {
+  types {
+    text/html html;
+  }
+  server {
+    listen 127.0.0.1:@PORT@;
+    root @ROOT@/www;
+    index index.html;
+  }
+}
