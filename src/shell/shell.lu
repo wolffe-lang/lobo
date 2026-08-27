@@ -642,6 +642,84 @@ pub fn shutdown_timeout_ms(c: config.Conf) -> int {
     0
 }
 
+// ---- the signal surface (wsm01, s114 in the pin) --------------------
+// Real signal reception exists as of the s115 pin: the s114 builtins
+// (os_signal_listen/os_signal_wait/os_signal_raise) deliver OS signals
+// as events by MEANING ([os.signal.set] — a bitmask, mapped to
+// platform signal numbers only at the runtime boundary). These helpers
+// are the pure half: the meaning constants and the meaning→verb map.
+// The entry owns the listen/wait/forward wiring; BOTH triggers — a
+// real SIGHUP and a control-channel line — flow through the ONE verb
+// dispatch (the flip ws04 §3 designed for). The UPGRADE meaning (8,
+// SIGUSR2 — binary swap) is deliberately not listened yet: that path
+// is a later sprint. Zero-arg fns are the portable constant spelling.
+
+/// The RELOAD meaning (bit 1; SIGHUP on unix). Total.
+pub fn sig_reload() -> int {
+    1
+}
+
+/// The TERMINATE meaning (bit 2; SIGTERM on unix — fast shutdown).
+/// Total.
+pub fn sig_terminate() -> int {
+    2
+}
+
+/// The QUIT meaning (bit 4; SIGQUIT on unix — graceful drain-then-
+/// exit). Total.
+pub fn sig_quit() -> int {
+    4
+}
+
+/// The interest mask of the OPERATOR meanings: RELOAD | TERMINATE |
+/// QUIT. Total.
+pub fn sig_mask() -> int {
+    7
+}
+
+/// The probe meaning (bit 8 — UPGRADE, SIGUSR2 on unix). The serve
+/// loop's spawn-free signal poll self-raises this bit each pass and
+/// waits once: the runtime queue is FIFO, so a real pending operator
+/// signal comes back first and the probe bounds the wait. NAMED
+/// residue: until the binary-swap sprint claims UPGRADE, an outside
+/// SIGUSR2 is indistinguishable from the probe and is ignored. Total.
+pub fn sig_probe() -> int {
+    8
+}
+
+/// The meaning's stable lowercase name (for log events and docs) —
+/// the MEANING vocabulary, not the platform signal name. Unknown
+/// meanings answer "unknown". Total.
+pub fn signal_name(m: int) -> str {
+    if m == 1 {
+        return "reload"
+    }
+    if m == 2 {
+        return "terminate"
+    }
+    if m == 4 {
+        return "quit"
+    }
+    "unknown"
+}
+
+/// The operator verb a received signal meaning drives: SIGHUP→reload,
+/// SIGTERM→stop (nginx's fast shutdown), SIGQUIT→quit (graceful).
+/// The SAME verbs the control channel accepts — one dispatch layer.
+/// An unknown meaning maps to "" (the entry ignores it). Total.
+pub fn signal_verb(m: int) -> str {
+    if m == 1 {
+        return "reload"
+    }
+    if m == 2 {
+        return "stop"
+    }
+    if m == 4 {
+        return "quit"
+    }
+    ""
+}
+
 // ---- the log-event vocabulary (FROZEN; documented in docs/) ---------
 // Each builder returns the event BODY: a stable name then space-
 // separated key=value fields. The entry prefixes "wws: [notice] " and
@@ -676,6 +754,15 @@ pub fn ev_connection_retired(gen: int, remaining: int) -> str {
 /// `aborted` were force-closed by the timeout, over `age_ms`.
 pub fn ev_generation_retired(gen: int, drained: int, aborted: int, age_ms: int) -> str {
     "generation-retired gen={gen} drained={drained} aborted={aborted} age-ms={age_ms}"
+}
+
+/// A real OS signal was received and mapped to an operator verb (the
+/// wsm01 vocabulary EXTENSION — appended, nothing renamed): `sig` is
+/// the meaning's name (reload|terminate|quit), `verb` the dispatched
+/// verb. The event that lets an operator (and the signal witness
+/// harness) tell a signal-driven reload from a control-channel one.
+pub fn ev_signal_received(m: int) -> str {
+    "signal-received sig={signal_name(m)} verb={signal_verb(m)}"
 }
 
 // ---- the status surface --------------------------------------------
