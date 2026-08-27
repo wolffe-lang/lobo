@@ -106,5 +106,11 @@ if ! tools/wws-signal; then
     exit 1
 fi
 
+step "tls-interop (openssl s_client against a live wws HTTPS server; ws05)"
+if ! tools/wws-tls-interop; then
+    echo "wws-gauntlet: FAILED at tls-interop — the OpenSSL interop differential (ws05)" >&2
+    exit 1
+fi
+
 echo ""
 echo "wws-gauntlet: GREEN"

@@ -1,0 +1,6 @@
+# OPENSSL-PIN — the interop oracle for tools/wws-tls-interop (ws05).
+# The host openssl s_client is an INDEPENDENT TLS 1.3 implementation;
+# wws serving it a verifiable handshake is the falsifiable interop
+# claim. Version drift is REPORTED, not gated (s_client behavior is
+# stable across OpenSSL 3.x and the wire bytes are the real check).
+version = 3.6.3
