@@ -1,0 +1,125 @@
+# wws — CI (ws00). Committed BEFORE any remote exists (the repo is
+# local until the human names it), so this has never run; it is
+# written against the pins so the first push is green or honestly
+# red. Conventions mirrored from the wolf-lang/wolf-book CI: explicit
+# shell, timeout ceilings, loud SKIPs (a lane that cannot run says so;
+# it never passes vacuously). linux x86-64 first; the matrix grows
+# when the repo goes public. Loopback only — nothing here touches an
+# external network except fetching the pinned sources.
+
+name: ci
+
+on:
+  push:
+    branches: [trunk]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gauntlet:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: wws
+
+      - name: read toolchain pins
+        id: pins
+        shell: bash
+        working-directory: wws
+        run: |
+          rev() { awk -v s="[$1]" '$0==s{f=1} f&&/^rev = /{gsub(/"/,"",$3); print $3; exit}' wolf-toolchain.toml; }
+          echo "wolf=$(rev wolf)" >> "$GITHUB_OUTPUT"
+          echo "lupin=$(rev lupin)" >> "$GITHUB_OUTPUT"
+
+      # The sibling repos are private; the default token cannot read
+      # them (the wolf-book lesson). With WOLF_CI_TOKEN the job runs
+      # in full; without it every toolchain step below SKIPs loudly.
+      - name: acquire pinned siblings
+        id: acquire
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::notice::WOLF_CI_TOKEN absent — sibling repos unreachable; the gauntlet lane skips (local runs remain the gate)"
+            echo "toolchain=none" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          ok=1
+          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-lang" wolf-lang \
+            && git -C wolf-lang checkout --quiet "${{ steps.pins.outputs.wolf }}" || ok=0
+          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-interp" wolf-interp \
+            && git -C wolf-interp checkout --quiet "${{ steps.pins.outputs.lupin }}" || ok=0
+          if [ "$ok" = 1 ]; then echo "toolchain=full" >> "$GITHUB_OUTPUT"
+          else echo "::error::token present but sibling acquisition failed"; exit 1; fi
+
+      - uses: Swatinem/rust-cache@v2
+        if: steps.acquire.outputs.toolchain == 'full'
+        with:
+          workspaces: |
+            wolf-lang
+            wolf-interp
+
+      - name: build pinned wolf (release) + runtime staticlib
+        if: steps.acquire.outputs.toolchain == 'full'
+        shell: bash
+        working-directory: wolf-lang
+        run: cargo build --release -p wolf_driver -p wolf_rt
+
+      - name: build pinned lupin (release)
+        if: steps.acquire.outputs.toolchain == 'full'
+        shell: bash
+        working-directory: wolf-interp
+        run: cargo build --release --bin lupin
+
+      - name: stage .wolf-bin
+        if: steps.acquire.outputs.toolchain == 'full'
+        shell: bash
+        run: |
+          mkdir -p wws/.wolf-bin
+          cp wolf-lang/target/release/wolf wolf-lang/target/release/libwolf_rt.a wws/.wolf-bin/
+          cp wolf-interp/target/release/lupin wws/.wolf-bin/
+
+      # The differential oracle, cached on the pin file — a CI step is
+      # not a build script in the D33 sense (the wsc00 closeout records
+      # the interpretation). The build recipe is docs/DIFFERENTIAL.md's,
+      # driven by the values in NGINX-PIN itself.
+      - name: cache pinned nginx
+        if: steps.acquire.outputs.toolchain == 'full'
+        id: nginx-cache
+        uses: actions/cache@v4
+        with:
+          path: wws/tests/differential/bin
+          key: nginx-${{ runner.os }}-${{ hashFiles('wws/tests/differential/NGINX-PIN') }}
+
+      - name: build pinned nginx (cache miss only)
+        if: steps.acquire.outputs.toolchain == 'full' && steps.nginx-cache.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: wws
+        run: |
+          set -euo pipefail
+          pin() { sed -n "s/^$1 = //p" tests/differential/NGINX-PIN; }
+          mkdir -p /tmp/nginx-build && cd /tmp/nginx-build
+          curl -sSLO "$(pin source)"
+          echo "$(pin sha256)  $(pin tarball)" | sha256sum -c -
+          tar xzf "$(pin tarball)"
+          cd "nginx-$(pin version)"
+          $(pin configure)
+          make -j"$(nproc)"
+          mkdir -p "$GITHUB_WORKSPACE/wws/tests/differential/bin"
+          cp objs/nginx "$GITHUB_WORKSPACE/wws/tests/differential/bin/nginx"
+          rm -rf /tmp/nginx-build
+
+      - name: wws-gauntlet
+        if: steps.acquire.outputs.toolchain == 'full'
+        shell: bash
+        working-directory: wws
+        run: tools/wws-gauntlet

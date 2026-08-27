@@ -1,0 +1,8 @@
+module pkg :: http
+  wolfi v0 · toolchain 0.1.0 · edition v1
+  export_hash fae88458d9204eb8864a72d761183c9ee08c9fcbce5810fec5646c94b0ad90da
+  pkg_hash    fae88458d9204eb8864a72d761183c9ee08c9fcbce5810fec5646c94b0ad90da
+  deps: (none)
+  items:
+    [0] pub version — fn version() -> str
+

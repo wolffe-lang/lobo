@@ -13,9 +13,29 @@ never create one.
 4. `.docs/refs/11-nginx-owned-bugs-and-the-finally-list.md` — the
    charter's evidence layer.
 
+## Entering the repo (the ws00 ritual — do this once, in order)
+1. **Toolchain**: build the pins in `wolf-toolchain.toml` (each
+   section carries its build command) and stage the binaries into
+   `.wolf-bin/` (gitignored): `wolf`, `libwolf_rt.a`, `lupin`.
+   Resolution order everywhere: `$WOLF_BIN`/`$LUPIN_BIN` →
+   `.wolf-bin/` → PATH. Every tool refuses on identity drift.
+2. **Differential oracle**: build the pinned nginx once per
+   `docs/DIFFERENTIAL.md` into `tests/differential/bin/`
+   (gitignored). The harness refuses while it is missing — a red
+   gauntlet until you do this is the designed behavior.
+3. **Verify**: `tools/wws-gauntlet` → `wws-gauntlet: GREEN`.
+Host tools the rig leans on beyond the toolchain: POSIX sh, awk,
+jq, diff — nothing else.
+
 ## Hard rules (inherited from the wolf org, binding here)
-- The gauntlet (`wws-gauntlet`, once ws00 lands: fmt, both tiers
-  build, tests, corpus runner) is green before ANY commit.
+- The gauntlet (`tools/wws-gauntlet`: toolchain pin, manifest, fmt,
+  both tiers build, `.wolfi` freshness, corpus runner over every
+  directive test's declared lanes with warnings denied, the nginx
+  differential) is green before ANY commit.
+- A commit that moves a `.wolfi` snapshot contains ONLY `.wolfi`
+  files, message starting `interface(<module>): ` (root.wolfi rides
+  along; `tools/wws-interface --emit` regenerates). The gauntlet
+  fails on unsynced surfaces — see `.docs/STYLE.md`.
 - Tests are first-class and land in the same commit as the code.
 - **Loopback only, in every test, forever.** The differential
   harness's pinned nginx runs on loopback too.

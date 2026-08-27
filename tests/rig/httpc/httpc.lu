@@ -1,0 +1,141 @@
+//! member: true
+//! httpc — the rig's loopback HTTP client. Test infrastructure, in
+//! wolf (the dogfood rule): dial 127.0.0.1:<port>, send a byte-exact
+//! request, read the whole reply under a deadline, and hand the test
+//! something it can assert on. LOOPBACK ONLY, FOREVER — no test in
+//! this repo ever names another host, and every read is under a
+//! deadline so a server bug is a named failure, never a hang.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+/// A reply split at the HTTP seams: `status` is the status line
+/// (no CRLF), `headers` the raw header block (CRLF-joined, no
+/// trailing blank line), `body` everything after the first blank
+/// line. A reply with no blank line lands whole in `body` with the
+/// other two fields empty — the differ still gets bytes to show.
+pub struct Reply {
+    status: str,
+    headers: str,
+    body: str,
+}
+
+/// Dial 127.0.0.1:`port`, arm `deadline_ms` on the socket, send `raw`
+/// verbatim, and read until the peer closes. Returns the reply's raw
+/// bytes. Rows: `refused` (nobody listens there), `timeout` (the
+/// deadline fired first — the assertion of the rig's silent-server
+/// test), `utf8` (reply bytes are not UTF-8 at a read boundary),
+/// `io` (everything else, including a mid-reply write failure).
+/// `closed` is not in the row: the peer finishing is how a reply
+/// ENDS, so it stops the read loop instead of raising.
+/// The four-tag row is deliberate (W0602 allowed): it is the net
+/// builtins' own vocabulary minus `closed`, and the doc above is its
+/// one home — rig tests are the only callers. The multi-arm handlers
+/// below discriminate correctly on all three lanes (re-measured at
+/// this pin: F-0079/wolf-interp#29 closed at lupin 0.1.13, a net
+/// handler picks the right arm across a module boundary). When a
+/// test needs the TAG ITSELF as its assertion, it goes through
+/// `exchange_once`, whose handler-free `?` path lets the toolchain
+/// name the tag rather than a handler asserting it — the strongest
+/// evidence, not a workaround for a bug.
+#[allow(w0602)]
+pub fn exchange(port: int, raw: str, deadline_ms: int) -> str ! {refused, timeout, utf8, io} {
+    let c = net_connect("127.0.0.1:{port}") else |e| match e {
+        refused => { return refused },
+        timeout => { return timeout },
+        io => { return io },
+    }
+    net_deadline(c, deadline_ms) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, raw) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                net_close(c) else |_| {}
+                return timeout
+            },
+            utf8 => {
+                net_close(c) else |_| {}
+                return utf8
+            },
+            io => {
+                net_close(c) else |_| {}
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    net_close(c) else |_| {}
+    out
+}
+
+/// Send `raw` and read ONE chunk (at most `max` bytes) under the
+/// deadline. The rig's tag WITNESS path: this body has no handler at
+/// all — every outcome propagates by `?` under its own name, so the
+/// tag a test observes is the toolchain's, not an arm this repo
+/// picked. Rows are the builtins' own, `closed` included: one
+/// bounded read has no loop for `closed` to stop. On an error path
+/// the socket is left to the process's exit — this is test
+/// infrastructure, and the row must ride out unchanged.
+/// The five-tag row is deliberate (W0602 allowed): it is the union
+/// of the net builtins' own vocabularies, stated so `?` can carry
+/// each tag out under its own name.
+#[allow(w0602)]
+pub fn exchange_once(port: int, raw: str, max: int, deadline_ms: int) -> str ! {
+    refused,
+    timeout,
+    closed,
+    utf8,
+    io,
+} {
+    let c = net_connect("127.0.0.1:{port}")?
+    net_deadline(c, deadline_ms)?
+    net_write(c, raw)?
+    let piece = net_read(c, max)?
+    net_close(c) else |_| {}
+    piece
+}
+
+/// Split a raw reply at the HTTP seams (see `Reply`). Total: never
+/// traps, whatever bytes the server sent — every offset it slices at
+/// is one `find` computed on the same string.
+pub fn split_reply(raw: str) -> Reply {
+    let cut = raw.find("\r\n\r\n") else -1
+    if cut == -1 {
+        return Reply { status: "", headers: "", body: raw }
+    }
+    let head = raw[0..cut]
+    let body = raw[cut + 4..raw.len]
+    let eol = head.find("\r\n") else head.len
+    let status = head[0..eol]
+    var headers = ""
+    if eol < head.len {
+        headers = head[eol + 2..head.len]
+    }
+    Reply { status: status, headers: headers, body: body }
+}
+
+/// True when the raw header block carries exactly the line `line`
+/// (name and value, byte-exact, any position). Total.
+pub fn has_header(headers: str, line: str) -> bool {
+    if headers == line {
+        return true
+    }
+    if headers.starts_with("{line}\r\n") {
+        return true
+    }
+    if headers.ends_with("\r\n{line}") {
+        return true
+    }
+    headers.contains("\r\n{line}\r\n")
+}

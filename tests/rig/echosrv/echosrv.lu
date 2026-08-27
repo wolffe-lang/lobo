@@ -1,0 +1,43 @@
+//! member: true
+//! echosrv — the rig's trivial proving server. RIG-PRIVATE: this is
+//! deliberately NOT `serve/`'s territory (serve/ stays empty until
+//! wsc01); it exists so the rig's client can be proven against a
+//! server whose behavior is fixed by four lines of wolf. It answers
+//! exactly one exchange with a canned HTTP reply echoing the
+//! request's first line, then closes.
+
+/// Bind a fresh loopback listener on an EPHEMERAL port (port 0,
+/// always — the wolf-lang#121 lesson; fixed ports collide across
+/// parallel lanes). Row: `io` (the host refused a socket).
+pub fn bind() -> int ! {io} {
+    net_listen("127.0.0.1:0")?
+}
+
+/// The port the host actually chose for `l`. Row: `io` (forged or
+/// closed listener).
+pub fn port_of(l: int) -> int ! {io} {
+    net_port(l)?
+}
+
+/// Accept ONE waiting connection and answer one canned reply:
+/// `HTTP/1.1 200 OK` with `X-Rig: echosrv`, `Content-Length`, and a
+/// body of `echo: <request's first line>`. Meant to run on a spawned
+/// task AFTER the client has dialed (the spawn-accept pattern —
+/// accept parks a real thread, so the dial must already be in the
+/// backlog or coming from another task). Swallows its own errors:
+/// the CLIENT's deadline is the rig's failure detector, and a dead
+/// task here surfaces there as `timeout`, with the case named by the
+/// test.
+pub fn serve_one(l: int) {
+    let conn = net_accept(l) else |_| -1
+    if conn < 0 {
+        return
+    }
+    let req = net_read(conn, 4096) else |_| ""
+    let eol = req.find("\r\n") else req.len
+    let first = req[0..eol]
+    let body = "echo: {first}"
+    let reply = "HTTP/1.1 200 OK\r\nX-Rig: echosrv\r\nContent-Length: {body.len}\r\nConnection: close\r\n\r\n{body}"
+    net_write(conn, reply) else |_| {}
+    net_close(conn) else |_| {}
+}

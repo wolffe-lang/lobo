@@ -1,0 +1,39 @@
+//! check: run(exit=0, stdout="status: HTTP/1.1 200 OK\nheader: ok\nbody: echo: GET /rig HTTP/1.1")
+//! phase: run
+//! lanes: native lupin
+//! conforms: conc.task.spawn, err.union, err.propagate
+//!
+//! The rig's happy path: spawn the accept side, dial from the main
+//! task (the spawn-accept pattern — `net_accept` parks a real thread,
+//! so a rig that listens and dials on one task deadlocks), exchange
+//! one request, and assert on all three seams the client exposes:
+//! status line, a header, the body. Port 0 always; the deadline makes
+//! a wedged server a named `timeout`, never a hang. The checked lane
+//! refuses structured concurrency wholesale (C1 deferred upstream),
+//! so this file's lanes are native + lupin.
+
+use echosrv
+use httpc
+
+fn main() -> !int {
+    let srv = echosrv.bind()?
+    let port = echosrv.port_of(srv)?
+    scope s {
+        s.spawn(fn() {
+            echosrv.serve_one(srv)
+        })
+        let raw = httpc.exchange(port, "GET /rig HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n", 2000)?
+        let r = httpc.split_reply(raw)
+        print("status: {r.status}")
+        var hdr = "MISSING"
+        if httpc.has_header(r.headers, "X-Rig: echosrv") {
+            if httpc.has_header(r.headers, "Content-Length: 23") {
+                hdr = "ok"
+            }
+        }
+        print("header: {hdr}")
+        print("body: {r.body}")
+    }
+    net_close(srv)?
+    0
+}

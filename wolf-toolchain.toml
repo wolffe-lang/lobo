@@ -1,0 +1,36 @@
+# The pinned toolchain wws is true for (ws00, target 4). The idiom is
+# wolf-book's `wolf-toolchain.toml` (repo + rev, CI fetches by commit
+# hash and builds), with wolf-std's binary-resolution order for local
+# runs: $WOLF_BIN / $LUPIN_BIN → .wolf-bin/ → PATH. `tools/wws-gauntlet`
+# verifies identity before anything else and refuses on drift.
+#
+# Identity is read from the FIRST line of `--version` only (the
+# wolf-std F-0064 lesson): `wolf` names no sha of its own — its second
+# line names its lupin PAIRING, which is reported, never gated — and
+# lupin's line names its wolf-lang conformance pin, which is
+# information, not this file's rev.
+#
+# Bumps are deliberate: their own commit, gauntlet green at the new
+# pin, this note updated with what the bump changes for wws.
+
+[wolf]
+# wolf-lang trunk at the s109 merge (nested rows flatten, declared
+# tags resolve wider). ≥ 1b149ba as the ws00 contract requires: net
+# with `net_deadline` on every lane this repo runs, json/process
+# native, E0414's legal main shapes. Build:
+#   cargo build --release -p wolf_driver -p wolf_rt
+# and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ —
+# the native tier needs the staticlib beside the driver.
+repo = "wolffe-lang/wolf-lang"
+rev = "87405aca88bbdd1d571e7b3ef8da638e64fbd57a"
+version_line = "wolf 0.1.0 (wolfgang)"
+
+[lupin]
+# wolf-interp trunk at the is18 merge: the interpreter runs the net
+# family (spawn-accept, deadline/timeout, refused) — measured with
+# wolf-lang's own corpus/net files before this pin was taken. Build:
+#   cargo build --release --bin lupin
+# and stage target/release/lupin into .wolf-bin/.
+repo = "wolffe-lang/wolf-interp"
+rev = "e2dbd40d56717b5bf9a836edb9cc354c61ffae6e"
+version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 1b149ba)"

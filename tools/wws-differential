@@ -1,0 +1,145 @@
+#!/bin/sh
+# wws-differential — the nginx differential harness (ws00 SKELETON:
+# the plumbing, one case). Starts the PINNED nginx on a loopback
+# ephemeral port, replays each case's raw request through the wolf
+# rig (tests/rig/diffsend.lu), normalizes BOTH the actual and the
+# expected reply by exactly the checked-in NORMALIZE list, and
+# byte-compares. From ws02 on, wws runs beside nginx and both replies
+# are diffed; the case format and the differ do not change for that.
+#
+# REFUSES, naming the pin, when the oracle is absent or drifted —
+# tests/differential/NGINX-PIN is the contract; building the binary
+# is the documented one-time action in docs/DIFFERENTIAL.md.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+DIFF_DIR=tests/differential
+BIN=$DIFF_DIR/bin/nginx
+pin_version=$(sed -n 's/^version = //p' $DIFF_DIR/NGINX-PIN)
+pin_configure=$(sed -n 's/^configure = //p' $DIFF_DIR/NGINX-PIN)
+
+if [ ! -x "$BIN" ]; then
+    echo "differential: REFUSED — pinned nginx binary missing at $BIN" >&2
+    echo "differential: the pin is nginx/$pin_version (tests/differential/NGINX-PIN); build it once per docs/DIFFERENTIAL.md" >&2
+    exit 1
+fi
+have_version=$("$BIN" -v 2>&1 | sed -n 's|^nginx version: nginx/||p')
+if [ "$have_version" != "$pin_version" ]; then
+    echo "differential: REFUSED — $BIN is nginx/$have_version, the pin (tests/differential/NGINX-PIN) is nginx/$pin_version" >&2
+    echo "differential: rebuild the oracle per docs/DIFFERENTIAL.md" >&2
+    exit 1
+fi
+have_configure=$("$BIN" -V 2>&1 | sed -n 's|^configure arguments: |./configure |p' | sed 's/ *$//')
+if [ "$have_configure" != "$pin_configure" ]; then
+    echo "differential: NOTE — configure-line drift (reported, not gated):" >&2
+    echo "differential:   pin:   $pin_configure" >&2
+    echo "differential:   built: $have_configure" >&2
+fi
+
+# normalize <in >out : replace the VALUE of every header the NORMALIZE
+# list names with `<normalized>`, in the header section only. Applied
+# to BOTH sides of every diff — the one normalizer is the whole
+# tolerance of this harness.
+normalize() {
+    awk -v listfile="$DIFF_DIR/NORMALIZE" '
+        BEGIN {
+            while ((getline l < listfile) > 0) {
+                sub(/#.*/, "", l)
+                gsub(/^[ \t]+|[ \t]+$/, "", l)
+                if (l != "") norm[tolower(l)] = 1
+            }
+            hdr = 1
+        }
+        {
+            line = $0
+            if (hdr) {
+                probe = line
+                sub(/\r$/, "", probe)
+                if (probe == "") { hdr = 0; print line; next }
+                n = index(probe, ":")
+                if (n > 1 && tolower(substr(probe, 1, n - 1)) in norm) {
+                    print substr(probe, 1, n - 1) ": <normalized>\r"
+                    next
+                }
+            }
+            print line
+        }'
+}
+
+# section <name> <casefile> : print a case section's raw bytes
+# (marker lines are LF or CRLF; leading comment lines end at the
+# first marker).
+section() {
+    awk -v want="--- $1" '
+        {
+            probe = $0
+            sub(/\r$/, "", probe)
+            if (probe ~ /^--- /) { in_s = (probe == want); next }
+            if (in_s) print
+        }' "$2"
+}
+
+failures=0
+cases=0
+for case in "$DIFF_DIR"/cases/*.case; do
+    [ -f "$case" ] || continue
+    cases=$((cases + 1))
+    name=$(basename "$case" .case)
+    scratch="target/differential/$name"
+    rm -rf "$scratch"
+    mkdir -p "$scratch/logs"
+    cp -r "$DIFF_DIR/www" "$scratch/www"
+    # deterministic Last-Modified/ETag: the corpus pins the mtime
+    find "$scratch/www" -type f -exec touch -d '2026-01-01T00:00:00Z' {} +
+    section request "$case" > "$scratch/request.raw"
+    section expect "$case" > "$scratch/expect.raw"
+
+    started=0
+    for attempt in 1 2 3 4 5; do
+        port=$("$WOLF" run ./tests/rig/freeport.lu 2>/dev/null)
+        case "$port" in '' | *[!0-9]*) continue ;; esac
+        sed -e "s|@PORT@|$port|" -e "s|@ROOT@|$(pwd)/$scratch|" \
+            "$DIFF_DIR/nginx.conf.in" > "$scratch/nginx.conf"
+        "$BIN" -p "$(pwd)/$scratch" -c nginx.conf -e error.log &
+        nginx_pid=$!
+        # ready when the request stops answering `refused`
+        for poll in $(seq 1 50); do
+            if "$WOLF" run ./tests/rig/diffsend.lu "$port" "$scratch/request.raw" \
+                > "$scratch/actual.raw" 2> "$scratch/diffsend.err"; then
+                started=1
+                break
+            fi
+            grep -q 'error: refused' "$scratch/diffsend.err" || break
+            kill -0 "$nginx_pid" 2>/dev/null || break
+            sleep 0.1
+        done
+        [ "$started" = 1 ] && break
+        kill "$nginx_pid" 2>/dev/null
+        wait "$nginx_pid" 2>/dev/null
+    done
+    if [ "$started" != 1 ]; then
+        echo "differential: FAILED — $name: nginx never answered (see $scratch/diffsend.err)" >&2
+        failures=$((failures + 1))
+        continue
+    fi
+
+    normalize < "$scratch/actual.raw" > "$scratch/actual.norm"
+    normalize < "$scratch/expect.raw" > "$scratch/expect.norm"
+    if diff -u "$scratch/expect.norm" "$scratch/actual.norm" > "$scratch/verdict.diff"; then
+        echo "differential: ok — $name (nginx/$have_version on 127.0.0.1:$port)"
+    else
+        echo "differential: FAILED — $name: reply diverges from the expected outcome (modulo NORMALIZE):" >&2
+        cat "$scratch/verdict.diff" >&2
+        failures=$((failures + 1))
+    fi
+    kill "$nginx_pid" 2>/dev/null
+    wait "$nginx_pid" 2>/dev/null
+done
+
+if [ "$cases" = 0 ]; then
+    echo "differential: FAILED — no case files under $DIFF_DIR/cases/" >&2
+    exit 1
+fi
+echo "differential: $((cases - failures))/$cases case(s) green"
+[ "$failures" = 0 ] || exit 1

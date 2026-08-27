@@ -1,0 +1,65 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.propagate
+//!
+//! diffsend — rig DRIVER first (the corpus lane runs it bare, which
+//! exercises exactly the no-argument usage path: exit 2). The
+//! differential harness's wire half, in wolf (the dogfood rule):
+//! argv is `<port> <request-file>`; the file's bytes go to
+//! 127.0.0.1:<port> verbatim, the whole reply (read to close, 5s
+//! deadline) lands on stdout RAW — `print_raw`, no added newline —
+//! for the shell half to normalize and diff. Any failure rides out
+//! of `main` as its own tag: `error: refused` is also the harness's
+//! "not ready yet" probe answer, so its retry loop keys on it. The
+//! check/phase header also keeps this file out of the interpreter's
+//! sibling-module merge (see freeport.lu).
+
+use httpc
+
+/// Parse a decimal port from argv. `io` on anything that is not
+/// 1..65535 — a driver argument error, not a case outcome.
+fn to_port(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 {
+            return io
+        }
+        if b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 65535 {
+            return io
+        }
+    }
+    if n == 0 {
+        return io
+    }
+    n
+}
+
+fn main() -> !int {
+    var port: int = 0
+    var reqfile = ""
+    var i: int = 0
+    for a in env_args() {
+        if i == 0 {
+            port = to_port(a)?
+        } else {
+            reqfile = a
+        }
+        i = i + 1
+    }
+    if i < 2 {
+        eprint("usage: diffsend <port> <request-file>")
+        return 2
+    }
+    let raw = fs_read_text(reqfile)?
+    let reply = httpc.exchange(port, raw, 5000)?
+    print_raw(reply)
+    0
+}

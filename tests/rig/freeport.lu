@@ -1,0 +1,24 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.propagate
+//!
+//! freeport — rig DRIVER first (tools/wws-differential runs it for a
+//! port), smoke test second (exit 0 is the whole assertion — the
+//! port is the host's choice, so stdout cannot be pinned). Asks the
+//! host for an ephemeral loopback port and prints it: the closest
+//! thing to "port 0 always" a peer that cannot bind port 0 itself
+//! (the differential's nginx) can get. The caller must tolerate the
+//! tiny release-to-rebind race with a retry (wolf-lang#121 is the
+//! cautionary tale). The check/phase header also keeps this file out
+//! of the interpreter's sibling-module merge (an entry header marks
+//! an independent program; a bare file would be read as part of
+//! every sibling test and duplicate `main`, E0302).
+
+fn main() -> !int {
+    let srv = net_listen("127.0.0.1:0")?
+    let port = net_port(srv)?
+    print("{port}")
+    net_close(srv)?
+    0
+}

@@ -1,0 +1,23 @@
+// static_basic — the ws00 plumbing case: one static file, served
+// byte-for-byte (modulo NORMALIZE). Request lines are RAW BYTES
+// with CRLF endings (this file deliberately mixes line endings;
+// see docs/DIFFERENTIAL.md). Expected reply generated against the
+// pinned nginx/1.30.4 with the corpus mtime 2026-01-01T00:00:00Z.
+--- request
+GET /index.html HTTP/1.1
+Host: 127.0.0.1
+Connection: close
+
+--- expect
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: 78
+Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
+Connection: close
+ETag: "6955b900-4e"
+Accept-Ranges: bytes
+
+<!doctype html>
+<html><body>wws differential case: static_basic</body></html>

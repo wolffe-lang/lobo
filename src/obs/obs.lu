@@ -1,0 +1,12 @@
+//! member: true
+//! obs — logging and metrics. wsc03's territory; a stub at ws00 so the `.wolfi`
+//! interface machinery has a real surface to freeze. Do not grow this
+//! module outside its sprint contract.
+
+/// This module's interface version. Frozen by the ws00 `.wolfi`
+/// snapshot beside this file; wsc03 bumps it with its first real
+/// surface. Total; never traps.
+#[allow(w0314)]
+pub fn version() -> str {
+    "0.0.1"
+}

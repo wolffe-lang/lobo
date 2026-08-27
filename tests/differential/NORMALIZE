@@ -1,0 +1,8 @@
+# NORMALIZE — the differ's normalization set. CHECKED IN, not code
+# folklore: tools/wws-differential replaces the VALUE of exactly the
+# response headers named here with `<normalized>` — on BOTH sides of
+# the diff — before comparing. Everything else byte-compares, CRLF
+# included. Every future entry needs a comment saying WHY (a differ
+# that quietly normalizes is a differ that lies).
+Server   # implementation identity: the two servers legitimately differ here forever
+Date     # wall clock: legitimately different on every run

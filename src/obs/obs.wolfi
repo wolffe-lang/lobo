@@ -1,0 +1,8 @@
+module pkg :: obs
+  wolfi v0 · toolchain 0.1.0 · edition v1
+  export_hash 351c45cb035c5c82bac259f2fde59be9b25a439a9c995aa2eee9ef0e10d31ea9
+  pkg_hash    351c45cb035c5c82bac259f2fde59be9b25a439a9c995aa2eee9ef0e10d31ea9
+  deps: (none)
+  items:
+    [0] pub version — fn version() -> str
+

@@ -1,0 +1,27 @@
+//! check: run(exit=1, stdout="error: timeout")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union, err.propagate
+//!
+//! The deadline fires on a silent server: the listener never accepts
+//! and never answers, the client's dial completes into the loopback
+//! backlog, its read parks, and the armed deadline resolves as the
+//! `timeout` row — which `?` rides out of `main` as `error: timeout`,
+//! exit 1 (the toolchain naming the tag is the strongest evidence a
+//! test can carry). 60ms is generous against a peer that will NEVER
+//! send, so the verdict is deterministic on any host. This is the
+//! test that holds the rig's "deadline on every read" law, and it
+//! goes through `exchange_once` — the rig's handler-free witness
+//! path — so the toolchain names the tag rather than a handler
+//! asserting it (the strongest evidence a row test can carry).
+
+use httpc
+
+fn main() -> !int {
+    let srv = net_listen("127.0.0.1:0")?
+    let port = net_port(srv)?
+    let raw = httpc.exchange_once(port, "GET /silent HTTP/1.1\r\n\r\n", 4096, 60)?
+    print("unreachable: {raw}")
+    net_close(srv)?
+    0
+}

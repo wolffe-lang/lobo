@@ -1,0 +1,8 @@
+module pkg :: config
+  wolfi v0 · toolchain 0.1.0 · edition v1
+  export_hash cd2e9492d3154250760f15f18259ac49316669e1aa4fe7ab0e39b46b24a92b30
+  pkg_hash    cd2e9492d3154250760f15f18259ac49316669e1aa4fe7ab0e39b46b24a92b30
+  deps: (none)
+  items:
+    [0] pub version — fn version() -> str
+
