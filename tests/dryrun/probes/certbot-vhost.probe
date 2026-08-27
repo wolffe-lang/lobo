@@ -1,0 +1,25 @@
+# certbot-vhost — an https probe with SNI: the ws05 selection logic
+# answers offline (certificate entry, server_name, live/ path), and
+# the decision is honest about this pin: the port-80 redirect server
+# wins by first-server (host matching is a named delta) and its
+# `return` is parse-only, so the prediction is the 404 the live
+# server demonstrably answers.
+args: --request 'GET https://www.example.org/' --sni www.example.org
+exit: 0
+--- expect
+== request: GET https://www.example.org/
+listener: 127.0.0.1:443 (ssl)
+  tls: sni "www.example.org" -> certificate entry 0 (the default) [server_name www.example.org] tests/config-corpus/certbot-vhost/live/example.org/fullchain.pem
+server: tests/config-corpus/certbot-vhost/nginx.conf:12 [server_name www.example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+  candidate server tests/config-corpus/certbot-vhost/nginx.conf:25 [server_name www.example.org] — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
+location: / (tests/config-corpus/certbot-vhost/nginx.conf:20)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location /.well-known/acme-challenge/ (tests/config-corpus/certbot-vhost/nginx.conf:16) — lost: the path does not start with this prefix
+  candidate location / (tests/config-corpus/certbot-vhost/nginx.conf:20) — won: the longest matching prefix wins (1 bytes)
+effective directives (the winning chain, with provenance):
+  include mime.types;  # from tests/config-corpus/certbot-vhost/nginx.conf:10
+  listen 80;  # from tests/config-corpus/certbot-vhost/nginx.conf:13
+  server_name www.example.org;  # from tests/config-corpus/certbot-vhost/nginx.conf:14
+  return 301 https://$host$request_uri;  # from tests/config-corpus/certbot-vhost/nginx.conf:21
+  note: parsed but not implemented at this pin, so they do not shape this decision: `server_name`, `return` (statuses: docs/directives.md)
+decision: would answer 404 — no root/alias maps this path to the filesystem — the live server answers 404

@@ -1,0 +1,25 @@
+# php-fpm — the teaching case: the ~ \.php$ regex location is
+# parse-only at this pin, so index.php falls to the / prefix and would
+# be served as a STATIC file — exactly the surprise an operator wants
+# the dry-run to show them before the wire does.
+args: --request 'GET http://app.example.org/index.php'
+exit: 0
+--- expect
+== request: GET http://app.example.org/index.php
+listener: 127.0.0.1:8080
+server: tests/config-corpus/php-fpm/nginx.conf:13 [server_name php.example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+location: / (tests/config-corpus/php-fpm/nginx.conf:19)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location / (tests/config-corpus/php-fpm/nginx.conf:19) — won: the longest matching prefix wins (1 bytes)
+  candidate location ~ \.php$ (tests/config-corpus/php-fpm/nginx.conf:23) — lost: regex locations are parse-only at this pin — they never win a route (a named delta)
+  candidate location ~ /\.ht (tests/config-corpus/php-fpm/nginx.conf:32) — lost: regex locations are parse-only at this pin — they never win a route (a named delta)
+effective directives (the winning chain, with provenance):
+  include mime.types;  # from tests/config-corpus/php-fpm/nginx.conf:10
+  default_type application/octet-stream;  # from tests/config-corpus/php-fpm/nginx.conf:11
+  listen 8080;  # from tests/config-corpus/php-fpm/nginx.conf:14
+  server_name php.example.org;  # from tests/config-corpus/php-fpm/nginx.conf:15
+  root /srv/www/app/public;  # from tests/config-corpus/php-fpm/nginx.conf:16
+  index index.php index.html;  # from tests/config-corpus/php-fpm/nginx.conf:17
+  try_files $uri $uri/ /index.php?$query_string;  # from tests/config-corpus/php-fpm/nginx.conf:20
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `server_name`, `try_files` (statuses: docs/directives.md)
+decision: would serve: /srv/www/app/public/index.php (not checked)

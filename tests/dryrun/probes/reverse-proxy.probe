@@ -1,0 +1,30 @@
+# reverse-proxy — the proxy decision: upstream pool, peer set, the
+# set_header inheritance (location-level only — WWS-L002), variables
+# kept honest (no --client here, so $remote_addr would be UNRESOLVED
+# had the location named it).
+args: --request 'GET http://app.example.org/api/users?id=3'
+exit: 0
+--- expect
+== request: GET http://app.example.org/api/users?id=3
+listener: 127.0.0.1:18081
+server: tests/config-corpus/reverse-proxy/nginx.conf:19 [server_name app.example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+location: / (tests/config-corpus/reverse-proxy/nginx.conf:26)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location / (tests/config-corpus/reverse-proxy/nginx.conf:26) — won: the longest matching prefix wins (1 bytes)
+  candidate location /health (tests/config-corpus/reverse-proxy/nginx.conf:34) — lost: the path does not start with this prefix
+effective directives (the winning chain, with provenance):
+  proxy_set_header Host $host;  # from tests/config-corpus/reverse-proxy/nginx.conf:10
+  listen 18081;  # from tests/config-corpus/reverse-proxy/nginx.conf:20
+  server_name app.example.org;  # from tests/config-corpus/reverse-proxy/nginx.conf:21
+  proxy_set_header X-Real-IP $remote_addr;  # from tests/config-corpus/reverse-proxy/nginx.conf:23
+  proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;  # from tests/config-corpus/reverse-proxy/nginx.conf:24
+  proxy_pass http://app_pool;  # from tests/config-corpus/reverse-proxy/nginx.conf:27
+  proxy_http_version 1.1;  # from tests/config-corpus/reverse-proxy/nginx.conf:28
+  proxy_set_header Connection "";  # from tests/config-corpus/reverse-proxy/nginx.conf:29
+  proxy_connect_timeout 5s;  # from tests/config-corpus/reverse-proxy/nginx.conf:30
+  proxy_read_timeout 60s;  # from tests/config-corpus/reverse-proxy/nginx.conf:31
+  note: parsed but not implemented at this pin, so they do not shape this decision: `server_name`, `proxy_http_version`, `proxy_connect_timeout` (statuses: docs/directives.md)
+proxy headers (sent upstream):
+  Connection: 
+upstream pool "app_pool": 127.0.0.1:9001 weight=1; 127.0.0.1:9002 weight=2; 127.0.0.1:9003 weight=1
+decision: would proxy to http://app_pool/api/users?id=3

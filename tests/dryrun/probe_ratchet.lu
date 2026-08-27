@@ -1,0 +1,67 @@
+//! check: run(exit=0, stdout="dry-run probes: 9 (8 configs covered)\n")
+//! phase: run
+//! lanes: native checked
+//!
+//! THE PROBE RATCHET (ws07 acceptance): the dry-run probe count joins
+//! the raise-only constants. RAISING is routine — add the probe file,
+//! bump the number, done; LOWERING needs the reason spelled out in
+//! the commit message. Every config-corpus entry must be covered by
+//! at least one probe (tools/wws-dryrun enforces the per-config
+//! mapping and the stanza snapshots; THIS file gates the counts on
+//! the wolf side). fs lanes only (lupin has no fs by design — the
+//! dry-run's own purity tests are the three-lane story).
+
+/// The ratcheted probe count. The story so far (ws07 seed): one probe
+/// per corpus config — distro-default, static-site (plus its POST/405
+/// twin), reverse-proxy, php-fpm (the regex-parse-only teaching
+/// case), certbot-vhost (https + --sni through the ws05 selection),
+/// redirect-farm (`return` is parse-only, named), map-and-if, and
+/// lua-openresty (a -t-refused config predicts NOTHING: exit 1).
+fn ratchet_probes() -> int {
+    9
+}
+
+fn main() -> int {
+    let root = "tests/dryrun/probes"
+    let names = fs_read_dir(root) else |e| {
+        assert(false, "probe dir missing: {root}")
+        return 1
+    }
+    var probes: int = 0
+    var covered: int = 0
+    for nm in names {
+        if nm.ends_with(".probe") {
+            probes = probes + 1
+        }
+    }
+    // every corpus config carries at least one probe named after it
+    let corpus = fs_read_dir("tests/config-corpus") else |e| {
+        assert(false, "corpus root missing")
+        return 1
+    }
+    for dir in corpus {
+        if fs_is_dir("tests/config-corpus/{dir}") {
+            var hit = false
+            let again = fs_read_dir(root) else |e| {
+                assert(false, "probe dir vanished mid-walk")
+                return 1
+            }
+            for nm in again {
+                if nm == "{dir}.probe" || nm.starts_with("{dir}.") {
+                    hit = true
+                }
+            }
+            assert(
+                hit,
+                "corpus config {dir} has no dry-run probe (the contract: every entry gains one)",
+            )
+            covered = covered + 1
+        }
+    }
+    assert(
+        probes == ratchet_probes(),
+        "probe count moved: {probes} vs ratchet {ratchet_probes()} — raising is routine (bump the constant with the new probe); silent shrinkage is not",
+    )
+    print("dry-run probes: {probes} ({covered} configs covered)")
+    0
+}

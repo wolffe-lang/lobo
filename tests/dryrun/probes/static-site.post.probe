@@ -1,0 +1,39 @@
+# static-site, POST — the static path serves GET/HEAD only: the
+# predicted decision is the named 405, after routing (the trace still
+# explains the chain the request DID match).
+args: --request 'POST http://static.example.org/assets/app.css'
+exit: 0
+--- expect
+== request: POST http://static.example.org/assets/app.css
+listener: 127.0.0.1:8080
+server: tests/config-corpus/static-site/nginx.conf:28 [server_name static.example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+location: /assets/ (tests/config-corpus/static-site/nginx.conf:39)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location / (tests/config-corpus/static-site/nginx.conf:35) — lost: the prefix matches, but a longer prefix won (1 < 8)
+  candidate location /assets/ (tests/config-corpus/static-site/nginx.conf:39) — won: the longest matching prefix wins (8 bytes)
+  candidate location = /favicon.ico (tests/config-corpus/static-site/nginx.conf:45) — lost: the path is not exactly this location's `=` argument
+effective directives (the winning chain, with provenance):
+  include mime.types;  # from tests/config-corpus/static-site/nginx.conf:12
+  default_type application/octet-stream;  # from tests/config-corpus/static-site/nginx.conf:13
+  sendfile on;  # from tests/config-corpus/static-site/nginx.conf:14
+  tcp_nopush on;  # from tests/config-corpus/static-site/nginx.conf:15
+  keepalive_timeout 65;  # from tests/config-corpus/static-site/nginx.conf:16
+  server_tokens off;  # from tests/config-corpus/static-site/nginx.conf:17
+  etag on;  # from tests/config-corpus/static-site/nginx.conf:18
+  charset utf-8;  # from tests/config-corpus/static-site/nginx.conf:19
+  gzip on;  # from tests/config-corpus/static-site/nginx.conf:21
+  gzip_comp_level 5;  # from tests/config-corpus/static-site/nginx.conf:22
+  gzip_min_length 256;  # from tests/config-corpus/static-site/nginx.conf:23
+  gzip_vary on;  # from tests/config-corpus/static-site/nginx.conf:24
+  gzip_proxied any;  # from tests/config-corpus/static-site/nginx.conf:25
+  gzip_types text/plain text/css application/json application/javascript image/svg+xml;  # from tests/config-corpus/static-site/nginx.conf:26
+  listen 8080;  # from tests/config-corpus/static-site/nginx.conf:29
+  listen [::]:8080;  # from tests/config-corpus/static-site/nginx.conf:30
+  server_name static.example.org;  # from tests/config-corpus/static-site/nginx.conf:31
+  root /srv/www/static;  # from tests/config-corpus/static-site/nginx.conf:32
+  index index.html index.htm;  # from tests/config-corpus/static-site/nginx.conf:33
+  expires 30d;  # from tests/config-corpus/static-site/nginx.conf:40
+  add_header Cache-Control "public, immutable";  # from tests/config-corpus/static-site/nginx.conf:41
+  access_log off;  # from tests/config-corpus/static-site/nginx.conf:42
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `tcp_nopush`, `keepalive_timeout`, `server_tokens`, `etag`, `charset`, `gzip`, `gzip_comp_level`, `gzip_min_length`, `gzip_vary`, `gzip_proxied`, `gzip_types`, `server_name`, `expires`, `add_header`, `access_log` (statuses: docs/directives.md)
+decision: would answer 405 — method POST on a static location — the live server serves GET and HEAD only and answers 405
