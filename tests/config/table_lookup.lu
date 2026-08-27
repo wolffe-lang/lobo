@@ -36,8 +36,12 @@ fn main() -> int {
         "include implemented",
     )
     assert(
-        config.spec_at(t, config.find(t, "listen", "server")).status == "planned(ws02)",
-        "listen planned",
+        config.spec_at(t, config.find(t, "listen", "server")).status == "implemented",
+        "listen implemented (status flipped at ws07 — sockets bind since ws02, ssl since ws05; the dry-run chain notes surfaced the stale row)",
+    )
+    assert(
+        config.spec_at(t, config.find(t, "server_name", "server")).status == "planned(ws02)",
+        "server_name stays planned: host matching is parse-only (what the ws07 trace explains)",
     )
     assert(
         config.spec_at(t, config.find(t, "ssl_certificate", "server")).status == "implemented",

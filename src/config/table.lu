@@ -132,8 +132,19 @@ pub fn table() -> Table {
         "implemented",
         "MIME map block; body rows are data entries (type ext...), at_least(1)",
     )
-    // ---- planned(ws02): static serving
-    row(mut t, "listen", "server", "", 1, -1, "planned(ws02)", "bind address/port and flags")
+    // ---- the ws02 static-serving set (status flipped at ws07: the
+    // dry-run's chain notes surfaced that these rows still said
+    // planned while the server has executed them since ws02/ws05)
+    row(
+        mut t,
+        "listen",
+        "server",
+        "",
+        1,
+        -1,
+        "implemented",
+        "bind address/port; `ssl` flag serves TLS (ws05). Delta, named: ONE plain + ONE ssl listener bind at this pin — additional listen directives parse but do not bind",
+    )
     row(mut t, "server_name", "server", "", 1, -1, "planned(ws02)", "host matching")
     row(
         mut t,
@@ -142,8 +153,8 @@ pub fn table() -> Table {
         "",
         1,
         1,
-        "planned(ws02)",
-        "document root (URI appended)",
+        "implemented",
+        "document root (URI appended); location-then-server resolution (ws02)",
     )
     row(
         mut t,
@@ -152,10 +163,19 @@ pub fn table() -> Table {
         "",
         1,
         1,
-        "planned(ws02)",
-        "path replacement for the matched location part — see WWS-L003",
+        "implemented",
+        "path replacement for the matched location part — see WWS-L003 (ws02)",
     )
-    row(mut t, "index", "http server location", "", 1, -1, "planned(ws02)", "index files")
+    row(
+        mut t,
+        "index",
+        "http server location",
+        "",
+        1,
+        -1,
+        "implemented",
+        "index files, tried in order on a directory request (ws02)",
+    )
     row(
         mut t,
         "try_files",
