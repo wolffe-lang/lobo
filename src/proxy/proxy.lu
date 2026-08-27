@@ -1041,6 +1041,11 @@ fn relay_name(lname: str) -> str {
 /// be armed on `conn` before calling. Rows: `timeout` (deadline fired
 /// before a full head — 504 at the caller), `closed` (peer closed
 /// before a head — a broken upstream, 502), `io`.
+/// wsm01 shape note: same-tag re-raises go through a sentinel code
+/// set in the arm and returned OUTSIDE the match — lupin (is23)
+/// registers a row-tag arm pattern as a local binding, so
+/// `timeout => {return timeout}` false-fires W0305 on a shape wolfc
+/// reads clean (#48: the arm is the TAG). Filed upstream.
 fn read_up_head(conn: int) -> (str, str) ! {timeout, closed, io} {
     var buf = ""
     loop {
@@ -1051,11 +1056,30 @@ fn read_up_head(conn: int) -> (str, str) ! {timeout, closed, io} {
         if buf.len > 65536 {
             return io
         }
+        var errc = 0
         let piece = net_read(conn, 4096) else |e| match e {
-            timeout => { return timeout },
-            closed => { return closed },
+            timeout => {
+                errc = 1
+                ""
+            },
+            closed => {
+                errc = 2
+                ""
+            },
             utf8 => { return io },
-            io => { return io },
+            io => {
+                errc = 3
+                ""
+            },
+        }
+        if errc == 1 {
+            return timeout
+        }
+        if errc == 2 {
+            return closed
+        }
+        if errc == 3 {
+            return io
         }
         buf = "{buf}{piece}"
     }
@@ -1077,17 +1101,25 @@ fn read_up_length(conn: int, carry: str, want: int) -> str ! {io} {
 
 /// Read an upstream body to EOF (the 1.0-style close-delimited body),
 /// bounded so a peer dribbling forever cannot pin memory. Row: io.
+/// (Sentinel dodge on the io arm — the W0305 note at read_up_head.)
 fn read_up_close(conn: int, carry: str, cap: int) -> str ! {io} {
     var buf = carry
     loop {
         if buf.len > cap {
             return io
         }
+        var bad = false
         let piece = net_read(conn, 4096) else |e| match e {
             closed => { return buf },
             timeout => { return buf },
             utf8 => { return io },
-            io => { return io },
+            io => {
+                bad = true
+                ""
+            },
+        }
+        if bad {
+            return io
         }
         buf = "{buf}{piece}"
     }
