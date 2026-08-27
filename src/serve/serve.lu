@@ -817,6 +817,242 @@ pub fn serve_conn(conn: int, c: config.Conf, opts: ServerOpts, limits: http.Limi
 }
 
 // ------------------------------------------------------------------
+// the drain-aware step (ws08) — serve_conn blocks a connection to
+// completion, which a single poll loop cannot afford when it must ALSO
+// watch old generations drain while a new one serves. conn_step does
+// ONE poll's worth of work on a connection under a SHORT deadline and
+// yields, so the entry's loop multiplexes many connections and keeps a
+// per-generation live counter honest. serve_request is serve_conn's
+// per-request core, factored out; serve_conn itself is left untouched
+// (its tests and the differential are its guard). Same helpers, same
+// order — the response bytes are identical whichever driver runs.
+// ------------------------------------------------------------------
+
+/// The drain loop's per-request outcome: whether the connection should
+/// close after this request, and the bytes to carry into the next
+/// request on a kept-alive connection.
+pub struct ReqOut {
+    close: bool,
+    carry: str,
+}
+
+/// Serve ONE already-framed request — its header block `head` read,
+/// `rest0` the bytes after the blank line — and write the response.
+/// serve_conn's request core, factored so the drain-aware accept loop
+/// (main) can serve a connection one request at a time without blocking
+/// on the keepalive idle gap; the loop's per-generation counters then
+/// watch an old generation drain while a new one serves (ws08). Does
+/// NOT close the socket — the caller closes when `close` is true; the
+/// caller arms the body-read deadline. `served` is how many requests
+/// this connection has already handled (the keepalive budget). Total:
+/// every path resolves to a written response and a close-or-carry.
+pub fn serve_request(
+    conn: int,
+    c: config.Conf,
+    opts: ServerOpts,
+    limits: http.Limits,
+    local_port: int,
+    head: str,
+    rest0: str,
+    served: int,
+) -> ReqOut {
+    let req = http.parse_request(head, limits) else |e| match e {
+        malformed => {
+            send_err(conn, 400, false, opts.token)
+            return ReqOut { close: true, carry: "" }
+        },
+        uri_too_long => {
+            send_err(conn, 414, false, opts.token)
+            return ReqOut { close: true, carry: "" }
+        },
+        too_large => {
+            send_err(conn, 400, true, opts.token)
+            return ReqOut { close: true, carry: "" }
+        },
+        unimplemented => {
+            send_err(conn, 501, false, opts.token)
+            return ReqOut { close: true, carry: "" }
+        },
+    }
+
+    var rest = rest0
+    var body = ""
+    if req.body_mode == "length" {
+        if req.content_length > limits.max_body {
+            send_err(conn, 413, false, opts.token)
+            half_close_drain(conn)
+            return ReqOut { close: true, carry: "" }
+        }
+        let taken = take_length(conn, rest, req.content_length) else |_| {
+            return ReqOut { close: true, carry: "" }
+        }
+        body = taken.0
+        rest = taken.1
+    } else if req.body_mode == "chunked" {
+        rest = read_chunked(conn, rest, limits) else |e| match e {
+            bad => {
+                send_err(conn, 400, false, opts.token)
+                return ReqOut { close: true, carry: "" }
+            },
+            big => {
+                send_err(conn, 413, false, opts.token)
+                half_close_drain(conn)
+                return ReqOut { close: true, carry: "" }
+            },
+            io => {
+                return ReqOut { close: true, carry: "" }
+            },
+        }
+    }
+
+    let decoded = http.percent_decode(req.path) else |_| {
+        send_err(conn, 400, false, opts.token)
+        return ReqOut { close: true, carry: "" }
+    }
+    if http.has_control(decoded) {
+        send_err(conn, 400, false, opts.token)
+        return ReqOut { close: true, carry: "" }
+    }
+    let norm = http.normalize_path(decoded) else {
+        send_err(conn, 400, false, opts.token)
+        return ReqOut { close: true, carry: "" }
+    }
+
+    let keep = req.keepalive && served + 1 < opts.keepalive_requests
+    var should_close = false
+    let pplan = proxy.plan(c, norm)
+    if pplan.is_proxy {
+        should_close = proxy.
+            run(conn, c, req, body, pplan, "127.0.0.1", opts.token, now_date(), keep) else |_| {
+            return ReqOut { close: true, carry: "" }
+        }
+    } else {
+        should_close = handle_request(conn, c, req, norm, opts.token, keep, local_port) else |_| {
+            return ReqOut { close: true, carry: "" }
+        }
+    }
+    if should_close || !keep {
+        return ReqOut { close: true, carry: "" }
+    }
+    ReqOut { close: false, carry: rest }
+}
+
+/// A header-block boundary search: `ready` when `buf` holds a full
+/// header block, `marker` its start and `mlen` the blank-line length (4
+/// for CRLFCRLF, 2 for a lone LF-LF). Lenient like read_head — the
+/// strict parser rejects a bare-LF frame later. Total.
+struct HeadCut {
+    ready: bool,
+    marker: int,
+    mlen: int,
+}
+
+fn head_cut(buf: str) -> HeadCut {
+    let m1 = buf.find("\r\n\r\n") else -1
+    let m2 = buf.find("\n\n") else -1
+    if m1 >= 0 && (m2 < 0 || m1 <= m2) {
+        return HeadCut { ready: true, marker: m1, mlen: 4 }
+    }
+    if m2 >= 0 {
+        return HeadCut { ready: true, marker: m2, mlen: 2 }
+    }
+    HeadCut { ready: false, marker: -1, mlen: 0 }
+}
+
+/// One poll step's outcome. `active` is true when the step made
+/// progress (read bytes or served a request) — the loop resets that
+/// connection's idle clock on it. `close` means the connection is
+/// finished (peer close, error, a written terminal response, or the
+/// keepalive budget spent): the caller closes the socket and decrements
+/// the owning generation. `carry`/`served` thread the connection state.
+pub struct ConnStep {
+    active: bool,
+    close: bool,
+    carry: str,
+    served: int,
+}
+
+/// A full head is present in `buf` at `cut`: split it, arm the
+/// body-read deadline, and serve exactly one request. Total.
+fn step_serve(
+    conn: int,
+    c: config.Conf,
+    opts: ServerOpts,
+    limits: http.Limits,
+    local_port: int,
+    buf: str,
+    cut: HeadCut,
+    served: int,
+) -> ConnStep {
+    let head = buf[0..cut.marker]
+    let rest = buf[cut.marker + cut.mlen..buf.len]
+    net_deadline(conn, opts.read_timeout_ms) else |_| {}
+    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served)
+    let ns = served + 1
+    if ro.close {
+        return ConnStep { active: true, close: true, carry: "", served: ns }
+    }
+    ConnStep { active: true, close: false, carry: ro.carry, served: ns }
+}
+
+/// One poll step on a connection for the drain-aware accept loop: arm a
+/// SHORT deadline `poll_ms`, do one bounded read, and — when a full
+/// request head is present (already carried, or completed by this read)
+/// — serve exactly one request. NEVER blocks on the keepalive idle gap:
+/// an idle keepalive connection returns `active: false, close: false`,
+/// so the loop keeps its per-generation counter live, checks the idle
+/// clock itself, and moves on to poll siblings and the control channel.
+/// This is the whole reason an old generation's drain is watchable
+/// while a new one serves (ws08). Total.
+pub fn conn_step(
+    conn: int,
+    c: config.Conf,
+    opts: ServerOpts,
+    limits: http.Limits,
+    local_port: int,
+    carry: str,
+    served: int,
+    poll_ms: int,
+) -> ConnStep {
+    var buf = carry
+    let pre = head_cut(buf)
+    if pre.ready {
+        return step_serve(conn, c, opts, limits, local_port, buf, pre, served)
+    }
+    if buf.len > limits.max_header_total {
+        send_err(conn, 400, true, opts.token)
+        return ConnStep { active: true, close: true, carry: "", served: served }
+    }
+    net_deadline(conn, poll_ms) else |_| {
+        return ConnStep { active: false, close: true, carry: buf, served: served }
+    }
+    let piece = net_read(conn, 4096) else |e| match e {
+        closed => {
+            return ConnStep { active: false, close: true, carry: buf, served: served }
+        },
+        timeout => {
+            return ConnStep { active: false, close: false, carry: buf, served: served }
+        },
+        utf8 => {
+            send_err(conn, 400, false, opts.token)
+            return ConnStep { active: true, close: true, carry: "", served: served }
+        },
+        io => {
+            return ConnStep { active: false, close: true, carry: buf, served: served }
+        },
+    }
+    if piece.is_empty() {
+        return ConnStep { active: false, close: true, carry: buf, served: served }
+    }
+    buf = "{buf}{piece}"
+    let cut = head_cut(buf)
+    if cut.ready {
+        return step_serve(conn, c, opts, limits, local_port, buf, cut, served)
+    }
+    ConnStep { active: true, close: false, carry: buf, served: served }
+}
+
+// ------------------------------------------------------------------
 // the accept loop (sequential — spawn-free, so it runs on native +
 // checked; the entry wraps serve_conn in a task per connection for
 // the concurrent posture on native)
