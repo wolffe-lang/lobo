@@ -20,9 +20,10 @@
 # ws04/ws08's D1/D14 deferral retires), s115 net byte paths
 # (net_read_bytes/net_write_bytes, no utf8 hazard on binary bodies)
 # and D56 cast semantics, s113's casts, s112's constant-time tier,
-# D54 (integer literals adopt float expectations). Trunk at wsm01
-# launch was 4727bfb (c22 dyn-ABI, mid-campaign); the pin takes the
-# contract's named s115 merge. Build:
+# D54 (integer literals adopt float expectations). Wolf-lang trunk
+# at wsm01 launch IS this commit (the c22 dyn-ABI work sits on the
+# unmerged s116 branch), so pin == trunk == the contract's named
+# target. Build:
 #   cargo build --release -p wolf_driver -p wolf_rt
 # and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ —
 # the native tier needs the staticlib beside the driver.
