@@ -18,6 +18,13 @@
 //!       after `$`) still opens a block.
 //!   p69 `include a$v}b.conf;` → open() "a$v}b.conf" — `}` mid-word
 //!       stays literal with or without a `$` before it.
+//!
+//! FINDING wolf-lang#134 (filed from this file, header not call site
+//! per F-0016): a wolf string carrying the raw byte pair `$` `{`
+//! opens an undocumented "generalized literal" (E0109/E0102), so the
+//! data strings below spell `${{v}}` — the interpolation-escape
+//! reading that yields the bytes `${v}` — and the prose messages
+//! avoid the pair entirely. The honest workaround, in the open.
 
 use config
 
