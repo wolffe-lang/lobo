@@ -1,8 +1,13 @@
 module pkg :: config
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash cd2e9492d3154250760f15f18259ac49316669e1aa4fe7ab0e39b46b24a92b30
-  pkg_hash    cd2e9492d3154250760f15f18259ac49316669e1aa4fe7ab0e39b46b24a92b30
+  export_hash 8772455fcc0b32a0a67c3e809a7516b6e340d2fa961881dd640046d138a85408
+  pkg_hash    8772455fcc0b32a0a67c3e809a7516b6e340d2fa961881dd640046d138a85408
   deps: (none)
   items:
-    [0] pub version — fn version() -> str
+    [0] pub lex — fn lex(src: str) -> self.Toks · regions (-) -> ρ_caller
+    [1] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
+    [2] pub render_spans — fn render_spans(t: self.Toks) -> str · regions (ρ1) -> -
+    [3] pub version — fn version() -> str
+    [4] pub word_segments — fn word_segments(text: str) -> str
+    [5] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
 
