@@ -1,0 +1,182 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: tls config
+//!
+//! The PURE half of tls: ClientHello parsing (tls.parse_client_hello)
+//! and the alert vocabulary. Wire bytes in, negotiation facts out —
+//! no net, no crypto, all three lanes. Builds a minimal RFC 8446
+//! ClientHello by hand (TLS 1.3, the ChaCha20 suite, an X25519 key
+//! share, ed25519 signatures, an SNI and http/1.1 ALPN) and asserts
+//! every fact, then mutates it to prove the negative gates.
+
+use tls
+
+fn u16be(v: int) -> List[int] {
+    var o = List[int]()
+    (mut o).push(v / 256 % 256)
+    (mut o).push(v % 256)
+    o
+}
+
+fn push_all(mut o: List[int], s: List[int]) {
+    for b in s {
+        (mut o).push(b)
+    }
+}
+
+fn u16p(d: List[int]) -> List[int] {
+    var o = u16be(d.len)
+    push_all(mut o, d)
+    o
+}
+
+fn ext(t: int, d: List[int]) -> List[int] {
+    var o = u16be(t)
+    push_all(mut o, u16p(d))
+    o
+}
+
+/// Build a ClientHello handshake message with a settable extension
+/// block, suite list, and key-share group.
+fn build_ch(exts: List[int], suites: List[int]) -> List[int] {
+    var body = List[int]()
+    push_all(mut body, u16be(771))
+    var i: int = 0
+    while i < 32 {
+        (mut body).push(i)
+        i = i + 1
+    }
+    (mut body).push(0)
+    push_all(mut body, u16p(suites))
+    (mut body).push(1)
+    (mut body).push(0)
+    push_all(mut body, u16p(exts))
+    var msg = List[int]()
+    (mut msg).push(1)
+    (mut msg).push(body.len / 65536 % 256)
+    (mut msg).push(body.len / 256 % 256)
+    (mut msg).push(body.len % 256)
+    push_all(mut msg, body)
+    msg
+}
+
+fn ext_versions13() -> List[int] {
+    var inner = List[int]()
+    (mut inner).push(2)
+    push_all(mut inner, u16be(772))
+    ext(43, inner)
+}
+
+fn ext_keyshare_x25519() -> List[int] {
+    var entry = List[int]()
+    push_all(mut entry, u16be(29))
+    var pt = List[int]()
+    var i: int = 0
+    while i < 32 {
+        (mut pt).push(9)
+        i = i + 1
+    }
+    push_all(mut entry, u16p(pt))
+    ext(51, u16p(entry))
+}
+
+fn ext_sigalgs_ed() -> List[int] {
+    ext(13, u16p(u16be(2055)))
+}
+
+fn ext_sni(host: str) -> List[int] {
+    var name = List[int]()
+    (mut name).push(0)
+    var hb = List[int]()
+    for b in host.bytes() {
+        (mut hb).push(b)
+    }
+    push_all(mut name, u16p(hb))
+    ext(0, u16p(name))
+}
+
+fn ext_alpn_http11() -> List[int] {
+    var names = List[int]()
+    (mut names).push(8)
+    for b in "http/1.1".bytes() {
+        (mut names).push(b)
+    }
+    ext(16, u16p(names))
+}
+
+fn full_exts() -> List[int] {
+    var e = List[int]()
+    push_all(mut e, ext_versions13())
+    push_all(mut e, ext_keyshare_x25519())
+    push_all(mut e, ext_sigalgs_ed())
+    push_all(mut e, ext_sni("wolf.example"))
+    push_all(mut e, ext_alpn_http11())
+    e
+}
+
+fn main() -> int {
+    let chacha = u16be(4867)
+
+    let h = tls.parse_client_hello(build_ch(full_exts(), chacha))
+    assert(h.ok, "full hello parses: {h.reason}")
+    assert(h.has_13, "TLS 1.3 seen")
+    assert(h.has_chacha, "ChaCha20 suite seen")
+    assert(h.has_ed25519, "ed25519 sigalg seen")
+    assert(h.kx.len == 32, "X25519 key share extracted")
+    assert(h.kx[0] == 9, "key share bytes verbatim")
+    assert(h.sni == "wolf.example", "SNI extracted: {h.sni}")
+    assert(h.alpn_offered, "ALPN offered")
+    assert(h.alpn_http11, "http/1.1 in ALPN")
+    assert(h.random.len == 32, "random extracted")
+
+    // no TLS 1.3 (drop supported_versions)
+    var e2 = List[int]()
+    push_all(mut e2, ext_keyshare_x25519())
+    push_all(mut e2, ext_sigalgs_ed())
+    let h2 = tls.parse_client_hello(build_ch(e2, chacha))
+    assert(h2.ok, "parses structurally")
+    assert(!h2.has_13, "no 1.3 without supported_versions")
+
+    // no ChaCha suite (offer only a bogus suite)
+    let h3 = tls.parse_client_hello(build_ch(full_exts(), u16be(4865)))
+    assert(!h3.has_chacha, "no chacha when unoffered")
+
+    // no key share
+    var e4 = List[int]()
+    push_all(mut e4, ext_versions13())
+    push_all(mut e4, ext_sigalgs_ed())
+    let h4 = tls.parse_client_hello(build_ch(e4, chacha))
+    assert(h4.kx.len == 0, "no key share extracted")
+
+    // ALPN with only h2 (no http/1.1)
+    var e5 = List[int]()
+    push_all(mut e5, ext_versions13())
+    var h2names = List[int]()
+    (mut h2names).push(2)
+    (mut h2names).push(104)
+    (mut h2names).push(50)
+    push_all(mut e5, ext(16, u16p(h2names)))
+    let h5 = tls.parse_client_hello(build_ch(e5, chacha))
+    assert(h5.alpn_offered, "ALPN offered")
+    assert(!h5.alpn_http11, "http/1.1 absent from an h2-only offer")
+
+    // truncated garbage never traps
+    var junk = List[int]()
+    (mut junk).push(1)
+    (mut junk).push(0)
+    (mut junk).push(0)
+    (mut junk).push(200)
+    let hj = tls.parse_client_hello(junk)
+    assert(!hj.ok, "truncated hello rejected, not trapped")
+
+    // alert vocabulary
+    assert(tls.alert_name(0) == "close_notify", "alert 0")
+    assert(tls.alert_name(40) == "handshake_failure", "alert 40")
+    assert(tls.alert_name(51) == "decrypt_error", "alert 51")
+    assert(tls.alert_name(120) == "no_application_protocol", "alert 120")
+    assert(tls.alert_name(200) == "alert_200", "unknown alert")
+
+    print("client_hello: facts parsed, gates observable, no trap on junk")
+    0
+}

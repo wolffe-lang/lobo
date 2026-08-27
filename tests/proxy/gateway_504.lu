@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: proxy http config obs serve
+//! stage-src: proxy http config obs serve conn tls
 //!
 //! The 504 path, live: wws proxies to an upstream that ACCEPTS but
 //! never replies (a listener left un-accepted — the kernel completes

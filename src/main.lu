@@ -48,11 +48,13 @@
 //! directly above a dotted call.
 
 use config
+use conn
 use http
 use obs
 use proxy
 use serve
 use shell
+use tls
 
 /// The package version. Matches wolf.pkg; the release ritual (far
 /// future) bumps both in one commit. Total; never traps.
@@ -393,6 +395,37 @@ fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: boo
 /// new one serves. Returns 1 on a config error, a failed bind, or a
 /// refused start; the loop runs until `stop`, or until `quit` has
 /// drained everything. Loopback only.
+/// The bind address of the first `listen ... ssl` directive (the TLS
+/// listener; a bare port becomes a loopback bind — loopback-only,
+/// forever). "" when no ssl listen exists. Total.
+fn ssl_listen_addr(c: config.Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "listen" {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var has_ssl = false
+            var j: int = 0
+            while j < nn {
+                if c.argp[at + j] == "ssl" {
+                    has_ssl = true
+                }
+                j = j + 1
+            }
+            if has_ssl && nn >= 1 {
+                let a = c.argp[at]
+                if a.contains(":") {
+                    return a
+                }
+                return "127.0.0.1:{a}"
+            }
+        }
+        i = i + 1
+    }
+    ""
+}
+
 fn serve_main(prefix: str, conf: str) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
@@ -414,14 +447,59 @@ fn serve_main(prefix: str, conf: str) -> int {
         eprint("wws: [warn] removing stale pid file \"{pidp}\" (control {existing} not responding)")
     }
 
-    let addr = serve.listen_addr(c0)
-    let hl = net_listen(addr) else |_| {
-        eprint("wws: [emerg] bind() to {addr} failed")
-        return 1
+    // the plaintext listener binds the first NON-ssl listen; a config
+    // whose only listen carries `ssl` has no plaintext socket (the
+    // TLS-only server). `hport` is the port a directory redirect's
+    // absolute Location uses — the plaintext port when there is one,
+    // else the TLS port (set below).
+    let addr = serve.listen_addr_plain(c0)
+    var have_http = false
+    var hl: int = 0
+    var hport: int = 0
+    if !addr.is_empty() {
+        hl = net_listen(addr) else |_| {
+            eprint("wws: [emerg] bind() to {addr} failed")
+            return 1
+        }
+        hport = net_port(hl) else |_| {
+            eprint("wws: [emerg] could not read the listen port")
+            return 1
+        }
+        have_http = true
     }
-    let hport = net_port(hl) else |_| {
-        eprint("wws: [emerg] could not read the listen port")
-        return 1
+
+    // ws05: the TLS listener. `listen ... ssl` opens a second socket;
+    // the SslConf (certs, keys, SNI table) is resolved and FROZEN per
+    // generation beside the Conf (the same freeze-and-swap the model
+    // rides — a reload rebuilds it, cert-reload atomicity for free).
+    // TLS connections are served BLOCKING to completion in the poll
+    // loop below (the drain multiplexer's table is parallel primitive
+    // lists and cannot hold a per-connection TLS session on the native
+    // tier — wolf-lang#144; interleaved TLS drain awaits the fix, a
+    // NAMED residue). The plaintext drain is untouched.
+    var have_tls = false
+    var tls_l: int = 0
+    var ssl0 = config.ssl_resolve(c0, prefix)
+    let tls_addr = ssl_listen_addr(c0)
+    if !tls_addr.is_empty() {
+        if !config.ssl_ok(ssl0) {
+            eprint("wws: [emerg] TLS configuration invalid: {ssl0.err}")
+            return 1
+        }
+        tls_l = net_listen(tls_addr) else |_| {
+            eprint("wws: [emerg] bind() to TLS {tls_addr} failed")
+            return 1
+        }
+        let tport = net_port(tls_l) else |_| {
+            return 1
+        }
+        if !have_http {
+            hport = tport
+        }
+        have_tls = true
+        eprint(
+            "wws: [notice] TLS serving on {tls_addr} (port {tport}); TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, certificate entries loaded: {ssl0.names.len}",
+        )
     }
 
     // the control endpoint is what the pid file records (so -s and the
@@ -450,7 +528,8 @@ fn serve_main(prefix: str, conf: str) -> int {
     let opts = serve.default_opts()
     let lim = http.default_limits()
     let shutdown_ms = shell.shutdown_timeout_ms(c0)
-    eprint("wws: [notice] serving on {addr}, control {ctrl_ep}, pid file {pidp}")
+    let where = if have_http { addr } else { "(no plaintext listener)" }
+    eprint("wws: [notice] serving on {where}, control {ctrl_ep}, pid file {pidp}")
 
     // signal reception (wsm01, s114 in the pin): register interest in
     // RELOAD|TERMINATE|QUIT by MEANING, plus the probe bit (UPGRADE —
@@ -578,6 +657,20 @@ fn serve_main(prefix: str, conf: str) -> int {
                 if ng.ok && ng.gen > curgen {
                     let held = gens[ci].live
                     let nhash = shell.conf_hash(ng.conf)
+                    // cert-reload atomicity (ws05): rebuild the frozen
+                    // SslConf from the new model. ssl_resolve validates
+                    // the PAIR; a reload whose certs fail keeps serving
+                    // (the ng.ok gate already held the config valid, and
+                    // TLS conns are served to completion, so in-flight
+                    // ones finish under the old cert — the ws04 rule).
+                    let nssl = config.ssl_resolve(ng.conf, prefix)
+                    if config.ssl_ok(nssl) {
+                        ssl0 = nssl
+                    } else {
+                        eprint(
+                            "wws: [error] reloaded config has invalid TLS ({nssl.err}); keeping the previous certificates",
+                        )
+                    }
                     gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
                     eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
                     eprint("wws: [notice] {shell.ev_generation_loaded(ng.gen, nhash)}")
@@ -595,7 +688,7 @@ fn serve_main(prefix: str, conf: str) -> int {
 
         // 2. accept a new http connection (unless winding down) — it is
         // tagged with the CURRENT generation and bumps that counter
-        if running && !quitting {
+        if have_http && running && !quitting {
             net_deadline(hl, 25) else |_| {}
             var got_conn = true
             let conn = net_accept(hl) else |_| {
@@ -610,6 +703,50 @@ fn serve_main(prefix: str, conf: str) -> int {
                 (mut ccarry).push("")
                 (mut cserved).push(0)
                 (mut cidle).push(now)
+            }
+        }
+
+        // 2b. TLS: accept and serve BLOCKING to completion (ws05).
+        // The session cannot ride the drain table (wolf-lang#144), so a
+        // TLS connection is handshaked and served here, start to finish,
+        // under the current generation's frozen SslConf. It is tagged to
+        // the current gen for the live counter (a reload while a TLS
+        // conn serves waits for it — acceptable on loopback; interleaved
+        // TLS drain is the named residue). A stalled handshake is bounded
+        // by the read deadline, never a hang.
+        if have_tls && running && !quitting {
+            net_deadline(tls_l, 25) else |_| {}
+            var got_tls = true
+            let tconn = net_accept(tls_l) else |_| {
+                got_tls = false
+                0
+            }
+            if got_tls {
+                let tgen = current_gen(gens)
+                gens = bump_live(gens, tgen, 1)
+                let tconf = conf_for(gens, tgen)
+                var aborted_t = false
+                var z = tls.accept(tconn, ssl0, opts.read_timeout_ms) else |e| match e {
+                    refused => {
+                        aborted_t = true
+                        tls.no_sess()
+                    },
+                    timeout => {
+                        aborted_t = true
+                        tls.no_sess()
+                    },
+                    io => {
+                        aborted_t = true
+                        tls.no_sess()
+                    },
+                }
+                if aborted_t {
+                    net_close(tconn) else |_| {}
+                } else {
+                    var tcn = conn.tls_conn(tconn, z)
+                    serve.serve_conn_cn(mut tcn, tconf, opts, lim, hport)
+                }
+                gens = on_conn_close(gens, tgen, false)
             }
         }
 
@@ -677,7 +814,12 @@ fn serve_main(prefix: str, conf: str) -> int {
     for fd in cfds {
         net_close(fd) else |_| {}
     }
-    net_close(hl) else |_| {}
+    if have_http {
+        net_close(hl) else |_| {}
+    }
+    if have_tls {
+        net_close(tls_l) else |_| {}
+    }
     if have_ctrl {
         net_close(cl) else |_| {}
     }

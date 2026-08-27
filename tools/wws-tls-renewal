@@ -1,0 +1,123 @@
+#!/bin/sh
+# wws-tls-renewal — the certbot renewal-reload case (ws05 §4, the W4
+# hard-minimum proof). A REAL certbot layout: a live/<domain>/ symlink
+# farm (fullchain.pem + privkey.pem symlinks into archive/), resolved
+# at load. Serve under cert A, repoint the symlinks to cert B exactly
+# as certbot does on renewal, `-s reload`, and prove a NEW connection
+# is served cert B while the reload kept the old model until the swap
+# (in-flight TLS connections are served to completion, so they finish
+# under cert A — the ws04 keep-serving rule, here for TLS state). Also
+# proves a BROKEN symlink is the named config error. Loopback only.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+WWS=target/wws-release
+FX=tests/tls/fixtures
+CA=$FX/ca.crt
+if [ ! -x "$WWS" ]; then
+    echo "tls-renewal: FAILED — $WWS missing" >&2
+    exit 1
+fi
+if ! command -v openssl >/dev/null 2>&1; then
+    echo "tls-renewal: SKIP — no openssl (named skip)" >&2
+    exit 0
+fi
+
+scratch=target/tls-renewal
+rm -rf "$scratch"
+mkdir -p "$scratch/archive" "$scratch/live" "$scratch/www"
+printf '<h1>renewal</h1>\n' > "$scratch/www/index.html"
+
+# cert A = the localhost pair, cert B = the alt.example pair (a visible
+# CN change so the renewal is observable through the served cert). The
+# archive holds the real files; live/ holds the symlinks certbot swaps.
+cp "$FX/fullchain.pem" "$scratch/archive/fullchainA.pem"
+cp "$FX/leaf.key"      "$scratch/archive/privkeyA.pem"
+cp "$FX/alt-fullchain.pem" "$scratch/archive/fullchainB.pem"
+cp "$FX/alt.key"           "$scratch/archive/privkeyB.pem"
+ln -sf ../archive/fullchainA.pem "$scratch/live/fullchain.pem"
+ln -sf ../archive/privkeyA.pem   "$scratch/live/privkey.pem"
+
+cat > "$scratch/wws.conf" <<EOF
+pid $scratch/wws.pid;
+control 127.0.0.1:0;
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost alt.example;
+        ssl_certificate $scratch/live/fullchain.pem;
+        ssl_certificate_key $scratch/live/privkey.pem;
+        ssl_protocols TLSv1.3;
+        root $scratch/www;
+        index index.html;
+    }
+}
+EOF
+
+red=0
+pass() { echo "tls-renewal: ok — $1"; }
+fail() { echo "tls-renewal: FAILED — $1" >&2; red=$((red + 1)); }
+
+"$WWS" -p . -c "$scratch/wws.conf" serve >"$scratch/wws.out" 2>"$scratch/wws.err" </dev/null &
+wws_pid=$!
+port=""
+i=0
+while [ $i -lt 50 ]; do
+    port=$(sed -n 's/.*TLS serving on [^ ]* (port \([0-9]*\)).*/\1/p' "$scratch/wws.err" | head -1)
+    [ -n "$port" ] && break
+    sleep 0.1
+    i=$((i + 1))
+done
+if [ -z "$port" ]; then
+    echo "tls-renewal: FAILED — no TLS port announced:" >&2
+    cat "$scratch/wws.err" >&2
+    kill "$wws_pid" 2>/dev/null
+    exit 1
+fi
+
+subj_before=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername localhost \
+    -CAfile "$CA" -tls1_3 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+case "$subj_before" in *localhost*) pass "serving cert A (CN=localhost) through the symlink farm" ;; *) fail "before-reload cert was: $subj_before" ;; esac
+
+# certbot's renewal move: repoint the live/ symlinks to the new archive
+# files (atomic-ish rename dance certbot does; a plain repoint here).
+ln -sfn ../archive/fullchainB.pem "$scratch/live/fullchain.pem"
+ln -sfn ../archive/privkeyB.pem   "$scratch/live/privkey.pem"
+
+# -s reload over the control channel (the certbot post-hook)
+"$WWS" -p . -c "$scratch/wws.conf" -s reload >"$scratch/reload.out" 2>"$scratch/reload.err"
+sleep 0.4
+
+subj_after=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername localhost \
+    -CAfile "$CA" -tls1_3 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+case "$subj_after" in *alt.example*) pass "after -s reload: new connections get cert B (CN=alt.example)" ;; *) fail "after-reload cert was: $subj_after" ;; esac
+
+# the reload was logged as a generation event (the observable drain)
+if grep -q "generation-loaded gen=2" "$scratch/wws.err"; then
+    pass "reload advanced the generation (gen 2 loaded)"
+else
+    fail "no generation-2 load event after reload"
+fi
+
+kill "$wws_pid" 2>/dev/null
+wait "$wws_pid" 2>/dev/null
+kill -9 "$wws_pid" 2>/dev/null
+
+# a BROKEN symlink is the named config error (not a crash, not a silent
+# plaintext fallback)
+rm -f "$scratch/live/fullchain.pem"
+ln -s ../archive/does-not-exist.pem "$scratch/live/fullchain.pem"
+terr=$("$WWS" -p . -c "$scratch/wws.conf" -t 2>&1)
+tcode=$?
+if [ "$tcode" != 0 ] && printf '%s' "$terr" | grep -qi "cannot load certificate"; then
+    pass "a broken symlink is the named config error at -t"
+else
+    fail "broken symlink did not produce a named -t error (exit $tcode)"
+fi
+
+echo "tls-renewal: cases run, $red red"
+[ "$red" = 0 ] || exit 1
+echo "tls-renewal: GREEN — the certbot renewal-reload flow carries over TLS"

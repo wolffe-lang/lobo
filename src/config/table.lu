@@ -664,7 +664,7 @@ pub fn table() -> Table {
         "implemented",
         "wws-native: loopback reload channel for -s (off by default; NOT an nginx directive — the oracle -t rejects it, a named delta; ws14 audits the surface)",
     )
-    // ---- planned(wsc02): the certs-carry campaign
+    // ---- implemented at ws05: the certs-carry campaign's serving set
     row(
         mut t,
         "ssl_certificate",
@@ -672,12 +672,39 @@ pub fn table() -> Table {
         "",
         1,
         1,
-        "planned(wsc02)",
-        "certificate chain PEM — existing layouts keep working (charter hard minimum)",
+        "implemented",
+        "fullchain PEM, leaf-first enforced with a named reorder error; Ed25519 leaf only at this pin (RSA/ECDSA are std.x.tls roadmap rows, refused BY NAME at -t, never accepted silently) — existing layouts keep working (charter hard minimum, ws05)",
     )
-    row(mut t, "ssl_certificate_key", "http server", "", 1, 1, "planned(wsc02)", "private key PEM")
-    row(mut t, "ssl_protocols", "http server", "", 1, -1, "planned(wsc02)", "TLS protocol set")
-    row(mut t, "ssl_ciphers", "http server", "", 1, 1, "planned(wsc02)", "cipher list")
+    row(
+        mut t,
+        "ssl_certificate_key",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "PKCS#8 PEM; pair MATCH verified at -t by public-key comparison; Ed25519 only at this pin (named refusal otherwise); encrypted keys are a named delta (ws05)",
+    )
+    row(
+        mut t,
+        "ssl_protocols",
+        "http server",
+        "",
+        1,
+        -1,
+        "implemented",
+        "v0 honest set: TLSv1.3 implemented; TLSv1.2 listed = config-time named delta citing the std.x.tls ladder (1.2 is its roadmap row); a set without TLSv1.3 is a config error (ws05)",
+    )
+    row(
+        mut t,
+        "ssl_ciphers",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "TLS 1.3 suites mapped: TLS_CHACHA20_POLY1305_SHA256 implemented (the RFC 8446 MTI), AES-GCM pair named roadmap, unknown TLS_* = named error listing supported; 1.2 cipher-list tokens are inert for 1.3 (nginx parity, warned) (ws05)",
+    )
     row(
         mut t,
         "ssl_prefer_server_ciphers",
@@ -688,8 +715,26 @@ pub fn table() -> Table {
         "planned(wsc02)",
         "cipher preference",
     )
-    row(mut t, "ssl_session_cache", "http server", "", 1, 2, "planned(wsc02)", "session cache")
-    row(mut t, "ssl_session_timeout", "http server", "", 1, 1, "planned(wsc02)", "session TTL")
+    row(
+        mut t,
+        "ssl_session_cache",
+        "http server",
+        "",
+        1,
+        2,
+        "planned(wsc02)",
+        "session cache — TLS 1.3 resumption is a NAMED std.x.tls roadmap row (ws05 serves full handshakes only)",
+    )
+    row(
+        mut t,
+        "ssl_session_timeout",
+        "http server",
+        "",
+        1,
+        1,
+        "planned(wsc02)",
+        "session TTL — rides the resumption roadmap row (ws05 note)",
+    )
     row(mut t, "ssl_dhparam", "http server", "", 1, 1, "planned(wsc02)", "DH parameters")
     row(mut t, "ssl_stapling", "http server", "", 1, 1, "planned(wsc02)", "OCSP stapling")
     row(

@@ -1,0 +1,104 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! The pure half of config/sslcert: PKCS#8 parsing (RFC 5958 over a
+//! hand-built DER — the RFC 8410 Ed25519 shape, the RSA-OID
+//! named-unsupported shape, and malformed inputs answering alg "")
+//! and the PEM label probe. No fs, no net — all three lanes.
+
+use config
+
+fn ed25519_pkcs8() -> List[int] {
+    // SEQUENCE(46) { INTEGER 0, SEQUENCE(5) { OID 1.3.101.112 },
+    // OCTET STRING(34) { OCTET STRING(32) seed } }
+    var b = List[int]()
+    (mut b).push(48)
+    (mut b).push(46)
+    (mut b).push(2)
+    (mut b).push(1)
+    (mut b).push(0)
+    (mut b).push(48)
+    (mut b).push(5)
+    (mut b).push(6)
+    (mut b).push(3)
+    (mut b).push(43)
+    (mut b).push(101)
+    (mut b).push(112)
+    (mut b).push(4)
+    (mut b).push(34)
+    (mut b).push(4)
+    (mut b).push(32)
+    var i: int = 0
+    while i < 32 {
+        (mut b).push(i + 100)
+        i = i + 1
+    }
+    b
+}
+
+fn rsa_pkcs8_head() -> List[int] {
+    // SEQUENCE { INTEGER 0, SEQUENCE(13) { OID 1.2.840.113549.1.1.1,
+    // NULL }, OCTET STRING(0) } — enough structure to classify
+    var b = List[int]()
+    (mut b).push(48)
+    (mut b).push(20)
+    (mut b).push(2)
+    (mut b).push(1)
+    (mut b).push(0)
+    (mut b).push(48)
+    (mut b).push(13)
+    (mut b).push(6)
+    (mut b).push(9)
+    (mut b).push(42)
+    (mut b).push(134)
+    (mut b).push(72)
+    (mut b).push(134)
+    (mut b).push(247)
+    (mut b).push(13)
+    (mut b).push(1)
+    (mut b).push(1)
+    (mut b).push(1)
+    (mut b).push(5)
+    (mut b).push(0)
+    (mut b).push(4)
+    (mut b).push(0)
+    b
+}
+
+fn main() -> int {
+    // the Ed25519 shape: alg named, the 32-byte seed extracted
+    let ki = config.pkcs8_parse(ed25519_pkcs8())
+    assert(ki.alg == "ed25519", "ed25519 recognized: {ki.alg}")
+    assert(ki.seed.len == 32, "seed extracted")
+    assert(ki.seed[0] == 100, "seed bytes verbatim")
+    assert(ki.seed[31] == 131, "seed tail verbatim")
+
+    // the RSA shape: classified for the named-unsupported error, no
+    // seed pretended
+    let kr = config.pkcs8_parse(rsa_pkcs8_head())
+    assert(kr.alg == "rsa", "rsa classified: {kr.alg}")
+    assert(kr.seed.len == 0, "no seed for an unsupported alg")
+
+    // malformed DER answers alg "" (never a trap — config data)
+    var junk = List[int]()
+    (mut junk).push(48)
+    let kj = config.pkcs8_parse(junk)
+    assert(kj.alg == "", "truncated DER answers empty")
+    var notseq = List[int]()
+    (mut notseq).push(2)
+    (mut notseq).push(1)
+    (mut notseq).push(0)
+    let kn = config.pkcs8_parse(notseq)
+    assert(kn.alg == "", "a non-SEQUENCE answers empty")
+
+    // the PEM label probe
+    let lbl = config.
+        pem_first_label("-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n")
+    assert(lbl == "RSA PRIVATE KEY", "label extracted: {lbl}")
+    assert(config.pem_first_label("no pem here") == "", "no block answers empty")
+
+    print("pkcs8: ed25519 seed out, rsa named, malformed empty")
+    0
+}

@@ -45,9 +45,32 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
         )
         verdict = 1
     }
+    // ws05: the ssl half of -t — certificates load, pairs MATCH
+    // (public-key comparison), leaf-first order holds, and an alg
+    // outside the sc22 ladder is a NAMED refusal. Warns (protocol/
+    // cipher deltas) print in nginx's [warn] stream and never change
+    // the exit code.
+    var sslw = ""
+    if verdict == 0 {
+        let s = ssl_resolve(c, prefix)
+        sslw = s.warns
+        if !ssl_ok(s) {
+            if s.err_line == 0 {
+                eprint("wws: [emerg] {s.err}")
+            } else {
+                eprint("wws: [emerg] {s.err} in {s.err_file}:{s.err_line}")
+            }
+            verdict = 1
+        }
+    }
     let findings = lint(c)
     if !findings.is_empty() {
         for line in findings.lines() {
+            eprint("wws: [warn] {line}")
+        }
+    }
+    if !sslw.is_empty() {
+        for line in sslw.lines() {
             eprint("wws: [warn] {line}")
         }
     }

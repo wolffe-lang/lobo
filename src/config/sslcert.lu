@@ -1,0 +1,932 @@
+//! member: true
+//! config/sslcert — the ssl_* half of the model (ws05): PEM loading,
+//! PKCS#8 Ed25519 key parsing, the cert/key PAIR check at -t time,
+//! leaf-first fullchain enforcement, and the SslConf value the tls
+//! module serves from. Lives in config/ because -t owns config-time
+//! validation (a cert wws cannot validate is a NAMED config error,
+//! never a silent accept — the wsc02 honesty post), and because the
+//! resolved cert material rides the same freeze-and-swap generation
+//! discipline the Conf does: reload builds a NEW SslConf and swaps
+//! whole, which is the ws04 keep-serving rule's cert-reload atomicity
+//! for free.
+//! Scope, honest (the sc22 ladder): the LEAF must be Ed25519 — wws
+//! signs CertificateVerify with curve25519.sign and can sign with
+//! nothing else. An RSA/ECDSA leaf or key is a NAMED config error
+//! citing the roadmap row. Chain certificates above the leaf are
+//! carried opaque to clients (clients validate them) and are only
+//! checked structurally + for issuer/subject chaining order.
+//! NAMED RESIDUE: the world-readable-key-file load warning needs a
+//! file-permission read the fs tier does not have (no fs_mode at this
+//! pin — filed; the deferral row routes it); PEM decryption
+//! ("ENCRYPTED PRIVATE KEY") is named-unsupported, wws prompts for no
+//! passphrase.
+//! Lane note: everything below the PEM readers is pure and testable
+//! on all three lanes; the file-reading resolvers are native+checked
+//! (lupin has no fs), exactly the config/parse split.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+use std.x.crypto.curve25519
+use std.x.tls.cert
+
+// ------------------------------------------------------------------
+// the resolved ssl model — one entry per ssl server block, flat
+// parallel lists (the Conf idiom; List[List[int]] is not a shape the
+// pinned tiers construct)
+// ------------------------------------------------------------------
+
+/// The resolved TLS serving material, frozen per generation beside
+/// its Conf. `on` is whether any `listen ... ssl` was seen. `err` is
+/// the FIRST named config error ("" when clean); `warns` is a
+/// newline-joined list of [warn] lines (protocol/cipher deltas —
+/// named, never silent). Per entry i: `names[i]` is the space-joined
+/// server_name list ("" when the block has none), the chain DER (leaf
+/// first, concatenated) spans `der[der_at[i] .. der_at[i]+der_n[i]]`,
+/// `leaf_n[i]` is the leaf's DER length inside that span, the 32-byte
+/// Ed25519 seed sits at `seed[i*32 .. i*32+32]`, and
+/// `cert_path`/`key_path` carry the file names for logs. `default_at`
+/// is the entry serving no-SNI and unmatched-SNI clients (-1 when
+/// there are no ssl servers).
+pub struct SslConf {
+    on: bool,
+    err: str,
+    err_file: str,
+    err_line: int,
+    warns: str,
+    names: List[str],
+    der: List[int],
+    der_at: List[int],
+    der_n: List[int],
+    leaf_n: List[int],
+    seed: List[int],
+    cert_path: List[str],
+    key_path: List[str],
+    default_at: int,
+}
+
+/// The no-ssl model (plaintext serving, and the empty fallback).
+/// Total.
+pub fn ssl_none() -> SslConf {
+    SslConf {
+        on: false,
+        err: "",
+        err_file: "",
+        err_line: 0,
+        warns: "",
+        names: List[str](),
+        der: List[int](),
+        der_at: List[int](),
+        der_n: List[int](),
+        leaf_n: List[int](),
+        seed: List[int](),
+        cert_path: List[str](),
+        key_path: List[str](),
+        default_at: -1,
+    }
+}
+
+/// Whether the resolved ssl model is clean (no named config error).
+/// Total.
+pub fn ssl_ok(s: SslConf) -> bool {
+    s.err.is_empty()
+}
+
+// ------------------------------------------------------------------
+// base64 + PEM (the decoder is this module's own: ~40 lines against
+// a std.base64 import whose module name would then be off-limits to
+// every future wws module — the last-segment identity rule)
+// ------------------------------------------------------------------
+
+/// The base64 value of byte `ch`, or -1 for anything outside the
+/// alphabet (padding and whitespace are the caller's to route).
+/// Total.
+fn b64val(ch: int) -> int {
+    if ch >= 65 && ch <= 90 {
+        return ch - 65
+    }
+    if ch >= 97 && ch <= 122 {
+        return ch - 97 + 26
+    }
+    if ch >= 48 && ch <= 57 {
+        return ch - 48 + 52
+    }
+    if ch == 43 {
+        return 62
+    }
+    if ch == 47 {
+        return 63
+    }
+    -1
+}
+
+/// Decode the base64 body of a PEM block (whitespace tolerated,
+/// `=` padding tolerated at the end). The `bad` row is a malformed
+/// body — an alphabet violation or a dangling quantum.
+fn b64_decode(body: str) -> List[int] ! {bad} {
+    var out = List[int]()
+    var acc: int = 0
+    var have: int = 0
+    for ch in body.bytes() {
+        if ch == 10 || ch == 13 || ch == 32 || ch == 9 {
+            continue
+        }
+        if ch == 61 {
+            break
+        }
+        let v = b64val(ch)
+        if v < 0 {
+            return bad
+        }
+        acc = acc * 64 + v
+        have = have + 1
+        if have == 4 {
+            (mut out).push(acc / 65536 % 256)
+            (mut out).push(acc / 256 % 256)
+            (mut out).push(acc % 256)
+            acc = 0
+            have = 0
+        }
+    }
+    if have == 1 {
+        return bad
+    }
+    if have == 2 {
+        (mut out).push(acc * 16 / 256 % 256)
+    }
+    if have == 3 {
+        (mut out).push(acc * 4 / 65536 % 256)
+        (mut out).push(acc * 4 / 256 % 256)
+    }
+    out
+}
+
+/// The label of the FIRST PEM block in `text` ("CERTIFICATE",
+/// "PRIVATE KEY", "RSA PRIVATE KEY", …), or "" when no block opens.
+/// Total.
+pub fn pem_first_label(text: str) -> str {
+    let at = text.find("-----BEGIN ") else -1
+    if at < 0 {
+        return ""
+    }
+    let rest = text[at + 11..text.len]
+    let stop = rest.find("-----") else -1
+    if stop < 0 {
+        return ""
+    }
+    rest[0..stop]
+}
+
+/// Every `-----BEGIN <label>-----` body in `text` with exactly
+/// `label`, decoded and concatenated, with each block's decoded
+/// length pushed onto `lens`. The `bad` row is a malformed block
+/// (unterminated, or base64 trouble). Total over arbitrary text
+/// otherwise; zero matching blocks is an EMPTY result, the caller's
+/// error to name.
+fn pem_blocks(text: str, label: str, mut lens: List[int]) -> List[int] ! {bad} {
+    var out = List[int]()
+    var rest = text
+    let open_mark = "-----BEGIN {label}-----"
+    let close_mark = "-----END {label}-----"
+    loop {
+        let at = rest.find(open_mark) else -1
+        if at < 0 {
+            return out
+        }
+        let from = at + open_mark.len
+        let tail = rest[from..rest.len]
+        let stop = tail.find(close_mark) else -1
+        if stop < 0 {
+            return bad
+        }
+        let body = tail[0..stop]
+        let der_bytes = b64_decode(body) else |_| {
+            return bad
+        }
+        var n: int = 0
+        for b in der_bytes {
+            (mut out).push(b)
+            n = n + 1
+        }
+        (mut lens).push(n)
+        rest = tail[stop + close_mark.len..tail.len]
+    }
+}
+
+// ------------------------------------------------------------------
+// a small DER walker — for the PRIVATE KEY side (the certificate side
+// is std.x.tls.cert's decoder; keys are this module's to parse)
+// ------------------------------------------------------------------
+
+/// Read one DER TLV header at `pos`: (tag, content_len, content_pos),
+/// or (-1, 0, 0) on any malformed/truncated/indefinite length. Total.
+fn der_tl(b: List[int], pos: int) -> (int, int, int) {
+    let n = b.len
+    if pos + 2 > n {
+        return (-1, 0, 0)
+    }
+    let tag = b[pos]
+    let l0 = b[pos + 1]
+    if l0 < 128 {
+        if pos + 2 + l0 > n {
+            return (-1, 0, 0)
+        }
+        return (tag, l0, pos + 2)
+    }
+    let extra = l0 - 128
+    if extra == 0 || extra > 4 {
+        return (-1, 0, 0)
+    }
+    if pos + 2 + extra > n {
+        return (-1, 0, 0)
+    }
+    var ln: int = 0
+    var i: int = 0
+    while i < extra {
+        ln = ln * 256 + b[pos + 2 + i]
+        i = i + 1
+    }
+    if pos + 2 + extra + ln > n {
+        return (-1, 0, 0)
+    }
+    (tag, ln, pos + 2 + extra)
+}
+
+/// Decode an OBJECT IDENTIFIER's content octets to dotted form
+/// ("1.3.101.112"), or "" on malformed. Total.
+fn oid_dotted(b: List[int], from: int, len: int) -> str {
+    if len <= 0 {
+        return ""
+    }
+    let first = b[from]
+    var out = "{first / 40}.{first % 40}"
+    var acc: int = 0
+    var i: int = 1
+    while i < len {
+        let v = b[from + i]
+        acc = acc * 128 + v % 128
+        if v < 128 {
+            out = "{out}.{acc}"
+            acc = 0
+        }
+        i = i + 1
+    }
+    if acc != 0 {
+        return ""
+    }
+    out
+}
+
+/// A parsed private key: the algorithm (dotted OID classified through
+/// cert.alg_name) and, when Ed25519, the 32-byte seed. `alg` is
+/// "" on malformed DER.
+pub struct KeyInfo {
+    alg: str,
+    seed: List[int],
+}
+
+/// Parse a PKCS#8 PrivateKeyInfo (RFC 5958): SEQUENCE { INTEGER v,
+/// AlgorithmIdentifier, OCTET STRING privateKey }. For Ed25519
+/// (RFC 8410 §7) the privateKey content is a nested OCTET STRING
+/// holding the 32-byte seed. Answers the classified algorithm name in
+/// every parseable case, so the caller's named-unsupported error can
+/// say WHAT it met; malformed DER answers alg "". Total.
+pub fn pkcs8_parse(der_bytes: List[int]) -> KeyInfo {
+    let none = KeyInfo { alg: "", seed: List[int]() }
+    let outer = der_tl(der_bytes, 0)
+    if outer.0 != 48 {
+        return none
+    }
+    let ver = der_tl(der_bytes, outer.2)
+    if ver.0 != 2 {
+        return none
+    }
+    let alg_seq = der_tl(der_bytes, ver.2 + ver.1)
+    if alg_seq.0 != 48 {
+        return none
+    }
+    let oid = der_tl(der_bytes, alg_seq.2)
+    if oid.0 != 6 {
+        return none
+    }
+    let dotted = oid_dotted(der_bytes, oid.2, oid.1)
+    if dotted.is_empty() {
+        return none
+    }
+    let alg = cert.alg_name(dotted)
+    if alg != "ed25519" {
+        return KeyInfo { alg: alg, seed: List[int]() }
+    }
+    let pk = der_tl(der_bytes, alg_seq.2 + alg_seq.1)
+    if pk.0 != 4 {
+        return none
+    }
+    let inner = der_tl(der_bytes, pk.2)
+    if inner.0 != 4 || inner.1 != 32 {
+        return none
+    }
+    var seed = List[int]()
+    var i: int = 0
+    while i < 32 {
+        (mut seed).push(der_bytes[inner.2 + i])
+        i = i + 1
+    }
+    KeyInfo { alg: "ed25519", seed: seed }
+}
+
+// ------------------------------------------------------------------
+// small byte helpers
+// ------------------------------------------------------------------
+
+/// The SPKI public-key bytes of one DER certificate, or the empty
+/// list when it does not parse (the reorder probe's tolerant read).
+/// Total.
+fn spki_of(d: List[int]) -> List[int] {
+    let cc = cert.parse(d) else |_| {
+        return List[int]()
+    }
+    cc.spki_key
+}
+
+/// Byte-list equality. Total.
+fn bytes_eq(a: List[int], b: List[int]) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    var i: int = 0
+    let n = a.len
+    while i < n {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+/// The bytes of `b` from `from` (inclusive) to `to` (exclusive).
+/// Offsets are this module's own (validated spans). Total.
+fn bsub(b: List[int], from: int, to: int) -> List[int] {
+    var out = List[int]()
+    var i = from
+    while i < to {
+        (mut out).push(b[i])
+        i = i + 1
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// model scanning helpers
+// ------------------------------------------------------------------
+
+/// Whether directive row `i`'s argument list contains `word`. Total.
+fn arg_has(c: Conf, i: int, word: str) -> bool {
+    let at = c.args_at[i]
+    let nn = c.args_n[i]
+    var j: int = 0
+    while j < nn {
+        if c.argp[at + j] == word {
+            return true
+        }
+        j = j + 1
+    }
+    false
+}
+
+/// The first argument of the nearest `name` directive: a row whose
+/// parent is `srv` wins, else a row in the surrounding `http` context.
+/// Returns (value, row) or ("", -1). Total.
+fn nearest_arg(c: Conf, srv: int, name: str) -> (str, int) {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == name && c.parent[i] == srv && c.args_n[i] >= 1 {
+            return (c.argp[c.args_at[i]], i)
+        }
+        i = i + 1
+    }
+    i = 0
+    while i < total {
+        if c.names[i] == name && c.ctx[i] == "http" && c.args_n[i] >= 1 {
+            return (c.argp[c.args_at[i]], i)
+        }
+        i = i + 1
+    }
+    ("", -1)
+}
+
+/// A path against the -p prefix (nginx: relative paths resolve
+/// against the prefix). Total.
+fn against_prefix(prefix: str, p: str) -> str {
+    if p.starts_with("/") {
+        return p
+    }
+    "{prefix}/{p}"
+}
+
+// ------------------------------------------------------------------
+// the per-server resolution
+// ------------------------------------------------------------------
+
+/// Record the first named error. Total.
+fn ssl_err(mut s: SslConf, msg: str, file: str, line: int) {
+    if s.err.is_empty() {
+        s.err = msg
+        s.err_file = file
+        s.err_line = line
+    }
+}
+
+/// Append a [warn] line. Total.
+fn ssl_warn(mut s: SslConf, msg: str) {
+    if s.warns.is_empty() {
+        s.warns = msg
+        return
+    }
+    s.warns = "{s.warns}\n{msg}"
+}
+
+/// The ssl_protocols honesty check (the v0 set: TLSv1.3 implemented;
+/// anything else listed is a named config-time delta citing the
+/// ladder, and a set WITHOUT TLSv1.3 is an error — nothing would be
+/// servable). Total.
+fn check_protocols(c: Conf, srv: int, mut s: SslConf) {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "ssl_protocols" && (c.parent[i] == srv || c.ctx[i] == "http") {
+            var has13 = false
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 0
+            while j < nn {
+                let v = c.argp[at + j]
+                if v == "TLSv1.3" {
+                    has13 = true
+                } else {
+                    ssl_warn(
+                        mut s,
+                        "ssl_protocols lists {v}: wws serves TLSv1.3 only at this pin ({v} is a std.x.tls roadmap row); {v}-only clients are answered with a protocol_version alert",
+                    )
+                }
+                j = j + 1
+            }
+            if !has13 {
+                ssl_err(
+                    mut s,
+                    "ssl_protocols does not include TLSv1.3 — wws serves TLSv1.3 only at this pin (the std.x.tls ladder; TLS 1.2 is its named roadmap row), so this server could serve nothing",
+                    c.files[i],
+                    c.lines[i],
+                )
+            }
+        }
+        i = i + 1
+    }
+}
+
+/// The ssl_ciphers honesty check: TLS 1.3 suite names are mapped
+/// (ChaCha20-Poly1305 implemented, the AES-GCM pair named roadmap);
+/// an unknown TLS_* name is a named error listing the supported set;
+/// OpenSSL 1.2-style cipher-list tokens are inert for 1.3 (nginx
+/// parity) and warned once. A list that excludes the one implemented
+/// suite is an error. Total.
+fn check_ciphers(c: Conf, srv: int, mut s: SslConf) {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "ssl_ciphers" &&
+            (c.parent[i] == srv || c.ctx[i] == "http") &&
+            c.args_n[i] >= 1 {
+            let list = c.argp[c.args_at[i]]
+            var has_chacha = false
+            var aes_tok = ""
+            var unknown_tok = ""
+            var legacy_tok = ""
+            let toks = list.split(":")
+            for tok in toks {
+                if tok == "TLS_CHACHA20_POLY1305_SHA256" {
+                    has_chacha = true
+                } else if tok == "TLS_AES_128_GCM_SHA256" || tok == "TLS_AES_256_GCM_SHA384" {
+                    aes_tok = tok
+                } else if tok.starts_with("TLS_") {
+                    if unknown_tok.is_empty() {
+                        unknown_tok = tok
+                    }
+                } else if legacy_tok.is_empty() {
+                    legacy_tok = tok
+                }
+            }
+            if !aes_tok.is_empty() {
+                ssl_warn(
+                    mut s,
+                    "ssl_ciphers lists {aes_tok}: the AES-GCM suites are a std.x.tls roadmap row; wws serves TLS_CHACHA20_POLY1305_SHA256 (RFC 8446's MTI) at this pin",
+                )
+            }
+            if !legacy_tok.is_empty() {
+                ssl_warn(
+                    mut s,
+                    "ssl_ciphers \"{legacy_tok}\" is TLS 1.2 cipher-list syntax: it never governs TLS 1.3 suites (nginx parity), and wws serves TLS 1.3 only",
+                )
+            }
+            if !unknown_tok.is_empty() {
+                ssl_err(
+                    mut s,
+                    "ssl_ciphers names an unknown TLS 1.3 suite \"{unknown_tok}\" — supported: TLS_CHACHA20_POLY1305_SHA256 (implemented), TLS_AES_128_GCM_SHA256 / TLS_AES_256_GCM_SHA384 (roadmap)",
+                    c.files[i],
+                    c.lines[i],
+                )
+            }
+            if !has_chacha && list.contains("TLS_") {
+                ssl_err(
+                    mut s,
+                    "ssl_ciphers excludes TLS_CHACHA20_POLY1305_SHA256 — the only suite wws implements at this pin, so this server could serve nothing",
+                    c.files[i],
+                    c.lines[i],
+                )
+            }
+        }
+        i = i + 1
+    }
+}
+
+/// Load and validate one server's certificate + key pair, appending
+/// the entry to `s` when clean. Named errors for: an unreadable or
+/// non-PEM file, a non-Ed25519 leaf or key (the honest sc22 scope), a
+/// pair mismatch, and a fullchain that is not leaf-first (the classic
+/// operator stumble, named with the reorder). fs half — native +
+/// checked only.
+fn load_pair(
+    mut s: SslConf,
+    prefix: str,
+    cert_rel: str,
+    key_rel: str,
+    srv_names: str,
+    file: str,
+    line: int,
+) {
+    let cp = against_prefix(prefix, cert_rel)
+    let kp = against_prefix(prefix, key_rel)
+
+    let cert_raw = fs_read_bytes(cp) else |e| match e {
+        not_found => {
+            ssl_err(mut s, "cannot load certificate \"{cp}\": no such file", file, line)
+            return
+        },
+        denied => {
+            ssl_err(mut s, "cannot load certificate \"{cp}\": permission denied", file, line)
+            return
+        },
+        io => {
+            ssl_err(mut s, "cannot load certificate \"{cp}\": read failed", file, line)
+            return
+        },
+    }
+    let cert_text = str_from_utf8(cert_raw) else |_| {
+        ssl_err(
+            mut s,
+            "cannot load certificate \"{cp}\": not a PEM file (wws loads PEM certificates only; DER files are a named delta)",
+            file,
+            line,
+        )
+        return
+    }
+    var lens = List[int]()
+    let chain = pem_blocks(cert_text, "CERTIFICATE", mut lens) else |_| {
+        ssl_err(mut s, "cannot load certificate \"{cp}\": malformed PEM block", file, line)
+        return
+    }
+    if lens.is_empty() {
+        let lbl = pem_first_label(cert_text)
+        if lbl.is_empty() {
+            ssl_err(
+                mut s,
+                "cannot load certificate \"{cp}\": no CERTIFICATE block in the file",
+                file,
+                line,
+            )
+        } else {
+            ssl_err(
+                mut s,
+                "cannot load certificate \"{cp}\": the file holds a \"{lbl}\" block, not a CERTIFICATE",
+                file,
+                line,
+            )
+        }
+        return
+    }
+
+    let key_raw = fs_read_bytes(kp) else |e| match e {
+        not_found => {
+            ssl_err(mut s, "cannot load certificate key \"{kp}\": no such file", file, line)
+            return
+        },
+        denied => {
+            ssl_err(mut s, "cannot load certificate key \"{kp}\": permission denied", file, line)
+            return
+        },
+        io => {
+            ssl_err(mut s, "cannot load certificate key \"{kp}\": read failed", file, line)
+            return
+        },
+    }
+    let key_text = str_from_utf8(key_raw) else |_| {
+        ssl_err(mut s, "cannot load certificate key \"{kp}\": not a PEM file", file, line)
+        return
+    }
+    let key_label = pem_first_label(key_text)
+    if key_label == "RSA PRIVATE KEY" ||
+        key_label == "EC PRIVATE KEY" ||
+        key_label == "DSA PRIVATE KEY" {
+        ssl_err(
+            mut s,
+            "certificate key \"{kp}\" is a {key_label} — wws signs with Ed25519 only at this pin (the sc22 ladder; RSA and ECDSA are std.x.tls roadmap rows), and a key it cannot use is refused by name, never accepted silently",
+            file,
+            line,
+        )
+        return
+    }
+    if key_label == "ENCRYPTED PRIVATE KEY" {
+        ssl_err(
+            mut s,
+            "certificate key \"{kp}\" is passphrase-encrypted — wws prompts for no passphrase (named delta; use an unencrypted PKCS#8 key)",
+            file,
+            line,
+        )
+        return
+    }
+    var klens = List[int]()
+    let kder = pem_blocks(key_text, "PRIVATE KEY", mut klens) else |_| {
+        ssl_err(mut s, "cannot load certificate key \"{kp}\": malformed PEM block", file, line)
+        return
+    }
+    if klens.is_empty() {
+        ssl_err(
+            mut s,
+            "cannot load certificate key \"{kp}\": no PRIVATE KEY block in the file",
+            file,
+            line,
+        )
+        return
+    }
+    let kinfo = pkcs8_parse(kder)
+    if kinfo.alg.is_empty() {
+        ssl_err(mut s, "cannot load certificate key \"{kp}\": malformed PKCS#8 DER", file, line)
+        return
+    }
+    if kinfo.alg != "ed25519" {
+        ssl_err(
+            mut s,
+            "certificate key \"{kp}\" is {kinfo.alg} — wws signs with Ed25519 only at this pin (the sc22 ladder; RSA and ECDSA are std.x.tls roadmap rows), and a key it cannot use is refused by name, never accepted silently",
+            file,
+            line,
+        )
+        return
+    }
+
+    // the leaf: parse (std.x.tls.cert's DER discipline) and hold the
+    // honest-alg line — a certificate wws cannot serve is a named
+    // config error at -t, never a silent accept
+    let leaf_len = lens[0]
+    let leaf_der = bsub(chain, 0, leaf_len)
+    let leaf = cert.parse(leaf_der) else |_| {
+        ssl_err(
+            mut s,
+            "cannot load certificate \"{cp}\": malformed X.509/DER (certificate 1)",
+            file,
+            line,
+        )
+        return
+    }
+    let leaf_alg = cert.alg_name(leaf.spki_alg)
+    if leaf_alg != "ed25519" {
+        ssl_err(
+            mut s,
+            "certificate \"{cp}\" carries a {leaf_alg} public key — wws validates and serves Ed25519 only at this pin (the sc22 ladder; RSA and ECDSA are std.x.tls roadmap rows), and a certificate it cannot validate is refused by name, never accepted silently",
+            file,
+            line,
+        )
+        return
+    }
+
+    // the pair check (-t verifies key/cert MATCH by public-key
+    // comparison — the contract's oracle behavior)
+    let pubk = curve25519.public(kinfo.seed)
+    if !bytes_eq(pubk, leaf.spki_key) {
+        // leaf-first stumble first: if a LATER chain cert matches the
+        // key, the file is a reordered fullchain and the error should
+        // name the reorder, not a bare mismatch
+        var off = 0
+        var idx: int = 0
+        var reordered: int = -1
+        for ln in lens {
+            if idx > 0 {
+                let cd = bsub(chain, off, off + ln)
+                if bytes_eq(pubk, spki_of(cd)) {
+                    reordered = idx + 1
+                }
+            }
+            off = off + ln
+            idx = idx + 1
+        }
+        if reordered > 0 {
+            ssl_err(
+                mut s,
+                "certificate \"{cp}\" is not leaf-first: the certificate matching key \"{kp}\" is entry {reordered}, not entry 1 — a fullchain file puts the server (leaf) certificate first, then its issuers; reorder the blocks",
+                file,
+                line,
+            )
+        } else {
+            ssl_err(
+                mut s,
+                "certificate key \"{kp}\" does not match certificate \"{cp}\" (public-key comparison failed)",
+                file,
+                line,
+            )
+        }
+        return
+    }
+
+    // chain order above the leaf: each cert must be issued by the
+    // next (structural check; clients do the cryptographic walk)
+    var prev_issuer = leaf.issuer
+    var prev_cn = leaf.subject_cn
+    var off2 = 0
+    var idx2: int = 0
+    for ln in lens {
+        if idx2 > 0 {
+            let cd = bsub(chain, off2, off2 + ln)
+            let cc = cert.parse(cd) else |_| {
+                ssl_err(
+                    mut s,
+                    "cannot load certificate \"{cp}\": malformed X.509/DER (certificate {idx2 + 1})",
+                    file,
+                    line,
+                )
+                return
+            }
+            if !bytes_eq(prev_issuer, cc.subject) {
+                ssl_err(
+                    mut s,
+                    "certificate \"{cp}\": entry {idx2 + 1} (\"{cc.subject_cn}\") is not the issuer of entry {idx2} (\"{prev_cn}\") — a fullchain runs leaf, then each issuer in order",
+                    file,
+                    line,
+                )
+                return
+            }
+            prev_issuer = cc.issuer
+            prev_cn = cc.subject_cn
+        }
+        off2 = off2 + ln
+        idx2 = idx2 + 1
+    }
+
+    // clean: append the entry
+    let entry_at = s.der.len
+    var total: int = 0
+    for b in chain {
+        (mut s.der).push(b)
+        total = total + 1
+    }
+    (mut s.der_at).push(entry_at)
+    (mut s.der_n).push(total)
+    (mut s.leaf_n).push(leaf_len)
+    (mut s.names).push(srv_names)
+    (mut s.cert_path).push(cp)
+    (mut s.key_path).push(kp)
+    var i: int = 0
+    while i < 32 {
+        (mut s.seed).push(kinfo.seed[i])
+        i = i + 1
+    }
+}
+
+/// The space-joined `server_name` arguments of server block `srv`
+/// ("" when the block has none). Total.
+fn server_names_of(c: Conf, srv: int) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "server_name" && c.parent[i] == srv {
+            var out = ""
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 0
+            while j < nn {
+                let v = c.argp[at + j]
+                if out.is_empty() {
+                    out = v
+                } else {
+                    out = "{out} {v}"
+                }
+                j = j + 1
+            }
+            return out
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// Resolve the TLS serving material from a parsed model: one entry
+/// per server block with an `ssl` listen, certificates loaded and the
+/// pair VALIDATED (-t's job — the reload path calls this too, and the
+/// ws04 keep-serving rule holds because a resolve with a named error
+/// never replaces the serving generation's SslConf). `prefix` is the
+/// -p prefix relative paths resolve against. fs half — native +
+/// checked only; a Conf that failed to parse resolves to ssl_none.
+pub fn ssl_resolve(c: Conf, prefix: str) -> SslConf {
+    var s = ssl_none()
+    if !c.err.is_empty() {
+        return s
+    }
+    let total = c.names.len
+    var srv: int = 0
+    while srv < total {
+        if c.names[srv] == "server" && c.kinds[srv] == "b" {
+            // an ssl server is one with `listen ... ssl`
+            var has_ssl = false
+            var is_default = false
+            var listen_row: int = -1
+            var i: int = 0
+            while i < total {
+                if c.names[i] == "listen" && c.parent[i] == srv {
+                    if arg_has(c, i, "ssl") {
+                        has_ssl = true
+                        listen_row = i
+                        if arg_has(c, i, "default_server") {
+                            is_default = true
+                        }
+                    }
+                }
+                i = i + 1
+            }
+            if has_ssl {
+                s.on = true
+                let cert_arg = nearest_arg(c, srv, "ssl_certificate")
+                let key_arg = nearest_arg(c, srv, "ssl_certificate_key")
+                if cert_arg.1 < 0 {
+                    ssl_err(
+                        mut s,
+                        "no \"ssl_certificate\" is defined for the \"listen ... ssl\" directive",
+                        c.files[listen_row],
+                        c.lines[listen_row],
+                    )
+                } else if key_arg.1 < 0 {
+                    ssl_err(
+                        mut s,
+                        "no \"ssl_certificate_key\" is defined for certificate \"{cert_arg.0}\"",
+                        c.files[cert_arg.1],
+                        c.lines[cert_arg.1],
+                    )
+                } else {
+                    let before = s.names.len
+                    load_pair(
+                        mut s,
+                        prefix,
+                        cert_arg.0,
+                        key_arg.0,
+                        server_names_of(c, srv),
+                        c.files[cert_arg.1],
+                        c.lines[cert_arg.1],
+                    )
+                    if s.names.len > before && is_default {
+                        s.default_at = before
+                    }
+                }
+                check_protocols(c, srv, mut s)
+                check_ciphers(c, srv, mut s)
+            }
+        }
+        srv = srv + 1
+    }
+    if s.default_at < 0 && s.names.len > 0 {
+        s.default_at = 0
+    }
+    s
+}
+
+/// The entry index serving `sni_host`: exact case-insensitive match
+/// against each entry's server_name list (RFC 6125 wildcards are
+/// named residue upstream — sc22's exact-label rule holds here), the
+/// default entry for "" or an unmatched name (nginx: SNI selects the
+/// server; an unknown name falls to the default server). -1 when no
+/// ssl entries exist. Total.
+pub fn ssl_select(s: SslConf, sni_host: str) -> int {
+    if s.names.len == 0 {
+        return -1
+    }
+    if !sni_host.is_empty() {
+        var i: int = 0
+        let n = s.names.len
+        while i < n {
+            let pats = s.names[i]
+            for pat in pats.words() {
+                if cert.host_matches(pat, sni_host) {
+                    return i
+                }
+            }
+            i = i + 1
+        }
+    }
+    s.default_at
+}

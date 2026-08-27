@@ -1,0 +1,21 @@
+module pkg :: conn
+  wolfi v0 · toolchain 0.1.0 · edition v1
+  export_hash feccdb33d942d9ea2bea6a7c29518a33d802d7c26e76cd5887b9c98f30b4dee5
+  pkg_hash    feccdb33d942d9ea2bea6a7c29518a33d802d7c26e76cd5887b9c98f30b4dee5
+  deps:
+    tls  efa0bd0ecfbd5db893b1990cd7fae252e3cf6a798188d7c11a99ad8d2897ed85
+  items:
+    [0] pub conn_close — fn conn_close(mut cn: self.Conn) · regions (ρ1) -> -
+    [1] pub conn_deadline — fn conn_deadline(cn: self.Conn, ms: int) -> () ! {io} · regions (ρ1, -) -> -
+    [2] pub conn_read — fn conn_read(mut cn: self.Conn, max: int) -> str ! {closed, io, timeout, utf8} · regions (ρ1, -) -> -
+    [3] pub conn_read_bytes — fn conn_read_bytes(mut cn: self.Conn, max: int) -> prelude.List[int] ! {closed, io, timeout} · regions (ρ1, -) -> ρ_caller
+    [4] pub conn_write — fn conn_write(mut cn: self.Conn, s: str) -> () ! {closed, io} · regions (ρ1, -) -> -
+    [5] pub conn_write_bytes — fn conn_write_bytes(mut cn: self.Conn, body: prelude.List[int]) -> () ! {closed, io} · regions (ρ1, ρ2) -> -
+    [6] pub fd — fn fd(cn: self.Conn) -> int · regions (ρ1) -> -
+    [7] pub is_tls — fn is_tls(cn: self.Conn) -> bool · regions (ρ1) -> -
+    [8] pub plain — fn plain(fd: int) -> self.Conn · regions (-) -> ρ_caller
+    [9] pub sni — fn sni(cn: self.Conn) -> str · regions (ρ1) -> -
+    [10] pub tls_conn — fn tls_conn(fd: int, sess: tls.Sess) -> self.Conn · regions (-, ρ1) -> ρ_caller
+    [11] pub truncated — fn truncated(cn: self.Conn) -> bool · regions (ρ1) -> -
+    [12] pub Conn — struct Conn { kind: int, fd: int, sess: tls.Sess }
+

@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native
 //! conforms: conc.task.spawn, err.union, err.propagate
-//! stage-src: serve proxy http config
+//! stage-src: serve conn tls proxy http config
 //!
 //! The half-close drain (ws02 §3): a client announces a body larger
 //! than the limit, the server 413s EARLY (before reading the body) and
