@@ -1,0 +1,31 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! The -T body, pure half (the include-chain provenance rides the
+//! same fields include_graph.lu pins on the fs lanes; the oracle's
+//! -T shape is p57 — raw files after `# configuration file <path>:`
+//! — where wws deliberately dumps the EFFECTIVE tree with
+//! per-directive `# from file:line` provenance instead, finally-list
+//! #4; the delta is recorded). Verbatim source slices survive:
+//! quoting, escapes, and interior comments print as written.
+
+use config
+
+fn main() -> int {
+    let c = config.
+        parse_str(
+        "worker_priority 0;\nevents {{\n}}\nhttp {{\n    server {{\n        listen 8080;\n        location \"/a b\" {{\n            root \"/srv/w w\";\n        }}\n    }}\n}}\n",
+        "t.conf",
+    )
+    let out = config.render_t(c)
+    let want = "# from t.conf:1\nworker_priority 0;\n# from t.conf:2\nevents {{\n}}\n# from t.conf:4\nhttp {{\n    # from t.conf:5\n    server {{\n        # from t.conf:6\n        listen 8080;\n        # from t.conf:7\n        location \"/a b\" {{\n            # from t.conf:8\n            root \"/srv/w w\";\n        }}\n    }}\n}}\n"
+    assert(out == want, "render_t: got\n{out}\nwant\n{want}")
+    // A directive whose raw spans lines (comment between args, p49)
+    // prints verbatim.
+    let c2 = config.parse_str("pid # zero\na;\nevents {{\n}}\n", "t.conf")
+    let out2 = config.render_t(c2)
+    assert(out2.contains("# from t.conf:1\npid # zero\na;\n"), "raw fidelity: got\n{out2}")
+    0
+}

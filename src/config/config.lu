@@ -1,13 +1,64 @@
 //! member: true
-//! config — nginx.conf loading: lexer, parser, include graph, and the
-//! directive tables. ws01's territory; a stub at ws00 so the `.wolfi`
-//! interface machinery has a real surface to freeze. Do not grow this
-//! module outside the ws01 contract.
+//! config — nginx.conf loading: lexer, parser, include graph,
+//! directive tables, footgun lints, and the -t/-T shell behavior.
+//! ws01's territory, implemented against the PINNED oracle
+//! (tests/differential/NGINX-PIN; the probe battery is cited
+//! per-rule across this module's files). The model is immutable
+//! after parse: hot reload (ws04) builds a NEW Conf and swaps —
+//! nothing in this surface mutates one.
 
-/// This module's interface version. Frozen by the ws00 `.wolfi`
-/// snapshot beside this file; ws01 bumps it with its first real
-/// surface. Total; never traps.
+/// This module's interface version. Bumped by ws01 with the first
+/// real surface (the ws00 stub was 0.0.1). Total; never traps.
 #[allow(w0314)]
 pub fn version() -> str {
-    "0.0.1"
+    "0.1.0"
+}
+
+/// The -t/-T verb: parse + table-check + lint, in nginx's shell
+/// shape (probe p01/p57: two `nginx: ...` lines on stderr, exit 0;
+/// `[emerg]` + `test failed`, exit 1 — wws prints the same shapes
+/// under its own name, deltas recorded in the ws01 status file).
+/// `dump` prints the effective config with provenance on stdout
+/// (wws's -T: per-directive `# from file:line`, chain on included
+/// hops — nginx dumps raw files instead; deliberate delta,
+/// finally-list #4). Lints render as `[warn]` lines after any error,
+/// before the verdict; they never change the exit code. Returns the
+/// process exit code (0 ok / 1 failed, the oracle's contract).
+pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
+    var conf = conf_rel
+    if !conf.starts_with("/") {
+        conf = "{prefix}/{conf_rel}"
+    }
+    let c = load(prefix, conf_rel)
+    var verdict: int = 0
+    if !ok(c) {
+        if c.err_line == 0 {
+            eprint("wws: [emerg] {c.err}")
+        } else {
+            eprint("wws: [emerg] {c.err} in {c.err_file}:{c.err_line}")
+        }
+        verdict = 1
+    } else if delta_count(c) > 0 {
+        let d = c.delta_at[0]
+        eprint(
+            "wws: [emerg] directive \"{c.names[d]}\" is not implemented in wws ({c.delta_note[0]}) in {c.files[d]}:{c.lines[d]}",
+        )
+        verdict = 1
+    }
+    let findings = lint(c)
+    if !findings.is_empty() {
+        for line in findings.lines() {
+            eprint("wws: [warn] {line}")
+        }
+    }
+    if verdict == 1 {
+        eprint("wws: configuration file {conf} test failed")
+        return 1
+    }
+    if dump {
+        print_raw(render_t(c))
+    }
+    eprint("wws: the configuration file {conf} syntax is ok")
+    eprint("wws: configuration file {conf} test is successful")
+    0
 }
