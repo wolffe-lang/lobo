@@ -1,0 +1,123 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! The CLI grammar — a PURE parse of argv into a decision, so the whole
+//! flag table is pinned off the socket, on every lane. Every exit code
+//! and error shape below was probed against the pinned oracle
+//! (nginx/1.30.4, 2026-08-27):
+//!   -v/-V/-h/-?  → exit 0 (version/usage to stderr)
+//!   -Z           → exit 1, `nginx: invalid option: "Z"` (letter only)
+//!   -s (no arg)  → exit 1, `option "-s" requires parameter`
+//!   -s bogus     → exit 1, `invalid option: "-s bogus"`
+//!   -c/-e no arg → exit 1, `requires file name`
+//!   -p (no arg)  → exit 1, `requires directory name`
+//!   -g (no arg)  → exit 1, `requires parameter`
+//! wws matches the exit codes and the message shapes (own "wws:"
+//! identity); the identity delta is the only divergence.
+
+use shell
+
+fn one(a: str) -> List[str] {
+    var x = List[str]()
+    (mut x).push(a)
+    x
+}
+
+fn two(a: str, b: str) -> List[str] {
+    var x = List[str]()
+    (mut x).push(a)
+    (mut x).push(b)
+    x
+}
+
+fn four(a: str, b: str, c: str, d: str) -> List[str] {
+    var x = List[str]()
+    (mut x).push(a)
+    (mut x).push(b)
+    (mut x).push(c)
+    (mut x).push(d)
+    x
+}
+
+fn main() -> int {
+    // no args: the wws banner
+    let empty = List[str]()
+    assert(shell.parse_cli(empty).mode == "banner", "no args → banner")
+
+    // the mode flags
+    assert(shell.parse_cli(one("-v")).mode == "version", "-v")
+    assert(shell.parse_cli(one("-V")).mode == "version_verbose", "-V")
+    assert(shell.parse_cli(one("--version")).mode == "version", "--version")
+    assert(shell.parse_cli(one("-t")).mode == "check", "-t")
+    assert(shell.parse_cli(one("-T")).mode == "dump", "-T")
+    assert(shell.parse_cli(one("-h")).mode == "help", "-h")
+    assert(shell.parse_cli(one("-?")).mode == "help", "-?")
+    assert(shell.parse_cli(one("help")).mode == "help", "help word")
+    assert(shell.parse_cli(one("serve")).mode == "serve", "serve verb")
+    assert(shell.parse_cli(one("directives-md")).mode == "docs", "docs verb")
+
+    // the quiet modifier does not change the mode
+    let q = shell.parse_cli(two("-q", "-t"))
+    assert(q.mode == "check", "-q -t → check")
+    assert(q.quiet, "-q sets quiet")
+
+    // arg-taking options
+    let paths = four("-t", "-c", "my.conf", "-p")
+    // (a trailing -p with no arg is an error — tested below; here use a full form)
+    let fullc = shell.parse_cli(four("-c", "x.conf", "-p", "/pre"))
+    assert(fullc.conf == "x.conf", "-c value")
+    assert(fullc.prefix == "/pre", "-p value")
+    assert(fullc.mode == "check" || fullc.mode == "banner", "no mode flag → banner default")
+
+    // signals
+    let sr = shell.parse_cli(two("-s", "reload"))
+    assert(sr.mode == "signal", "-s reload → signal")
+    assert(sr.signal == "reload", "-s reload signal word")
+    assert(shell.parse_cli(two("-s", "stop")).signal == "stop", "-s stop")
+    assert(shell.parse_cli(two("-s", "quit")).signal == "quit", "-s quit")
+    assert(shell.parse_cli(two("-s", "reopen")).signal == "reopen", "-s reopen")
+
+    // errors: exit 1, oracle-shaped messages
+    let bad_s = shell.parse_cli(two("-s", "bogus"))
+    assert(bad_s.mode == "error", "-s bogus → error")
+    assert(bad_s.exit_code == 1, "-s bogus exit 1")
+    assert(bad_s.err_msg == "invalid option: \"-s bogus\"", "-s bogus shape: {bad_s.err_msg}")
+
+    let need_s = shell.parse_cli(one("-s"))
+    assert(need_s.exit_code == 1, "-s no arg exit 1")
+    assert(need_s.err_msg == "option \"-s\" requires parameter", "-s need: {need_s.err_msg}")
+
+    let need_c = shell.parse_cli(one("-c"))
+    assert(need_c.err_msg == "option \"-c\" requires file name", "-c need: {need_c.err_msg}")
+
+    let need_p = shell.parse_cli(one("-p"))
+    assert(need_p.err_msg == "option \"-p\" requires directory name", "-p need: {need_p.err_msg}")
+
+    let need_e = shell.parse_cli(one("-e"))
+    assert(need_e.err_msg == "option \"-e\" requires file name", "-e need: {need_e.err_msg}")
+
+    let need_g = shell.parse_cli(one("-g"))
+    assert(need_g.err_msg == "option \"-g\" requires parameter", "-g need: {need_g.err_msg}")
+
+    let bad_opt = shell.parse_cli(one("-Z"))
+    assert(bad_opt.mode == "error", "-Z → error")
+    assert(bad_opt.err_msg == "invalid option: \"Z\"", "-Z shape: {bad_opt.err_msg}")
+
+    let bad_word = shell.parse_cli(one("bogusverb"))
+    assert(bad_word.err_msg == "invalid option: \"bogusverb\"", "bad word shape")
+
+    // -g captures its payload for the validator
+    let g = shell.parse_cli(two("-g", "pid /x;"))
+    assert(g.globals == "pid /x;", "-g payload captured")
+
+    // -e captures its errlog path
+    let e = shell.parse_cli(two("-e", "err.log"))
+    assert(e.errlog == "err.log", "-e payload captured")
+
+    // touch `paths` so it is honestly used (it holds a trailing -p → error)
+    assert(shell.parse_cli(paths).mode == "error", "trailing -p with no arg → error")
+
+    0
+}

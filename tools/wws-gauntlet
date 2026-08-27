@@ -90,5 +90,11 @@ if ! tools/wws-confcheck; then
     exit 1
 fi
 
+step "shell (CLI probe table vs oracle)"
+if ! tools/wws-shell; then
+    echo "wws-gauntlet: FAILED at shell — CLI exit-code parity vs the oracle" >&2
+    exit 1
+fi
+
 echo ""
 echo "wws-gauntlet: GREEN"

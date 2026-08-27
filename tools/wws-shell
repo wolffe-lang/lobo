@@ -1,0 +1,122 @@
+#!/bin/sh
+# wws-shell — the CLI probe table: every operator flag driven through
+# BOTH the pinned oracle (nginx) and wws, exit codes required to MATCH
+# (report 11 §3's drop-in shell contract; the oracle is the record —
+# "nginx's codes are folklore, the oracle is the record", ws04 §5).
+# Where a case must diverge it carries a `delta=` reason (the named-
+# delta discipline, as in wws-confcheck); a case with a divergence and
+# no reason FAILS. The version/help/error TEXT differs only by identity
+# ("wws:" for "nginx:", both on stderr) — a documented, non-gating
+# delta; this harness gates on EXIT CODES, which carry across.
+#
+# The `-t` exit-code parity over the real config corpus is wws-confcheck's;
+# this harness owns the flag grammar confcheck does not exercise
+# (version, help, unknown option, missing argument, invalid signal, and
+# `-s` with no running master).
+#
+# Lives in sh because a wolf runner cannot read a child's exit code
+# without os_spawn stdout capture (ws00's D3 / wolf-lang#129); the same
+# reason wws-confcheck is sh.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+NGINX="$(pwd)/tests/differential/bin/nginx"
+WWS="$(pwd)/target/wws-debug"
+pin_version=$(sed -n 's/^version = //p' tests/differential/NGINX-PIN)
+
+if [ ! -x "$NGINX" ]; then
+    echo "wws-shell: REFUSED — pinned oracle missing at $NGINX (nginx/$pin_version; build per docs/DIFFERENTIAL.md)" >&2
+    exit 1
+fi
+if [ ! -x "$WWS" ]; then
+    echo "wws-shell: FAILED — $WWS missing; the gauntlet's build step makes it" >&2
+    exit 1
+fi
+
+red=0
+total=0
+parity=0
+named=0
+
+# a minimal, parseable config so `-s` reaches the pid-file lookup on
+# both sides (nginx needs a valid config even to send a signal)
+scratch="target/wws-shell"
+rm -rf "$scratch"
+mkdir -p "$scratch/logs"
+printf 'events {\n}\nhttp {\n  server { listen 18080; }\n}\n' > "$scratch/n.conf"
+
+# probe <desc> <want_wws> <want_oracle> <delta> -- <args...>
+probe() {
+    desc="$1"; want_wws="$2"; want_oracle="$3"; delta="$4"
+    shift 4
+    [ "$1" = "--" ] && shift
+    total=$((total + 1))
+
+    "$WWS" "$@" >/dev/null 2>"$scratch/wws.err"
+    got_wws=$?
+    "$NGINX" "$@" >/dev/null 2>"$scratch/oracle.err"
+    got_oracle=$?
+
+    ok=1
+    if [ "$got_wws" != "$want_wws" ]; then
+        echo "wws-shell: FAILED — [$desc] wws exited $got_wws, want $want_wws:" >&2
+        sed 's/^/wws-shell:   wws: /' "$scratch/wws.err" >&2
+        ok=0
+    fi
+    if [ "$got_oracle" != "$want_oracle" ]; then
+        echo "wws-shell: FAILED — [$desc] oracle exited $got_oracle, want $want_oracle (the record moved — re-probe):" >&2
+        sed 's/^/wws-shell:   oracle: /' "$scratch/oracle.err" >&2
+        ok=0
+    fi
+    if [ "$want_wws" != "$want_oracle" ] && [ -z "$delta" ]; then
+        echo "wws-shell: FAILED — [$desc] wws/oracle exits diverge ($want_wws vs $want_oracle) with no delta= reason" >&2
+        ok=0
+    fi
+    if [ "$ok" = 0 ]; then
+        red=$((red + 1))
+        return
+    fi
+    if [ "$want_wws" = "$want_oracle" ]; then
+        parity=$((parity + 1))
+        echo "wws-shell: ok — [$desc] exit $got_wws (parity)"
+    else
+        named=$((named + 1))
+        echo "wws-shell: ok — [$desc] wws $got_wws vs oracle $got_oracle (named: $delta)"
+    fi
+}
+
+# version / help — exit 0 both (identity text differs on stderr; not gated)
+probe "-v version"        0 0 "" -- -v
+probe "-V build metadata" 0 0 "" -- -V
+probe "-h usage"          0 0 "" -- -h
+probe "-? usage"          0 0 "" -- -\?
+
+# unknown option — exit 1 both, `invalid option`
+probe "-Z unknown option" 1 1 "" -- -Z
+
+# missing arguments — exit 1 both
+probe "-s no arg"         1 1 "" -- -s
+probe "-c no arg"         1 1 "" -- -c
+probe "-p no arg"         1 1 "" -- -p
+probe "-e no arg"         1 1 "" -- -e
+probe "-g no arg"         1 1 "" -- -g
+
+# invalid signal word — exit 1 both
+probe "-s bogus signal"   1 1 "" -- -s bogus
+
+# -s with no running master: both read the pid file, find nothing,
+# exit 1 (wws: open() failed; nginx: open() failed — same shape)
+probe "-s reload no master" 1 1 "" -- -s reload -p "$scratch" -c n.conf
+
+# assert the error diagnostics land on STDERR (nginx's stream), not stdout
+"$WWS" -Z >/tmp/wws-shell-stdout 2>/dev/null
+if [ -s /tmp/wws-shell-stdout ]; then
+    echo "wws-shell: FAILED — -Z wrote to stdout; nginx writes diagnostics to stderr" >&2
+    red=$((red + 1))
+fi
+total=$((total + 1))
+[ ! -s /tmp/wws-shell-stdout ] && { parity=$((parity + 1)); echo "wws-shell: ok — [-Z on stderr] diagnostics go to stderr (nginx's stream)"; }
+rm -f /tmp/wws-shell-stdout
+
+echo "wws-shell: $total probes — $parity parity, $named named deltas, $red red"
+[ "$red" = 0 ] && [ "$total" -gt 0 ] || exit 1

@@ -1,0 +1,186 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! The control channel, end to end, against the REAL binary
+//! (os_spawn + net + fs → native+checked; lupin declines the process
+//! trio and has no fs). Spawns `target/wws-debug serve`, then drives it
+//! as a client: fetch under generation 1, `reload` the config through
+//! the control channel, fetch again and watch the routing SWAP live —
+//! which is also the LISTENER-SURVIVAL proof (the http listener fd is
+//! reused across the reload; every connect after the reload succeeds,
+//! zero refusals). Then `stop` and confirm the pid file is removed.
+//! The four verbs reach the SAME dispatch a real signal will when #126
+//! lands; this test is what the signal path will join.
+//!
+//! Loopback only, OS-chosen ports (bind :0, learn, close, hand to the
+//! child). Idempotent: the scratch tree is cleared at the START.
+
+use shell
+
+/// A single HTTP/1.1 GET, Connection: close, returning the body after
+/// the header block. Rows: net `io`.
+fn http_get(port: int, path: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    let m = buf.find("\r\n\r\n") else -1
+    if m < 0 {
+        return io
+    }
+    buf[m + 4..buf.len]
+}
+
+/// Poll the control endpoint until it answers `ping`, up to ~6s. Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// A free loopback port (bind :0, read it, release it). Row: net io.
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
+    let text = "pid ws04_e2e/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    fs_write_text(path, text)?
+}
+
+fn main() -> !int {
+    let scratch = "ws04_e2e"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/A")?
+    fs_create_dir_all("{scratch}/B")?
+    fs_write_text("{scratch}/A/index.html", "generation-A-body\n")?
+    fs_write_text("{scratch}/B/index.html", "generation-B-body\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let confp = "{scratch}/wws.conf"
+    write_conf(confp, hp, cp, "ws04_e2e/A")?
+
+    // spawn the real server: target/wws-debug serve -p . -c <conf>
+    var argv = List[str]()
+    (mut argv).push("target/wws-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn of target/wws-debug failed — is the debug tier built?")
+        0
+    }
+
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| {
+            0
+        }
+        assert(false, "the spawned wws never became alive on {ep}")
+    }
+
+    // pid file records the control endpoint (this pin's delta)
+    let recorded = shell.pid_read("{scratch}/wws.pid") else |_| {
+        ""
+    }
+    assert(recorded == ep, "pid file records the control endpoint: {recorded}")
+
+    // generation 1: routes into A
+    let b1 = http_get(hp, "/index.html")?
+    assert(b1.contains("generation-A-body"), "gen1 serves A: {b1}")
+
+    // rewrite the config to route into B, reload through the channel
+    write_conf(confp, hp, cp, "ws04_e2e/B")?
+    let r = shell.control_send(ep, "reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control reload failed")
+        ""
+    }
+    assert(r.contains("reload complete (generation 2)"), "reload reply: {r}")
+
+    // generation 2: the SAME listener now routes into B — the swap is
+    // live, and every connect below is a listener-survival probe.
+    var i: int = 0
+    while i < 10 {
+        let b2 = http_get(hp, "/index.html")?
+        assert(b2.contains("generation-B-body"), "gen2 serves B (probe {i}): {b2}")
+        i = i + 1
+    }
+
+    // reload back to A (a second swap on the surviving listener)
+    write_conf(confp, hp, cp, "ws04_e2e/A")?
+    let r2 = shell.control_send(ep, "reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "second control reload failed")
+        ""
+    }
+    assert(r2.contains("generation 3"), "second reload advances the generation: {r2}")
+    let b3 = http_get(hp, "/index.html")?
+    assert(b3.contains("generation-A-body"), "gen3 serves A again: {b3}")
+
+    // reopen is reachable and answers
+    let ro = shell.control_send(ep, "reopen") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control reopen failed")
+        ""
+    }
+    assert(ro.contains("reopen"), "reopen reply: {ro}")
+
+    // stop: the loop ends, the pid file is removed
+    let rs = shell.control_send(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control stop failed")
+        ""
+    }
+    assert(rs.contains("shutting down"), "stop reply: {rs}")
+    let _code = os_wait(child) else |_| {
+        0
+    }
+    // give the shutdown a moment to unlink the pid file
+    time_sleep_ms(100)
+    assert(!fs_exists("{scratch}/wws.pid"), "pid file removed on stop")
+
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

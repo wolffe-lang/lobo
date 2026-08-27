@@ -1,0 +1,69 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! The listen-set diff — a reload REUSES a surviving listener's live
+//! fd (never close-and-reopen: that loses queued SYNs, the contract's
+//! hammer catches it), OPENS the new, and DRAINS the removed. Pure set
+//! ops over two frozen config models, every lane. Bare ports normalize
+//! to loopback binds (loopback-only, forever).
+
+use config
+use shell
+
+/// Comma-join a List[str] for a stable assertion string.
+fn join(xs: List[str]) -> str {
+    var out = ""
+    var first = true
+    for x in xs {
+        if first {
+            out = x
+            first = false
+        } else {
+            out = "{out},{x}"
+        }
+    }
+    out
+}
+
+fn main() -> int {
+    // A listens :8080 and :8443; B listens :8080 and :9000.
+    let a = config.
+        parse_str(
+        "http {{\n  server {{ listen 8080; }}\n  server {{ listen 8443; }}\n}}\n",
+        "a.conf",
+    )
+    let b = config.
+        parse_str(
+        "http {{\n  server {{ listen 8080; }}\n  server {{ listen 9000; }}\n}}\n",
+        "b.conf",
+    )
+
+    let la = shell.listen_addrs(a)
+    assert(
+        join(la) == "127.0.0.1:8080,127.0.0.1:8443",
+        "A binds (bare port → loopback): {join(la)}",
+    )
+
+    let lb = shell.listen_addrs(b)
+    let reused = shell.listen_reused(la, lb)
+    assert(join(reused) == "127.0.0.1:8080", "reused = the surviving listener: {join(reused)}")
+
+    let added = shell.listen_added(la, lb)
+    assert(join(added) == "127.0.0.1:9000", "added = the opened listener: {join(added)}")
+
+    let removed = shell.listen_removed(la, lb)
+    assert(join(removed) == "127.0.0.1:8443", "removed = the drained listener: {join(removed)}")
+
+    // an explicit host:port is kept verbatim (no re-normalization)
+    let c = config.parse_str("http {{\n  server {{ listen 127.0.0.1:1234; }}\n}}\n", "c.conf")
+    assert(join(shell.listen_addrs(c)) == "127.0.0.1:1234", "explicit host:port verbatim")
+
+    // no reload change → everything reused, nothing added/removed
+    assert(join(shell.listen_reused(la, la)) == "127.0.0.1:8080,127.0.0.1:8443", "identity reuse")
+    assert(shell.listen_added(la, la).is_empty(), "identity: nothing opened")
+    assert(shell.listen_removed(la, la).is_empty(), "identity: nothing closed")
+
+    0
+}
