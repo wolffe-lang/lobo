@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: serve proxy http config
+//! stage-src: serve conn tls proxy http config
 //!
 //! serve/ static GET, round-trip: bind loopback:0, dial self, accept,
 //! serve_conn (Connection: close → serves once and closes), then read

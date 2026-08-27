@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: proxy http config obs serve
+//! stage-src: proxy http config obs serve conn tls
 //!
 //! The 502 path, live and end-to-end: wws proxies to a DEAD upstream
 //! (a port bound then closed → connect refused) and must answer the
