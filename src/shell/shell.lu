@@ -63,7 +63,11 @@ pub fn version() -> str {
 /// "nginx: …") and `exit_code` the code to return when `mode ==
 /// "error"` (or a terminal mode's code). The path knobs (`prefix`,
 /// `conf`, `errlog`, `globals`) and `quiet` carry through to the acting
-/// modes.
+/// modes. The ws07 dry-run knobs ride `-t`: `requests` is the
+/// repeatable `--request` probe batch, `sni`/`client` feed the
+/// TLS-selection and client-address decision inputs, `stat` the fs
+/// opt-in — each REQUIRES `-t` (spelled anywhere else they are the
+/// named error, so the surface cannot silently mean nothing).
 pub struct Cli {
     mode: str,
     signal: str,
@@ -75,6 +79,10 @@ pub struct Cli {
     err_msg: str,
     exit_code: int,
     format: str,
+    requests: List[str],
+    sni: str,
+    client: str,
+    stat: bool,
 }
 
 /// True when `name` is one of nginx's four signal words. Total.
@@ -118,6 +126,10 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var globals = ""
     var quiet = false
     var format = "text"
+    var requests = List[str]()
+    var sni = ""
+    var client = ""
+    var stat = false
     var want = ""
     var want_kind = ""
     var err_msg = ""
@@ -144,6 +156,12 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 globals = a
             } else if want == "format" {
                 format = a
+            } else if want == "request" {
+                (mut requests).push(a)
+            } else if want == "sni" {
+                sni = a
+            } else if want == "client" {
+                client = a
             }
             want = ""
             want_kind = ""
@@ -179,6 +197,17 @@ pub fn parse_cli(args: List[str]) -> Cli {
         } else if a == "--format" {
             want = "format"
             want_kind = "parameter"
+        } else if a == "--request" {
+            want = "request"
+            want_kind = "parameter"
+        } else if a == "--sni" {
+            want = "sni"
+            want_kind = "parameter"
+        } else if a == "--client" {
+            want = "client"
+            want_kind = "parameter"
+        } else if a == "--stat" {
+            stat = true
         } else if a == "directives-md" {
             mode = "docs"
         } else if a == "serve" {
@@ -195,10 +224,38 @@ pub fn parse_cli(args: List[str]) -> Cli {
         }
     }
     // a trailing arg-taking option with no argument (nginx: "option
-    // \"-c\" requires file name", exit 1)
+    // \"-c\" requires file name", exit 1). The long options spell
+    // their own name in the diagnostic.
     if !errored && !want.is_empty() {
         errored = true
-        err_msg = "option \"-{want}\" requires {want_kind}"
+        if want.len > 1 {
+            err_msg = "option \"--{want}\" requires {want_kind}"
+        } else {
+            err_msg = "option \"-{want}\" requires {want_kind}"
+        }
+    }
+    // the dry-run knobs require -t (ws07): anywhere else they would
+    // silently mean nothing, and this surface never means nothing
+    if !errored && mode != "check" {
+        if requests.len > 0 {
+            errored = true
+            err_msg = "option \"--request\" requires -t (the dry-run rides the config check)"
+        } else if !sni.is_empty() {
+            errored = true
+            err_msg = "option \"--sni\" requires -t --request"
+        } else if !client.is_empty() {
+            errored = true
+            err_msg = "option \"--client\" requires -t --request"
+        } else if stat {
+            errored = true
+            err_msg = "option \"--stat\" requires -t --request"
+        }
+    }
+    if !errored && mode == "check" && requests.len == 0 {
+        if !sni.is_empty() || !client.is_empty() || stat {
+            errored = true
+            err_msg = "options \"--sni\"/\"--client\"/\"--stat\" shape --request probes; add --request"
+        }
     }
     if errored {
         mode = "error"
@@ -215,6 +272,10 @@ pub fn parse_cli(args: List[str]) -> Cli {
         err_msg: err_msg,
         exit_code: code,
         format: format,
+        requests: requests,
+        sni: sni,
+        client: client,
+        stat: stat,
     }
 }
 
@@ -254,6 +315,9 @@ pub fn usage_text() -> str {
     var s = "{version_report()}\n"
     s = "{s}Usage: wws [-?hvVtTq] [-s signal] [-p prefix]\n"
     s = "{s}           [-e filename] [-c filename] [-g directives]\n"
+    s = "{s}       wws -t --request '<method> <scheme>://<host>/<path>' ...\n"
+    s = "{s}           [--sni name] [--client addr] [--stat] [--format json]\n"
+    s = "{s}           (the config dry-run: what would this config DO — ws07)\n"
     s = "{s}       wws [serve | directives-md]   (wws-native verbs)\n"
     s
 }

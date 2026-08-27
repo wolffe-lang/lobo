@@ -133,5 +133,57 @@ fn main() -> int {
     // touch `paths` so it is honestly used (it holds a trailing -p → error)
     assert(shell.parse_cli(paths).mode == "error", "trailing -p with no arg → error")
 
+    // ---- the ws07 dry-run knobs ----
+    // -t --request → still the check mode, the probe captured verbatim
+    let dr = shell.parse_cli(four("-t", "--request", "GET http://h/a", "--stat"))
+    assert(dr.mode == "check", "-t --request stays the check mode")
+    assert(dr.requests.len == 1, "one probe captured")
+    assert(dr.requests[0] == "GET http://h/a", "the probe verbatim")
+    assert(dr.stat, "--stat captured")
+
+    // --request repeats: a batch of probes in one run
+    var batch = List[str]()
+    (mut batch).push("-t")
+    (mut batch).push("--request")
+    (mut batch).push("GET http://h/a")
+    (mut batch).push("--request")
+    (mut batch).push("GET http://h/b")
+    let db = shell.parse_cli(batch)
+    assert(db.requests.len == 2, "--request is repeatable")
+    assert(db.requests[1] == "GET http://h/b", "batch order kept")
+
+    // --sni/--client ride -t --request
+    var full = List[str]()
+    (mut full).push("-t")
+    (mut full).push("--request")
+    (mut full).push("GET https://h/a")
+    (mut full).push("--sni")
+    (mut full).push("h.example")
+    (mut full).push("--client")
+    (mut full).push("203.0.113.9")
+    let df = shell.parse_cli(full)
+    assert(df.mode == "check", "the full dry-run spelling is the check mode")
+    assert(df.sni == "h.example", "--sni captured")
+    assert(df.client == "203.0.113.9", "--client captured")
+
+    // the knobs REQUIRE -t: anywhere else they are the named error
+    let no_t = shell.parse_cli(two("--request", "GET http://h/a"))
+    assert(no_t.mode == "error", "--request without -t errors")
+    assert(no_t.exit_code == 1, "--request without -t exits 1")
+    assert(no_t.err_msg.contains("requires -t"), "and names the requirement: {no_t.err_msg}")
+    let dump_req = shell.parse_cli(four("-T", "--request", "GET http://h/a", "-q"))
+    assert(dump_req.mode == "error", "-T --request errors (the dry-run rides -t only)")
+    let stat_alone = shell.parse_cli(two("-t", "--stat"))
+    assert(stat_alone.mode == "error", "--stat without --request errors")
+    assert(stat_alone.err_msg.contains("--request"), "and points at --request")
+
+    // a trailing --request with no argument names itself in full
+    let trail = shell.parse_cli(two("-t", "--request"))
+    assert(trail.mode == "error", "trailing --request errors")
+    assert(
+        trail.err_msg == "option \"--request\" requires parameter",
+        "long options spell their own name: {trail.err_msg}",
+    )
+
     0
 }
