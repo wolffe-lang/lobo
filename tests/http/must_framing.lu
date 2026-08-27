@@ -1,0 +1,60 @@
+//! check: run(exit=0, stdout="cl_te=malformed\ndup_cl_same=malformed\ndup_cl_diff=malformed\nneg_cl=malformed\nnondigit_cl=malformed\nplus_cl=malformed\nte_gzip=unimplemented\nte_chunked=ok:chunked\ncl_ok=ok:length:5\nno_body=ok:none:0\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! RFC 9110 §8.6 (Content-Length: a single digits-only value; wws
+//! rejects any duplicate — stricter than "combine identical", matching
+//! the pinned oracle and the smuggling posture) and RFC 9112 §6.1
+//! (Transfer-Encoding + Content-Length together MUST be treated as an
+//! error — wws makes it 400, full stop; a Transfer-Encoding other than
+//! chunked is 501, matching the oracle). Each line is one framing MUST.
+
+use http
+
+fn probe(name: str, raw: str) {
+    let lim = http.default_limits()
+    let r = http.parse_request(raw, lim) else |e| match e {
+        malformed => {
+            print("{name}=malformed")
+            return
+        },
+        uri_too_long => {
+            print("{name}=uri_too_long")
+            return
+        },
+        too_large => {
+            print("{name}=too_large")
+            return
+        },
+        unimplemented => {
+            print("{name}=unimplemented")
+            return
+        },
+    }
+    print("{name}=ok:{r.body_mode}:{r.content_length}")
+}
+
+fn probe2(name: str, raw: str) {
+    let lim = http.default_limits()
+    let r = http.parse_request(raw, lim) else |_| {
+        print("{name}=err")
+        return
+    }
+    print("{name}=ok:{r.body_mode}")
+}
+
+fn main() -> int {
+    probe("cl_te", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nTransfer-Encoding: chunked")
+    probe("dup_cl_same", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 5")
+    probe("dup_cl_diff", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nContent-Length: 6")
+    probe("neg_cl", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: -5")
+    probe("nondigit_cl", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5a")
+    probe("plus_cl", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: +5")
+    probe("te_gzip", "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip")
+    probe2("te_chunked", "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked")
+    probe("cl_ok", "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 5")
+    probe("no_body", "GET / HTTP/1.1\r\nHost: x")
+    0
+}

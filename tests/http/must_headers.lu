@@ -1,0 +1,53 @@
+//! check: run(exit=0, stdout="space_before_colon=malformed\nobs_fold_sp=malformed\nobs_fold_tab=malformed\nempty_name=malformed\ndup_host=malformed\nmissing_host_11=malformed\nhost_ok_10=ok\nows_trimmed=ok:v\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! RFC 9112 §5.1 (no whitespace between field name and colon — a
+//! MUST-reject: `Host : x`), §5.2 (obs-fold: a recipient MAY reject
+//! with 400 rather than unfold — the Class-B posture), §5.4 / RFC 9110
+//! §7.2 (a 1.1 request MUST include exactly one Host; wws rejects a
+//! missing or duplicated Host). OWS around a value is trimmed (§5).
+
+use http
+
+fn probe(name: str, raw: str) {
+    let lim = http.default_limits()
+    let r = http.parse_request(raw, lim) else |e| match e {
+        malformed => {
+            print("{name}=malformed")
+            return
+        },
+        uri_too_long => {
+            print("{name}=uri_too_long")
+            return
+        },
+        too_large => {
+            print("{name}=too_large")
+            return
+        },
+        unimplemented => {
+            print("{name}=unimplemented")
+            return
+        },
+    }
+    if name == "ows_trimmed" {
+        let v = http.header(r, "x-test") else "?"
+        print("{name}=ok:{v}")
+        return
+    }
+    print("{name}=ok")
+}
+
+fn main() -> int {
+    probe("space_before_colon", "GET / HTTP/1.1\r\nHost: x\r\nName : v")
+    probe("obs_fold_sp", "GET / HTTP/1.1\r\nHost: x\r\nX: a\r\n cont")
+    probe("obs_fold_tab", "GET / HTTP/1.1\r\nHost: x\r\nX: a\r\n\tcont")
+    probe("empty_name", "GET / HTTP/1.1\r\nHost: x\r\n: v")
+    probe("dup_host", "GET / HTTP/1.1\r\nHost: a\r\nHost: b")
+    probe("missing_host_11", "GET / HTTP/1.1\r\nAccept: x")
+    probe("host_ok_10", "GET / HTTP/1.0\r\nAccept: x")
+    probe("ows_trimmed", "GET / HTTP/1.1\r\nHost: x\r\nX-Test: \t v \t")
+    0
+}

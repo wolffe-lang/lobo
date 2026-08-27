@@ -1,0 +1,44 @@
+//! check: run(exit=0, stdout="enc_dotdot=malformed\nraw_dotdot=malformed\nmixed=malformed\ndeep_ok=/a/b/c\ndot_here=/a/c\ndouble_decode=/%2e%2e/x\nnul_control=BLOCKED\ncrlf_control=BLOCKED\npct25=/a%b\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! The traversal defence is the ORDER: percent-decode ONCE, THEN
+//! dot-segment normalize (RFC 3986 §2.1, §5.2.4). A `%2e%2e%2f`
+//! escape decodes to `../` and is then caught by normalization —
+//! which is why decode must run first. Decoding is done EXACTLY once
+//! (`%252e` stays `%2e`, never re-decoded to `.`), the anti-double-
+//! decode posture. A decoded NUL or CR/LF is blocked post-decode
+//! (has_control) — the response-splitting / null-byte class.
+
+use http
+
+fn decode_norm(name: str, raw: str) {
+    let dec = http.percent_decode(raw) else |_| {
+        print("{name}=malformed")
+        return
+    }
+    if http.has_control(dec) {
+        print("{name}=BLOCKED")
+        return
+    }
+    let n = http.normalize_path(dec) else {
+        print("{name}=malformed")
+        return
+    }
+    print("{name}={n}")
+}
+
+fn main() -> int {
+    decode_norm("enc_dotdot", "/%2e%2e/%2e%2e/etc/passwd")
+    decode_norm("raw_dotdot", "/../../etc/passwd")
+    decode_norm("mixed", "/a/%2e%2e/%2e%2e/b")
+    decode_norm("deep_ok", "/a/b/c")
+    decode_norm("dot_here", "/a/./b/../c")
+    decode_norm("double_decode", "/%252e%252e/x")
+    decode_norm("nul_control", "/a%00b")
+    decode_norm("crlf_control", "/a%0d%0ab")
+    decode_norm("pct25", "/a%25b")
+    0
+}
