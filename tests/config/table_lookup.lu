@@ -40,8 +40,12 @@ fn main() -> int {
         "listen planned",
     )
     assert(
-        config.spec_at(t, config.find(t, "ssl_certificate", "server")).status == "planned(wsc02)",
-        "ssl planned at the certs campaign (the contract's marking)",
+        config.spec_at(t, config.find(t, "ssl_certificate", "server")).status == "implemented",
+        "ssl_certificate implemented at ws05 (the certs campaign lands)",
+    )
+    assert(
+        config.spec_at(t, config.find(t, "ssl_session_cache", "server")).status == "planned(wsc02)",
+        "resumption stays a named roadmap row (ws05 serves full handshakes only)",
     )
     assert(
         config.spec_at(t, config.find(t, "content_by_lua_block", "location")).status ==
