@@ -1,0 +1,58 @@
+//! check: run(exit=0, stdout="prose ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: dryrun http proxy config
+//!
+//! The operator prose table (contract target 5): location precedence
+//! in nginx is folklore, and these are the sentences that teach it —
+//! kept in ONE place (dryrun.why_prose) so ws-docs reuse the wording
+//! and edits to it never smear routing diffs (the trace itself
+//! carries stable CODES; this file pins code -> sentence). A NEW code
+//! reaching a stanza without prose renders as the bare code, which
+//! the last assertion makes a loud failure instead of a shrug.
+
+use dryrun
+
+fn main() -> int {
+    // the teaching lines, pinned verbatim
+    assert(
+        dryrun.why_prose("exact-match") == "exact match — `location =` beats every prefix and regex",
+        "exact-match prose",
+    )
+    assert(
+        dryrun.why_prose("longest-prefix") == "the longest matching prefix wins",
+        "longest-prefix prose",
+    )
+    assert(
+        dryrun.why_prose("shorter-prefix") == "the prefix matches, but a longer prefix won",
+        "shorter-prefix prose",
+    )
+    assert(
+        dryrun.why_prose("lost-to-exact") ==
+            "the prefix matches, but an exact `location =` takes precedence",
+        "lost-to-exact prose",
+    )
+    assert(
+        dryrun.why_prose("regex-parse-only") ==
+            "regex locations are parse-only at this pin — they never win a route (a named delta)",
+        "regex-parse-only prose",
+    )
+    assert(
+        dryrun.precedence_prose() ==
+            "= exact > longest prefix (regex is parse-only at this pin and never wins)",
+        "the one-line precedence summary",
+    )
+    // every code the classifier can emit has a sentence
+    let codes = "first-server not-first-server exact-match exact-miss longest-prefix shorter-prefix lost-to-exact prefix-miss regex-parse-only named-location tie-first-wins"
+    for code in codes.words() {
+        let prose = dryrun.why_prose(code)
+        assert(!prose.is_empty(), "no prose at all for {code}")
+        assert(
+            prose != code,
+            "code {code} has no operator sentence (the table fell behind the classifier)",
+        )
+    }
+    print("prose ok")
+    0
+}

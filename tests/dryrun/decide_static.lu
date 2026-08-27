@@ -1,0 +1,96 @@
+//! check: run(exit=0, stdout="static ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: dryrun http proxy config
+//!
+//! The dry-run's static decisions, offline: probe parsing through the
+//! REAL ws02 target parser (absolute-form), the serve/refuse verdicts
+//! (200 mapped / 404 unmapped / 405 method / parse-stage 400s), the
+//! listener honesty (an https probe against a plaintext-only config
+//! has NOWHERE to connect — kind "none", not a guessed answer), and
+//! the directory/index shape. Three lanes: the lupin run IS the
+//! purity witness (no fs, no sockets exist there).
+
+use config
+use dryrun
+use http
+
+fn main() -> int {
+    let src = "http {{\n  server {{\n    listen 8080;\n    root /var/www;\n    index home.html;\n    location /img/ {{\n      alias /data/img/;\n    }}\n  }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    assert(config.ok(c), "fixture must parse: {c.err}")
+
+    // probe parsing: absolute-form, host + path + query split
+    let p = dryrun.probe_request("GET http://example.org/a/b.html?x=1")
+    assert(p.input_err.is_empty(), "a well-formed probe has no input error")
+    assert(p.refuse_status == 0, "a well-formed probe predicts no refusal")
+    assert(p.scheme == "http", "scheme")
+    assert(p.host == "example.org", "the authority is the effective host (RFC 9112 §3.2.2)")
+    assert(p.path == "/a/b.html", "path")
+    assert(p.query == "x=1", "query")
+
+    // serve: root append
+    var tr = http.trace_new()
+    let v = dryrun.decide(c, p, "127.0.0.1:8080", "", mut tr)
+    assert(v.kind == "serve", "mapped path serves")
+    assert(v.status == 200, "predicted 200 (not checked)")
+    assert(v.fs_path == "/var/www/a/b.html", "root appends the URI")
+
+    // serve: alias replace
+    var tra = http.trace_new()
+    let pa = dryrun.probe_request("GET http://h/img/cat.png")
+    let va = dryrun.decide(c, pa, "127.0.0.1:8080", "", mut tra)
+    assert(va.fs_path == "/data/img/cat.png", "alias replaces the matched prefix")
+    assert(va.is_alias, "the alias is reported as such")
+
+    // directory request carries the index candidates
+    var trd = http.trace_new()
+    let pd = dryrun.probe_request("GET http://h/")
+    let vd = dryrun.decide(c, pd, "127.0.0.1:8080", "", mut trd)
+    assert(vd.kind == "serve", "a directory request is still a serve decision")
+    assert(vd.index.len == 1, "one configured index candidate")
+    assert(vd.index[0] == "home.html", "the configured index file, not the default")
+
+    // 405: the static path serves GET and HEAD only
+    var trm = http.trace_new()
+    let pm = dryrun.probe_request("POST http://h/a")
+    let vm = dryrun.decide(c, pm, "127.0.0.1:8080", "", mut trm)
+    assert(vm.kind == "refuse" && vm.status == 405, "POST on a static location is the named 405")
+
+    // 404: nothing maps the path (a config with no root)
+    let nr = config.parse_str("http {{\n  server {{\n    listen 8080;\n  }}\n}}\n", "n.conf")
+    var trn = http.trace_new()
+    let vn = dryrun.decide(nr, p, "127.0.0.1:8080", "", mut trn)
+    assert(vn.kind == "refuse" && vn.status == 404, "an unmapped path is the named 404")
+
+    // 404: no server block at all
+    let ns = config.parse_str("events {{\n}}\n", "e.conf")
+    var trs = http.trace_new()
+    let vs = dryrun.decide(ns, p, "127.0.0.1:8080", "", mut trs)
+    assert(vs.kind == "refuse" && vs.status == 404, "no server block is the named 404")
+    assert(vs.note.contains("no server block"), "and the note says so")
+
+    // listener honesty: an https probe with no ssl listener
+    var trh = http.trace_new()
+    let ph = dryrun.probe_request("GET https://h/a")
+    let vh = dryrun.decide(c, ph, "127.0.0.1:8080", "", mut trh)
+    assert(vh.kind == "none", "no ssl listener: no answer, not a guessed one")
+    assert(vh.note.contains("listen ... ssl"), "the note names the missing directive")
+
+    // parse-stage refusals ride the real gates: traversal is 400
+    let pt = dryrun.probe_request("GET http://h/%2e%2e/etc/passwd")
+    assert(pt.refuse_status == 400, "encoded dot-segment traversal predicts the 400")
+    var trt = http.trace_new()
+    let vt = dryrun.decide(c, pt, "127.0.0.1:8080", "", mut trt)
+    assert(vt.kind == "refuse" && vt.status == 400, "the verdict carries the parse-stage 400")
+
+    // operator input errors are input errors, not predictions
+    let bad = dryrun.probe_request("GEThttp://h/a")
+    assert(!bad.input_err.is_empty(), "a one-token --request is the operator's error")
+    let rel = dryrun.probe_request("GET /a/b")
+    assert(!rel.input_err.is_empty(), "a relative target is refused: absolute-form only")
+
+    print("static ok")
+    0
+}

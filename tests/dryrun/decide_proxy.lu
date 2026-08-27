@@ -1,0 +1,86 @@
+//! check: run(exit=0, stdout="proxy ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: dryrun http proxy config
+//!
+//! The dry-run's proxy decisions, offline: the upstream URL through
+//! ws03's REAL rewrite arithmetic (proxy.rewrite_target), the pool
+//! peer set, the proxy-over-TLS named 502 (ws05 residue — the live
+//! server's exact refusal, predicted), the empty-pool 502, and the
+//! variables-stay-honest rule through the stanza: `$remote_addr`
+//! resolves only under --client, `$proxy_add_x_forwarded_for` is
+//! UNRESOLVED always (it depends on the inbound request), never a
+//! guessed value.
+
+use config
+use dryrun
+use http
+
+fn main() -> int {
+    let src = "http {{\n  upstream pool {{\n    server 127.0.0.1:9001 weight=2;\n    server 127.0.0.1:9002 backup;\n  }}\n  server {{\n    listen 8080;\n    root /w;\n    location /api/ {{\n      proxy_pass http://pool;\n      proxy_set_header X-Real-IP $remote_addr;\n      proxy_set_header X-Fwd $proxy_add_x_forwarded_for;\n      proxy_set_header Host fixed.example;\n    }}\n    location /re/ {{\n      proxy_pass http://127.0.0.1:9009/v2/;\n    }}\n  }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    assert(config.ok(c), "fixture must parse: {c.err}")
+
+    // a pool proxy: original target carries (no URI on the pass)
+    var tr = http.trace_new()
+    let p = dryrun.probe_request("POST http://h/api/users?id=3")
+    let v = dryrun.decide(c, p, "127.0.0.1:8080", "", mut tr)
+    assert(v.kind == "proxy", "a proxy_pass location proxies (any method)")
+    assert(v.upstream == "http://pool/api/users?id=3", "no pass-URI: the original target carries")
+    assert(v.pool == "pool", "the pool is named")
+    assert(v.peers.contains("127.0.0.1:9001 weight=2"), "peer one with its weight")
+    assert(v.peers.contains("127.0.0.1:9002 weight=1 backup"), "peer two flagged backup")
+
+    // the rewrite case: pass-URI replaces the matched prefix
+    var trr = http.trace_new()
+    let pr = dryrun.probe_request("GET http://h/re/a/b?q=1")
+    let vr = dryrun.decide(c, pr, "127.0.0.1:8080", "", mut trr)
+    assert(
+        vr.upstream == "http://127.0.0.1:9009/v2/a/b?q=1",
+        "the pass-URI replaces the matched prefix (ws03's probed arithmetic): {vr.upstream}",
+    )
+    assert(vr.pool.is_empty(), "a host:port pass is not a pool")
+
+    // variables stay honest, through the stanza
+    let st = dryrun.stanza(c, p, tr, v, "127.0.0.1:8080", "", "", "")
+    assert(
+        st.contains("X-Real-IP: $remote_addr -> UNRESOLVED"),
+        "$remote_addr without --client is UNRESOLVED by name",
+    )
+    assert(
+        st.contains("X-Fwd: $proxy_add_x_forwarded_for -> UNRESOLVED"),
+        "$proxy_add_x_forwarded_for is always UNRESOLVED offline",
+    )
+    assert(st.contains("Host: fixed.example"), "a literal header value renders as itself")
+    let stc = dryrun.stanza(c, p, tr, v, "127.0.0.1:8080", "", "", "203.0.113.9")
+    assert(
+        stc.contains("X-Real-IP: 203.0.113.9"),
+        "--client resolves $remote_addr with the supplied address",
+    )
+    assert(
+        stc.contains("X-Fwd: $proxy_add_x_forwarded_for -> UNRESOLVED"),
+        "--client does NOT invent the inbound X-Forwarded-For",
+    )
+
+    // proxy over a TLS listener: the ws05 residue, predicted
+    var trt = http.trace_new()
+    let pt = dryrun.probe_request("GET https://h/api/x")
+    let vt = dryrun.decide(c, pt, "127.0.0.1:8080", "127.0.0.1:8443", mut trt)
+    assert(vt.kind == "refuse" && vt.status == 502, "proxy over TLS is the named 502")
+    assert(vt.note.contains("ws05 residue"), "the note names the residue")
+    assert(!vt.upstream.is_empty(), "the would-be upstream is still reported")
+
+    // an empty pool is the live server's 502, predicted
+    let esrc = "http {{\n  upstream empty {{\n  }}\n  server {{\n    listen 8080;\n    location / {{\n      proxy_pass http://empty;\n    }}\n  }}\n}}\n"
+    let ec = config.parse_str(esrc, "e.conf")
+    assert(config.ok(ec), "empty-pool fixture must parse: {ec.err}")
+    var tre = http.trace_new()
+    let pe = dryrun.probe_request("GET http://h/x")
+    let ve = dryrun.decide(ec, pe, "127.0.0.1:8080", "", mut tre)
+    assert(ve.kind == "refuse" && ve.status == 502, "an empty pool answers 502")
+    assert(ve.note.contains("no servers"), "and says why")
+
+    print("proxy ok")
+    0
+}

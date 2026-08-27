@@ -1,0 +1,61 @@
+//! check: run(exit=0, stdout="pure ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: dryrun http proxy config
+//!
+//! PURITY, ENFORCED (contract target 2): the WHOLE dry-run pipeline —
+//! probe parse, decide, why-it-lost trace, effective directives,
+//! chain notes, text stanza, JSON twin — runs here on the LUPIN lane,
+//! and the interpreter has NO sockets and NO fs by design. This test
+//! executing there IS the proof that the offline path opens no
+//! listener and reads nothing: any io builtin on the called path
+//! would refuse the lane and turn this row red. The module's imports
+//! back it structurally (dryrun/ imports config, http, proxy — never
+//! conn/serve/tls), and the one deliberate exception, stat_note
+//! (--stat), is NOT called here and never runs on the default path.
+//! The mapped path is REPORTED, not stat'd, and the stanza says "not
+//! checked" — tense discipline, asserted below.
+
+use config
+use dryrun
+use http
+
+fn main() -> int {
+    let src = "http {{\n  server {{\n    listen 8080;\n    root /var/www;\n    location = /health {{\n      root /special;\n    }}\n  }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    assert(config.ok(c), "fixture must parse: {c.err}")
+
+    let p = dryrun.probe_request("GET http://example.org/health")
+    var tr = http.trace_new()
+    let v = dryrun.decide(c, p, "127.0.0.1:8080", "", mut tr)
+    assert(v.kind == "serve", "the exact location serves")
+    assert(v.fs_path == "/special/health", "exact location's root")
+
+    // the text stanza: complete, and tense-honest about the fs
+    let st = dryrun.stanza(c, p, tr, v, "127.0.0.1:8080", "", "", "")
+    assert(
+        st.contains("== request: GET http://example.org/health"),
+        "the stanza opens with the probe",
+    )
+    assert(st.contains("listener: 127.0.0.1:8080"), "the listener line")
+    assert(st.contains("location: /health"), "the winner line")
+    assert(st.contains("candidate location = /health"), "the candidate list includes the winner")
+    assert(st.contains("won: exact match"), "with its why")
+    assert(st.contains("effective directives"), "the -T provenance filtered to the chain")
+    assert(st.contains("# from t.conf:"), "each directive carries file:line")
+    assert(
+        st.contains("would serve: /special/health (not checked)"),
+        "the decision REPORTS the path and says it did not look",
+    )
+
+    // the JSON twin: schema-versioned, same knowledge
+    let doc = "{dryrun.json_open()}{dryrun.stanza_json(c, p, tr, v, "127.0.0.1:8080", "", "", "")}{dryrun.json_close()}"
+    assert(doc.starts_with("{{\"schema\":1,"), "the JSON opens with its schema version")
+    assert(doc.contains("\"why\":\"exact-match\""), "the trace codes ride the JSON")
+    assert(doc.contains("\"checked\":false"), "the JSON decision carries the not-checked truth")
+    assert(dryrun.schema() == 1, "schema 1 at ws07")
+
+    print("pure ok")
+    0
+}

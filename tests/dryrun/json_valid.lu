@@ -1,0 +1,51 @@
+//! check: run(exit=0, stdout="json ok\n")
+//! phase: run
+//! lanes: checked
+//! conforms: err.union
+//! stage-src: dryrun http proxy config
+//!
+//! The JSON twin is a public tooling surface (the ws08/ws12
+//! convention) — so it is validated by an INDEPENDENT reader:
+//! std.x.json (the kernel evaluator), not the emitter's own claims.
+//! One lane on purpose: the json_* builtin family is checked-lane
+//! only at this pin (the native rung refuses it by name, lupin
+//! declines it by design) — the EMITTER's three-lane evidence lives
+//! in purity_offline.lu; this file is the reader's cross-check. The
+//! escaping path is exercised with a value that carries quote,
+//! backslash and tab.
+
+use config
+use dryrun
+use http
+use std.x.json
+
+fn main() -> int {
+    let src = "http {{\n  upstream pool {{\n    server 127.0.0.1:9001;\n  }}\n  server {{\n    listen 8080;\n    root \"/var/w w\";\n    location /api/ {{\n      proxy_pass http://pool;\n      proxy_set_header X-Real-IP $remote_addr;\n    }}\n  }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    assert(config.ok(c), "fixture must parse: {c.err}")
+
+    let p = dryrun.probe_request("GET http://h/api/x?q=\"1\"")
+    var tr = http.trace_new()
+    let v = dryrun.decide(c, p, "127.0.0.1:8080", "", mut tr)
+    let doc = "{dryrun.json_open()}{dryrun.stanza_json(c, p, tr, v, "127.0.0.1:8080", "", "", "")}{dryrun.json_close()}"
+
+    assert(json.is_valid(doc), "the emitted document parses under the independent reader")
+    let schema = json.get(doc, "schema") else "?"
+    assert(schema == "1", "schema 1")
+    let kind = json.get(doc, "requests.0.decision.kind") else "?"
+    assert(kind == "proxy", "decision kind rides the twin")
+    let upstream = json.get(doc, "requests.0.decision.upstream") else "?"
+    assert(
+        upstream == "http://pool/api/x?q=\"1\"",
+        "the quoted query survives the escaping round-trip",
+    )
+    let why = json.get(doc, "requests.0.considered.1.why") else "?"
+    assert(why == "longest-prefix", "trace codes are addressable")
+    let resolved = json.get(doc, "requests.0.headers.0.resolved") else "?"
+    assert(resolved == "false", "the unresolved header says so as a JSON bool")
+    let reason = json.get(doc, "requests.0.headers.0.unresolved") else "?"
+    assert(reason.contains("--client"), "and names the missing input")
+
+    print("json ok")
+    0
+}
