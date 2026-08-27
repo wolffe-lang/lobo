@@ -34,7 +34,38 @@ fn banner() {
 
 /// One usage line; grows with shell/ at ws04.
 fn usage() {
-    print("usage: wws [-V | --version | help | -t | -T] [-c <conf>] [-p <prefix>] [directives-md]")
+    print(
+        "usage: wws [-V | --version | help | -t | -T | serve] [-c <conf>] [-p <prefix>] [directives-md]",
+    )
+}
+
+/// The serving verb: load the config through the include graph, bind
+/// its first `listen`, and serve. The per-connection UNIT is
+/// serve.serve_conn (the full keepalive lifecycle); the shipped binary
+/// drives it through serve.accept_loop, which serves connections
+/// sequentially. Task-per-connection (scope + spawn per accept) is the
+/// intended concurrent posture and is proven on the DEBUG tier and the
+/// native rig lane (tests/serve/keepalive.lu spawns serve_conn), but
+/// the LLVM RELEASE tier currently refuses this task entry's func.addr
+/// ("the conservatism ledger, not a bug in your program"), and the
+/// gauntlet builds BOTH tiers — so the release binary is sequential at
+/// v0. Deferral D7 owns the gap (filed upstream). Loopback only.
+/// Returns 1 on a config error or a failed bind; the serve loop itself
+/// does not return — it is the server.
+fn serve_main(prefix: str, conf: str) -> int {
+    let c = config.load(prefix, conf)
+    if !config.ok(c) {
+        eprint("wws: configuration file test failed")
+        return 1
+    }
+    let addr = serve.listen_addr(c)
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+    serve.accept_loop(c, addr, opts, lim) else |_| {
+        eprint("wws: could not bind {addr}")
+        return 1
+    }
+    0
 }
 
 fn main() -> int {
@@ -66,6 +97,8 @@ fn main() -> int {
             want = "p"
         } else if a == "directives-md" {
             mode = "docs"
+        } else if a == "serve" {
+            mode = "serve"
         } else {
             mode = "bad"
             bad = a
@@ -97,6 +130,9 @@ fn main() -> int {
     if mode == "docs" {
         print_raw(config.directives_markdown())
         return 0
+    }
+    if mode == "serve" {
+        return serve_main(prefix, conf)
     }
     eprint("wws: unknown argument `{bad}`")
     usage()

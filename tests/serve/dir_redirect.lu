@@ -1,0 +1,88 @@
+//! check: run(exit=0, stdout="status=HTTP/1.1 301 Moved Permanently\nloc-ok=yes\nindex=HTTP/1.1 200 OK\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: serve http config
+//!
+//! A directory with no trailing slash → 301 with an absolute Location
+//! (nginx's shape: http://<host>:<port>/<path>/ — the port appended
+//! because the Host carried none, matching the oracle byte-for-byte on
+//! the same ephemeral port). A directory WITH the slash resolves the
+//! index file → 200. net + fs → native + checked.
+
+use config
+use http
+use serve
+
+fn read_reply(cli: int) -> str ! {io} {
+    net_deadline(cli, 2000) else |_| {
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 4096) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                return io
+            },
+            utf8 => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    out
+}
+
+fn status_line(reply: str) -> str {
+    let eol = reply.find("\r\n") else reply.len
+    reply[0..eol]
+}
+
+fn one(c: config.Conf, opts: serve.ServerOpts, lim: http.Limits, req: str) -> str ! {
+    refused,
+    timeout,
+    closed,
+    io,
+} {
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    net_write(cli, req)?
+    let conn = net_accept(l)?
+    serve.serve_conn(conn, c, opts, lim, port)
+    let reply = read_reply(cli)?
+    net_close(l) else |_| {}
+    reply
+}
+
+fn main() -> !int {
+    let root = "ws02_dr"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/www/sub")?
+    fs_write_text("{root}/www/sub/index.html", "<html>sub</html>\n")?
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws02_dr/www; index index.html; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+
+    let r1 = one(c, opts, lim, "GET /sub HTTP/1.1\r\nHost: h.test\r\nConnection: close\r\n\r\n")?
+    print("status={status_line(r1)}")
+    var lok = "no"
+    if r1.contains("Location: http://h.test:") && r1.contains("/sub/\r\n") {
+        lok = "yes"
+    }
+    print("loc-ok={lok}")
+
+    let r2 = one(c, opts, lim, "GET /sub/ HTTP/1.1\r\nHost: h.test\r\nConnection: close\r\n\r\n")?
+    print("index={status_line(r2)}")
+    fs_remove_dir_all(root) else |_| {}
+    0
+}

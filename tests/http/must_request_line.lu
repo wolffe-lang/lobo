@@ -1,0 +1,57 @@
+//! check: run(exit=0, stdout="bare_cr=malformed\nbare_lf=malformed\nsp_in_target=malformed\ndouble_sp=malformed\nbad_method=malformed\nlower_method=ok\nhttp09=malformed\nbad_version=malformed\nabs_form_wins=real.example\norigin_ok=ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! RFC 9112 §2.2 (message parsing: a recipient MUST NOT recognise a
+//! bare CR or bare LF as a line terminator), §3 (request line: single
+//! SP delimiters, no whitespace in the target), §3.2.2 (absolute-form
+//! authority overrides Host — a smuggling-relevant MUST). Each line
+//! is one MUST turned into a named rejection; the pure parser makes it
+//! a three-lane fact. wws requires the three-token line, so an
+//! HTTP/0.9 request is `malformed` — a deliberate delta from nginx
+//! (which serves 0.9), documented in the differential delta list.
+
+use http
+
+fn probe(name: str, raw: str) {
+    let lim = http.default_limits()
+    let r = http.parse_request(raw, lim) else |e| match e {
+        malformed => {
+            print("{name}=malformed")
+            return
+        },
+        uri_too_long => {
+            print("{name}=uri_too_long")
+            return
+        },
+        too_large => {
+            print("{name}=too_large")
+            return
+        },
+        unimplemented => {
+            print("{name}=unimplemented")
+            return
+        },
+    }
+    if name == "abs_form_wins" {
+        print("{name}={r.host}")
+        return
+    }
+    print("{name}=ok")
+}
+
+fn main() -> int {
+    probe("bare_cr", "GET / HTTP/1.1\rHost: x")
+    probe("bare_lf", "GET / HTTP/1.1\nHost: x")
+    probe("sp_in_target", "GET /a b HTTP/1.1\r\nHost: x")
+    probe("double_sp", "GET  / HTTP/1.1\r\nHost: x")
+    probe("bad_method", "G@T / HTTP/1.1\r\nHost: x")
+    probe("lower_method", "get / HTTP/1.1\r\nHost: x")
+    probe("http09", "GET /\r\nHost: x")
+    probe("bad_version", "GET / HTTP/2.0\r\nHost: x")
+    probe("abs_form_wins", "GET http://real.example/p HTTP/1.1\r\nHost: fake.test")
+    probe("origin_ok", "GET /index.html HTTP/1.1\r\nHost: x")
+    0
+}

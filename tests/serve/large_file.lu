@@ -1,0 +1,89 @@
+//! check: run(exit=0, stdout="status=HTTP/1.1 200 OK\nclen=100000\nbodylen=100000\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: serve http config
+//!
+//! A file larger than the 65536 stream threshold is served in bounded
+//! chunks (no whole-file-into-memory — ws02 pitfall). 100000 ASCII
+//! bytes: Content-Length is exact (fs_size, known before streaming),
+//! and the body arrives whole. net + fs → native + checked.
+
+use config
+use http
+use serve
+
+fn read_reply(cli: int) -> str ! {io} {
+    net_deadline(cli, 4000) else |_| {
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 65536) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                return io
+            },
+            utf8 => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    out
+}
+
+fn main() -> !int {
+    let root = "ws02_lf"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/www")?
+    var chunk = "0123456789"
+    var block = ""
+    var i: int = 0
+    while i < 100 {
+        block = "{block}{chunk}"
+        i = i + 1
+    }
+    var big = ""
+    var j: int = 0
+    while j < 100 {
+        big = "{big}{block}"
+        j = j + 1
+    }
+    fs_write_text("{root}/www/big.txt", big)?
+    let src = "http {{\n  types {{ text/plain txt; }}\n  server {{ root ws02_lf/www; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    net_write(cli, "GET /big.txt HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    let conn = net_accept(l)?
+    serve.serve_conn(conn, c, opts, lim, port)
+    let reply = read_reply(cli)?
+    net_close(l) else |_| {}
+
+    let cut = reply.find("\r\n\r\n") else -1
+    let head = reply[0..cut]
+    let body = reply[cut + 4..reply.len]
+    let eol = head.find("\r\n") else head.len
+    print("status={head[0..eol]}")
+    for line in head.lines() {
+        if line.lower().starts_with("content-length:") {
+            let v = line[15..line.len]
+            print("clen={v.trim()}")
+        }
+    }
+    print("bodylen={body.len}")
+    fs_remove_dir_all(root) else |_| {}
+    0
+}

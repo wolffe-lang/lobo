@@ -1,12 +1,837 @@
 //! member: true
-//! serve — listeners and the connection lifecycle. wsc01's territory; a stub at ws00 so the `.wolfi`
-//! interface machinery has a real surface to freeze. Do not grow this
-//! module outside its sprint contract.
+//! serve — the listener, the connection lifecycle, the response
+//! writer, and static file serving. This is the io half of the
+//! server: it reads bytes off a socket under a deadline, hands the
+//! head to http.parse_request (PURE), executes http.route's decision
+//! against the fs, and writes the reply. http/ never calls back into
+//! here — the dependency runs serve → {http, config}, one way
+//! (ARCHITECTURE.md).
+//! The response-splitting defence lives HERE, at the writer: no
+//! header value may carry CR or LF, asserted on the way out, so no
+//! later sprint can reintroduce it (ws02 contract §2).
+//! Lane note: net runs on all three lanes, fs on native+checked only
+//! (lupin has no fs), so full static serving is a native+checked
+//! integration surface; the pure response helpers (dates, mime,
+//! status lines, error bodies) run everywhere and are tested there.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
 
-/// This module's interface version. Frozen by the ws00 `.wolfi`
-/// snapshot beside this file; wsc01 bumps it with its first real
-/// surface. Total; never traps.
-#[allow(w0314)]
+use config
+use http
+
+/// This module's interface version. Total; never traps.
 pub fn version() -> str {
-    "0.0.1"
+    "0.1.0"
+}
+
+// ------------------------------------------------------------------
+// response-side pure helpers (dates, hex, status lines, error bodies,
+// mime) — no io, run on all three lanes
+// ------------------------------------------------------------------
+
+/// The reason phrase nginx pairs with a status code (its spellings,
+/// not the RFC's — the differential holds us to the oracle: nginx
+/// writes "Request-URI Too Large", "Not Allowed", "Request Time-out").
+/// An unknown code answers "Status" (never traps). Total.
+pub fn status_phrase(code: int) -> str {
+    if code == 200 {
+        return "OK"
+    }
+    if code == 301 {
+        return "Moved Permanently"
+    }
+    if code == 304 {
+        return "Not Modified"
+    }
+    if code == 400 {
+        return "Bad Request"
+    }
+    if code == 403 {
+        return "Forbidden"
+    }
+    if code == 404 {
+        return "Not Found"
+    }
+    if code == 405 {
+        return "Not Allowed"
+    }
+    if code == 408 {
+        return "Request Time-out"
+    }
+    if code == 413 {
+        return "Request Entity Too Large"
+    }
+    if code == 414 {
+        return "Request-URI Too Large"
+    }
+    if code == 500 {
+        return "Internal Server Error"
+    }
+    if code == 501 {
+        return "Not Implemented"
+    }
+    "Status"
+}
+
+/// A non-negative int as lowercase hex (no `0x`). Total.
+pub fn to_hex(n: int) -> str {
+    if n == 0 {
+        return "0"
+    }
+    let digits = "0123456789abcdef"
+    var v = n
+    var out = ""
+    while v > 0 {
+        let d = v % 16
+        out = "{digits[d..d + 1]}{out}"
+        v = v / 16
+    }
+    out
+}
+
+/// Zero-pad a non-negative int to two digits. Total.
+fn pad2(n: int) -> str {
+    if n < 10 {
+        return "0{n}"
+    }
+    "{n}"
+}
+
+/// Day-of-week abbreviation, 0=Sun..6=Sat. Total.
+fn wkday(i: int) -> str {
+    let names = "Sun Mon Tue Wed Thu Fri Sat"
+    let at = i * 4
+    names[at..at + 3]
+}
+
+/// Month abbreviation, 1=Jan..12=Dec. Total for 1..12.
+fn month(i: int) -> str {
+    let names = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec"
+    let at = (i - 1) * 4
+    names[at..at + 3]
+}
+
+/// Format a Unix time in SECONDS as an IMF-fixdate (RFC 9110 §5.6.7,
+/// e.g. "Thu, 01 Jan 2026 00:00:00 GMT") — the byte-exact shape nginx
+/// writes for Date and Last-Modified. Uses Howard Hinnant's
+/// civil-from-days; total for any non-negative second count.
+pub fn http_date(secs: int) -> str {
+    let days = secs / 86400
+    let tod = secs - days * 86400
+    let hh = tod / 3600
+    let mm = (tod - hh * 3600) / 60
+    let ss = tod - hh * 3600 - mm * 60
+    let wd = (days + 4) % 7
+    // civil_from_days
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    var y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    var mo = mp + 3
+    if mp >= 10 {
+        mo = mp - 9
+    }
+    if mo <= 2 {
+        y = y + 1
+    }
+    "{wkday(wd)}, {pad2(d)} {month(mo)} {y} {pad2(hh)}:{pad2(mm)}:{pad2(ss)} GMT"
+}
+
+/// The default error body nginx serves for `code`, byte-for-byte
+/// modulo the identity footer (`server` — nginx puts its own token
+/// there, wws puts wws's; that footer is a documented server-identity
+/// delta, the body analogue of the Server header). Total.
+pub fn error_body(code: int, server: str) -> str {
+    let phrase = status_phrase(code)
+    "<html>\r\n<head><title>{code} {phrase}</title></head>\r\n<body>\r\n<center><h1>{code} {phrase}</h1></center>\r\n<hr><center>{server}</center>\r\n</body>\r\n</html>\r\n"
+}
+
+/// The header-too-large 400 body (nginx's special shape: a distinct
+/// title and an extra centered line). `server` is the identity
+/// footer. Total.
+pub fn header_too_large_body(server: str) -> str {
+    "<html>\r\n<head><title>400 Request Header Or Cookie Too Large</title></head>\r\n<body>\r\n<center><h1>400 Bad Request</h1></center>\r\n<center>Request Header Or Cookie Too Large</center>\r\n<hr><center>{server}</center>\r\n</body>\r\n</html>\r\n"
+}
+
+/// The lowercased extension of `path` (after the last `.`), or "".
+/// Total.
+fn extension(path: str) -> str {
+    let dot = path.rfind(".") else -1
+    if dot < 0 {
+        return ""
+    }
+    let slash = path.rfind("/") else -1
+    if dot < slash {
+        return ""
+    }
+    path[dot + 1..path.len].lower()
+}
+
+/// The MIME type for `path`'s extension, consulting the config
+/// `types` model (kind "e" entries under a `types` block: the row's
+/// NAME is the type, its args the extensions). Falls back to a
+/// `default_type` directive, else "text/plain" (nginx's compiled-in
+/// default). Total; never traps.
+pub fn mime_for(c: config.Conf, path: str) -> str {
+    let ext = extension(path)
+    if !ext.is_empty() {
+        var i: int = 0
+        let total = c.names.len
+        while i < total {
+            if c.kinds[i] == "e" && c.ctx[i] == "types" {
+                let at = c.args_at[i]
+                let nn = c.args_n[i]
+                var j: int = 0
+                while j < nn {
+                    if c.argp[at + j] == ext {
+                        return c.names[i]
+                    }
+                    j = j + 1
+                }
+            }
+            i = i + 1
+        }
+    }
+    // default_type directive anywhere, else nginx's text/plain
+    var k: int = 0
+    let count = c.names.len
+    while k < count {
+        if c.names[k] == "default_type" && c.args_n[k] >= 1 {
+            return c.argp[c.args_at[k]]
+        }
+        k = k + 1
+    }
+    "text/plain"
+}
+
+// ------------------------------------------------------------------
+// server configuration resolved from the model
+// ------------------------------------------------------------------
+
+/// The server's runtime knobs, resolved once from the config model
+/// (serve/ reads directives; http/ never does). `token` is the
+/// Server header identity, `keepalive_timeout_ms` the idle gap before
+/// a persistent connection is closed, `keepalive_requests` the per-
+/// connection request budget.
+pub struct ServerOpts {
+    token: str,
+    keepalive_timeout_ms: int,
+    keepalive_requests: int,
+    read_timeout_ms: int,
+}
+
+/// The wws-flavoured defaults (nginx analogues: keepalive_timeout 75s,
+/// keepalive_requests 1000). `server_tokens on` → "wws/<ver>". Total.
+pub fn default_opts() -> ServerOpts {
+    ServerOpts {
+        token: "wws/0.1.0",
+        keepalive_timeout_ms: 75000,
+        keepalive_requests: 1000,
+        read_timeout_ms: 60000,
+    }
+}
+
+// ------------------------------------------------------------------
+// the writer — the response-splitting defence lives here
+// ------------------------------------------------------------------
+
+/// Assert a header VALUE carries no CR or LF, then return it. THE
+/// response-splitting defence (ws02 contract §2): every header line
+/// wws emits routes its value through here, so a CR/LF that reached a
+/// value (a mis-decoded Location, a future header from config) traps
+/// rather than splitting the response. Traps `assert` on violation —
+/// a server bug, caught in-process, never a corrupt wire.
+fn safe_value(v: str) -> str {
+    for b in v.bytes() {
+        assert(b != 13, "header value carries CR — response-splitting refused")
+        assert(b != 10, "header value carries LF — response-splitting refused")
+    }
+    v
+}
+
+/// One header line, `Name: value` with the value CR/LF-checked. Total
+/// unless the value is unsafe (then it traps, by design).
+fn hline(name: str, value: str) -> str {
+    "{name}: {safe_value(value)}\r\n"
+}
+
+/// Write the full bytes of `s` to `conn`. Rows: the net builtins'
+/// `closed`/`io` — a peer that vanished mid-write.
+fn write_all(conn: int, s: str) -> () ! {closed, io} {
+    net_write(conn, s)?
+}
+
+/// Build a complete error response (status line + headers + default
+/// body). Errors always close the connection (Connection: close).
+/// `code` picks the phrase and body; `special_header_body` swaps in
+/// the header-too-large body shape when true. `date` and `token` are
+/// the Date/Server values. Total (pure string building).
+pub fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str {
+    let phrase = status_phrase(code)
+    var body = error_body(code, token)
+    if special_header_body {
+        body = header_too_large_body(token)
+    }
+    var head = "HTTP/1.1 {code} {phrase}\r\n"
+    head = "{head}{hline("Server", token)}"
+    head = "{head}{hline("Date", date)}"
+    head = "{head}{hline("Content-Type", "text/html")}"
+    head = "{head}{hline("Content-Length", "{body.len}")}"
+    head = "{head}{hline("Connection", "close")}"
+    "{head}\r\n{body}"
+}
+
+// ------------------------------------------------------------------
+// the reader — bytes off the socket, under a deadline, size-bounded
+// ------------------------------------------------------------------
+
+/// A head-read outcome: the header block (before the blank line), the
+/// leftover bytes after the blank line (body / next request), and a
+/// status. `status` 0 = a head was read; else a size/timeout status
+/// the caller writes (408 timeout, 400/431 oversize). `closed` true
+/// means the peer finished with no (further) request — a clean end.
+struct HeadRead {
+    status: int,
+    special: bool,
+    head: str,
+    rest: str,
+    closed: bool,
+}
+
+/// Read from `conn` (accumulating into `carry`) until the CRLFCRLF
+/// that ends the header block, enforcing the total-header bound as it
+/// grows (over-limit → 400 header-too-large, special body). A
+/// deadline-fired read is 408 when a partial head is in flight, a
+/// clean close when nothing is buffered. Rows: only the net builtins'
+/// `io` (a genuinely broken socket); `timeout`/`closed`/`utf8` are
+/// turned into a HeadRead status here (utf8 → 400, the request head
+/// was not valid UTF-8). Chosen so the lifecycle reads one value.
+fn read_head(conn: int, carry: str, limits: http.Limits) -> HeadRead ! {io} {
+    var buf = carry
+    // maybe the carry already holds a full head (pipelined)
+    loop {
+        // detect the header-block boundary LENIENTLY — CRLFCRLF, or a
+        // bare LF-LF (a client that terminated with lone LFs) — so the
+        // boundary is FOUND; the strict parser then rejects the bare
+        // LF as `malformed` (a server that cannot recognise the frame
+        // cannot reject it, and a peer that only ever sends "\n\n"
+        // must not be able to hang the read to the keepalive timeout).
+        let m1 = buf.find("\r\n\r\n") else -1
+        let m2 = buf.find("\n\n") else -1
+        var marker: int = -1
+        var mlen: int = 0
+        if m1 >= 0 && (m2 < 0 || m1 <= m2) {
+            marker = m1
+            mlen = 4
+        } else if m2 >= 0 {
+            marker = m2
+            mlen = 2
+        }
+        if marker >= 0 {
+            let head = buf[0..marker]
+            let rest = buf[marker + mlen..buf.len]
+            return HeadRead { status: 0, special: false, head: head, rest: rest, closed: false }
+        }
+        if buf.len > limits.max_header_total {
+            return HeadRead { status: 400, special: true, head: "", rest: "", closed: false }
+        }
+        let piece = net_read(conn, 4096) else |e| match e {
+            closed => {
+                // peer finished. an empty buffer is a clean end; a
+                // partial head is a broken request, dropped (no reply
+                // is owed to a half-sent head at close)
+                return HeadRead { status: 0, special: false, head: "", rest: buf, closed: true }
+            },
+            timeout => {
+                if buf.is_empty() {
+                    return HeadRead { status: 0, special: false, head: "", rest: "", closed: true }
+                }
+                return HeadRead { status: 408, special: false, head: "", rest: "", closed: false }
+            },
+            utf8 => {
+                return HeadRead { status: 400, special: false, head: "", rest: "", closed: false }
+            },
+            io => {
+                return io
+            },
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// Read exactly `want` more bytes beyond what `carry` already holds,
+/// for a fixed-length body (consumed and discarded — a static GET
+/// carries no meaning in its body, but a persistent connection must
+/// drain it to find the next request). Returns the leftover after the
+/// body. Rows: net `io`; a `closed`/`timeout`/`utf8` mid-body is a
+/// broken request → the caller closes, so they ride out as `io`.
+fn drain_length(conn: int, carry: str, want: int) -> str ! {io} {
+    var buf = carry
+    while buf.len < want {
+        let piece = net_read(conn, 4096) else |_| {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+    buf[want..buf.len]
+}
+
+// ------------------------------------------------------------------
+// static file serving (fs half — native + checked only)
+// ------------------------------------------------------------------
+
+/// The current wall-clock time as an IMF-fixdate. Uses `time_unix_ms`
+/// (native + checked + lupin). Not pure — a clock read — so it lives
+/// beside the io.
+fn now_date() -> str {
+    http_date(time_unix_ms() / 1000)
+}
+
+/// host[:port] for a Location, mirroring nginx: the Host verbatim
+/// when it already carries a port, else Host with the listening port
+/// appended (omitted only for the default port 80). Total.
+fn hostport(host: str, port: int) -> str {
+    if host.contains(":") {
+        return host
+    }
+    if port == 80 {
+        return host
+    }
+    "{host}:{port}"
+}
+
+/// Send a full error response and swallow the write outcome (the
+/// connection is closing regardless). Total.
+fn send_err(conn: int, code: int, special: bool, token: str) {
+    let resp = error_response(code, special, now_date(), token)
+    net_write(conn, resp) else |_| {}
+}
+
+/// Serve one already-resolved file at `path` (known to exist and be a
+/// regular file). Writes a 200 (or 304 on a matching
+/// If-Modified-Since), byte-order matching nginx's static handler:
+/// Server, Date, Content-Type, Content-Length, Last-Modified,
+/// Connection, ETag, Accept-Ranges. `is_head` omits the body. Reads
+/// the whole file BEFORE writing headers when it is small, so a read
+/// error becomes a clean 500 instead of a truncated 200; streams a
+/// large file in bounded chunks (no whole-file-into-memory), and a
+/// mid-stream read error can only close (bytes are already on the
+/// wire — the ws02 pitfall). Returns should_close. Rows: net `io`.
+fn serve_file(
+    conn: int,
+    c: config.Conf,
+    req: http.Request,
+    path: str,
+    token: str,
+    keep: bool,
+    is_head: bool,
+    local_port: int,
+) -> bool ! {closed, io} {
+    let size = fs_size(path) else |e| match e {
+        not_found => {
+            send_err(conn, 404, false, token)
+            return true
+        },
+        denied => {
+            send_err(conn, 403, false, token)
+            return true
+        },
+        io => {
+            send_err(conn, 500, false, token)
+            return true
+        },
+    }
+    var secs: int = 0
+    let mms = fs_modified_ms(path) else |_| 0
+    secs = mms / 1000
+    let lm = http_date(secs)
+    let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
+    let mime = mime_for(c, path)
+    let conn_hdr = keep_token(keep)
+
+    // conditional GET: a matching If-Modified-Since → 304, no body
+    let ims = http.header(req, "if-modified-since") else ""
+    if !ims.is_empty() && ims == lm {
+        var h304 = "HTTP/1.1 304 Not Modified\r\n"
+        h304 = "{h304}{hline("Server", token)}"
+        h304 = "{h304}{hline("Date", now_date())}"
+        h304 = "{h304}{hline("Last-Modified", lm)}"
+        h304 = "{h304}{hline("Connection", conn_hdr)}"
+        h304 = "{h304}{hline("ETag", etag)}"
+        h304 = "{h304}\r\n"
+        write_all(conn, h304)?
+        return !keep
+    }
+
+    var head = "HTTP/1.1 200 OK\r\n"
+    head = "{head}{hline("Server", token)}"
+    head = "{head}{hline("Date", now_date())}"
+    head = "{head}{hline("Content-Type", mime)}"
+    head = "{head}{hline("Content-Length", "{size}")}"
+    head = "{head}{hline("Last-Modified", lm)}"
+    head = "{head}{hline("Connection", conn_hdr)}"
+    head = "{head}{hline("ETag", etag)}"
+    head = "{head}{hline("Accept-Ranges", "bytes")}"
+    head = "{head}\r\n"
+
+    if is_head {
+        write_all(conn, head)?
+        return !keep
+    }
+
+    // small files: read whole BEFORE the headers, so a read failure
+    // is a clean 500. The 65536 threshold is the stream boundary.
+    if size <= 65536 {
+        let body = fs_read_text(path) else |_| {
+            send_err(conn, 500, false, token)
+            return true
+        }
+        write_all(conn, head)?
+        write_all(conn, body)?
+        return !keep
+    }
+
+    // large files: headers first (Content-Length is known), then
+    // stream in bounded chunks. A mid-stream read error can only
+    // close — bytes are already on the wire.
+    write_all(conn, head)?
+    let fd = fs_open(path) else |_| {
+        // could not even open after stat: nothing sent yet past head,
+        // but Content-Length is committed, so close
+        return true
+    }
+    var streaming = true
+    while streaming {
+        let chunk = fs_read(fd, 65536) else |e| match e {
+            eof => {
+                streaming = false
+                ""
+            },
+            io => {
+                fs_close(fd) else |_| {}
+                return true
+            },
+            utf8 => {
+                fs_close(fd) else |_| {}
+                return true
+            },
+        }
+        if !chunk.is_empty() {
+            write_all(conn, chunk)?
+        }
+    }
+    fs_close(fd) else |_| {}
+    !keep
+}
+
+/// The Connection header token for a keepalive decision. Total.
+fn keep_token(keep: bool) -> str {
+    if keep {
+        return "keep-alive"
+    }
+    "close"
+}
+
+/// Execute a routing decision against the fs: directory redirect,
+/// index resolution, file serve, or the 403/404 nginx draws. Returns
+/// should_close. Rows: net `io`.
+fn handle_request(
+    conn: int,
+    c: config.Conf,
+    req: http.Request,
+    norm_path: str,
+    token: str,
+    keep: bool,
+    local_port: int,
+) -> bool ! {closed, io} {
+    // method: GET and HEAD serve; anything else is 405 (the CVE
+    // corpus's POSTs are already rejected at parse when they smuggle)
+    let is_head = req.method == "HEAD"
+    if req.method != "GET" && !is_head {
+        send_err(conn, 405, false, token)
+        return true
+    }
+
+    let d = http.route(c, norm_path)
+    if d.fs_path.is_empty() {
+        send_err(conn, 404, false, token)
+        return true
+    }
+
+    if fs_is_dir(d.fs_path) {
+        if !norm_path.ends_with("/") {
+            // 301 to the trailing-slash form (nginx's dir redirect)
+            let loc = "http://{hostport(req.host, local_port)}{norm_path}/"
+            let body = error_body(301, token)
+            var h = "HTTP/1.1 301 Moved Permanently\r\n"
+            h = "{h}{hline("Server", token)}"
+            h = "{h}{hline("Date", now_date())}"
+            h = "{h}{hline("Content-Type", "text/html")}"
+            h = "{h}{hline("Content-Length", "{body.len}")}"
+            h = "{h}{hline("Location", loc)}"
+            h = "{h}{hline("Connection", keep_token(keep))}"
+            h = "{h}\r\n{body}"
+            write_all(conn, h)?
+            return !keep
+        }
+        // directory with a trailing slash: try the index files
+        var idxs = d.index
+        if idxs.is_empty() {
+            (mut idxs).push("index.html")
+        }
+        for name in idxs {
+            let cand = join_fs(d.fs_path, name)
+            if fs_is_file(cand) {
+                return serve_file(conn, c, req, cand, token, keep, is_head, local_port)
+            }
+        }
+        // no index, autoindex off → 403 (nginx)
+        send_err(conn, 403, false, token)
+        return true
+    }
+
+    if fs_is_file(d.fs_path) {
+        return serve_file(conn, c, req, d.fs_path, token, keep, is_head, local_port)
+    }
+
+    send_err(conn, 404, false, token)
+    true
+}
+
+/// Join a directory path and a file name with one `/`. Total.
+fn join_fs(dir: str, name: str) -> str {
+    if dir.ends_with("/") {
+        return "{dir}{name}"
+    }
+    "{dir}/{name}"
+}
+
+// ------------------------------------------------------------------
+// the connection lifecycle — read → parse → route → respond →
+// keepalive-or-close, an explicit loop (not control-flow folklore).
+// SPAWN-FREE on purpose: the checked lane refuses structured
+// concurrency, so task-per-connection is wired at the entry (main),
+// which spawns this per accepted socket. Runs on native + checked
+// (net + fs both present there); lupin lacks fs, so its lane is the
+// pure helpers above.
+// ------------------------------------------------------------------
+
+/// Briefly read-and-discard from `conn` before a close, so a client
+/// still sending a large body does not RST the connection and eat the
+/// final response (the half-close drain — ws02 §3). Bounded: a few
+/// short reads, then return. Swallows everything.
+fn half_close_drain(conn: int) {
+    net_deadline(conn, 200) else |_| {
+        return
+    }
+    var i: int = 0
+    while i < 4 {
+        let _ = net_read(conn, 4096) else |_| {
+            return
+        }
+        i = i + 1
+    }
+}
+
+/// Accumulate a chunked body until its terminating zero-chunk, then
+/// validate it through http.decode_chunked. Returns the leftover
+/// after the body. A framing error is `bad` (→ 400), an over-limit
+/// body `big` (→ 413); net trouble is `io`. Bounded by twice
+/// `max_body` so a peer dribbling forever cannot pin memory.
+fn read_chunked(conn: int, carry: str, limits: http.Limits) -> str ! {bad, big, io} {
+    var buf = carry
+    let cap = limits.max_body * 2
+    loop {
+        // the terminating "0" chunk followed by CRLFCRLF (no trailers)
+        // or a "\r\n0\r\n\r\n" boundary is our stop signal
+        if buf.ends_with("0\r\n\r\n") || buf.contains("\r\n0\r\n\r\n") {
+            let _ = http.decode_chunked(buf, limits) else |e| match e {
+                malformed => {
+                    return bad
+                },
+                too_large => {
+                    return big
+                },
+            }
+            return ""
+        }
+        if buf.len > cap {
+            return big
+        }
+        let piece = net_read(conn, 4096) else |_| {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// Serve one connection to completion: the full keepalive lifecycle.
+/// SPAWN-FREE. `local_port` is the port wws is listening on (for the
+/// absolute Location of a directory redirect, matching nginx).
+/// Total: every error path resolves to a written response and/or a
+/// close; the socket is always closed before return.
+pub fn serve_conn(conn: int, c: config.Conf, opts: ServerOpts, limits: http.Limits, local_port: int) {
+    var carry = ""
+    var served: int = 0
+    loop {
+        // between requests the idle budget is keepalive_timeout; the
+        // first read of a request onward uses read_timeout. v0 arms
+        // one deadline covering the whole head read.
+        net_deadline(conn, opts.keepalive_timeout_ms) else |_| {
+            net_close(conn) else |_| {}
+            return
+        }
+        let hr = read_head(conn, carry, limits) else |_| {
+            net_close(conn) else |_| {}
+            return
+        }
+        if hr.closed {
+            net_close(conn) else |_| {}
+            return
+        }
+        if hr.status != 0 {
+            // a size/timeout outcome from the reader: 408/400, always
+            // close (a 408 is written; a between-request timeout came
+            // back as closed above, so a status here is a real error)
+            if hr.status != 408 || !carry.is_empty() {
+                send_err(conn, hr.status, hr.special, opts.token)
+            }
+            net_close(conn) else |_| {}
+            return
+        }
+
+        var should_close = false
+        let req = http.parse_request(hr.head, limits) else |e| match e {
+            malformed => {
+                send_err(conn, 400, false, opts.token)
+                net_close(conn) else |_| {}
+                return
+            },
+            uri_too_long => {
+                send_err(conn, 414, false, opts.token)
+                net_close(conn) else |_| {}
+                return
+            },
+            too_large => {
+                send_err(conn, 400, true, opts.token)
+                net_close(conn) else |_| {}
+                return
+            },
+            unimplemented => {
+                send_err(conn, 501, false, opts.token)
+                net_close(conn) else |_| {}
+                return
+            },
+        }
+
+        // body framing: drain a fixed-length body, validate a chunked
+        // one; an over-size length body is 413 with the half-close
+        // drain (the client must still read the 413)
+        var rest = hr.rest
+        if req.body_mode == "length" {
+            if req.content_length > limits.max_body {
+                send_err(conn, 413, false, opts.token)
+                half_close_drain(conn)
+                net_close(conn) else |_| {}
+                return
+            }
+            rest = drain_length(conn, rest, req.content_length) else |_| {
+                net_close(conn) else |_| {}
+                return
+            }
+        } else if req.body_mode == "chunked" {
+            rest = read_chunked(conn, rest, limits) else |e| match e {
+                bad => {
+                    send_err(conn, 400, false, opts.token)
+                    net_close(conn) else |_| {}
+                    return
+                },
+                big => {
+                    send_err(conn, 413, false, opts.token)
+                    half_close_drain(conn)
+                    net_close(conn) else |_| {}
+                    return
+                },
+                io => {
+                    net_close(conn) else |_| {}
+                    return
+                },
+            }
+        }
+
+        // decode → normalize → map, in that ORDER (the traversal
+        // defence). A bad escape or a control byte post-decode is 400.
+        let decoded = http.percent_decode(req.path) else |_| {
+            send_err(conn, 400, false, opts.token)
+            net_close(conn) else |_| {}
+            return
+        }
+        if http.has_control(decoded) {
+            send_err(conn, 400, false, opts.token)
+            net_close(conn) else |_| {}
+            return
+        }
+        let norm = http.normalize_path(decoded) else {
+            send_err(conn, 400, false, opts.token)
+            net_close(conn) else |_| {}
+            return
+        }
+
+        let keep = req.keepalive && served + 1 < opts.keepalive_requests
+        should_close = handle_request(conn, c, req, norm, opts.token, keep, local_port) else |_| {
+            net_close(conn) else |_| {}
+            return
+        }
+        served = served + 1
+        if should_close || !keep {
+            net_close(conn) else |_| {}
+            return
+        }
+        carry = rest
+    }
+}
+
+// ------------------------------------------------------------------
+// the accept loop (sequential — spawn-free, so it runs on native +
+// checked; the entry wraps serve_conn in a task per connection for
+// the concurrent posture on native)
+// ------------------------------------------------------------------
+
+/// Bind `addr`, then accept and serve connections one at a time.
+/// Returns the port bound (never, in practice — it loops until `io`).
+/// The differential and the rig drive `serve_conn` directly; this is
+/// the standalone entry's loop. Row: net `io` (bind or a fatal
+/// accept failure).
+pub fn accept_loop(c: config.Conf, addr: str, opts: ServerOpts, limits: http.Limits) -> () ! {io} {
+    let l = net_listen(addr)?
+    let port = net_port(l)?
+    loop {
+        let conn = net_accept(l) else |_| {
+            continue
+        }
+        serve_conn(conn, c, opts, limits, port)
+    }
+}
+
+/// The bind address from the config model's first `listen` directive
+/// (a bare port becomes a loopback bind — this server is loopback-only
+/// in every test, forever). Falls back to 127.0.0.1:8080. Total.
+pub fn listen_addr(c: config.Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "listen" && c.args_n[i] >= 1 {
+            let a = c.argp[c.args_at[i]]
+            if a.contains(":") {
+                return a
+            }
+            return "127.0.0.1:{a}"
+        }
+        i = i + 1
+    }
+    "127.0.0.1:8080"
 }

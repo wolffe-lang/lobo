@@ -1,8 +1,25 @@
 module pkg :: http
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash fae88458d9204eb8864a72d761183c9ee08c9fcbce5810fec5646c94b0ad90da
-  pkg_hash    fae88458d9204eb8864a72d761183c9ee08c9fcbce5810fec5646c94b0ad90da
-  deps: (none)
+  export_hash 258e294adb196b8855742361c199033e4ac9863f000b7b2d1ad3bab6d7d65bbd
+  pkg_hash    258e294adb196b8855742361c199033e4ac9863f000b7b2d1ad3bab6d7d65bbd
+  deps:
+    config  46e40ce27c442fc3257f65b51ccf07dcddfcb3b2e26edada020817dd00efcaec
   items:
-    [0] pub version — fn version() -> str
+    [0] pub decode_chunked — fn decode_chunked(body: str, limits: self.Limits) -> str ! {malformed, too_large} · regions (-, ρ1) -> -
+    [1] pub default_limits — fn default_limits() -> self.Limits · regions () -> ρ_caller
+    [2] pub has_control — fn has_control(s: str) -> bool
+    [3] pub header — fn header(r: self.Request, name: str) -> str ! {none} · regions (ρ1, -) -> -
+    [4] pub header_count — fn header_count(r: self.Request) -> int · regions (ρ1) -> -
+    [5] pub is_digit — fn is_digit(b: int) -> bool
+    [6] pub is_target_bad — fn is_target_bad(b: int) -> bool
+    [7] pub is_tchar — fn is_tchar(b: int) -> bool
+    [8] pub is_token — fn is_token(s: str) -> bool
+    [9] pub normalize_path — fn normalize_path(p: str) -> str ! {malformed}
+    [10] pub parse_request — fn parse_request(head: str, limits: self.Limits) -> self.Request ! {malformed, too_large, unimplemented, uri_too_long} · regions (-, ρ1) -> ρ_caller
+    [11] pub percent_decode — fn percent_decode(s: str) -> str ! {invalid, malformed}
+    [12] pub route — fn route(c: config.Conf, path: str) -> self.Decision · regions (ρ1, -) -> ρ_caller
+    [13] pub version — fn version() -> str
+    [14] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str }
+    [15] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int }
+    [16] pub Request — struct Request { method: str, target: str, version: str, host: str, path: str, query: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int, keepalive: bool }
 

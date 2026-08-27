@@ -1,0 +1,37 @@
+//! check: run(exit=0, stdout="root=/var/www/a/b.html:false\nalias=/data/img/cat.png:true:/img/\nexact=/special/health:false:/health\nslash=/var/www/:false\nnoserver=:false\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! route is a PURE function of the config model and the request path
+//! (ws02 §4): no socket, no fs, no clock — which is exactly why it runs
+//! on all three lanes here while serve/'s io does not. Longest-prefix
+//! location match with `=` exact winning; `root` appends the URI,
+//! `alias` replaces the matched prefix (WWS-L003's class at runtime).
+//! ws07's dry-run and ws11's replay consume this same function.
+
+use config
+use http
+
+fn show(c: config.Conf, name: str, p: str) {
+    let d = http.route(c, p)
+    print("{name}={d.fs_path}:{d.is_alias}:{d.matched}")
+}
+
+fn show2(c: config.Conf, name: str, p: str) {
+    let d = http.route(c, p)
+    print("{name}={d.fs_path}:{d.is_alias}")
+}
+
+fn main() -> int {
+    let src = "http {{\n  server {{\n    root /var/www;\n    index index.html;\n    location /img/ {{ alias /data/img/; }}\n    location = /health {{ root /special; }}\n  }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    show2(c, "root", "/a/b.html")
+    show(c, "alias", "/img/cat.png")
+    show(c, "exact", "/health")
+    show2(c, "slash", "/")
+    let empty = config.parse_str("events {{}}\n", "e.conf")
+    show2(empty, "noserver", "/x")
+    0
+}

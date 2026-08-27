@@ -1,0 +1,115 @@
+//! check: run(exit=0, stdout="req1=HTTP/1.1 200 OK\nreq2=HTTP/1.1 200 OK\nreused=yes\nclose3=yes\n")
+//! phase: run
+//! lanes: native
+//! conforms: conc.task.spawn, err.union, err.propagate
+//! stage-src: serve http config
+//!
+//! The keepalive lifecycle: TWO requests on ONE connection (1.1
+//! default-on), the connection reused between them, then a third with
+//! Connection: close that ends it. The server runs on a spawned task
+//! (serve_conn's full keepalive loop) while the client drives the
+//! exchange on the main task — the spawn-accept pattern. net + fs +
+//! concurrency all meet only on the native lane (checked refuses
+//! spawn, lupin has no fs), so this lifecycle evidence is native.
+//! Determinism: the exchange is fixed and the deadline makes a wedged
+//! server a named failure, so ten runs give the same verdict.
+
+use config
+use http
+use serve
+
+fn recv_one(cli: int) -> str ! {io} {
+    // read one response: headers then exactly Content-Length bytes
+    net_deadline(cli, 2000) else |_| {
+        return io
+    }
+    var buf = ""
+    loop {
+        let cut = buf.find("\r\n\r\n") else -1
+        if cut >= 0 {
+            let head = buf[0..cut]
+            let clh = header_len(head)
+            let body_start = cut + 4
+            while buf.len < body_start + clh {
+                let piece = net_read(cli, 4096) else |_| {
+                    return io
+                }
+                buf = "{buf}{piece}"
+            }
+            return buf[0..body_start + clh]
+        }
+        let piece = net_read(cli, 4096) else |_| {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+fn header_len(head: str) -> int {
+    for line in head.lines() {
+        let low = line.lower()
+        if low.starts_with("content-length:") {
+            let v = line[15..line.len]
+            let t = v.trim()
+            var n: int = 0
+            for b in t.bytes() {
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                }
+            }
+            return n
+        }
+    }
+    0
+}
+
+fn status_line(reply: str) -> str {
+    let eol = reply.find("\r\n") else reply.len
+    reply[0..eol]
+}
+
+fn main() -> !int {
+    let root = "ws02_ka"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/www")?
+    fs_write_text("{root}/www/index.html", "<html>ka</html>\n")?
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws02_ka/www; index index.html; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    scope s {
+        s.spawn(fn() {
+            let conn = net_accept(l) else |_| -1
+            if conn >= 0 {
+                serve.serve_conn(conn, c, opts, lim, port)
+            }
+        })
+        net_deadline(cli, 3000)?
+        net_write(cli, "GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")?
+        let r1 = recv_one(cli)?
+        print("req1={status_line(r1)}")
+        net_write(cli, "GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")?
+        let r2 = recv_one(cli)?
+        print("req2={status_line(r2)}")
+        var reused = "no"
+        if status_line(r1) == "HTTP/1.1 200 OK" && status_line(r2) == "HTTP/1.1 200 OK" {
+            reused = "yes"
+        }
+        print("reused={reused}")
+        net_write(cli, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+        let r3 = recv_one(cli)?
+        var closed3 = "no"
+        if r3.contains("Connection: close") {
+            closed3 = "yes"
+        }
+        print("close3={closed3}")
+    }
+    net_close(cli) else |_| {}
+    net_close(l) else |_| {}
+    fs_remove_dir_all(root) else |_| {}
+    0
+}

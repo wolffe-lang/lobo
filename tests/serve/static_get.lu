@@ -1,0 +1,99 @@
+//! check: run(exit=0, stdout="status=HTTP/1.1 200 OK\nct=text/html\nbody=<html>\nhi\n</html>\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: serve http config
+//!
+//! serve/ static GET, round-trip: bind loopback:0, dial self, accept,
+//! serve_conn (Connection: close → serves once and closes), then read
+//! the reply off the client fd. net + fs → native + checked (lupin has
+//! no fs). The doc root is a per-test scratch dir cleared at the START
+//! (sc12 idempotency: the rig stages once and runs both lanes in it).
+
+use config
+use http
+use serve
+
+fn read_reply(cli: int) -> str ! {io} {
+    net_deadline(cli, 2000) else |_| {
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 4096) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                return io
+            },
+            utf8 => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    out
+}
+
+fn main() -> !int {
+    let root = "ws02_sg"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all(root)?
+    fs_write_text("{root}/index.html", "<html>\nhi\n</html>\n")?
+
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws02_sg; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    net_write(cli, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    let conn = net_accept(l)?
+    serve.serve_conn(conn, c, opts, lim, port)
+    let reply = read_reply(cli)?
+    net_close(l) else |_| {}
+
+    let r = httpc_split(reply)
+    print("status={r.0}")
+    print("ct={header_val(r.1, "Content-Type")}")
+    print("body={r.2}")
+    fs_remove_dir_all(root) else |_| {}
+    0
+}
+
+fn httpc_split(raw: str) -> (str, str, str) {
+    let cut = raw.find("\r\n\r\n") else -1
+    if cut == -1 {
+        return ("", "", raw)
+    }
+    let head = raw[0..cut]
+    let body = raw[cut + 4..raw.len]
+    let eol = head.find("\r\n") else head.len
+    let status = head[0..eol]
+    var headers = ""
+    if eol < head.len {
+        headers = head[eol + 2..head.len]
+    }
+    (status, headers, body)
+}
+
+fn header_val(headers: str, name: str) -> str {
+    for line in headers.lines() {
+        let colon = line.find(": ") else -1
+        if colon > 0 {
+            let hn = line[0..colon]
+            if hn == name {
+                return line[colon + 2..line.len]
+            }
+        }
+    }
+    ""
+}

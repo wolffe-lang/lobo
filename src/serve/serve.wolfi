@@ -1,8 +1,22 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 1fbe58daa6beba6bb7111dc41689a5e842725a8af5f78d5886890981f2c1cfa2
-  pkg_hash    1fbe58daa6beba6bb7111dc41689a5e842725a8af5f78d5886890981f2c1cfa2
-  deps: (none)
+  export_hash 120a2029d01e2647ac58832c770890de48faa018a1fd9395aab45dbfd1139d8c
+  pkg_hash    120a2029d01e2647ac58832c770890de48faa018a1fd9395aab45dbfd1139d8c
+  deps:
+    config  46e40ce27c442fc3257f65b51ccf07dcddfcb3b2e26edada020817dd00efcaec
+    http  258e294adb196b8855742361c199033e4ac9863f000b7b2d1ad3bab6d7d65bbd
   items:
-    [0] pub version — fn version() -> str
+    [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
+    [1] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
+    [2] pub error_body — fn error_body(code: int, server: str) -> str
+    [3] pub error_response — fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str
+    [4] pub header_too_large_body — fn header_too_large_body(server: str) -> str
+    [5] pub http_date — fn http_date(secs: int) -> str
+    [6] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
+    [7] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
+    [8] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
+    [9] pub status_phrase — fn status_phrase(code: int) -> str
+    [10] pub to_hex — fn to_hex(n: int) -> str
+    [11] pub version — fn version() -> str
+    [12] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int }
 
