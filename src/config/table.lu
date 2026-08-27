@@ -606,6 +606,16 @@ pub fn table() -> Table {
     )
     row(
         mut t,
+        "worker_shutdown_timeout",
+        "main",
+        "",
+        1,
+        1,
+        "implemented",
+        "drain deadline: a reloaded generation drains its held connections, and this is how long before the remainder are aborted and it retires anyway (ws08; nginx's semantics — 0/absent means drain fully, no forced timeout)",
+    )
+    row(
+        mut t,
         "pid",
         "main",
         "",
