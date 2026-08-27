@@ -9,19 +9,36 @@
 //! `main`'s legal shapes are E0414's: no parameters — arguments come
 //! through `env_args`, which drops argv[0].
 //!
-//! The signal split (ws04 §3). The pin exposes no getpid, no
-//! arbitrary-pid signal SEND, and no signal RECEPTION (wolf-lang #126
-//! / s114 — the wws pin is s109, which does NOT include it) — so `-s`
-//! drives the CONTROL CHANNEL, the pid file records the control
-//! endpoint, and the verbs are reached the same way a real signal will
-//! reach them when #126 lands (the loop's verb dispatch is the one
-//! layer). The receiver is the campaign's named deferral.
+//! The signal split (ws04 §3, FLIPPED at wsm01). The s115 pin carries
+//! s114's signal RECEPTION (wolf-lang #126): the server listens for
+//! real SIGHUP/SIGTERM/SIGQUIT (the RELOAD/TERMINATE/QUIT meanings)
+//! and each received meaning feeds the SAME verb dispatch the control
+//! channel drives — the one-layer design ws04 built for exactly this
+//! flip. The control channel STAYS
+//! (the portable path, and the Windows reload story — [os.signal.
+//! platform] names RELOAD/UPGRADE as having no Windows analog). What
+//! did NOT land: a getpid surface — so `-s` still SENDS over the
+//! control channel and the pid file still records the control
+//! endpoint (named residue; a real pid file follows a getpid).
+//! Signal delivery is Linux-full at this pin (non-Linux follows the
+//! task-layer port); where the listen refuses, the server says so and
+//! runs control-channel-only — a named gap, never a fake.
 //!
-//! Serve is SPAWN-FREE (D7: the LLVM release tier refuses a task
-//! entry's func.addr, and the gauntlet builds both tiers) — ONE poll
-//! loop multiplexes the http listener, the control channel, and every
-//! open connection, each stepped a slice at a time under a short
-//! deadline (serve.conn_step) so no single connection blocks the loop.
+//! Serve stays SPAWN-FREE (D7, ws04's shape): ONE poll loop
+//! multiplexes the http listener, the control channel, the signal
+//! queue, and every open connection, each stepped a slice at a time
+//! under a short deadline (serve.conn_step) so no single connection
+//! blocks the loop. Signals are polled by SELF-RAISE: each pass
+//! raises the UPGRADE meaning as a probe and waits once — the
+//! runtime's queue is FIFO, so a real pending SIGHUP/TERM/QUIT comes
+//! back BEFORE the probe and the probe bounds the wait (never a
+//! park on a signal that may not come). The clean parked-forwarder
+//! task ([os.signal.wait]'s intended shape) is blocked at this pin by
+//! an upstream release-tier bug — s43's cluster partition follows
+//! CALL edges only, so a task-entry shim can land in a different
+//! object than its spawner's `func.addr` and the LLVM tier refuses
+//! (filed; the corpus-shape witness is tools' probe record). The poll
+//! flips to the forwarder the sprint after the fix enters the pin.
 //! That is what makes the DRAIN WATCHABLE (ws08): a per-generation live
 //! counter in the loop's own bookkeeping lets an operator see an old
 //! generation drain — via `wws status` and log events — while a new one
@@ -435,6 +452,25 @@ fn serve_main(prefix: str, conf: str) -> int {
     let shutdown_ms = shell.shutdown_timeout_ms(c0)
     eprint("wws: [notice] serving on {addr}, control {ctrl_ep}, pid file {pidp}")
 
+    // signal reception (wsm01, s114 in the pin): register interest in
+    // RELOAD|TERMINATE|QUIT by MEANING, plus the probe bit (UPGRADE —
+    // the self-raise poll below). Where delivery is not wired (s114 is
+    // Linux-full; non-Linux follows the task-layer port) the listen
+    // answers `io` and the control channel stays the only trigger —
+    // the NAMED platform gap, said out loud at startup.
+    let sprobe = shell.sig_probe()
+    var sig_on = true
+    os_signal_listen(shell.sig_mask() + sprobe) else |_| {
+        sig_on = false
+    }
+    if sig_on {
+        eprint("wws: [notice] signal reception armed (HUP=reload, TERM=stop, QUIT=quit)")
+    } else {
+        eprint(
+            "wws: [notice] signal reception unavailable on this platform; the control channel is the trigger",
+        )
+    }
+
     // generation 1 is current
     let h1 = shell.conf_hash(c0)
     var gens = List[GenRow]()
@@ -465,60 +501,94 @@ fn serve_main(prefix: str, conf: str) -> int {
     while running {
         let now = time_unix_ms()
 
-        // 1. poll the control channel (short deadline)
+        // 1. collect ONE trigger for the verb dispatch: a control-
+        // channel line (with a reply socket) or a received signal
+        // (reply-less; a real SIGHUP lands here). Both flow through
+        // the SAME dispatch below — ws04's one-layer design,
+        // flipped real by s114. A control verb wins the pass; a
+        // signal waits buffered for the next pass, so neither is
+        // lost.
+        var verb = ""
+        var cc = -1
         if have_ctrl {
             net_deadline(cl, 25) else |_| {}
             var got_ctrl = true
-            let cc = net_accept(cl) else |_| {
+            let cand = net_accept(cl) else |_| {
                 got_ctrl = false
                 0
             }
             if got_ctrl {
+                cc = cand
                 net_deadline(cc, 2000) else |_| {}
-                let verb = read_command(cc)
-                let curgen = current_gen(gens)
-                if verb == "ping" {
-                    net_write(cc, "pong\n") else |_| {}
-                } else if verb == "status" {
-                    let body = status_stanza(gens, shutdown_ms, quitting, false)
-                    net_write(cc, "{body}\n") else |_| {}
-                } else if verb == "status json" {
-                    let body = status_stanza(gens, shutdown_ms, quitting, true)
-                    net_write(cc, "{body}\n") else |_| {}
-                } else if verb == "stop" {
-                    net_write(cc, "stop: shutting down (generation {curgen})\n") else |_| {}
-                    running = false
-                } else if verb == "quit" {
-                    net_write(cc, "quit: draining then exiting (generation {curgen})\n") else |_| {}
-                    quitting = true
-                    let held = held_of(gens, curgen)
-                    gens = mark_draining(gens, curgen, now)
-                    eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
-                    gens = retire_zero(gens, now)
-                } else if verb == "reopen" {
-                    net_write(cc, "reopen: log outputs cycled (generation {curgen})\n") else |_| {}
-                } else if verb == "reload" {
-                    let ci = index_of(gens, curgen)
-                    let prev = shell.Gen {
-                        conf: copy gens[ci].conf,
-                        gen: curgen,
-                        ok: true,
-                        note: "",
-                    }
-                    let ng = shell.reload(prefix, conf, prev)
-                    if ng.ok && ng.gen > curgen {
-                        let held = gens[ci].live
-                        let nhash = shell.conf_hash(ng.conf)
-                        gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
-                        eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
-                        eprint("wws: [notice] {shell.ev_generation_loaded(ng.gen, nhash)}")
-                        eprint("wws: [notice] {shell.ev_generation_activated(ng.gen)}")
-                        gens = retire_zero(gens, now)
-                    }
-                    net_write(cc, "{ng.note}\n") else |_| {}
-                } else {
-                    net_write(cc, "unknown verb \"{verb}\"\n") else |_| {}
+                verb = read_command(cc)
+            }
+        }
+        if sig_on && cc < 0 {
+            // The self-raise poll: enqueue the probe meaning, then
+            // wait ONCE. The runtime queue is FIFO, so a real
+            // pending signal comes back before the probe and the
+            // probe bounds the wait — a spawn-free, non-blocking
+            // signal check (see the header note; flips to the
+            // parked forwarder when the upstream cluster fix
+            // lands). A failed raise skips the wait: without a
+            // probe in the queue the wait could park forever.
+            var m = 0
+            os_signal_raise(sprobe) else |_| {
+                m = -1
+            }
+            if m == 0 {
+                m = os_signal_wait(shell.sig_mask() + sprobe) else |_| { sprobe }
+            }
+            if m > 0 && m != sprobe {
+                verb = shell.signal_verb(m)
+                eprint("wws: [notice] {shell.ev_signal_received(m)}")
+            }
+        }
+        if cc >= 0 || !verb.is_empty() {
+            let curgen = current_gen(gens)
+            if verb == "ping" {
+                reply(cc, "pong\n")
+            } else if verb == "status" {
+                let body = status_stanza(gens, shutdown_ms, quitting, false)
+                reply(cc, "{body}\n")
+            } else if verb == "status json" {
+                let body = status_stanza(gens, shutdown_ms, quitting, true)
+                reply(cc, "{body}\n")
+            } else if verb == "stop" {
+                reply(cc, "stop: shutting down (generation {curgen})\n")
+                running = false
+            } else if verb == "quit" {
+                reply(cc, "quit: draining then exiting (generation {curgen})\n")
+                quitting = true
+                let held = held_of(gens, curgen)
+                gens = mark_draining(gens, curgen, now)
+                eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
+                gens = retire_zero(gens, now)
+            } else if verb == "reopen" {
+                reply(cc, "reopen: log outputs cycled (generation {curgen})\n")
+            } else if verb == "reload" {
+                let ci = index_of(gens, curgen)
+                let prev = shell.Gen {
+                    conf: copy gens[ci].conf,
+                    gen: curgen,
+                    ok: true,
+                    note: "",
                 }
+                let ng = shell.reload(prefix, conf, prev)
+                if ng.ok && ng.gen > curgen {
+                    let held = gens[ci].live
+                    let nhash = shell.conf_hash(ng.conf)
+                    gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
+                    eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
+                    eprint("wws: [notice] {shell.ev_generation_loaded(ng.gen, nhash)}")
+                    eprint("wws: [notice] {shell.ev_generation_activated(ng.gen)}")
+                    gens = retire_zero(gens, now)
+                }
+                reply(cc, "{ng.note}\n")
+            } else {
+                reply(cc, "unknown verb \"{verb}\"\n")
+            }
+            if cc >= 0 {
                 net_close(cc) else |_| {}
             }
         }
@@ -613,6 +683,15 @@ fn serve_main(prefix: str, conf: str) -> int {
     }
     shell.pid_remove(pidp) else |_| {}
     0
+}
+
+/// Write a control reply when the trigger carried a reply socket (a
+/// signal trigger has none — `cc` is -1). Write trouble is swallowed:
+/// the peer is closing anyway. Total.
+fn reply(cc: int, s: str) {
+    if cc >= 0 {
+        net_write(cc, s) else |_| {}
+    }
 }
 
 /// The live-connection count `gen` currently holds, or 0. Total.
