@@ -137,6 +137,7 @@ fi
 # graceful stop, then the security-floor grep of the server's OWN logs
 kill "$wws_pid" 2>/dev/null
 wait "$wws_pid" 2>/dev/null
+kill -9 "$wws_pid" 2>/dev/null
 
 # 8. NEVER log secrets: the server's stdout+stderr must carry no key
 # material. We grep for the hex of the actual key seed and for the
@@ -157,6 +158,6 @@ else
     fail "secrets-grep: the server's logs carry secret-shaped material"
 fi
 
-echo "tls-interop: $((8 - 0)) cases, $red red"
+echo "tls-interop: 8 cases, $red red"
 [ "$red" = 0 ] || exit 1
 echo "tls-interop: GREEN — wws serves TLS 1.3 to openssl"

@@ -112,5 +112,11 @@ if ! tools/wws-tls-interop; then
     exit 1
 fi
 
+step "tls-renewal (certbot symlink farm -> -s reload -> cert B; ws05 W4)"
+if ! tools/wws-tls-renewal; then
+    echo "wws-gauntlet: FAILED at tls-renewal — the certbot renewal-reload case (ws05)" >&2
+    exit 1
+fi
+
 echo ""
 echo "wws-gauntlet: GREEN"
