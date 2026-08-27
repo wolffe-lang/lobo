@@ -41,3 +41,28 @@ version_line = "wolf 0.1.0 (wolfgang)"
 repo = "wolffe-lang/wolf-interp"
 rev = "b682bcf38416e7db878b881276c89611ee7bbd5d"
 version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 77466a3)"
+
+[std]
+# wolf-std, pinned at the sc22 merge — the first std consumption in
+# this repo (ws05's TLS gate: std.x.tls.{record,handshake,cert} and
+# the std.x.crypto ladder under them). NOT a binary: a SOURCE TREE the
+# toolchain resolves `use std.…` against (`--std-root` / $WOLF_STD —
+# the driver's own mechanism; lib-toolchain.sh exports it). Staged,
+# like every pinned artifact, by a documented one-time action:
+#   git -C <wolf-std-checkout> archive <rev> std | tar -x -C .wolf-bin/
+#   git -C <wolf-std-checkout> rev-parse <rev> > .wolf-bin/std/STD-REV
+# lib-toolchain.sh REFUSES when the tree is missing or STD-REV drifts
+# from `rev` (a tree has no --version; the marker is its identity).
+# What the pin brings wws: sc20 record layer (RFC 8448-gated), sc21
+# handshake (frozen HandshakeResult seam), sc22 X.509/Ed25519 chain
+# validation (frozen validate_chain seam), sc16/17/18 digests/AEAD/
+# curves beneath them. wolf-std's own wolf pin (21b129e, s111) is an
+# ANCESTOR of this repo's (64a38f3, s115) — forward drift, verified by
+# probe at staging (the record/handshake/curve modules compile and run
+# natively here). KNOWN CAVEAT at this pin pair: the RELEASE tier's
+# mid-end ICEs on std.x.crypto.curve25519.sc_reduce (wolf-lang#142) —
+# the gauntlet's release step runs WOLF_MIDEND=0 (the driver's own
+# escape hatch) until the fix enters the [wolf] pin; the flip-back rides
+# that bump.
+repo = "wolffe-lang/wolf-std"
+rev = "b326f09fc34dc4c388d7688ba68322bf9bea0a9a"

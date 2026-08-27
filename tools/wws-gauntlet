@@ -48,7 +48,11 @@ if ! "$WOLF" build ./src/main.lu -o target/wws-debug; then
     echo "wws-gauntlet: FAILED at tiers — the owned debug tier does not build" >&2
     exit 1
 fi
-if ! "$WOLF" build --release ./src/main.lu -o target/wws-release; then
+# WOLF_MIDEND=0 (the driver's own escape hatch): the release mid-end
+# ICEs on std.x.crypto.curve25519.sc_reduce at this pin pair
+# (wolf-lang#142, filed from ws05) and the TLS path imports it. The
+# flip-back rides the [wolf] pin bump that carries the fix.
+if ! WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/wws-release; then
     echo "wws-gauntlet: FAILED at tiers — the release tier does not build" >&2
     exit 1
 fi

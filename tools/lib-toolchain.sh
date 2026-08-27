@@ -49,3 +49,23 @@ have_lupin=$("$LUPIN" --version 2>/dev/null | head -1)
 if [ ! -f "$(dirname "$WOLF")/libwolf_rt.a" ] && [ -z "${WOLF_RT_LIB:-}" ]; then
     fail_pin "libwolf_rt.a is not beside $WOLF (and \$WOLF_RT_LIB is unset) — the native tier cannot link"
 fi
+
+# The pinned std tree (ws05: `use std.…` resolves against it via the
+# driver's own $WOLF_STD/$LUPIN_STD mechanism). A tree has no
+# --version, so identity is the STD-REV marker the staging ritual
+# writes (wolf-toolchain.toml [std]). $WOLF_STD may override the
+# location; the pin check still runs against its STD-REV.
+want_std=$(toml_value std rev)
+if [ -n "$want_std" ]; then
+    STD_TREE="${WOLF_STD:-.wolf-bin/std}"
+    if [ ! -d "$STD_TREE" ] || [ ! -f "$STD_TREE/STD-REV" ]; then
+        fail_pin "no pinned std tree at $STD_TREE (stage wolf-std per wolf-toolchain.toml [std]: git archive $(echo "$want_std" | cut -c1-7) std into .wolf-bin/, then write STD-REV)"
+    fi
+    have_std=$(cat "$STD_TREE/STD-REV")
+    [ "$have_std" = "$want_std" ] || fail_pin "std tree identity drift: STD-REV $have_std, pin wants $want_std"
+    # Absolute: tools cd around (staged corpus entries, scratch dirs).
+    STD_TREE="$(cd "$STD_TREE" && pwd)"
+    WOLF_STD="$STD_TREE"
+    LUPIN_STD="$STD_TREE"
+    export WOLF_STD LUPIN_STD
+fi
