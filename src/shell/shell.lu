@@ -1,12 +1,525 @@
 //! member: true
-//! shell — CLI verbs, signals, reload. ws04's territory; a stub at ws00 so the `.wolfi`
-//! interface machinery has a real surface to freeze. Do not grow this
-//! module outside its sprint contract.
+//! shell — the operator contract: nginx's CLI grammar, the pid-file
+//! lifecycle, the lifecycle verbs (stop/quit/reload/reopen), and the
+//! platform-independent reload path — a loopback CONTROL CHANNEL the
+//! running server listens on. ws04's territory.
+//!
+//! The split (ws04 contract §3). Signal RECEPTION is the wolf-lang
+//! ask #126 (s114), open at the pin this repo is built for — so the
+//! four verbs are reached through the control channel here, and the
+//! signal receiver is the campaign's one named deferral. The pin also
+//! exposes neither a getpid nor an arbitrary-pid signal SEND (os_kill
+//! terminates a CHILD by handle only), so `-s` drives the control
+//! channel too and the pid file records the control ENDPOINT, not an
+//! os pid — the whole signal/pid family is #126, and each half flips
+//! to the unix path the sprint after #126 lands. All three are one
+//! gate; the control channel is the working path AND the Windows
+//! reload story (contract §3).
+//!
+//! Design (contract §3 sketch): every trigger — a control command
+//! today, a real signal when #126 lands — dispatches into the SAME
+//! verb layer (`dispatch`), so the paths are interchangeable and join
+//! the same tests. The config model is FROZEN after parse (ws01): a
+//! reload builds a NEW model and SWAPS the reference; serving code
+//! never mutates config state, so an in-flight request finishing on
+//! the old generation and a new request routing the new one is data,
+//! not a race (contract pitfall — the frozen-model discipline).
+//!
+//! Lane note: the CLI grammar and the text builders are PURE and run
+//! on all three lanes; the pid lifecycle is fs (native+checked); the
+//! control client is net (all three). File-header note (F-0016):
+//! comments never sit directly above a dotted call — `wolf fmt`
+//! splits the call at the dot.
 
-/// This module's interface version. Frozen by the ws00 `.wolfi`
-/// snapshot beside this file; ws04 bumps it with its first real
-/// surface. Total; never traps.
-#[allow(w0314)]
+use config
+
+/// This module's interface version. Bumped from the ws00 stub's
+/// "0.0.1" as ws04 lands its real surface. Total; never traps.
 pub fn version() -> str {
-    "0.0.1"
+    "0.1.0"
+}
+
+// ------------------------------------------------------------------
+// the CLI grammar — a PURE parse of argv into a decision, so the
+// whole flag table is testable off the socket, on every lane.
+// nginx's shape: `nginx [-?hvVtTq] [-s signal] [-p prefix]
+//                       [-e filename] [-c filename] [-g directives]`
+// ------------------------------------------------------------------
+
+/// The parsed command line. `mode` is the verb the entry dispatches:
+/// banner | version | version_verbose | help | check | dump | docs |
+/// serve | signal | error. `signal` carries the validated verb when
+/// `mode == "signal"`. `err_msg` is the nginx-shaped diagnostic (own
+/// identity: "wws: …" for "nginx: …") and `exit_code` the code to
+/// return when `mode == "error"` (or a terminal mode's code). The
+/// path knobs (`prefix`, `conf`, `errlog`, `globals`) and `quiet`
+/// carry through to the acting modes.
+pub struct Cli {
+    mode: str,
+    signal: str,
+    prefix: str,
+    conf: str,
+    errlog: str,
+    globals: str,
+    quiet: bool,
+    err_msg: str,
+    exit_code: int,
+}
+
+/// True when `name` is one of nginx's four signal words. Total.
+pub fn signal_ok(name: str) -> bool {
+    name == "stop" || name == "quit" || name == "reload" || name == "reopen"
+}
+
+/// The unix signal a verb maps to (stop=TERM, quit=QUIT, reload=HUP,
+/// reopen=USR1) — reported by `-V`/docs and the note the deferred
+/// receiver will honor; the control channel carries the verb WORD, so
+/// this is documentation, not a send today. "" for an unknown verb.
+pub fn signal_unix(name: str) -> str {
+    if name == "stop" {
+        return "TERM"
+    }
+    if name == "quit" {
+        return "QUIT"
+    }
+    if name == "reload" {
+        return "HUP"
+    }
+    if name == "reopen" {
+        return "USR1"
+    }
+    ""
+}
+
+/// Parse argv (env_args order — argv[0] already dropped) into a `Cli`.
+/// PURE and total: never touches fs/net, never traps. Mirrors nginx's
+/// getopt discipline — mode flags (`-v -V -t -T -h -?`), the quiet
+/// modifier (`-q`), the arg-taking options (`-s -p -c -e -g`), and
+/// wws's own verbs (`serve`, `directives-md`). An option missing its
+/// argument, an unknown option, or an invalid signal word is
+/// `mode == "error"` with the oracle-shaped message and exit 1.
+pub fn parse_cli(args: List[str]) -> Cli {
+    var mode = "banner"
+    var signal = ""
+    var prefix = "."
+    var conf = "conf/nginx.conf"
+    var errlog = ""
+    var globals = ""
+    var quiet = false
+    var want = ""
+    var want_kind = ""
+    var err_msg = ""
+    var errored = false
+    for a in args {
+        if errored {
+            // first error is terminal (nginx stops at the first)
+        } else if !want.is_empty() {
+            if want == "s" {
+                if signal_ok(a) {
+                    mode = "signal"
+                    signal = a
+                } else {
+                    errored = true
+                    err_msg = "invalid option: \"-s {a}\""
+                }
+            } else if want == "p" {
+                prefix = a
+            } else if want == "c" {
+                conf = a
+            } else if want == "e" {
+                errlog = a
+            } else if want == "g" {
+                globals = a
+            }
+            want = ""
+            want_kind = ""
+        } else if a == "-v" {
+            mode = "version"
+        } else if a == "-V" {
+            mode = "version_verbose"
+        } else if a == "-t" {
+            mode = "check"
+        } else if a == "-T" {
+            mode = "dump"
+        } else if a == "-q" {
+            quiet = true
+        } else if a == "-h" || a == "-?" || a == "help" {
+            mode = "help"
+        } else if a == "-s" {
+            want = "s"
+            want_kind = "parameter"
+        } else if a == "-p" {
+            want = "p"
+            want_kind = "directory name"
+        } else if a == "-c" {
+            want = "c"
+            want_kind = "file name"
+        } else if a == "-e" {
+            want = "e"
+            want_kind = "file name"
+        } else if a == "-g" {
+            want = "g"
+            want_kind = "parameter"
+        } else if a == "--version" {
+            mode = "version"
+        } else if a == "directives-md" {
+            mode = "docs"
+        } else if a == "serve" {
+            mode = "serve"
+        } else if a.starts_with("-") {
+            errored = true
+            let letter = a[1..a.len]
+            err_msg = "invalid option: \"{letter}\""
+        } else {
+            errored = true
+            err_msg = "invalid option: \"{a}\""
+        }
+    }
+    // a trailing arg-taking option with no argument (nginx: "option
+    // \"-c\" requires file name", exit 1)
+    if !errored && !want.is_empty() {
+        errored = true
+        err_msg = "option \"-{want}\" requires {want_kind}"
+    }
+    if errored {
+        mode = "error"
+    }
+    let code = if errored { 1 } else { 0 }
+    Cli {
+        mode: mode,
+        signal: signal,
+        prefix: prefix,
+        conf: conf,
+        errlog: errlog,
+        globals: globals,
+        quiet: quiet,
+        err_msg: err_msg,
+        exit_code: code,
+    }
+}
+
+// ------------------------------------------------------------------
+// the text builders — nginx's one-fact-per-line shapes, wws identity.
+// nginx prints all of these to STDERR (measured against the oracle);
+// the entry follows suit.
+// ------------------------------------------------------------------
+
+/// The server identity token, "wws/<ver>" (nginx: "nginx/1.30.4").
+/// Total.
+pub fn version_token() -> str {
+    "wws/0.1.0"
+}
+
+/// The one-line version report (`-v`): "wws version: wws/0.1.0"
+/// (nginx: "nginx version: nginx/1.30.4"). Total.
+pub fn version_report() -> str {
+    "wws version: {version_token()}"
+}
+
+/// The `-V` build metadata, nginx's one-line-per-fact shape: identity,
+/// the wolf toolchain it was built with, the two-tier posture, and the
+/// module set. No compile-time git pin (D33: no build scripts), so the
+/// toolchain's own version string is the honest identity. Total.
+pub fn version_verbose() -> str {
+    var s = "{version_report()}\n"
+    s = "{s}built with wolf 0.1.0 (wolfgang)\n"
+    s = "{s}tier: two-tier (owned debug + LLVM release)\n"
+    s = "{s}modules: config {config.version()} · http · serve · proxy · obs · shell {version()}\n"
+    s
+}
+
+/// The usage text (`-h`/`-?`/`help`), nginx's Usage shape plus wws's
+/// own verbs on a trailing line. Total.
+pub fn usage_text() -> str {
+    var s = "{version_report()}\n"
+    s = "{s}Usage: wws [-?hvVtTq] [-s signal] [-p prefix]\n"
+    s = "{s}           [-e filename] [-c filename] [-g directives]\n"
+    s = "{s}       wws [serve | directives-md]   (wws-native verbs)\n"
+    s
+}
+
+// ------------------------------------------------------------------
+// the pid file — the running master's rendezvous. At this pin the
+// content is the CONTROL ENDPOINT (a loopback address), not an os pid
+// (no getpid; #126): `-s` and stale-detection reach the master by
+// CONNECTING to it, which is a liveness probe the pin can express and
+// a real signal is not. Write-rename so a reader never sees a torn
+// file (contract pitfall). Flips to the os pid when #126 lands.
+// ------------------------------------------------------------------
+
+/// The pid file path: the `pid` directive's argument resolved under
+/// `prefix`, else nginx's default "logs/nginx.pid" under the prefix.
+/// An absolute directive value is honored verbatim. Total.
+pub fn pid_path(c: config.Conf, prefix: str) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "pid" && c.args_n[i] >= 1 {
+            let p = c.argp[c.args_at[i]]
+            if p.starts_with("/") {
+                return p
+            }
+            return "{prefix}/{p}"
+        }
+        i = i + 1
+    }
+    "{prefix}/logs/nginx.pid"
+}
+
+/// Write `endpoint` to the pid file atomically: create the parent
+/// directory if absent (wws owns its runtime dirs — nginx's logs/ is
+/// there by its install), write a sibling temp file, then rename over
+/// the target, so a concurrent reader sees either the old file or the
+/// whole new one, never a partial write. Rows: fs `io` (a write or
+/// rename that failed). Total otherwise.
+pub fn pid_write(path: str, endpoint: str) -> () ! {io} {
+    let slash = path.rfind("/") else -1
+    if slash > 0 {
+        let dir = path[0..slash]
+        fs_create_dir_all(dir) else |_| {}
+    }
+    let tmp = "{path}.new"
+    fs_write_text(tmp, "{endpoint}\n") else |_| {
+        return io
+    }
+    fs_rename(tmp, path) else |_| {
+        return io
+    }
+}
+
+/// Read the pid file's endpoint (the first line, trimmed). Rows:
+/// `none` when the file does not exist (nginx's "No such file or
+/// directory" on `-s` with no master), `io` on a read failure — two
+/// tags a caller acts on differently (allow w0602: the row is
+/// deliberate API, one tag per distinct failure).
+#[allow(w0602)]
+pub fn pid_read(path: str) -> str ! {none, io} {
+    if !fs_exists(path) {
+        return none
+    }
+    let raw = fs_read_text(path) else |_| {
+        return io
+    }
+    raw.trim()
+}
+
+/// Remove the pid file (the master's shutdown step, and the stale-file
+/// replacement). Swallows a missing file; rows `io` on a real failure.
+pub fn pid_remove(path: str) -> () ! {io} {
+    if !fs_exists(path) {
+        return
+    }
+    fs_remove(path) else |_| {
+        return io
+    }
+}
+
+// ------------------------------------------------------------------
+// the control channel — a loopback command listener the running
+// server owns. One-line commands, one-line replies. Off by default
+// (no `control` directive → no listener), loopback-bound, linted as
+// non-nginx surface (ws14's security pass audits it — kept minimal).
+// ------------------------------------------------------------------
+
+/// The control address: the `control` directive's argument, or "" when
+/// the directive is absent (the channel is OFF by default). A bare
+/// port becomes a loopback bind (loopback-only, forever). Total.
+pub fn control_addr(c: config.Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "control" && c.args_n[i] >= 1 {
+            let a = c.argp[c.args_at[i]]
+            if a.contains(":") {
+                return a
+            }
+            return "127.0.0.1:{a}"
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// Send one command line to the control endpoint and read the one-line
+/// reply. Dials, arms a short deadline, writes "`line`\n", reads the
+/// reply to a newline, closes. Rows: `refused` (nobody listening — a
+/// dead/absent master, which `-s` and stale-detection read as "not
+/// alive"), `io` for every other net trouble. The reply is trimmed
+/// (allow w0602: deliberate API — refused and other failures differ).
+#[allow(w0602)]
+pub fn control_send(addr: str, line: str) -> str ! {refused, io} {
+    let c = net_connect(addr) else |e| match e {
+        refused => {
+            return refused
+        },
+        timeout => {
+            return io
+        },
+        io => {
+            return io
+        },
+    }
+    net_deadline(c, 2000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "{line}\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let nl = buf.find("\n") else -1
+        if nl >= 0 {
+            reading = false
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                reading = false
+                ""
+            }
+            if piece.is_empty() {
+                reading = false
+            } else {
+                buf = "{buf}{piece}"
+            }
+        }
+    }
+    net_close(c) else |_| {}
+    buf.trim()
+}
+
+/// True when the endpoint answers a `ping` — the liveness probe the
+/// pin can express (a real kill(pid, 0) is #126). Used by `-s` and by
+/// startup stale-detection. Total: any failure reads as "not alive".
+pub fn control_alive(addr: str) -> bool {
+    if addr.is_empty() {
+        return false
+    }
+    let r = control_send(addr, "ping") else |_| {
+        return false
+    }
+    r == "pong"
+}
+
+// ------------------------------------------------------------------
+// the verb layer — one dispatch every trigger flows through, so a
+// control command today and a signal when #126 lands are the same
+// call. A verb is serialized by construction: the server processes
+// control connections one at a time, so a second reload arriving mid-
+// reload gets the `busy` answer (contract pitfall — nginx queues
+// HUPs; one-at-a-time with a named busy answer is the honest v0).
+// ------------------------------------------------------------------
+
+/// A server generation: the frozen config model, the generation
+/// number (ws08 surfaces old-generation connection counts against it —
+/// the counter lands here, the reporting there), whether the last
+/// reload succeeded, and the human note the control reply carries.
+pub struct Gen {
+    conf: config.Conf,
+    gen: int,
+    ok: bool,
+    note: str,
+}
+
+/// The initial generation from a loaded config. `gen` starts at 1
+/// (nginx's first master is generation 1). Total (the load already
+/// happened; this just tags it).
+pub fn gen_new(c: config.Conf) -> Gen {
+    Gen { conf: c, gen: 1, ok: true, note: "started (generation 1)" }
+}
+
+/// Reload: parse the config FRESH through the full ws01 pipeline. On
+/// ANY error keep the OLD generation serving and answer a non-zero
+/// notice (the nginx contract — the reason `-t` exists); on success
+/// freeze the new model, bump the generation, and hand it back for the
+/// caller to SWAP the routing reference to. The listen-set diff is the
+/// caller's (`listen_addrs`): a surviving address reuses its live
+/// listener, a removed one drains, a new one opens. Total.
+pub fn reload(prefix: str, conf_rel: str, prev: Gen) -> Gen {
+    let c = config.load(prefix, conf_rel)
+    if config.ok(c) {
+        let g = prev.gen + 1
+        return Gen { conf: c, gen: g, ok: true, note: "reload complete (generation {g})" }
+    }
+    Gen {
+        conf: prev.conf,
+        gen: prev.gen,
+        ok: false,
+        note: "reload rejected: configuration test failed; keeping generation {prev.gen}",
+    }
+}
+
+// ------------------------------------------------------------------
+// the listen-set diff — a reload reuses a surviving listener's live
+// fd (never close-and-reopen: that loses queued SYNs, the contract's
+// hammer-connects-across-a-reload catches it), opens the new, and
+// drains the removed. These pure set ops name which is which.
+// ------------------------------------------------------------------
+
+/// The normalized bind addresses of every `listen` directive (a bare
+/// port becomes a loopback bind — loopback-only, forever). Total; the
+/// order is the config's. Duplicates are kept (nginx's own posture).
+pub fn listen_addrs(c: config.Conf) -> List[str] {
+    var out = List[str]()
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "listen" && c.args_n[i] >= 1 {
+            let a = c.argp[c.args_at[i]]
+            if a.contains(":") {
+                (mut out).push(a)
+            } else {
+                (mut out).push("127.0.0.1:{a}")
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// True when `addr` is in `xs`. Total (argument reads are free).
+fn addr_in(xs: List[str], addr: str) -> bool {
+    for x in xs {
+        if x == addr {
+            return true
+        }
+    }
+    false
+}
+
+/// The addresses in `new` that also appear in `old` — the listeners a
+/// reload REUSES (live fd carried across the generation). Total.
+pub fn listen_reused(old: List[str], new: List[str]) -> List[str] {
+    var out = List[str]()
+    for a in new {
+        if addr_in(old, a) {
+            (mut out).push(a)
+        }
+    }
+    out
+}
+
+/// The addresses in `new` not in `old` — the listeners a reload OPENS.
+/// Total.
+pub fn listen_added(old: List[str], new: List[str]) -> List[str] {
+    var out = List[str]()
+    for a in new {
+        if !addr_in(old, a) {
+            (mut out).push(a)
+        }
+    }
+    out
+}
+
+/// The addresses in `old` not in `new` — the listeners a reload CLOSES
+/// (connections on them drain per the quit rules). Total.
+pub fn listen_removed(old: List[str], new: List[str]) -> List[str] {
+    var out = List[str]()
+    for a in old {
+        if !addr_in(new, a) {
+            (mut out).push(a)
+        }
+    }
+    out
 }
