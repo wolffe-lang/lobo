@@ -1,0 +1,89 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! The parser's named errors, each in the pinned oracle's shape
+//! (nginx/1.30.4 battery, 2026-08-27) with the transcript cited:
+//!   p04 `flurble wib;` → [emerg] unknown directive "flurble" (wws
+//!       appends a nearest-name suggestion when one is within
+//!       distance 3 — a recorded output delta, the oracle has none)
+//!   p39 `listen 80;` at main → "listen" directive is not allowed
+//!       here; p55 same for a `server` block at main
+//!   p46 `worker_processes;` → invalid number of arguments in
+//!       "worker_processes" directive; p54 `location` with no arg
+//!   p47 `events;` → directive "events" has no opening "{"
+//!   p48 `worker_priority 0 {` → directive "worker_priority" is not
+//!       terminated by ";" (reported at the `{` line)
+//!   p22/p23 `;` with no words → unexpected ";" (`;;` is illegal —
+//!       the folklore "empty directive" does not exist)
+//!   p25 stray `}` → unexpected "}"; p76 words then `}` → same
+//!   p26 `{` with no directive → unexpected "{"
+//!   p24 missing `;` at EOF → unexpected end of file, expecting ";"
+//!       or "}" (at the EOF line)
+//!   p75 unclosed block at EOF → unexpected end of file, expecting
+//!       "}"
+//!   p21 a directive spanning lines is reported at its TERMINATOR's
+//!       line, not its name's
+
+use config
+
+fn perr(src: str, want: str, what: str) {
+    let got = config.render_conf(config.parse_str(src, "t.conf"))
+    assert(got.contains(want), "{what}: got\n{got}\nwant fragment\n{want}")
+}
+
+fn main() -> int {
+    perr("flurble wib;", "err|t.conf:1|unknown directive \"flurble\"", "p04 unknown")
+    // The suggestion delta: within distance 3 the nearest row is
+    // offered (the oracle prints none — recorded output delta).
+    perr(
+        "worker_procesess 1;",
+        "err|t.conf:1|unknown directive \"worker_procesess\" (did you mean \"worker_processes\"?)",
+        "suggestion",
+    )
+    perr("listen 80;", "err|t.conf:1|\"listen\" directive is not allowed here", "p39 context")
+    perr(
+        "server {{\n}}",
+        "err|t.conf:1|\"server\" directive is not allowed here",
+        "p55 server at main",
+    )
+    perr(
+        "worker_processes;",
+        "err|t.conf:1|invalid number of arguments in \"worker_processes\" directive",
+        "p46 arity zero",
+    )
+    perr(
+        "events {{\n}}\nhttp {{\n    server {{\n        location {{\n        }}\n    }}\n}}\n",
+        "err|t.conf:5|invalid number of arguments in \"location\" directive",
+        "p54 location no arg",
+    )
+    perr("events;", "err|t.conf:1|directive \"events\" has no opening \"{{\"", "p47 no block")
+    perr(
+        "worker_priority 0 {{\n}}",
+        "err|t.conf:1|directive \"worker_priority\" is not terminated by \";\"",
+        "p48 simple with block",
+    )
+    perr(";", "err|t.conf:1|unexpected \";\"", "p22 empty directive")
+    perr("worker_priority 0;;", "err|t.conf:1|unexpected \";\"", "p23 double semi")
+    perr("}}", "err|t.conf:1|unexpected \"}}\"", "p25 stray close")
+    perr(
+        "events {{\n    worker_connections 8 }}\n",
+        "err|t.conf:2|unexpected \"}}\"",
+        "p76 words then close",
+    )
+    perr("{{\n}}", "err|t.conf:1|unexpected \"{{\"", "p26 brace no name")
+    perr(
+        "events {{\n}}\npid a\n",
+        "err|t.conf:4|unexpected end of file, expecting \";\" or \"}}\"",
+        "p24 eof",
+    )
+    perr(
+        "events {{\n",
+        "err|t.conf:2|unexpected end of file, expecting \"}}\"",
+        "p75 open block eof",
+    )
+    // p21: terminator-line convention.
+    perr("flurble\nwib;", "err|t.conf:2|unknown directive \"flurble\"", "p21 terminator line")
+    0
+}

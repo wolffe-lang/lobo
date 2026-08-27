@@ -1,0 +1,95 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! The context tree over the flat arena: contexts main/events/http/
+//! server/location (nested)/upstream/map/types, parent-linked, spans
+//! carried. Oracle citations (nginx/1.30.4 battery, 2026-08-27):
+//!   p41 upstream pool with `server` members + keepalive → syntax ok.
+//!       `server` in `upstream` is a SIMPLE directive; `server` in
+//!       `http` is a BLOCK — the (name, context) collision the table
+//!       key exists for (this file is the contract's demanded unit
+//!       test for it).
+//!   p52 nested locations → syntax ok.
+//!   p40 types block with multi-extension rows → syntax ok; body rows
+//!       are DATA (`text/html html htm;` is no directive) with
+//!       at_least(1) shape.
+//!   p42 map block → syntax ok; `default zero;`/`example.com two;`
+//!       are data entries.
+//!   p44/p62 `if`/`return` are rewrite-module directives the STRIPPED
+//!       oracle lacks (unknown directive there — recorded build
+//!       delta); stock nginx admits them, wws rows say planned.
+
+use config
+
+fn tree(src: str) -> str {
+    config.render_conf(config.parse_str(src, "t.conf"))
+}
+
+fn main() -> int {
+    // p41: the server collision — block in http, simple in upstream.
+    let up = tree(
+        "events {{\n}}\nhttp {{\n    upstream backend {{\n        server 127.0.0.1:8081;\n        server 127.0.0.1:8082 weight=2;\n        keepalive 8;\n    }}\n    server {{\n        listen 8080;\n    }}\n}}\n",
+    )
+    assert(
+        up ==
+            "b|main|events|t.conf:1\nb|main|http|t.conf:3\nb|http|upstream backend|t.conf:4\nd|upstream|server 127.0.0.1:8081|t.conf:5\nd|upstream|server 127.0.0.1:8082 weight=2|t.conf:6\nd|upstream|keepalive 8|t.conf:7\nb|http|server|t.conf:9\nd|server|listen 8080|t.conf:10\n",
+        "p41 upstream/server collision: got\n{up}",
+    )
+    // The collision's failure direction: a BLOCK server inside
+    // upstream is a shape error, not a silent reparse.
+    let bad = tree(
+        "events {{\n}}\nhttp {{\n    upstream u {{\n        server {{\n        }}\n    }}\n}}\n",
+    )
+    assert(
+        bad.contains("err|t.conf:5|directive \"server\" is not terminated by \";\""),
+        "block server in upstream: got\n{bad}",
+    )
+    // p52: nested locations, each row citing the context it sits IN.
+    let nest = tree(
+        "events {{\n}}\nhttp {{\n    server {{\n        listen 8080;\n        location /a/ {{\n            location /a/b/ {{\n                root html;\n            }}\n        }}\n    }}\n}}\n",
+    )
+    assert(
+        nest.
+            contains(
+            "b|server|location /a/|t.conf:6\nb|location|location /a/b/|t.conf:7\nd|location|root html|t.conf:8",
+        ),
+        "p52 nested location: got\n{nest}",
+    )
+    // p40/p42: map and types bodies are data entries (kind `e`).
+    let dat = tree(
+        "events {{\n}}\nhttp {{\n    types {{\n        text/html html htm shtml;\n        image/gif gif;\n    }}\n    map $http_host $pool {{\n        default one;\n        example.com two;\n    }}\n}}\n",
+    )
+    assert(dat.contains("e|types|text/html html htm shtml|t.conf:5"), "p40 types entry: got\n{dat}")
+    assert(dat.contains("e|types|image/gif gif|t.conf:6"), "p40 second entry")
+    assert(dat.contains("e|map|default one|t.conf:9"), "p42 map default entry")
+    assert(dat.contains("e|map|example.com two|t.conf:10"), "p42 map host entry")
+    // `if` inside location parses (planned row; the lint owns the
+    // footgun) — body stays in the surrounding context (`same`).
+    let iff = tree(
+        "events {{\n}}\nhttp {{\n    server {{\n        location / {{\n            if ($http_x) {{\n                return 200;\n            }}\n        }}\n    }}\n}}\n",
+    )
+    assert(
+        iff.contains("b|location|if ($http_x)|t.conf:6\nd|location|return 200|t.conf:7"),
+        "if block keeps context: got\n{iff}",
+    )
+    // A named_error directive with a block: the row is recorded, the
+    // body brace-skipped (quotes protected by the lexer — the `}`
+    // inside the Lua string does not close the block), and the delta
+    // is named, never silent.
+    let lua = tree(
+        "events {{\n}}\nhttp {{\n    server {{\n        listen 8080;\n        location / {{\n            content_by_lua_block {{\n                ngx.say(\"}}\")\n            }}\n            root html;\n        }}\n    }}\n}}\n",
+    )
+    assert(lua.contains("b|location|content_by_lua_block|t.conf:7"), "lua row recorded: got\n{lua}")
+    assert(lua.contains("d|location|root html|t.conf:10"), "parse continues past skip")
+    assert(lua.contains("delta|content_by_lua_block|OpenResty Lua"), "delta named")
+    let c = config.
+        parse_str(
+        "events {{\n}}\nhttp {{\n    server {{\n        listen 8080;\n        location / {{\n            content_by_lua_block {{\n                ngx.say(\"}}\")\n            }}\n        }}\n    }}\n}}\n",
+        "t.conf",
+    )
+    assert(config.ok(c), "named delta is not a structural error")
+    assert(config.delta_count(c) == 1, "exactly one delta")
+    0
+}

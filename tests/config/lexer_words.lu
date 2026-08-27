@@ -1,0 +1,53 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! Bare-word boundaries, each rule cited to its ws01 oracle-battery
+//! transcript (pinned nginx/1.30.4, `nginx -t -p <prefix> -c
+//! nginx.conf -e error.log`, 2026-08-27):
+//!   p03 `flurble{` → [emerg] unknown directive "flurble" — `{` ends
+//!       a word with no whitespace needed.
+//!   p04 `flurble wib;` → unknown directive "flurble" — words split
+//!       at whitespace, name lexed whole.
+//!   p14 `include a\;b.conf;` → open() "a\;b.conf" failed — `\`
+//!       defuses `;` and is KEPT in the word.
+//!   p17 `include a\ b.conf;` → open() "a\ b.conf" failed — same for
+//!       a space: one word, backslash kept.
+//!   p18 `include a#b.conf;` → open() "a#b.conf" failed — `#` mid-word
+//!       is literal, not a comment.
+//!   p64 `include a{v.conf;` → directive "include" is not terminated
+//!       by ";" — a bare `{` mid-word DOES end the word (block open).
+//!   p68 `include a}b.conf;` → open() "a}b.conf" failed — `}` mid-word
+//!       does NOT end the word.
+//!   p43 `location ~ \.php$` → [emerg] echoes regex "\.php$" — regex
+//!       chars lex as word bytes, backslash preserved.
+
+use config
+
+fn check(src: str, want: str, what: str) {
+    let got = config.render(config.lex(src))
+    assert(got == want, "{what}: got\n{got}\nwant\n{want}")
+}
+
+fn main() -> int {
+    // p04: words split at whitespace; `;` is its own token.
+    check("flurble wib;", "w|flurble\nw|wib\n;\n", "p04 split")
+    // p03: `{` ends a word without whitespace.
+    check("flurble{{", "w|flurble\n{{\n", "p03 brace ends word")
+    // p64: same, mid-word.
+    check("include a{{v.conf;", "w|include\nw|a\n{{\nw|v.conf\n;\n", "p64 brace mid-word")
+    // p68: `}` mid-word is word bytes.
+    check("include a}}b.conf;", "w|include\nw|a}}b.conf\n;\n", "p68 rbrace literal")
+    // p14: `\;` defused, backslash kept.
+    check("include a\\;b.conf;", "w|include\nw|a\\;b.conf\n;\n", "p14 escaped semi")
+    // p17: `\ ` defused, backslash kept.
+    check("include a\\ b.conf;", "w|include\nw|a\\ b.conf\n;\n", "p17 escaped space")
+    // p18: `#` mid-word is literal.
+    check("include a#b.conf;", "w|include\nw|a#b.conf\n;\n", "p18 hash literal")
+    // p43: regex characters are ordinary word bytes.
+    check("location ~ \\.php$ {{\n}}", "w|location\nw|~\nw|\\.php$\n{{\n}}\n", "p43 regex word")
+    // A comment at token position runs to EOL (p01-family baseline).
+    check("# note\nflurble wib;\n", "w|flurble\nw|wib\n;\n", "comment to eol")
+    0
+}

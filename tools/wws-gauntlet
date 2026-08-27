@@ -54,6 +54,12 @@ if ! "$WOLF" build --release ./src/main.lu -o target/wws-release; then
 fi
 echo "debug + release ok"
 
+step "directive docs (docs/directives.md)"
+if ! tools/wws-directives --check; then
+    echo "wws-gauntlet: FAILED at directives — see above for the ritual" >&2
+    exit 1
+fi
+
 step "interface freshness (.wolfi)"
 if ! tools/wws-interface --check; then
     echo "wws-gauntlet: FAILED at wolfi — see above for the ritual" >&2
@@ -69,6 +75,12 @@ fi
 step "differential (pinned nginx)"
 if ! tools/wws-differential; then
     echo "wws-gauntlet: FAILED at differential" >&2
+    exit 1
+fi
+
+step "confcheck (corpus oracle parity)"
+if ! tools/wws-confcheck; then
+    echo "wws-gauntlet: FAILED at confcheck" >&2
     exit 1
 fi
 

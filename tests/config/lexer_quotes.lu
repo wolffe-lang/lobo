@@ -1,0 +1,84 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! Quoted strings against the pinned oracle (nginx/1.30.4 battery,
+//! 2026-08-27). The headline: the ws01 contract's "quotes glue"
+//! claim is FALSE — the oracle demands a delimiter after a closing
+//! quote — and its `\{`/`\}` escape claim is false too. The binary is
+//! the spec; these transcripts are the evidence:
+//!   p02 `"a b"c;` → [emerg] unexpected "c" — no gluing, named error.
+//!   p07 `include "a "" b.conf";` → unexpected """ — quote directly
+//!       after a closing quote is the same named error.
+//!   p73 `... "txt"}` → unexpected "}" — `}` is not a legal
+//!       post-quote delimiter.
+//!   p74 `include "nope.conf"#c` → unexpected "#" — neither is `#`.
+//!   p65 `location "/x"{` → syntax ok — `{` IS legal after a quote.
+//!   p08 `include "a b" ;` → open() "a b" failed — space-separated
+//!       quoted arg carries its space.
+//!   p06 `"a b";` → unknown directive "a b" — a quoted word can even
+//!       be the directive name.
+//!   p09 `include a"b c.conf";` → invalid number of arguments — a
+//!       quote mid-word is LITERAL (two args: `a"b`, `c.conf"`).
+//!   p10 `include "a\"b.conf";` → open() "a"b.conf" — \" splices.
+//!   p15 `include "a\'b.conf";` → open() "a'b.conf" — \' splices.
+//!   p12 `include "a\\b.conf";` → open() "a\b.conf" — \\ splices.
+//!   p11 `include "a\{b.conf";` → open() "a\{b.conf" — any other
+//!       backslash pair is kept whole.
+//!   p16 `include 'a b"c.conf';` → open() "a b"c.conf" — single
+//!       quotes: `"` literal inside.
+//!   p13 `include "a}b.conf";` → open() "a}b.conf" — `}` in quotes is
+//!       text, never a block close.
+//!   p72 `include "a.conf` EOF → unexpected end of file, expecting
+//!       ";" or "}" — unterminated quote, at the EOF line.
+
+use config
+
+fn check(src: str, want: str, what: str) {
+    let got = config.render(config.lex(src))
+    assert(got == want, "{what}: got\n{got}\nwant\n{want}")
+}
+
+fn main() -> int {
+    // p02: no gluing — delimiter required after the closing quote.
+    check("\"a b\"c;", "d|a b\nerr|1|unexpected \"c\"\n", "p02 no glue")
+    // p07: a second quote is the same error.
+    check(
+        "include \"a \"\" b.conf\";",
+        "w|include\nd|a \nerr|1|unexpected \"\"\"\n",
+        "p07 quote after quote",
+    )
+    // p73/p74: `}` and `#` are not post-quote delimiters.
+    check("\"txt\"}}", "d|txt\nerr|1|unexpected \"}}\"\n", "p73 rbrace after quote")
+    check("\"nope\"#c", "d|nope\nerr|1|unexpected \"#\"\n", "p74 hash after quote")
+    // p65: `{` is a legal post-quote delimiter.
+    check("location \"/x\"{{\n}}", "w|location\nd|/x\n{{\n}}\n", "p65 brace after quote")
+    // p08: quoted arg keeps its interior space; `;` after ws is fine.
+    check("include \"a b\" ;", "w|include\nd|a b\n;\n", "p08 quoted arg")
+    // p06: a quoted directive name lexes as one word.
+    check("\"a b\";", "d|a b\n;\n", "p06 quoted name")
+    // p09: a quote mid-word is literal — two separate words here.
+    check(
+        "include a\"b c.conf\";",
+        "w|include\nw|a\"b\nw|c.conf\"\n;\n",
+        "p09 mid-word quote literal",
+    )
+    // p10/p15/p12: the three splicing escapes.
+    check("include \"a\\\"b\";", "w|include\nd|a\"b\n;\n", "p10 dquote splice")
+    check("include \"a\\'b\";", "w|include\nd|a'b\n;\n", "p15 squote splice")
+    check("include \"a\\\\b\";", "w|include\nd|a\\b\n;\n", "p12 backslash splice")
+    // p11: every other backslash pair is kept whole.
+    check("include \"a\\{{b\";", "w|include\nd|a\\{{b\n;\n", "p11 backslash kept")
+    // p16: single quotes — `"` literal inside, escapes still splice.
+    check("include 'a b\"c.conf';", "w|include\ns|a b\"c.conf\n;\n", "p16 single quotes")
+    // p13: `}` inside quotes is text (the classic hand-rolled bug).
+    check("include \"a}}b.conf\";", "w|include\nd|a}}b.conf\n;\n", "p13 rbrace in quotes")
+    // p72: EOF inside a quote — the oracle's unterminated sentence.
+    check(
+        "include \"a.conf\n",
+        "w|include\nerr|2|unexpected end of file, expecting \";\" or \"}}\"\n",
+        "p72 eof in quote",
+    )
+    0
+}

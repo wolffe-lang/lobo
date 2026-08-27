@@ -1,0 +1,137 @@
+//! member: true
+//! config/lint — the footgun linter: a pass over the parsed tree,
+//! each lint a code + span + nginx's behavior + wws's stance, printed
+//! by -t after errors. ws01 ships the skeleton and the three
+//! PARSE-VISIBLE footguns report 11 §1C verified (the corrected
+//! reading: nginx [emerg]s on wrong-context directives — the real
+//! class is legal-but-ambushed configuration, which is exactly what a
+//! linter can name at load time). Sources, per the ws00 verification
+//! pass (wolf/refs/articles/wws/class-c-config-footguns.md):
+//!   L001 — nginx "If Is Evil" wiki: "In some cases it even
+//!          segfaults"; only return / rewrite...last are safe in
+//!          location-if; try_files silently disabled.
+//!   L002 — proxy_set_header docs: "inherited from the previous
+//!          configuration level if and only if there are no
+//!          proxy_set_header directives defined on the current
+//!          level" — one child line drops ALL parent lines.
+//!   L003 — the alias off-by-slash traversal (PortSwigger
+//!          nginx-alias-traversal / gixy alias-traversal advisory):
+//!          location /i + alias /data/w3/images/ lets /i../secret
+//!          escape; nginx upstream calls it configuration, not a bug.
+//! Semantic lints wait for semantics; adding one here is a matcher
+//! function and a call — the skeleton is the deliverable.
+
+/// Run every lint over a parsed config. Returns one finding per
+/// line: `CODE|file:line|message` — "" when clean. Pure over the
+/// frozen model; -t renders these as `[warn]` lines (they never
+/// change the exit code).
+pub fn lint(c: Conf) -> str {
+    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}"
+}
+
+/// WWS-L001: `if` inside a `location` block.
+fn lint_if_in_location(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "if" && c.kinds[i] == "b" && c.ctx[i] == "location" {
+            out = "{out}WWS-L001|{c.files[i]}:{c.lines[i]}|\"if\" inside \"location\": nginx evaluates this in ways its own wiki calls unpredictable (\"If Is Evil\" — try_files silently disabled, proxy_pass URI changes, documented segfaults; only \"return\" and \"rewrite ... last\" are safe). wws parses the block today and will give it defined semantics at ws03; prefer \"map\", separate locations, or \"return\".\n"
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// WWS-L002: `proxy_set_header` in a child block while an ancestor
+/// level also sets some — the child's presence drops EVERY
+/// parent-level header line; the finding names exactly which lines
+/// stop applying.
+fn lint_psh_shadow(c: Conf) -> str {
+    var out = ""
+    // Every block index that directly holds a proxy_set_header.
+    var blocks = List[int]()
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "proxy_set_header" {
+            var seen = false
+            for b in blocks {
+                if b == c.parent[i] {
+                    seen = true
+                }
+            }
+            if !seen {
+                (mut blocks).push(c.parent[i])
+            }
+        }
+        i = i + 1
+    }
+    for b in blocks {
+        if b < 0 {
+            // main holds no proxy_set_header rows (table-checked);
+            // defensive skip.
+        } else {
+            var dropped = ""
+            var a = c.parent[b]
+            while a >= -1 {
+                for other in blocks {
+                    if other == a {
+                        dropped = "{dropped}{psh_lines(c, a)}"
+                    }
+                }
+                if a == -1 {
+                    a = -2
+                } else {
+                    a = c.parent[a]
+                }
+            }
+            if !dropped.is_empty() {
+                let lines = dropped.strip_suffix(", ") else dropped
+                out = "{out}WWS-L002|{c.files[b]}:{c.lines[b]}|\"proxy_set_header\" in this block discards ALL parent-level proxy_set_header directives — nginx array directives inherit only when the current level sets NONE (proxy module docs, verbatim: inherited \"if and only if there are no proxy_set_header directives defined on the current level\"). These parent lines stop applying here: {lines}. wws keeps nginx's rule when proxying lands (ws03) and names it at load time.\n"
+            }
+        }
+    }
+    out
+}
+
+/// The `file:line` list of proxy_set_header rows directly under
+/// block `b`.
+fn psh_lines(c: Conf, b: int) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "proxy_set_header" && c.parent[i] == b {
+            out = "{out}{c.files[i]}:{c.lines[i]}, "
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// WWS-L003: the alias off-by-slash traversal shape — a non-exact
+/// location whose prefix does NOT end in `/` holding an `alias`
+/// whose path DOES.
+fn lint_alias_slash(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "alias" && c.args_n[i] == 1 {
+            let target = c.argp[c.args_at[i]]
+            // nearest enclosing location block (alias may sit inside
+            // an `if` whose context is still location)
+            var l = c.parent[i]
+            while l >= 0 && !(c.names[l] == "location" && c.kinds[l] == "b") {
+                l = c.parent[l]
+            }
+            if l >= 0 && target.ends_with("/") {
+                let n = c.args_n[l]
+                let modifier = if n == 2 { c.argp[c.args_at[l]] } else { "" }
+                let path = c.argp[c.args_at[l] + n - 1]
+                if modifier != "=" && !path.ends_with("/") {
+                    out = "{out}WWS-L003|{c.files[i]}:{c.lines[i]}|\"alias\" ends with \"/\" under location \"{path}\", which does not: nginx replaces only the matched part, so a request for \"{path}../secret\" resolves OUTSIDE the alias root (the off-by-slash traversal — PortSwigger nginx-alias-traversal / gixy advisory; nginx upstream treats it as configuration, not a bug). wws will refuse the traversal shape when alias serves (ws02); today the fix is matching slashes on both.\n"
+                }
+            }
+        }
+        i = i + 1
+    }
+    out
+}

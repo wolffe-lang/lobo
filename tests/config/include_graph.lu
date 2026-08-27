@@ -1,0 +1,153 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: config
+//!
+//! The include graph on the real filesystem (fs is a two-lane tier —
+//! lupin has no fs by design, so this file declares the compiler
+//! rungs only; the pure half of the graph is held by glob_match.lu on
+//! all three). Oracle citations (nginx/1.30.4 battery, 2026-08-27):
+//!   p71 a RELATIVE include resolves against the CONF prefix (the -c
+//!       file's directory), not the -p prefix — `-c conf/nginx.conf`
+//!       + `include rel.conf;` opens `conf/rel.conf`. The ws01
+//!       contract said "-p"; the oracle overrules it (recorded
+//!       contract correction).
+//!   p58 an include from a SUBDIRECTORY file still resolves against
+//!       the conf prefix, not the including file's directory.
+//!   p30/p35 glob expansion loads every match, SORTED (aa.conf before
+//!       zz.conf — proven by nginx's duplicate-pid error naming
+//!       zz.conf as the second).
+//!   p31 a glob matching NOTHING is EMPTY, not an error (folklore
+//!       confirmed by probe).
+//!   p32 a literal include naming a missing file is
+//!       open() "<path>" failed (2: No such file or directory).
+//!   p34/p37 an include CYCLE dumps the oracle's core (exit 139,
+//!       segfault — self-include and mutual). wws refuses by name
+//!       with the chain printed; the crash transcript is the evidence
+//!       that carrying the chain is not gold-plating.
+//!   p77/p78 include works INSIDE types and map blocks (whose other
+//!       rows are data entries).
+//! Directives carry file:line THROUGH the chain — every hop, not
+//! just the leaf (the -T provenance spine).
+//!
+//! The scratch tree lives under target/ (never a system path) and is
+//! cleared at the START, not the end — the corpus runner runs three
+//! lanes over one staging and a row-test never reaches its own
+//! cleanup line (the sc12 fs lesson).
+
+use config
+
+fn wr(path: str, text: str) {
+    fs_write_text(path, text) else |_| {
+        assert(false, "scratch write failed: {path}")
+    }
+}
+
+fn main() -> int {
+    let root = "target/test-scratch/include-graph"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/conf/parts") else |_| {
+        assert(false, "scratch mkdir failed")
+    }
+
+    // p71/p58: relative includes resolve against the conf prefix.
+    wr("{root}/conf/nginx.conf", "include sub/inner.conf;\nevents {{\n}}\n")
+    fs_create_dir_all("{root}/conf/sub") else |_| {
+        assert(false, "scratch mkdir failed")
+    }
+    wr("{root}/conf/sub/inner.conf", "worker_priority 0;\n")
+    let c1 = config.load(root, "conf/nginx.conf")
+    assert(config.ok(c1), "p71 conf-prefix resolution: {config.render_conf(c1)}")
+    let r1 = config.render_conf(c1)
+    assert(
+        r1.
+            contains(
+            "d|main|worker_priority 0|{root}/conf/sub/inner.conf:1|via {root}/conf/nginx.conf:1",
+        ),
+        "p71 chain provenance: got\n{r1}",
+    )
+
+    // p30/p35: glob expansion, sorted; entries land in include order.
+    wr("{root}/conf/glob.conf", "include parts/*.conf;\nevents {{\n}}\n")
+    wr("{root}/conf/parts/zz.conf", "worker_priority 2;\n")
+    wr("{root}/conf/parts/aa.conf", "worker_priority 1;\n")
+    let c2 = config.load(root, "conf/glob.conf")
+    let r2 = config.render_conf(c2)
+    let aa = r2.find("worker_priority 1") else -1
+    let zz = r2.find("worker_priority 2") else -1
+    assert(aa >= 0 && zz >= 0, "p30 both glob files loaded: got\n{r2}")
+    assert(aa < zz, "p35 sorted expansion (aa before zz): got\n{r2}")
+
+    // p31: a glob matching nothing is EMPTY, not an error.
+    wr("{root}/conf/nomatch.conf", "include parts/nope-*.conf;\nevents {{\n}}\n")
+    let c3 = config.load(root, "conf/nomatch.conf")
+    assert(config.ok(c3), "p31 empty glob ok: {config.render_conf(c3)}")
+
+    // p32: a literal missing include is the open() shape, cited at
+    // the INCLUDING line.
+    wr("{root}/conf/missing.conf", "include gone.conf;\nevents {{\n}}\n")
+    let c4 = config.load(root, "conf/missing.conf")
+    let r4 = config.render_conf(c4)
+    assert(
+        r4.
+            contains(
+            "err|{root}/conf/missing.conf:1|open() \"{root}/conf/gone.conf\" failed (2: No such file or directory)",
+        ),
+        "p32 missing include: got\n{r4}",
+    )
+
+    // p34: the cycle the oracle segfaults on is a named error with
+    // the chain printed.
+    wr("{root}/conf/self.conf", "include self.conf;\nevents {{\n}}\n")
+    let c5 = config.load(root, "conf/self.conf")
+    let r5 = config.render_conf(c5)
+    assert(r5.contains("include cycle: \"{root}/conf/self.conf\""), "p34 cycle named: got\n{r5}")
+    assert(r5.contains("chain: {root}/conf/self.conf:1"), "p34 chain printed: got\n{r5}")
+
+    // p37: the mutual cycle, chain carrying both hops.
+    wr("{root}/conf/a.conf", "include b.conf;\nevents {{\n}}\n")
+    wr("{root}/conf/b.conf", "include a.conf;\n")
+    let c6 = config.load(root, "conf/a.conf")
+    let r6 = config.render_conf(c6)
+    assert(
+        r6.
+            contains(
+            "include cycle: \"{root}/conf/a.conf\" is already being loaded (chain: {root}/conf/a.conf:1 > {root}/conf/b.conf:1)",
+        ),
+        "p37 mutual cycle chain: got\n{r6}",
+    )
+
+    // p77/p78: include inside types and map bodies.
+    wr(
+        "{root}/conf/tym.conf",
+        "events {{\n}}\nhttp {{\n    types {{\n        include extra.types;\n        image/gif gif;\n    }}\n    map $http_host $x {{\n        include map.rows;\n        default zero;\n    }}\n}}\n",
+    )
+    wr("{root}/conf/extra.types", "text/html html;\n")
+    wr("{root}/conf/map.rows", "example.com one;\n")
+    let c7 = config.load(root, "conf/tym.conf")
+    assert(config.ok(c7), "p77/p78 include in data contexts: {config.render_conf(c7)}")
+    let r7 = config.render_conf(c7)
+    assert(
+        r7.contains("e|types|text/html html|{root}/conf/extra.types:1|via {root}/conf/tym.conf:5"),
+        "p77 included types entry with chain: got\n{r7}",
+    )
+    assert(
+        r7.contains("e|map|example.com one|{root}/conf/map.rows:1|via {root}/conf/tym.conf:9"),
+        "p78 included map entry with chain: got\n{r7}",
+    )
+
+    // A two-hop chain records every hop, not just the leaf.
+    wr("{root}/conf/hop0.conf", "include hop1.conf;\nevents {{\n}}\n")
+    wr("{root}/conf/hop1.conf", "include hop2.conf;\n")
+    wr("{root}/conf/hop2.conf", "worker_priority 3;\n")
+    let c8 = config.load(root, "conf/hop0.conf")
+    let r8 = config.render_conf(c8)
+    assert(
+        r8.
+            contains(
+            "d|main|worker_priority 3|{root}/conf/hop2.conf:1|via {root}/conf/hop0.conf:1 > {root}/conf/hop1.conf:1",
+        ),
+        "two-hop chain: got\n{r8}",
+    )
+    0
+}

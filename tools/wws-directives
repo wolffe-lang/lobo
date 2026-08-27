@@ -1,0 +1,51 @@
+#!/bin/sh
+# wws-directives — generate/check docs/directives.md from the
+# directive table (src/config/table.lu) through the built wws binary
+# (`wws directives-md`). The docs page is the drop-in story's public
+# ledger and is NEVER hand-edited: the gauntlet runs --check after
+# the tiers build; drift is a named failure telling the ritual.
+#
+#   tools/wws-directives --emit    regenerate docs/directives.md
+#   tools/wws-directives --check   regenerate and diff (default)
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+BIN=target/wws-debug
+if [ ! -x "$BIN" ]; then
+    echo "wws-directives: FAILED — $BIN is missing; run the gauntlet's build step first (wolf build ./src/main.lu -o $BIN)" >&2
+    exit 1
+fi
+
+mode="${1:---check}"
+tmp="target/directives.md.$$"
+if ! "$BIN" directives-md > "$tmp"; then
+    echo "wws-directives: FAILED — \`wws directives-md\` did not run" >&2
+    rm -f "$tmp"
+    exit 1
+fi
+
+case "$mode" in
+--emit)
+    mv "$tmp" docs/directives.md
+    echo "wws-directives: wrote docs/directives.md"
+    ;;
+--check)
+    if [ ! -f docs/directives.md ]; then
+        echo "wws-directives: FAILED — docs/directives.md is missing; run tools/wws-directives --emit and commit it with the table change" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+    if ! diff -u docs/directives.md "$tmp"; then
+        echo "wws-directives: FAILED — docs/directives.md drifted from the table; it is GENERATED (never hand-edited): run tools/wws-directives --emit and commit it with the table change" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+    rm -f "$tmp"
+    echo "wws-directives: docs/directives.md matches the table"
+    ;;
+*)
+    echo "usage: tools/wws-directives [--emit|--check]" >&2
+    rm -f "$tmp"
+    exit 2
+    ;;
+esac

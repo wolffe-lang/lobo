@@ -1,0 +1,65 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! Spans and line accounting — the provenance spine every later
+//! target rides (file:line through includes, -T). Oracle battery
+//! (nginx/1.30.4, 2026-08-27):
+//!   p19 `include "a\nb.conf";` → open() "a\nb.conf" failed ... in
+//!       nginx.conf:2 — a newline inside quotes is literal text AND
+//!       the line counter advances (the error cites line 2).
+//!   p20 `include a\` NL `b.conf;` → open() "a\<NL>b.conf" — a
+//!       backslash before the newline keeps BOTH bytes in the word:
+//!       nginx has no line continuation, and this is not one.
+//!   p50 CRLF config → syntax ok — CR is whitespace.
+//!   p51 BOM config → unknown directive "\xEF\xBB\xBFworker_priority"
+//!       — the BOM is word bytes, not trivia.
+//!   p49 comment between a directive's arguments → syntax ok.
+//!   p66 `;# comment` / `{#c` / `}#c` → syntax ok — a comment can
+//!       start immediately after any delimiter.
+
+use config
+
+fn check(src: str, want: str, what: str) {
+    let got = config.render(config.lex(src))
+    assert(got == want, "{what}: got\n{got}\nwant\n{want}")
+}
+
+fn main() -> int {
+    // Byte spans: `ab "c" ;` — word 0..2, quoted word 3..6 (quotes
+    // included), semi 7..8.
+    let spans = config.render_spans(config.lex("ab \"c\" ;"))
+    assert(spans == "w|ab|0..2|L1\nd|c|3..6|L1\n;|;|7..8|L1\n", "spans: got\n{spans}")
+    // p19: newline in quotes is literal; the token starts on line 1,
+    // the next token lands on line 2.
+    let nl = config.render_spans(config.lex("\"a\nb\" x;"))
+    assert(nl == "d|a\nb|0..5|L1\nw|x|6..7|L2\n;|;|7..8|L2\n", "p19 line count: got\n{nl}")
+    // p20: backslash-newline stays inside the word, which then spans
+    // two lines; the following token is on line 2.
+    let cont = config.render_spans(config.lex("a\\\nb c;"))
+    assert(
+        cont == "w|a\\\nb|0..4|L1\nw|c|5..6|L2\n;|;|6..7|L2\n",
+        "p20 backslash newline: got\n{cont}",
+    )
+    // p50: CRLF — CR is whitespace, tokens identical to LF input.
+    check("pid a;\r\nevents {{\r\n}}\r\n", "w|pid\nw|a\n;\nw|events\n{{\n}}\n", "p50 crlf")
+    // p51: a BOM is word bytes.
+    var bom_bytes = List[int]()
+    (mut bom_bytes).push(239)
+    (mut bom_bytes).push(187)
+    (mut bom_bytes).push(191)
+    let bom = str_from_utf8(bom_bytes) else ""
+    assert(!bom.is_empty(), "bom builds")
+    let bommed = config.render(config.lex("{bom}pid a;"))
+    assert(bommed == "w|{bom}pid\nw|a\n;\n", "p51 bom in word: got\n{bommed}")
+    // p49: a comment between arguments; the directive continues.
+    check("pid # zero\na;", "w|pid\nw|a\n;\n", "p49 comment between args")
+    // p66: comments straight after `;`, `{`, `}`.
+    check(
+        "pid a;# c\nevents {{#c\n}}#c\n",
+        "w|pid\nw|a\n;\nw|events\n{{\n}}\n",
+        "p66 comment after delims",
+    )
+    0
+}

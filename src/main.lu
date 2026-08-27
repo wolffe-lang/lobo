@@ -1,8 +1,14 @@
 //! wws — a production web server in wolf (working name). Entry file:
-//! version print and argument dispatch ONLY (the ws00 contract); real
-//! verbs arrive with shell/ at ws04. `main`'s legal shapes are E0414's:
-//! no parameters — arguments come through `env_args`, which drops
-//! argv[0].
+//! version print and argument dispatch. ws01 adds the nginx shell's
+//! config half: `-t`/`-T` with `-c <conf>` and `-p <prefix>`, exit
+//! codes per the oracle (0 ok / 1 failed), plus the maintenance verb
+//! `directives-md` the gauntlet's docs generator drives. `main`'s
+//! legal shapes are E0414's: no parameters — arguments come through
+//! `env_args`, which drops argv[0].
+//! Defaults: prefix "." and conf "conf/nginx.conf" under it (nginx
+//! defaults to its compile-time prefix; wws has no compile-time
+//! paths by design — recorded shell delta, harnesses always pass
+//! -p/-c explicitly).
 
 use config
 use http
@@ -28,23 +34,47 @@ fn banner() {
 
 /// One usage line; grows with shell/ at ws04.
 fn usage() {
-    print("usage: wws [-V | --version | help]")
+    print("usage: wws [-V | --version | help | -t | -T] [-c <conf>] [-p <prefix>] [directives-md]")
 }
 
 fn main() -> int {
     var mode = "banner"
     var bad = ""
+    var prefix = "."
+    var conf = "conf/nginx.conf"
+    var want = ""
     for a in env_args() {
-        if a == "-V" {
+        if want == "c" {
+            conf = a
+            want = ""
+        } else if want == "p" {
+            prefix = a
+            want = ""
+        } else if a == "-V" {
             mode = "version"
         } else if a == "--version" {
             mode = "version"
         } else if a == "help" {
             mode = "help"
+        } else if a == "-t" {
+            mode = "check"
+        } else if a == "-T" {
+            mode = "dump"
+        } else if a == "-c" {
+            want = "c"
+        } else if a == "-p" {
+            want = "p"
+        } else if a == "directives-md" {
+            mode = "docs"
         } else {
             mode = "bad"
             bad = a
         }
+    }
+    if !want.is_empty() {
+        eprint("wws: option -{want} requires an argument")
+        usage()
+        return 2
     }
     if mode == "banner" {
         banner()
@@ -56,6 +86,16 @@ fn main() -> int {
     }
     if mode == "help" {
         usage()
+        return 0
+    }
+    if mode == "check" {
+        return config.check(prefix, conf, false)
+    }
+    if mode == "dump" {
+        return config.check(prefix, conf, true)
+    }
+    if mode == "docs" {
+        print_raw(config.directives_markdown())
         return 0
     }
     eprint("wws: unknown argument `{bad}`")

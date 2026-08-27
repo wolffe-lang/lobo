@@ -1,0 +1,91 @@
+//! check: run(exit=0, stdout="corpus ratchet: 8 configs — 7 parse-clean / 1 named-delta / 0 silent")
+//! phase: run
+//! lanes: native checked
+//! stage-src: config
+//!
+//! THE RATCHET (contract target 4): the real-config corpus under
+//! tests/config-corpus/, every config classified, counts GATED, zero
+//! silent outcomes. fs lanes only (lupin has no fs by design). The
+//! oracle-parity half lives in tools/wws-confcheck (running child
+//! processes needs the sh harness — F-0065/wolf-lang#129, ws00's D3
+//! routing); THIS file is the wolf-side classification gate.
+//! Classes:
+//!   parse-clean — load() ok, zero named deltas (every directive
+//!                 under an implemented/planned row)
+//!   named-delta — load() ok, ≥1 named_error rows, each carried in
+//!                 Conf.delta_at/delta_note BY NAME (the class-C
+//!                 posture: lua-openresty's exhibit)
+//!   silent      — anything else would land here, and the count is
+//!                 pinned at ZERO: a structural error or an unnamed
+//!                 outcome in the corpus fails this test loudly.
+
+use config
+
+/// The corpus ratchet counts — the lane-coverage convention, applied
+/// to configs: RAISING a count is routine (add the corpus dir, bump
+/// the number, done); LOWERING one needs the reason spelled out in
+/// the commit message. The story so far (ws01 seed): 8 shapes —
+/// nginx's own distro default + mime.types, static site with
+/// gzip/expires, reverse proxy + upstream keepalive (the L002
+/// exhibit), a certbot-managed vhost (ACME webroot + ssl pair +
+/// options include), a redirect/rewrite farm, the fastcgi/php-fpm
+/// shape, a map + if config (the L001/L003 exhibits), and the
+/// OpenResty lua named_error exhibit — 7 parse clean, 1 carries its
+/// named delta, 0 silent anything.
+fn ratchet_configs() -> int {
+    8
+}
+
+fn ratchet_parse_clean() -> int {
+    7
+}
+
+fn ratchet_named_delta() -> int {
+    1
+}
+
+fn main() -> int {
+    let root = "tests/config-corpus"
+    let names = fs_read_dir(root) else |e| {
+        assert(false, "corpus root missing: {root}")
+        return 1
+    }
+    var configs: int = 0
+    var clean: int = 0
+    var delta: int = 0
+    for nm in names {
+        if fs_is_dir("{root}/{nm}") {
+            configs = configs + 1
+            let c = config.load("{root}/{nm}", "nginx.conf")
+            if !config.ok(c) {
+                assert(false, "SILENT-OR-BROKEN corpus config {nm}: {config.render_conf(c)}")
+            } else if config.delta_count(c) > 0 {
+                delta = delta + 1
+                // Named means NAMED: every delta row carries its note.
+                var i: int = 0
+                while i < config.delta_count(c) {
+                    assert(!c.delta_note[i].is_empty(), "unnamed delta in {nm}")
+                    i = i + 1
+                }
+            } else {
+                clean = clean + 1
+            }
+        }
+    }
+    assert(
+        configs == ratchet_configs(),
+        "config count moved: {configs} vs ratchet {ratchet_configs()} — raising is routine (bump the constant with the new corpus dir); silent shrinkage is not",
+    )
+    assert(
+        clean == ratchet_parse_clean(),
+        "parse-clean moved: {clean} vs ratchet {ratchet_parse_clean()}",
+    )
+    assert(
+        delta == ratchet_named_delta(),
+        "named-delta moved: {delta} vs ratchet {ratchet_named_delta()}",
+    )
+    print(
+        "corpus ratchet: {configs} configs — {clean} parse-clean / {delta} named-delta / 0 silent",
+    )
+    0
+}

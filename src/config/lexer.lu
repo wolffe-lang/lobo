@@ -1,0 +1,318 @@
+//! member: true
+//! config/lexer — the nginx.conf lexer, implemented against the PINNED
+//! ORACLE (nginx/1.30.4, tests/differential/NGINX-PIN), not against the
+//! docs and not against the ws01 contract's sketch where the oracle
+//! disagreed. Every rule here cites a probe transcript (p-numbers) from
+//! the ws01 oracle battery; the probe tests under tests/config/ carry
+//! the transcripts verbatim. The two contract corrections the battery
+//! forced, recorded loudly:
+//!   - Quotes do NOT glue. `"a b"c` is `[emerg] unexpected "c"` (p02,
+//!     p05, p07): after a closing quote the oracle demands whitespace,
+//!     `;` or `{` — anything else is a named error. The contract's
+//!     "a bc" claim was folklore.
+//!   - Inside quotes only `\"` `\'` `\\` splice (p10, p12, p15);
+//!     `\{` keeps its backslash (p11). The contract's `\{` `\}` escape
+//!     claim was folklore too.
+//! The rules the battery CONFIRMED: a word ends at whitespace/`;`/`{`
+//! (p03, p64) but NOT at `}` (p68) and not at `#` (p18); `{` directly
+//! after `$` is consumed into the word with its closing `}` (p63, p69,
+//! p70) while `;` still terminates even inside `${` (p67); a bare `\`
+//! defuses the next byte's delimiter role and is KEPT in the text
+//! (p14, p17), including a newline (p20) — nginx has no line
+//! continuation, and this is not one: both bytes stay in the word;
+//! `}` and text inside quotes are literal (p13, p19); a comment runs
+//! `#` to EOL and may sit between a directive's arguments (p49); a
+//! UTF-8 BOM is word bytes, not trivia (p51).
+//! Spans: every token carries byte offsets into the source and the
+//! 1-based line of its start — the provenance spine -T rides.
+
+/// The lexed token stream for one source text, as parallel columns
+/// (index i across all lists is one token). `kinds` entries: "w" bare
+/// word, "d" double-quoted word, "s" single-quoted word, ";", "{",
+/// "}". `texts` holds the word VALUE (quotes stripped, `\"` `\'` `\\`
+/// spliced; bare words keep every byte including backslashes, exactly
+/// as the oracle passes them to directives). `starts`/`ends` are byte
+/// offsets (quoted words include their quotes), `lines` the 1-based
+/// start line. `err` is "" on success, else the oracle-shaped message
+/// with `err_line` its line. The stream is a value: nothing here
+/// mutates after `lex` returns.
+pub struct Toks {
+    kinds: List[str],
+    texts: List[str],
+    starts: List[int],
+    ends: List[int],
+    lines: List[int],
+    err: str,
+    err_line: int,
+}
+
+/// True for the oracle's whitespace set: space, tab, CR, LF (p50
+/// proves CRLF configs lex clean — CR is whitespace, not word bytes).
+fn is_ws(b: int) -> bool {
+    b == 32 || b == 9 || b == 13 || b == 10
+}
+
+/// One UTF-8 character at byte offset `i`, for `unexpected "<c>"`
+/// messages. Probes widths 1..4 with `get`, which refuses non-boundary
+/// slices, so a multi-byte character renders whole. "?" only when `i`
+/// is out of range.
+fn char_at(src: str, i: int) -> str {
+    var w: int = 1
+    while w <= 4 {
+        let piece = src.get(i..i + w) else ""
+        if !piece.is_empty() {
+            return piece
+        }
+        w = w + 1
+    }
+    "?"
+}
+
+/// Splice the three quoted-string escapes the oracle unescapes —
+/// `\"` `\'` `\\` (p10, p15, p12) — and keep every other backslash
+/// byte-for-byte (p11: `\{` stays `\{`).
+fn unescape_quoted(inner: str) -> str {
+    var out = ""
+    var run: int = 0
+    var i: int = 0
+    var esc = false
+    for b in inner.bytes() {
+        if esc {
+            if b == 34 || b == 39 || b == 92 {
+                out = "{out}{inner[run..i - 1]}"
+                run = i
+            }
+            esc = false
+        } else if b == 92 {
+            esc = true
+        }
+        i = i + 1
+    }
+    "{out}{inner[run..inner.len]}"
+}
+
+/// Append one token to the columns.
+fn push_tok(mut t: Toks, kind: str, text: str, s: int, e: int, ln: int) {
+    (mut t.kinds).push(kind)
+    (mut t.texts).push(text)
+    (mut t.starts).push(s)
+    (mut t.ends).push(e)
+    (mut t.lines).push(ln)
+}
+
+/// Lex one config source. Total: errors land in `Toks.err` in the
+/// oracle's message shape, never as traps — a config file is caller
+/// data (§10), and the caller gets the same sentence nginx prints.
+pub fn lex(src: str) -> Toks {
+    var t = Toks {
+        kinds: List[str](),
+        texts: List[str](),
+        starts: List[int](),
+        ends: List[int](),
+        lines: List[int](),
+        err: "",
+        err_line: 0,
+    }
+    // states: 0 between tokens, 1 bare word, 2 double-quoted,
+    // 3 single-quoted, 4 comment, 5 just past a closing quote
+    // (delimiter required — p02/p07/p73/p74), 6 done (error).
+    var state: int = 0
+    var esc = false
+    var prev_dollar = false
+    var start: int = 0
+    var startline: int = 1
+    var line: int = 1
+    var i: int = 0
+    for b in src.bytes() {
+        if state == 0 {
+            if is_ws(b) {} else if b == 35 {
+                state = 4
+            } else if b == 34 {
+                state = 2
+                start = i
+                startline = line
+                esc = false
+            } else if b == 39 {
+                state = 3
+                start = i
+                startline = line
+                esc = false
+            } else if b == 59 {
+                push_tok(mut t, ";", ";", i, i + 1, line)
+            } else if b == 123 {
+                push_tok(mut t, "{{", "{{", i, i + 1, line)
+            } else if b == 125 {
+                push_tok(mut t, "}}", "}}", i, i + 1, line)
+            } else {
+                state = 1
+                start = i
+                startline = line
+                esc = b == 92
+                prev_dollar = b == 36
+            }
+        } else if state == 1 {
+            if esc {
+                esc = false
+                prev_dollar = false
+            } else if b == 92 {
+                esc = true
+                prev_dollar = false
+            } else if is_ws(b) {
+                push_tok(mut t, "w", src[start..i], start, i, startline)
+                state = 0
+            } else if b == 59 {
+                push_tok(mut t, "w", src[start..i], start, i, startline)
+                push_tok(mut t, ";", ";", i, i + 1, line)
+                state = 0
+            } else if b == 123 {
+                if prev_dollar {
+                    prev_dollar = false
+                } else {
+                    push_tok(mut t, "w", src[start..i], start, i, startline)
+                    push_tok(mut t, "{{", "{{", i, i + 1, line)
+                    state = 0
+                }
+            } else {
+                prev_dollar = b == 36
+            }
+        } else if state == 2 || state == 3 {
+            if esc {
+                esc = false
+            } else if b == 92 {
+                esc = true
+            } else if state == 2 && b == 34 || state == 3 && b == 39 {
+                let kind = if state == 2 { "d" } else { "s" }
+                push_tok(mut t, kind, unescape_quoted(src[start + 1..i]), start, i + 1, startline)
+                state = 5
+            }
+        } else if state == 4 {
+            if b == 10 {
+                state = 0
+            }
+        } else if state == 5 {
+            if is_ws(b) {
+                state = 0
+            } else if b == 59 {
+                push_tok(mut t, ";", ";", i, i + 1, line)
+                state = 0
+            } else if b == 123 {
+                push_tok(mut t, "{{", "{{", i, i + 1, line)
+                state = 0
+            } else {
+                t.err = "unexpected \"{char_at(src, i)}\""
+                t.err_line = line
+                state = 6
+            }
+        }
+        if b == 10 {
+            line = line + 1
+        }
+        i = i + 1
+    }
+    if state == 1 {
+        push_tok(mut t, "w", src[start..i], start, i, startline)
+    }
+    if state == 2 || state == 3 {
+        // p72: EOF inside a quoted string is the oracle's generic
+        // unterminated-directive sentence, at the EOF line.
+        t.err = "unexpected end of file, expecting \";\" or \"}}\""
+        t.err_line = line
+    }
+    t
+}
+
+/// Render the stream one token per line as `kind|text` — the probe
+/// tests' assertion surface. Errors render as `err|<line>|<message>`
+/// on the final line.
+pub fn render(t: Toks) -> str {
+    var out = ""
+    var i: int = 0
+    while i < t.kinds.len {
+        let kind = t.kinds[i]
+        if kind == "w" || kind == "d" || kind == "s" {
+            out = "{out}{kind}|{t.texts[i]}\n"
+        } else {
+            out = "{out}{kind}\n"
+        }
+        i = i + 1
+    }
+    if !t.err.is_empty() {
+        out = "{out}err|{t.err_line}|{t.err}\n"
+    }
+    out
+}
+
+/// Render with spans: `kind|text|start..end|L<line>` per token — what
+/// pins the provenance spine.
+pub fn render_spans(t: Toks) -> str {
+    var out = ""
+    var i: int = 0
+    while i < t.kinds.len {
+        out = "{out}{t.kinds[i]}|{t.texts[i]}|{t.starts[i]}..{t.ends[i]}|L{t.lines[i]}\n"
+        i = i + 1
+    }
+    out
+}
+
+/// Variable segmentation of one word VALUE, one segment per line:
+/// `lit|<text>` or `var|<name>`. Syntax only — evaluation is a later
+/// sprint; the model records the segmentation so `-T` prints
+/// faithfully and later sprints get spans for free. `$name` takes
+/// ASCII alphanumerics and `_`; `${name}` takes anything to the `}`.
+/// A `$` that opens neither form is literal text (p69's lone `$v`
+/// keeps its `}` as literal). An unclosed `${` is literal from the
+/// `$` (p67's `a${v.conf` carries it verbatim).
+pub fn word_segments(text: str) -> str {
+    var out = ""
+    var lit_run: int = 0
+    var i: int = 0
+    let bs = text.bytes()
+    let n = bs.len
+    while i < n {
+        if bs[i] == 36 && i + 1 < n {
+            var name = ""
+            var next: int = i
+            if bs[i + 1] == 123 {
+                var j: int = i + 2
+                while j < n && bs[j] != 125 {
+                    j = j + 1
+                }
+                if j < n {
+                    name = text[i + 2..j]
+                    next = j + 1
+                }
+            } else {
+                var j: int = i + 1
+                while j < n && is_name_byte(bs[j]) {
+                    j = j + 1
+                }
+                if j > i + 1 {
+                    name = text[i + 1..j]
+                    next = j
+                }
+            }
+            if !name.is_empty() {
+                if lit_run < i {
+                    out = "{out}lit|{text[lit_run..i]}\n"
+                }
+                out = "{out}var|{name}\n"
+                i = next
+                lit_run = i
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    if lit_run < n {
+        out = "{out}lit|{text[lit_run..n]}\n"
+    }
+    out
+}
+
+/// True for the bytes an unbraced variable name takes: ASCII letters,
+/// digits, `_`.
+fn is_name_byte(b: int) -> bool {
+    b >= 97 && b <= 122 || b >= 65 && b <= 90 || b >= 48 && b <= 57 || b == 95
+}
