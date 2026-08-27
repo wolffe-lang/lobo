@@ -266,6 +266,34 @@ fn write_all(conn: int, s: str) -> () ! {closed, io} {
     net_write(conn, s)?
 }
 
+/// Write a raw byte body to `conn` (wsm01, s115's net byte path —
+/// wolf-lang#137 delivered): the write that carries a BINARY static
+/// file, which the str tier could not represent (deferral D8). An
+/// `invalid` element cannot occur here — the bytes come from the fs
+/// byte tier, which yields only 0..255 — so it folds to `io` (a
+/// truthful coarsening should a future pin reach it). The sentinel
+/// shape is the W0305 dodge (see shell.control_send).
+fn write_bytes_all(conn: int, body: List[int]) -> () ! {closed, io} {
+    var errc = 0
+    net_write_bytes(conn, body) else |e| match e {
+        closed => {
+            errc = 1
+        },
+        invalid => {
+            errc = 2
+        },
+        io => {
+            errc = 2
+        },
+    }
+    if errc == 1 {
+        return closed
+    }
+    if errc == 2 {
+        return io
+    }
+}
+
 /// Build a complete error response (status line + headers + default
 /// body). Errors always close the connection (Connection: close).
 /// `code` picks the phrase and body; `special_header_body` swaps in
@@ -488,19 +516,23 @@ fn serve_file(
 
     // small files: read whole BEFORE the headers, so a read failure
     // is a clean 500. The 65536 threshold is the stream boundary.
+    // BYTES, not text (wsm01, s115/#137): a static file is bytes —
+    // a PNG, a gzip, a favicon — and the old `fs_read_text` 500'd on
+    // the first non-UTF-8 byte (deferral D8, now retired here).
     if size <= 65536 {
-        let body = fs_read_text(path) else |_| {
+        let body = fs_read_bytes(path) else |_| {
             send_err(conn, 500, false, token)
             return true
         }
         write_all(conn, head)?
-        write_all(conn, body)?
+        write_bytes_all(conn, body)?
         return !keep
     }
 
     // large files: headers first (Content-Length is known), then
-    // stream in bounded chunks. A mid-stream read error can only
-    // close — bytes are already on the wire.
+    // stream in bounded byte chunks (fs_read_chunk has no utf8 row —
+    // a lone 0x80 is data). A mid-stream read error can only close —
+    // bytes are already on the wire.
     write_all(conn, head)?
     let fd = fs_open(path) else |_| {
         // could not even open after stat: nothing sent yet past head,
@@ -509,22 +541,23 @@ fn serve_file(
     }
     var streaming = true
     while streaming {
-        let chunk = fs_read(fd, 65536) else |e| match e {
+        var bad = false
+        let chunk = fs_read_chunk(fd, 65536) else |e| match e {
             eof => {
                 streaming = false
-                ""
+                List[int]()
             },
             io => {
-                fs_close(fd) else |_| {}
-                return true
-            },
-            utf8 => {
-                fs_close(fd) else |_| {}
-                return true
+                bad = true
+                List[int]()
             },
         }
-        if !chunk.is_empty() {
-            write_all(conn, chunk)?
+        if bad {
+            fs_close(fd) else |_| {}
+            return true
+        }
+        if chunk.len > 0 {
+            write_bytes_all(conn, chunk)?
         }
     }
     fs_close(fd) else |_| {}

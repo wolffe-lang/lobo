@@ -96,5 +96,11 @@ if ! tools/wws-shell; then
     exit 1
 fi
 
+step "signal (real SIGHUP/QUIT/TERM drive the drain; Linux, else named skip)"
+if ! tools/wws-signal; then
+    echo "wws-gauntlet: FAILED at signal — the real-signal witness (wsm01)" >&2
+    exit 1
+fi
+
 echo ""
 echo "wws-gauntlet: GREEN"

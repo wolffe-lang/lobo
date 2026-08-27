@@ -110,7 +110,8 @@ sprint deliberately does not serialize the accept path against a reader.
 
 Emitted through the logging seam (ws02 — `wws: [notice] <event>` on
 stderr today; ws09 reformats these into JSON, ws12 into metrics). The
-event NAMES and FIELD KEYS are a stable contract. Five events:
+event NAMES and FIELD KEYS are a stable contract. Six events (the
+sixth is wsm01's EXTENSION — appended, nothing renamed):
 
 | event | fields | emitted when |
 |-------|--------|--------------|
@@ -119,6 +120,7 @@ event NAMES and FIELD KEYS are a stable contract. Five events:
 | `generation-draining` | `gen`, `held` | a generation stops accepting and begins draining, still holding `held` connections |
 | `connection-retired` | `gen`, `remaining` | one connection on a draining generation closed; `remaining` still held |
 | `generation-retired` | `gen`, `drained`, `aborted`, `age-ms` | a draining generation reached zero (or timed out): `drained` closed cleanly, `aborted` force-closed by the timeout |
+| `signal-received` | `sig`, `verb` | a real OS signal arrived and was mapped to an operator verb (wsm01): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb — the line that tells a signal-driven reload from a control-channel one |
 
 Example lifecycle of one reloaded-away generation holding two
 connections, both closing cleanly:
@@ -130,16 +132,33 @@ wws: [notice] connection-retired gen=1 remaining=0
 wws: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840
 ```
 
-## Trigger disposition (control channel vs signal)
+## Trigger disposition (control channel AND signals — the wsm01 flip)
 
-The drain is triggered by a `reload`/`quit` over the CONTROL CHANNEL —
-ws04's shipped path, the working trigger at this pin and the Windows
-reload story. Signal RECEPTION (a real `SIGHUP`/`SIGQUIT` triggering the
-same verbs) is wolf-lang #126 / s114; the wws toolchain pin is s109,
-which does NOT include it, so the signal path is the campaign's named
-deferral. Both triggers flow through the SAME verb dispatch, so the
-signal path joins these same tests the sprint after #126 lands on the
-pin — no drain logic changes, only the trigger.
+Both triggers are REAL now and flow through the ONE verb dispatch
+ws04 built:
+
+- **Signals** (wsm01, s114 in the s115 pin): a genuine `SIGHUP` is
+  `reload`, `SIGTERM` is `stop` (fast shutdown), `SIGQUIT` is `quit`
+  (graceful drain-then-exit) — the platform meanings. Delivery is
+  Linux-full at this pin; other unixes follow wolf's task-layer port
+  and Windows has no HUP/USR2 at all ([os.signal.platform]) — where
+  the listen refuses, the server says so at startup and runs
+  control-channel-only. The serve loop polls the signal queue
+  spawn-free by SELF-RAISING the probe meaning (UPGRADE's bit) each
+  pass and waiting once — FIFO delivery returns any real pending
+  signal first and the probe bounds the wait. Named residue: a real
+  outside `SIGUSR2` is indistinguishable from the probe and ignored
+  until the binary-swap sprint claims UPGRADE; and with no getpid
+  surface yet, the pid FILE still records the control endpoint, so
+  `wws -s reload` still sends over the channel while `kill -HUP`
+  needs the pid from the process table.
+- **The control channel** (ws04) STAYS: the portable trigger, the
+  Windows reload story, and the transport for `status`.
+
+The real-signal witness is `tools/wws-signal` (a gauntlet step): a
+held connection, a real `kill -HUP`, the observable drain, retirement,
+then `SIGQUIT`/`SIGTERM` shutdowns — including `SIGTERM` against a
+server with NO control directive, because signals need no channel.
 
 ## Witnesses
 
@@ -153,4 +172,7 @@ pin — no drain logic changes, only the trigger.
 - `tests/shell/quit_drains.lu` — `-s quit` drains then exits, status
   shows `quitting: true`.
 - `tests/shell/status_surface.lu` — the pure shapes (all three lanes):
-  the hash, the timeout parse, the event vocabulary, the stanza builders.
+  the hash, the timeout parse, the event vocabulary, the stanza
+  builders, and the signal meaning/verb map.
+- `tools/wws-signal` — the REAL-SIGNAL witness (wsm01): `kill -HUP`
+  drives the observable drain end-to-end; Linux, named skip elsewhere.

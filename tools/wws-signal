@@ -1,0 +1,174 @@
+#!/bin/sh
+# wws-signal — the REAL-SIGNAL witness (wsm01, s114 in the pin): a
+# genuine SIGHUP / SIGQUIT / SIGTERM — sent with kill(1), the test
+# harness's signal path; the server's os pid is the shell's `$!`,
+# because nothing in wolf exposes a getpid yet (the named residue —
+# the pid FILE still records the control endpoint) — drives the SAME
+# observable drain ws08's control-channel tests pin:
+#   1. a held keepalive connection puts generation 1 at live=1;
+#   2. a REAL `kill -HUP` reloads: gen 1 DRAINING live=1 while gen 2
+#      serves new connections (byte-checked against the new root);
+#   3. the holder closes: gen 1 RETIRES;
+#   4. a REAL `kill -QUIT` drains and exits 0, pid file removed;
+#   5. a REAL `kill -TERM` is the fast shutdown — witnessed on a
+#      server with NO control directive at all, which is the point:
+#      signals need no channel.
+# The log-event trail (`signal-received sig=… verb=…`, the wsm01
+# vocabulary extension) is asserted so a signal-driven reload is
+# distinguishable from a control-channel one.
+#
+# Linux-only at this pin ([os.signal.platform]: delivery is
+# Linux-full; other unixes follow the task-layer port; Windows has no
+# HUP at all) — elsewhere this harness SKIPS, by name, exit 0. The
+# control channel remains the portable trigger and its tests gate on
+# every platform.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+case "$(uname -s)" in
+Linux) ;;
+*)
+    echo "wws-signal: SKIPPED — s114 signal delivery is Linux-full at this pin; non-Linux follows the task-layer port (named platform gap)"
+    exit 0
+    ;;
+esac
+
+WWS="$(pwd)/target/wws-release"
+if [ ! -x "$WWS" ]; then
+    echo "wws-signal: FAILED — $WWS missing; the gauntlet's build step makes it" >&2
+    exit 1
+fi
+
+scratch="target/wws-signal"
+rm -rf "$scratch"
+mkdir -p "$scratch/A" "$scratch/B"
+echo "SIG-GEN-A" > "$scratch/A/index.html"
+echo "SIG-GEN-B" > "$scratch/B/index.html"
+
+red=0
+total=0
+say() { echo "wws-signal: $1"; }
+check() { # check <desc> <ok(0/1)>
+    total=$((total + 1))
+    if [ "$2" = 0 ]; then
+        say "ok — $1"
+    else
+        say "FAILED — $1" >&2
+        red=$((red + 1))
+    fi
+}
+
+hp=$("$WOLF" run ./tests/rig/freeport.lu)
+ctp=$("$WOLF" run ./tests/rig/freeport.lu)
+conf="$scratch/wws.conf"
+render() { # render <root>
+    printf 'pid %s/wws.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+        "$scratch" "$ctp" "$hp" "$1" > "$conf"
+}
+render "$scratch/A"
+
+"$WWS" serve -p . -c "$conf" 2> "$scratch/wws.log" &
+pid=$!
+
+# status text via the wws CLI (reads the pid file's control endpoint)
+status_text() { "$WWS" status -p . -c "$conf" 2>/dev/null; }
+poll() { # poll <desc> <grep-pattern> — up to ~8s
+    i=0
+    while [ $i -lt 80 ]; do
+        if status_text | grep -q "$2"; then
+            check "$1" 0
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    say "status at timeout: $(status_text | tr '\n' ' | ')" >&2
+    check "$1" 1
+    return 1
+}
+
+poll "server up, generation 1 current" "generation 1: current"
+
+# 1. hold a keepalive connection on generation 1
+"$WOLF" run ./tests/rig/holdconn.lu "$hp" 4000 > "$scratch/hold.out" 2> "$scratch/hold.err" &
+holder=$!
+poll "held connection counted (gen 1 live=1)" "generation 1: current live=1"
+
+# 2. REAL SIGHUP — the reload trigger. Swap the root first so the new
+# generation is observably different.
+render "$scratch/B"
+kill -HUP "$pid"
+poll "SIGHUP drains gen 1 (draining live=1)" "generation 1: draining live=1"
+poll "generation 2 current while gen 1 drains" "generation 2: current"
+
+# gen 2 serves a NEW connection while gen 1 still drains
+printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
+body=$("$WOLF" run ./tests/rig/diffsend.lu "$hp" "$scratch/req.txt" 2>/dev/null)
+case "$body" in
+*SIG-GEN-B*) check "new connection served by generation 2 during the drain" 0 ;;
+*) check "new connection served by generation 2 during the drain (got: $(printf '%s' "$body" | tail -c 60))" 1 ;;
+esac
+
+# 3. the holder closes -> generation 1 retires
+wait "$holder"
+check "holder exited cleanly" $?
+i=0
+while [ $i -lt 80 ]; do
+    if status_text | grep -q "generation 1:"; then sleep 0.1; i=$((i + 1)); else break; fi
+done
+if status_text | grep -q "generation 1:"; then
+    check "generation 1 retired after the held connection closed" 1
+else
+    check "generation 1 retired after the held connection closed" 0
+fi
+
+# 4. REAL SIGQUIT — graceful drain-then-exit
+kill -QUIT "$pid"
+wait "$pid"
+check "SIGQUIT exits 0 (graceful quit)" $?
+if [ -f "$scratch/wws.pid" ]; then
+    check "pid file removed on quit" 1
+else
+    check "pid file removed on quit" 0
+fi
+
+# the log-event trail: the signal path names itself
+for ev in \
+    "signal-received sig=reload verb=reload" \
+    "signal-received sig=quit verb=quit" \
+    "generation-draining gen=1 held=1" \
+    "generation-retired gen=1 drained=1"; do
+    if grep -q "$ev" "$scratch/wws.log"; then
+        check "log event: $ev" 0
+    else
+        check "log event: $ev" 1
+    fi
+done
+
+# 5. REAL SIGTERM on a server with NO control directive: the fast
+# shutdown needs no channel (nginx parity: `kill -TERM` always works).
+printf 'pid %s/wws2.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+    "$scratch" "$hp" "$scratch/A" > "$scratch/wws2.conf"
+"$WWS" serve -p . -c "$scratch/wws2.conf" 2> "$scratch/wws2.log" &
+pid2=$!
+i=0
+while [ $i -lt 80 ]; do
+    if grep -q "generation-activated gen=1" "$scratch/wws2.log" 2>/dev/null; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+kill -TERM "$pid2"
+wait "$pid2"
+check "SIGTERM exits 0 with no control channel configured" $?
+if grep -q "signal-received sig=terminate verb=stop" "$scratch/wws2.log"; then
+    check "log event: signal-received sig=terminate verb=stop" 0
+else
+    check "log event: signal-received sig=terminate verb=stop" 1
+fi
+
+if [ "$red" != 0 ]; then
+    echo "wws-signal: RED — $red of $total checks failed (logs under $scratch/)" >&2
+    exit 1
+fi
+echo "wws-signal: $total/$total checks green (a real SIGHUP drove the observable drain)"

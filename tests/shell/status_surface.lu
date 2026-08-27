@@ -88,5 +88,29 @@ fn main() -> !int {
     let full = "{jopen}{jobj}{shell.status_json_close()}"
     assert(!full.contains("\n"), "the JSON stanza is a single line")
 
+    // ---- the signal surface (wsm01, s114 in the pin), PURE half:
+    // the meaning constants, the meaning→verb map every trigger
+    // shares, and the vocabulary EXTENSION event. The real delivery
+    // is witnessed by tools/wws-signal against the live binary.
+    assert(shell.sig_reload() == 1, "RELOAD is bit 1 (SIGHUP)")
+    assert(shell.sig_terminate() == 2, "TERMINATE is bit 2 (SIGTERM)")
+    assert(shell.sig_quit() == 4, "QUIT is bit 4 (SIGQUIT)")
+    assert(shell.sig_mask() == 7, "the operator mask is RELOAD|TERMINATE|QUIT")
+    assert(shell.sig_probe() == 8, "the probe rides the UPGRADE bit (SIGUSR2)")
+    assert(shell.signal_verb(1) == "reload", "SIGHUP drives the reload verb")
+    assert(shell.signal_verb(2) == "stop", "SIGTERM drives the stop verb (fast shutdown)")
+    assert(shell.signal_verb(4) == "quit", "SIGQUIT drives the quit verb (graceful)")
+    assert(shell.signal_verb(8).is_empty(), "the probe maps to no verb")
+    assert(shell.signal_verb(0).is_empty(), "an unknown meaning maps to no verb")
+    assert(shell.signal_name(1) == "reload", "meaning 1 names reload")
+    assert(shell.signal_name(2) == "terminate", "meaning 2 names terminate")
+    assert(shell.signal_name(4) == "quit", "meaning 4 names quit")
+    assert(shell.signal_name(9) == "unknown", "a non-meaning names unknown")
+    let sev = shell.ev_signal_received(1)
+    assert(
+        sev == "signal-received sig=reload verb=reload",
+        "the signal-received event shape: {sev}",
+    )
+
     0
 }
