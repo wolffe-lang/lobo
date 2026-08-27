@@ -1,0 +1,58 @@
+//! check: run(exit=0, stdout="matrix ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: proxy http config
+//!
+//! The proxy_pass rewrite PROBE MATRIX — ≥12 cells, each pinned
+//! against the pinned oracle (nginx/1.30.4) FIRST, then asserted here.
+//! The oracle's upstream request-target for each (location prefix,
+//! proxy_pass with/without URI, request path) cell was recorded by a
+//! backend that logged the request line it received (the transcript is
+//! in the sprint status). The rule the matrix proves:
+//!   - no URI in proxy_pass  → request path forwarded UNCHANGED.
+//!   - URI present           → matched prefix replaced by the URI,
+//!                             remainder appended; query preserved.
+//! This is PURE (proxy.rewrite_target), so it runs on all three lanes
+//! and is the spec for the slash arithmetic implementations diverge on.
+
+use proxy
+
+/// One matrix cell: assert rewrite_target(matched, has_uri, uri, path,
+/// query) equals the oracle-pinned `want`. Traps with the cell label
+/// on a miss.
+fn cell(label: str, matched: str, has_uri: bool, uri: str, path: str, query: str, want: str) {
+    let got = proxy.rewrite_target(matched, has_uri, uri, path, query)
+    assert(got == want, "{label}: got `{got}` want `{want}`")
+}
+
+fn main() -> int {
+    // no-URI proxy_pass: path forwarded unchanged
+    cell("c1 root/no-uri", "/", false, "", "/z/deep", "", "/z/deep")
+    cell("c2 pfx/no-uri", "/a1/", false, "", "/a1/x/y", "", "/a1/x/y")
+    // URI = "/" replaces the matched prefix
+    cell("c3 pfx->slash", "/a2/", true, "/", "/a2/x/y", "", "/x/y")
+    // URI = "/v2/" replaces "/a3/"
+    cell("c4 pfx->v2slash", "/a3/", true, "/v2/", "/a3/x/y", "", "/v2/x/y")
+    // no-trailing prefix, no-trailing uri
+    cell("c5 noslash->v2", "/a4", true, "/v2", "/a4/x/y", "", "/v2/x/y")
+    // trailing prefix, NO-trailing uri → concatenation glue (/v2 + x/y)
+    cell("c6 slash->v2", "/a5/", true, "/v2", "/a5/x/y", "", "/v2x/y")
+    // no-trailing prefix, trailing uri → double slash (/v2/ + /x/y)
+    cell("c7 noslash->v2slash", "/a6", true, "/v2/", "/a6/x/y", "", "/v2//x/y")
+    // exact location: whole match replaced
+    cell("c8 exact", "/a7", true, "/new", "/a7", "", "/new")
+    // query preserved on the URI branch
+    cell("c9 query-uri", "/a3/", true, "/v2/", "/a3/x", "q=1", "/v2/x?q=1")
+    // query preserved on the no-URI branch
+    cell("c10 query-nouri", "/", false, "", "/z/deep", "a=1&b=2", "/z/deep?a=1&b=2")
+    // matched prefix == path (URI branch, empty remainder)
+    cell("c11 empty-remainder", "/api/", true, "/v2/", "/api/", "", "/v2/")
+    // server-root proxy (matched ""), no-URI
+    cell("c12 rootmatch-nouri", "", false, "", "/anything/here", "", "/anything/here")
+    // server-root proxy (matched ""), URI present → prepend uri to whole path
+    cell("c13 rootmatch-uri", "", true, "/base", "/deep/leaf", "", "/base/deep/leaf")
+
+    print("matrix ok")
+    0
+}

@@ -1,0 +1,89 @@
+//! check: run(exit=0, stdout="502 ok\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: proxy http config obs serve
+//!
+//! The 502 path, live and end-to-end: wws proxies to a DEAD upstream
+//! (a port bound then closed → connect refused) and must answer the
+//! client "502 Bad Gateway" with the gateway shape the oracle draws
+//! (probed: Content-Type text/html, Connection close, the nginx error
+//! page modulo the server-identity footer — the documented ws02 error-
+//! body delta). No spawn: connect-refused is immediate, so proxy.run
+//! writes the 502 and returns synchronously (native + checked both).
+//! The client conn is one end of a loopback pair; we read the other.
+
+use config
+use http
+use proxy
+
+/// A definitely-refused loopback port: bind one, learn it, close it.
+/// Row: net io.
+fn dead_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0")?
+    let p = net_port(l)?
+    net_close(l)?
+    p
+}
+
+fn status_line(reply: str) -> str {
+    let eol = reply.find("\r\n") else reply.len
+    reply[0..eol]
+}
+
+fn header_block(reply: str) -> str {
+    let cut = reply.find("\r\n\r\n") else reply.len
+    reply[0..cut]
+}
+
+fn main() -> !int {
+    let dp = dead_port()?
+    // a config whose only location proxies to the dead port
+    let src = "http {{ server {{ listen 127.0.0.1:8080; location / {{ proxy_pass http://127.0.0.1:{dp}/; }} }} }}"
+    let c = config.parse_str(src, "dead.conf")
+    let lim = http.default_limits()
+    let req = http.parse_request("GET /x HTTP/1.1\r\nHost: front", lim) else |_| {
+        assert(false, "req parse")
+        return 1
+    }
+    let pl = proxy.plan(c, "/x")
+    assert(pl.is_proxy, "must be a proxy location")
+
+    // a loopback pair: `cli` is the proxy's client-facing conn, `rd`
+    // our read end (dial first, then accept — the F-0049 discipline)
+    let l = net_listen("127.0.0.1:0")?
+    let lport = net_port(l)?
+    let cli = net_connect("127.0.0.1:{lport}")?
+    let rd = net_accept(l)?
+
+    let date = "Thu, 01 Jan 2026 00:00:00 GMT"
+    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "wws/0.1.0", date, false) else |_| {
+        assert(false, "proxy.run should not raise on a refused upstream")
+        return 1
+    }
+    assert(close, "a 502 always closes the connection")
+    net_close(cli)?
+
+    // read the reply the proxy wrote to the client
+    net_deadline(rd, 2000)?
+    var reply = ""
+    var more = true
+    while more {
+        let piece = net_read(rd, 4096) else |_| {
+            more = false
+            ""
+        }
+        reply = "{reply}{piece}"
+    }
+    net_close(rd)?
+    net_close(l)?
+
+    assert(status_line(reply) == "HTTP/1.1 502 Bad Gateway", "status: {status_line(reply)}")
+    let hb = header_block(reply)
+    assert(hb.contains("Content-Type: text/html"), "502 must be text/html")
+    assert(hb.contains("Connection: close"), "502 must close")
+    assert(reply.contains("<title>502 Bad Gateway</title>"), "502 nginx page shape")
+
+    print("502 ok")
+    0
+}
