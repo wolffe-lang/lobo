@@ -1,0 +1,92 @@
+//! check: run(exit=0, stdout="status=HTTP/1.1 413 Request Entity Too Large\nread-413=yes\n")
+//! phase: run
+//! lanes: native
+//! conforms: conc.task.spawn, err.union, err.propagate
+//! stage-src: serve http config
+//!
+//! The half-close drain (ws02 §3): a client announces a body larger
+//! than the limit, the server 413s EARLY (before reading the body) and
+//! then read-and-discards briefly before closing, so the client can
+//! still READ the 413 rather than eating a RST. The client sends a
+//! huge Content-Length and a trickle of body, then reads: it must see
+//! the 413. Server on a task (it drains), client on main. native lane
+//! (spawn + fs). The limit here is tiny so the test is fast.
+
+use config
+use http
+use serve
+
+fn tiny_limits() -> http.Limits {
+    http.Limits {
+        max_request_line: 8192,
+        max_header_line: 8192,
+        max_headers: 100,
+        max_header_total: 32768,
+        max_chunk_digits: 15,
+        max_body: 16,
+    }
+}
+
+fn main() -> !int {
+    let root = "ws02_hc"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/www")?
+    fs_write_text("{root}/www/index.html", "<html>hc</html>\n")?
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws02_hc/www; index index.html; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = tiny_limits()
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    scope s {
+        s.spawn(fn() {
+            let conn = net_accept(l) else |_| -1
+            if conn >= 0 {
+                serve.serve_conn(conn, c, opts, lim, port)
+            }
+        })
+        net_deadline(cli, 3000)?
+        // announce a 1000-byte body (over max_body=16), send only a
+        // trickle — the server must 413 without reading it all
+        net_write(
+            cli,
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1000\r\nConnection: close\r\n\r\nsome-early-bytes",
+        )?
+        var reply = ""
+        var more = true
+        while more {
+            let piece = net_read(cli, 4096) else |e| match e {
+                closed => {
+                    more = false
+                    ""
+                },
+                timeout => {
+                    more = false
+                    ""
+                },
+                utf8 => {
+                    more = false
+                    ""
+                },
+                io => {
+                    more = false
+                    ""
+                },
+            }
+            reply = "{reply}{piece}"
+        }
+        let eol = reply.find("\r\n") else reply.len
+        print("status={reply[0..eol]}")
+        var got = "no"
+        if reply.contains("413") {
+            got = "yes"
+        }
+        print("read-413={got}")
+    }
+    net_close(cli) else |_| {}
+    net_close(l) else |_| {}
+    fs_remove_dir_all(root) else |_| {}
+    0
+}
