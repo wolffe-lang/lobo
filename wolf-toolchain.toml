@@ -14,33 +14,37 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang trunk at the s115 merge (the wsm01 bump, from 87405ac /
-# s109). What the bump brings wws: s114 SIGNAL RECEPTION
-# (os_signal_listen/wait/raise — the real SIGHUP/TERM/QUIT trigger;
-# ws04/ws08's D1/D14 deferral retires), s115 net byte paths
-# (net_read_bytes/net_write_bytes, no utf8 hazard on binary bodies)
-# and D56 cast semantics, s113's casts, s112's constant-time tier,
-# D54 (integer literals adopt float expectations). Wolf-lang trunk
-# at wsm01 launch IS this commit (the c22 dyn-ABI work sits on the
-# unmerged s116 branch), so pin == trunk == the contract's named
-# target. Build:
+# wolf-lang trunk at the s119 merge (the wsm02 bump, from 64a38f3 /
+# s115). What the bump brings wws — the three named retirements:
+# s118 os_random(n) (OS CSPRNG: getrandom/getentropy/BCryptGenRandom;
+# failure TRAPS, no fallback, no error row — ws05's interim
+# HKDF-derived TLS randomness retires, wolf-lang#143 / D19), s119's
+# #142 fix (rangeopt's stale-CFG dominance bug + the token-linearity
+# verifier refined to edge-target — the release WOLF_MIDEND=0
+# workaround retires, D18), and s119's #144 fix (List element stride
+# rounds up to the element's alignment — the bool-mixing connection
+# struct tiles, TLS joins the ws08 drain table, D20). Wolf-lang trunk
+# at wsm02 launch IS this commit, so pin == trunk == the contract's
+# named target. Build:
 #   cargo build --release -p wolf_driver -p wolf_rt
 # and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ —
 # the native tier needs the staticlib beside the driver.
 repo = "wolffe-lang/wolf-lang"
-rev = "64a38f3c2d33f75ced7c96f3b5d5f968b9f513a6"
+rev = "53f6191ff3821ede1df6a0a18fc3fd6a079ad5bf"
 version_line = "wolf 0.1.0 (wolfgang)"
 
 [lupin]
-# wolf-interp trunk at the is23 merge: D54 literal-adoption PARITY in
-# the interpreter (int literals adopt float expectations, byte-agreed
-# against wolfc's litmus) — bumped together with [wolf] so both
-# machines read wsm01's numerics the same way. Build:
+# wolf-interp trunk at the is24 merge: the #44 lint fix — a
+# tag-shaped match arm resolves as the TAG, not a fresh binding, so
+# W0305 no longer false-fires on a same-tag re-raise
+# (`refused => return refused`). The wsm01 sentinel-code reshapes in
+# rig/shell/proxy revert on this bump (ledger row D17). Bumped
+# together with [wolf] as always. Build:
 #   cargo build --release --bin lupin
 # and stage target/release/lupin into .wolf-bin/.
 repo = "wolffe-lang/wolf-interp"
-rev = "b682bcf38416e7db878b881276c89611ee7bbd5d"
-version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 77466a3)"
+rev = "7b1363857567c6d46bd2ca6ef3873cb89388960b"
+version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 90c90df)"
 
 [std]
 # wolf-std, pinned at the sc22 merge — the first std consumption in
