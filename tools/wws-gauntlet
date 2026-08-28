@@ -48,10 +48,13 @@ if ! "$WOLF" build ./src/main.lu -o target/wws-debug; then
     echo "wws-gauntlet: FAILED at tiers — the owned debug tier does not build" >&2
     exit 1
 fi
-# WOLF_MIDEND=0 (the driver's own escape hatch): the release mid-end
-# ICEs on std.x.crypto.curve25519.sc_reduce at this pin pair
-# (wolf-lang#142, filed from ws05) and the TLS path imports it. The
-# flip-back rides the [wolf] pin bump that carries the fix.
+# WOLF_MIDEND=0 (the driver's own escape hatch): wsm02 attempted the
+# retirement at the s119 pin (#142 fixed — its witnesses build) and a
+# SURVIVOR of the same dominance class ICEs from a different site:
+# the loop-versioning noalias guard is built from a non-dominating
+# len load (std.x.crypto.curve25519.sc_muladd; std-free reproducer in
+# the filing). Filed as wolf-lang#146 from wsm02; the flip-back rides
+# the [wolf] pin bump that carries THAT fix.
 if ! WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/wws-release; then
     echo "wws-gauntlet: FAILED at tiers — the release tier does not build" >&2
     exit 1

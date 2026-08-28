@@ -64,9 +64,12 @@ version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 90c90df)
 # ANCESTOR of this repo's (64a38f3, s115) — forward drift, verified by
 # probe at staging (the record/handshake/curve modules compile and run
 # natively here). KNOWN CAVEAT at this pin pair: the RELEASE tier's
-# mid-end ICEs on std.x.crypto.curve25519.sc_reduce (wolf-lang#142) —
-# the gauntlet's release step runs WOLF_MIDEND=0 (the driver's own
-# escape hatch) until the fix enters the [wolf] pin; the flip-back rides
-# that bump.
+# mid-end still ICEs on std.x.crypto.curve25519 — #142 (sc_reduce) is
+# FIXED at the s119 pin, and a survivor of the same dominance class
+# ICEs in sc_muladd from a different site (the loop-versioning
+# noalias guard builds from a non-dominating len load) — wolf-lang#146,
+# filed from wsm02 with a std-free reproducer. The gauntlet's release
+# step keeps WOLF_MIDEND=0 until the #146 fix enters the [wolf] pin;
+# the flip-back rides that bump.
 repo = "wolffe-lang/wolf-std"
 rev = "b326f09fc34dc4c388d7688ba68322bf9bea0a9a"
