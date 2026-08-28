@@ -487,6 +487,16 @@ fn serve_main(prefix: str, conf: str) -> int {
             eprint("wws: [emerg] TLS configuration invalid: {ssl0.err}")
             return 1
         }
+        // wsm02 entropy probe (s118): TLS session keys come from
+        // os_random, which has no error row and never falls back — a
+        // host whose CSPRNG cannot serve TRAPS. Draw once HERE so an
+        // entropy-less host dies loudly at startup, never
+        // mid-handshake. The probe bytes are discarded (never logged,
+        // never reused); every handshake draws its own fresh bytes.
+        if os_random(32).len != 32 {
+            eprint("wws: [emerg] entropy probe short (impossible per [os.random])")
+            return 1
+        }
         tls_l = net_listen(tls_addr) else |_| {
             eprint("wws: [emerg] bind() to TLS {tls_addr} failed")
             return 1

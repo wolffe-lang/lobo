@@ -27,16 +27,16 @@
 //! Never log secrets: nothing in this module prints key material,
 //! secrets, or handshake randoms at any level — the rig greps the
 //! server's logs after the TLS suite (tools/wws-tls-interop).
-//! INTERIM RANDOMNESS, NAMED LOUDLY (wolf-lang#143): the language has
-//! no entropy source at this pin (`random_seed` is typed but
-//! unlowered on every lane), so handshake randoms and the X25519
-//! ephemeral derive via HKDF-SHA256 over (the server's PRIVATE KEY
-//! seed, the client random, both clocks, the fd). Unpredictable to an
-//! outside observer only while the key stays secret, and NOT forward
-//! secret against key compromise — this is not cryptographic
-//! randomness and this module does not pretend otherwise. Loopback-
-//! only testing keeps the interim honest; real serving waits on the
-//! os_random builtin (#143), and the swap is one function.
+//! RANDOMNESS (wsm02, the #143 retirement): handshake randoms and
+//! the X25519 ephemeral are drawn from `os_random` — the OS CSPRNG
+//! (s118; [os.random.sole] makes it the only sanctioned source of
+//! cryptographic material). os_random has NO error row and never
+//! falls back: a host whose CSPRNG cannot serve TRAPS, which is the
+//! wanted behavior — main additionally draws a startup probe at TLS
+//! bind time so an entropy-less host dies loudly at startup, never
+//! mid-handshake. ws05's interim HKDF-derived randomness (and its
+//! loopback-only caveat) retired at the wsm02 pin; each handshake's
+//! ephemeral is now forward secret.
 //! Lane note: net + crypto — the executing lane is native (the
 //! checked tier's step budget is exhausted by one scalar mult,
 //! measured at ws05); the PURE parsers (ClientHello, records-from-
@@ -46,7 +46,6 @@
 
 use config
 use std.x.crypto.curve25519
-use std.x.crypto.sha2
 use std.x.tls.cert
 use std.x.tls.handshake
 use std.x.tls.record
@@ -124,26 +123,6 @@ fn u24p(data: List[int]) -> List[int] {
     (mut out).push(data.len / 256 % 256)
     (mut out).push(data.len % 256)
     push_all(mut out, data)
-    out
-}
-
-/// An int in `n` big-endian bytes (clock/fd material for the interim
-/// random). Total for non-negative values.
-fn be_bytes(v: int, n: int) -> List[int] {
-    var tmp = List[int]()
-    var x = v
-    var i: int = 0
-    while i < n {
-        (mut tmp).push(x % 256)
-        x = x / 256
-        i = i + 1
-    }
-    var out = List[int]()
-    var j = n - 1
-    while j >= 0 {
-        (mut out).push(tmp[j])
-        j = j - 1
-    }
     out
 }
 
@@ -577,26 +556,6 @@ fn send_alert_sealed(fd: int, key: List[int], iv: List[int], seq: int, code: int
 }
 
 // ------------------------------------------------------------------
-// the interim random (wolf-lang#143 — read the module header)
-// ------------------------------------------------------------------
-
-/// INTERIM: `n` bytes that are unpredictable to an outside observer
-/// only while the server's key stays secret — HKDF-SHA256 over the
-/// key seed, the client's random, both clocks and the fd. NOT
-/// cryptographic randomness (no entropy source exists at this pin —
-/// wolf-lang#143 is the ask; the swap is this one function). Never
-/// logged, never sent except through the derivations below.
-fn interim_random(seedk: List[int], salt: List[int], label: str, n: int) -> List[int] {
-    var ikm = List[int]()
-    push_all(mut ikm, seedk)
-    push_all(mut ikm, salt)
-    push_all(mut ikm, be_bytes(time_unix_ms(), 8))
-    push_all(mut ikm, be_bytes(time_now_ms(), 8))
-    let prk = sha2.hkdf256_extract(ascii("wws-interim-random-v0"), ikm)
-    sha2.hkdf256_expand(prk, ascii(label), n)
-}
-
-// ------------------------------------------------------------------
 // the session
 // ------------------------------------------------------------------
 
@@ -803,9 +762,13 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     let chain = chain_of(sc, entry)
 
     // ---- ServerHello + key schedule ------------------------------
-    let eph = interim_random(seedk, hello.random, "x25519-ephemeral", 32)
+    // Both draws are OS CSPRNG bytes (s118 os_random; traps on an
+    // entropy-less host — the module header's retirement note). Only
+    // the SOURCE moved at wsm02; the handshake around them is
+    // unchanged.
+    let eph = os_random(32)
     let spub = curve25519.x25519_base(eph)
-    let srand = interim_random(seedk, hello.random, "server-hello-random", 32)
+    let srand = os_random(32)
     var sh_exts = List[int]()
     push_all(mut sh_exts, handshake.ext_supported_versions_server())
     push_all(mut sh_exts, handshake.ext_key_share_server_x25519(spub))
