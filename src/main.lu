@@ -474,10 +474,15 @@ fn serve_main(prefix: str, conf: str) -> int {
     // generation beside the Conf (the same freeze-and-swap the model
     // rides — a reload rebuilds it, cert-reload atomicity for free).
     // TLS connections are served BLOCKING to completion in the poll
-    // loop below (the drain multiplexer's table is parallel primitive
-    // lists and cannot hold a per-connection TLS session on the native
-    // tier — wolf-lang#144; interleaved TLS drain awaits the fix, a
-    // NAMED residue). The plaintext drain is untouched.
+    // loop below. The upstream gate retired at the wsm02 pin
+    // (wolf-lang#144 fixed: a List row mixing bool/int/List — the
+    // Sess shape — now tiles on the native tier, probed at wsm02
+    // including an imported-struct field); what remains is wws's own
+    // work — a Conn-based conn_step (serve_request re-plumbed over
+    // the conn seam), a session-carrying row table, and a TLS-holder
+    // drain witness — a NAMED follow-on rider (ledger D24), the
+    // least critical of wsm02's three retirements. The plaintext
+    // drain is untouched.
     var have_tls = false
     var tls_l: int = 0
     var ssl0 = config.ssl_resolve(c0, prefix)
@@ -718,13 +723,15 @@ fn serve_main(prefix: str, conf: str) -> int {
         }
 
         // 2b. TLS: accept and serve BLOCKING to completion (ws05).
-        // The session cannot ride the drain table (wolf-lang#144), so a
-        // TLS connection is handshaked and served here, start to finish,
-        // under the current generation's frozen SslConf. It is tagged to
-        // the current gen for the live counter (a reload while a TLS
-        // conn serves waits for it — acceptable on loopback; interleaved
-        // TLS drain is the named residue). A stalled handshake is bounded
-        // by the read deadline, never a hang.
+        // A TLS connection is handshaked and served here, start to
+        // finish, under the current generation's frozen SslConf. It is
+        // tagged to the current gen for the live counter (a reload
+        // while a TLS conn serves waits for it — acceptable on
+        // loopback). The #144 layout gate retired at the wsm02 pin;
+        // joining the drain table is now wws's own stepper refactor,
+        // the NAMED D24 rider (see the listener comment above). A
+        // stalled handshake is bounded by the read deadline, never a
+        // hang.
         if have_tls && running && !quitting {
             net_deadline(tls_l, 25) else |_| {}
             var got_tls = true
