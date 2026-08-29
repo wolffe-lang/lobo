@@ -19,10 +19,22 @@ if [ ! -x "$WWS" ]; then
     echo "tls-renewal: FAILED — $WWS missing" >&2
     exit 1
 fi
-if ! command -v openssl >/dev/null 2>&1; then
-    echo "tls-renewal: SKIP — no openssl (named skip)" >&2
+# Oracle resolution (the toolchain idiom, same as wws-tls-interop):
+# $OPENSSL_BIN → PATH; macOS's LibreSSL `openssl` cannot drive the
+# TLS 1.3 s_client probes, so a non-OpenSSL oracle refuses by name.
+OPENSSL="${OPENSSL_BIN:-}"
+[ -n "$OPENSSL" ] || OPENSSL=$(command -v openssl 2>/dev/null || true)
+if [ -z "$OPENSSL" ]; then
+    echo "tls-renewal: SKIP — no openssl (\$OPENSSL_BIN unset, PATH empty); named skip" >&2
     exit 0
 fi
+case "$("$OPENSSL" version 2>/dev/null)" in
+OpenSSL*) : ;;
+*)
+    echo "tls-renewal: FAILED — the oracle is \"$("$OPENSSL" version 2>/dev/null)\", not OpenSSL. Set \$OPENSSL_BIN to a real OpenSSL 3.x" >&2
+    exit 1
+    ;;
+esac
 
 scratch=target/tls-renewal
 rm -rf "$scratch"
@@ -78,8 +90,8 @@ if [ -z "$port" ]; then
     exit 1
 fi
 
-subj_before=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername localhost \
-    -CAfile "$CA" -tls1_3 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+subj_before=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername localhost \
+    -CAfile "$CA" -tls1_3 2>/dev/null | "$OPENSSL" x509 -noout -subject 2>/dev/null)
 case "$subj_before" in *localhost*) pass "serving cert A (CN=localhost) through the symlink farm" ;; *) fail "before-reload cert was: $subj_before" ;; esac
 
 # certbot's renewal move: repoint the live/ symlinks to the new archive
@@ -91,8 +103,8 @@ ln -sfn ../archive/privkeyB.pem   "$scratch/live/privkey.pem"
 "$WWS" -p . -c "$scratch/wws.conf" -s reload >"$scratch/reload.out" 2>"$scratch/reload.err"
 sleep 0.4
 
-subj_after=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername localhost \
-    -CAfile "$CA" -tls1_3 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+subj_after=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername localhost \
+    -CAfile "$CA" -tls1_3 2>/dev/null | "$OPENSSL" x509 -noout -subject 2>/dev/null)
 case "$subj_after" in *alt.example*) pass "after -s reload: new connections get cert B (CN=alt.example)" ;; *) fail "after-reload cert was: $subj_after" ;; esac
 
 # the reload was logged as a generation event (the observable drain)

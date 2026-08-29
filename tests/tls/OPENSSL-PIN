@@ -3,4 +3,9 @@
 # wws serving it a verifiable handshake is the falsifiable interop
 # claim. Version drift is REPORTED, not gated (s_client behavior is
 # stable across OpenSSL 3.x and the wire bytes are the real check).
+# IMPLEMENTATION is gated (wsm03): resolution is $OPENSSL_BIN → PATH,
+# and a non-OpenSSL `openssl` (macOS ships LibreSSL under that name;
+# its s_client redded 7/8 cases against a server OpenSSL 3.6.3 passes
+# 8/8) is a named REFUSAL — point $OPENSSL_BIN at a real OpenSSL 3.x
+# (e.g. Homebrew's openssl@3).
 version = 3.6.3

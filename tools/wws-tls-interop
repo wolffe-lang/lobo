@@ -28,11 +28,27 @@ if [ ! -x "$WWS" ]; then
     echo "tls-interop: FAILED — $WWS missing (the gauntlet's tiers step builds it)" >&2
     exit 1
 fi
-if ! command -v openssl >/dev/null 2>&1; then
-    echo "tls-interop: SKIP — no openssl on PATH (the interop oracle); named skip" >&2
+# Oracle resolution (the toolchain idiom): $OPENSSL_BIN → PATH. The
+# oracle must BE OpenSSL: macOS ships LibreSSL as `openssl`, a
+# different implementation whose s_client cannot drive these cases
+# (measured at wsm03: 7/8 red under LibreSSL 3.3.6, 8/8 green under
+# OpenSSL 3.6.3, same server) — that rig REFUSES by name instead of
+# redding every case. Point $OPENSSL_BIN at a real OpenSSL 3.x
+# (e.g. Homebrew's openssl@3).
+OPENSSL="${OPENSSL_BIN:-}"
+[ -n "$OPENSSL" ] || OPENSSL=$(command -v openssl 2>/dev/null || true)
+if [ -z "$OPENSSL" ]; then
+    echo "tls-interop: SKIP — no openssl (\$OPENSSL_BIN unset, PATH empty); named skip" >&2
     exit 0
 fi
-have_ssl=$(openssl version 2>/dev/null)
+have_ssl=$("$OPENSSL" version 2>/dev/null)
+case "$have_ssl" in
+OpenSSL*) : ;;
+*)
+    echo "tls-interop: FAILED — the interop oracle is \"$have_ssl\", not OpenSSL; its s_client cannot drive these cases. Set \$OPENSSL_BIN to a real OpenSSL 3.x" >&2
+    exit 1
+    ;;
+esac
 pin_ssl=$(sed -n 's/^version = //p' tests/tls/OPENSSL-PIN 2>/dev/null)
 case "$have_ssl" in
 *"$pin_ssl"*) : ;;
@@ -71,7 +87,7 @@ fail() { echo "tls-interop: FAILED — $1" >&2; red=$((red + 1)); }
 req='GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n'
 
 # 1. TLS 1.3 handshake + chain verification against the TEST CA
-out=$(printf "$req" localhost | openssl s_client -connect 127.0.0.1:"$port" \
+out=$(printf "$req" localhost | "$OPENSSL" s_client -connect 127.0.0.1:"$port" \
     -servername localhost -CAfile "$CA" -tls1_3 -quiet 2>"$scratch/c1.err")
 if printf '%s' "$out" | grep -q "wws TLS interop"; then
     pass "TLS 1.3 handshake + GET (body served)"
@@ -86,7 +102,7 @@ else
 fi
 
 # 2. negotiated protocol + cipher (independent implementation's view)
-info=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername localhost \
+info=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername localhost \
     -CAfile "$CA" -tls1_3 2>/dev/null)
 if printf '%s' "$info" | grep -q "TLSv1.3, Cipher is TLS_CHACHA20_POLY1305_SHA256"; then
     pass "negotiated TLSv1.3 / TLS_CHACHA20_POLY1305_SHA256"
@@ -95,32 +111,32 @@ else
 fi
 
 # 3. SNI selection: localhost -> CN=localhost, alt.example -> CN=alt.example
-subj_l=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername localhost \
-    -CAfile "$CA" -tls1_3 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
-subj_a=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername alt.example \
-    -CAfile "$CA" -tls1_3 2>/dev/null | openssl x509 -noout -subject 2>/dev/null)
+subj_l=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername localhost \
+    -CAfile "$CA" -tls1_3 2>/dev/null | "$OPENSSL" x509 -noout -subject 2>/dev/null)
+subj_a=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername alt.example \
+    -CAfile "$CA" -tls1_3 2>/dev/null | "$OPENSSL" x509 -noout -subject 2>/dev/null)
 case "$subj_l" in *localhost*) pass "SNI localhost -> the localhost certificate" ;; *) fail "SNI localhost gave: $subj_l" ;; esac
 case "$subj_a" in *alt.example*) pass "SNI alt.example -> the alt.example certificate" ;; *) fail "SNI alt.example gave: $subj_a" ;; esac
 
 # 4. no-SNI -> the default_server certificate (localhost)
-subj_d=$(echo | openssl s_client -connect 127.0.0.1:"$port" -CAfile "$CA" -tls1_3 2>/dev/null \
-    | openssl x509 -noout -subject 2>/dev/null)
+subj_d=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -CAfile "$CA" -tls1_3 2>/dev/null \
+    | "$OPENSSL" x509 -noout -subject 2>/dev/null)
 case "$subj_d" in *localhost*) pass "no-SNI -> the default_server certificate" ;; *) fail "no-SNI gave: $subj_d" ;; esac
 
 # 5. ALPN http/1.1 selected when offered
-alpn=$(echo | openssl s_client -connect 127.0.0.1:"$port" -servername localhost \
+alpn=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername localhost \
     -CAfile "$CA" -tls1_3 -alpn http/1.1 2>/dev/null | grep -i "ALPN protocol")
 case "$alpn" in *http/1.1*) pass "ALPN negotiated http/1.1" ;; *) fail "ALPN not http/1.1: $alpn" ;; esac
 
 # 6. TLS 1.2 is refused with a protocol_version alert (the honest set)
-v12=$(echo | openssl s_client -connect 127.0.0.1:"$port" -tls1_2 -CAfile "$CA" 2>&1)
+v12=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -tls1_2 -CAfile "$CA" 2>&1)
 case "$v12" in *"protocol version"*|*"alert number 70"*) pass "TLS 1.2 refused (protocol_version alert)" ;; *) fail "TLS 1.2 was not cleanly refused" ;; esac
 
 # 7. close_notify on a server-initiated close: s_client reports a clean
 # shutdown, not a truncation. `-quiet` suppresses it, so re-run verbose
 # and check for the absence of the truncation warning openssl prints on
 # a missing close_notify.
-cn=$(printf "$req" localhost | openssl s_client -connect 127.0.0.1:"$port" \
+cn=$(printf "$req" localhost | "$OPENSSL" s_client -connect 127.0.0.1:"$port" \
     -servername localhost -CAfile "$CA" -tls1_3 2>&1)
 if printf '%s' "$cn" | grep -qi "closed"; then
     pass "server sent close_notify (clean shutdown observed)"
@@ -142,7 +158,7 @@ kill -9 "$wws_pid" 2>/dev/null
 # 8. NEVER log secrets: the server's stdout+stderr must carry no key
 # material. We grep for the hex of the actual key seed and for the
 # vocabulary a leak would use. A hit is a hard failure.
-seedhex=$(openssl pkey -in "$FX/leaf.key" -text -noout 2>/dev/null \
+seedhex=$("$OPENSSL" pkey -in "$FX/leaf.key" -text -noout 2>/dev/null \
     | tr -d ' :\n' | grep -oiE '[0-9a-f]{40,}' | head -1)
 leaked=0
 if [ -n "$seedhex" ] && grep -qiF "$seedhex" "$scratch/wws.err" "$scratch/wws.out" 2>/dev/null; then
