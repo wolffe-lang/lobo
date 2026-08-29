@@ -1,18 +1,18 @@
 # The dry-run that means something (ws07)
 
-`nginx -t` checks syntax. `wws -t --request ...` checks MEANING: what
+`nginx -t` checks syntax. `lobo -t --request ...` checks MEANING: what
 would this config DO with this request — the matched server, the
 matched location with a WHY-IT-LOST trace for every candidate that was
 considered, the effective directives with `-T` provenance, and the
 terminal decision — offline, no listener, no network, deterministic.
 This page is the CONTRACT for the surface and its JSON schema; the
 stanza snapshots live under `tests/dryrun/probes/` (one per
-config-corpus entry, reviewed), and `tools/wws-dryrun` is the gate.
+config-corpus entry, reviewed), and `tools/lobo-dryrun` is the gate.
 
 ## The surface
 
 ```
-wws -t [-p prefix] [-c file] \
+lobo -t [-p prefix] [-c file] \
     --request '<method> <scheme>://<host>/<path>[?query]' ... \
     [--sni <name>] [--client <addr>] [--stat] [--format json]
 ```
@@ -97,7 +97,7 @@ like the ws08 status surface and validated by an INDEPENDENT reader
 (std.x.json) in `tests/dryrun/json_valid.lu`.
 
 ```
-{ "schema": 1, "tool": "wws --request", "requests": [ {
+{ "schema": 1, "tool": "lobo --request", "requests": [ {
     "request":  { "method", "scheme", "host", "target", "path", "query" },
     "listener": "<bind or ''>",
     "tls":      "<selection note or ''>",
@@ -122,7 +122,7 @@ Schema changes bump `"schema"` and this page in one commit.
 ## The anti-drift gate: predicted vs live
 
 A prediction that can drift from the server is worse than none.
-`tools/wws-dryrun` (a gauntlet step) runs two cross checks on every
+`tools/lobo-dryrun` (a gauntlet step) runs two cross checks on every
 gate:
 
 - **static**: predict `GET /index.html` over the differential's own

@@ -3,7 +3,7 @@
 The drop-in claim is falsifiable or it is marketing: same config,
 same requests → same responses as a pinned REAL nginx, on loopback,
 in CI. ws00 ships the SKELETON — the pin, the case format, the
-differ, one static-file case green. From ws02 on, wws runs beside
+differ, one static-file case green. From ws02 on, lobo runs beside
 the oracle and both replies go through the same differ.
 
 ## The pin, and the D33-safe build ritual
@@ -32,7 +32,7 @@ a CI step is not a build script in the D33 sense (wolf-lang's own CI
 compiles things); the wsc00 closeout records that interpretation for
 review.
 
-`tools/wws-differential` REFUSES, naming the pin, when the binary is
+`tools/lobo-differential` REFUSES, naming the pin, when the binary is
 absent or `bin/nginx -v` disagrees with the pinned version. A
 configure-line drift (`-v` right, `-V` different) is reported but
 not gated: the version is the behavioral identity, the configure

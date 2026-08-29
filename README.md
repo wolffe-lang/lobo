@@ -1,9 +1,8 @@
 # Lobo
 
 > Named 2026-08-29 (D64): **Lobo** — Seton's wolf no trap could take.
-> The code still spells `wws` (binary, tools, control channel, test
-> transcripts) until wsm03 lands the rename under its gauntlet. The
-> repo goes public under `wolffe-lang/lobo` at ws16, "the door opens".
+> The name landed at wsm03, under the gauntlet. The repo goes public
+> under `wolffe-lang/lobo` at ws16, "the door opens".
 
 A production web server, written in wolf. The charter: **nginx,
 rewritten without their owned bugs, so that a 20-year nginx user
@@ -23,7 +22,7 @@ stretch goal.
   inheritance surprises, alias traversal — the config carries, and
   the linter tells you where nginx would have quietly hurt you.
 - **The drop-in claim is falsifiable.** CI runs a pinned real nginx
-  beside wws with the same configs and diffs the responses. Claims
+  beside lobo with the same configs and diffs the responses. Claims
   ratchet; they don't hand-wave.
 
 ## What "finally!" means
