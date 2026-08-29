@@ -17,19 +17,20 @@
 # vocabulary extension) is asserted so a signal-driven reload is
 # distinguishable from a control-channel one.
 #
-# Linux-only at this pin ([os.signal.platform]: delivery is
-# Linux-full; other unixes follow the task-layer port; Windows has no
-# HUP at all) — elsewhere this harness SKIPS, by name, exit 0. The
-# control channel remains the portable trigger and its tests gate on
-# every platform.
+# Linux + macOS at this pin ([os.signal.platform]: s114 was
+# Linux-full; macOS joined at s59 via the task-layer port — the wsm03
+# pin carries it, and the wsm03 gauntlet measured the full suite green
+# on macOS/arm64). Other hosts still SKIP, by name, exit 0 (BSDs widen
+# with s61; Windows has no HUP at all). The control channel remains
+# the portable trigger and its tests gate on every platform.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
 
 case "$(uname -s)" in
-Linux) ;;
+Linux | Darwin) ;;
 *)
-    echo "wws-signal: SKIPPED — s114 signal delivery is Linux-full at this pin; non-Linux follows the task-layer port (named platform gap)"
+    echo "wws-signal: SKIPPED — signal delivery is Linux+macOS at this pin (s114/s59); other hosts follow the ports (named platform gap)"
     exit 0
     ;;
 esac
