@@ -1,6 +1,6 @@
 //! member: true
 //! rigback — the two-sided differential's COMMON BACKEND, in wolf (the
-//! dogfood rule). Both proxies (the pinned nginx AND wws) point at an
+//! dogfood rule). Both proxies (the pinned nginx AND lobo) point at an
 //! instance of this server; it RECORDS the exact request each proxy
 //! sends upstream (so the harness can byte-compare the backend-facing
 //! leg — proxy compat is unverifiable from the client side alone) and

@@ -3,7 +3,7 @@
 //! lanes: native checked lupin
 //! conforms: err.propagate
 //!
-//! freeport — rig DRIVER first (tools/wws-differential runs it for a
+//! freeport — rig DRIVER first (tools/lobo-differential runs it for a
 //! port), smoke test second (exit 0 is the whole assertion — the
 //! port is the host's choice, so stdout cannot be pinned). Asks the
 //! host for an ephemeral loopback port and prints it: the closest

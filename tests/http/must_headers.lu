@@ -7,7 +7,7 @@
 //! RFC 9112 §5.1 (no whitespace between field name and colon — a
 //! MUST-reject: `Host : x`), §5.2 (obs-fold: a recipient MAY reject
 //! with 400 rather than unfold — the Class-B posture), §5.4 / RFC 9110
-//! §7.2 (a 1.1 request MUST include exactly one Host; wws rejects a
+//! §7.2 (a 1.1 request MUST include exactly one Host; lobo rejects a
 //! missing or duplicated Host). OWS around a value is trimmed (§5).
 
 use http

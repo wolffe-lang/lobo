@@ -1,9 +1,9 @@
 #!/bin/sh
-# wws-dryrun — the ws07 gate, two phases.
+# lobo-dryrun — the ws07 gate, two phases.
 #
 # PHASE 1, probe snapshots (offline): every file under
 # tests/dryrun/probes/<config>[.<case>].probe replays its `args:` line
-# against `wws -t` over tests/config-corpus/<config>/ and byte-diffs
+# against `lobo -t` over tests/config-corpus/<config>/ and byte-diffs
 # STDOUT against the checked-in `--- expect` stanza (snapshot-reviewed
 # — regenerating one is deliberate: rerun the command, read the diff,
 # commit the new stanza). `exit:` pins the exit code, so the
@@ -15,13 +15,13 @@
 # PHASE 2, the predicted-vs-live CROSS CHECK (the anti-drift gate):
 # the dry-run PREDICTS, a live server VERIFIES —
 #   static: predict `GET /index.html` over the differential's own
-#     wws.conf.in (decision kind, mapped path, --stat existence), then
+#     lobo.conf.in (decision kind, mapped path, --stat existence), then
 #     start the real server on the same rendered config, send the same
 #     request, and assert the live status matches AND the live body is
 #     byte-identical to the file at the PREDICTED path. A missing path
 #     is predicted 404-under---stat and must answer a live 404.
 #   proxy: predict `GET /rewrite/a` over the proxy differential's
-#     wws.proxy.conf.in (upstream URL through ws03's rewrite
+#     lobo.proxy.conf.in (upstream URL through ws03's rewrite
 #     arithmetic), then run the real proxy against a rig backend and
 #     assert the request line the backend RECORDED is exactly the
 #     predicted outbound target. The prediction is falsifiable or it
@@ -34,13 +34,13 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
 
-WWS=target/wws-debug
-WWS_LIVE=target/wws-release
+LOBO=target/lobo-debug
+LOBO_LIVE=target/lobo-release
 DIFF_DIR=tests/differential
 PROBES=tests/dryrun/probes
 
-[ -x "$WWS" ] || { echo "dryrun: FAILED — $WWS missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
-[ -x "$WWS_LIVE" ] || { echo "dryrun: FAILED — $WWS_LIVE missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+[ -x "$LOBO" ] || { echo "dryrun: FAILED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+[ -x "$LOBO_LIVE" ] || { echo "dryrun: FAILED — $LOBO_LIVE missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
 
 red=0
 
@@ -68,7 +68,7 @@ for pf in "$PROBES"/*.probe; do
     rm -rf "$scratch"; mkdir -p "$scratch"
     awk 'insec { print } /^--- expect$/ { insec = 1 }' "$pf" > "$scratch/expect"
     eval "set -- $args"
-    "$WWS" -t -p "$confdir" -c nginx.conf "$@" > "$scratch/got" 2> "$scratch/err"
+    "$LOBO" -t -p "$confdir" -c nginx.conf "$@" > "$scratch/got" 2> "$scratch/err"
     got_exit=$?
     if [ "$got_exit" != "$want_exit" ]; then
         echo "dryrun: FAILED — $base: exit $got_exit, probe pins $want_exit (stderr: $scratch/err)" >&2
@@ -125,10 +125,10 @@ cross_static() {
     rm -rf "$scratch"; mkdir -p "$scratch/logs"
     cp -r "$DIFF_DIR/www" "$scratch/www"
     port=$(free_port) || { echo "dryrun: FAILED — no free port for the static cross check" >&2; return 1; }
-    sed -e "s|@PORT@|$port|" -e "s|@ROOT@|$(pwd)/$scratch|" "$DIFF_DIR/wws.conf.in" > "$scratch/wws.conf"
+    sed -e "s|@PORT@|$port|" -e "s|@ROOT@|$(pwd)/$scratch|" "$DIFF_DIR/lobo.conf.in" > "$scratch/lobo.conf"
 
     # the prediction, offline (--stat is the fs half of the claim)
-    "$WWS" -t -p "$(pwd)/$scratch" -c wws.conf \
+    "$LOBO" -t -p "$(pwd)/$scratch" -c lobo.conf \
         --request "GET http://127.0.0.1/index.html" \
         --request "GET http://127.0.0.1/missing.html" \
         --stat --format json > "$scratch/predict.json" 2> "$scratch/predict.err" || {
@@ -150,7 +150,7 @@ cross_static() {
     # the live side: the same config, the same requests, on the wire
     printf 'GET /index.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$scratch/req1.raw"
     printf 'GET /missing.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$scratch/req2.raw"
-    "$WWS_LIVE" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/wws.conf" 2> "$scratch/wws.err" &
+    "$LOBO_LIVE" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/lobo.conf" 2> "$scratch/lobo.err" &
     livepid=$!
     ok=1
     if send "$port" "$scratch/req1.raw" "$scratch/live1"; then
@@ -162,7 +162,7 @@ cross_static() {
             echo "dryrun: FAILED — the live body differs from the file at the predicted path $ppath" >&2; ok=0
         fi
     else
-        echo "dryrun: FAILED — the live static server never answered (see $scratch/wws.err)" >&2; ok=0
+        echo "dryrun: FAILED — the live static server never answered (see $scratch/lobo.err)" >&2; ok=0
     fi
     if send "$port" "$scratch/req2.raw" "$scratch/live2"; then
         status=$(head -1 "$scratch/live2" | awk '{print $2}')
@@ -193,10 +193,10 @@ cross_proxy() {
         kill "$backpid" 2>/dev/null; return 1 ;; esac
     fport=$(free_port) || { echo "dryrun: FAILED — no free front port" >&2; kill "$backpid" 2>/dev/null; return 1; }
     sed -e "s|@PORT@|$fport|" -e "s|@BACKEND@|127.0.0.1:$bport|" \
-        "$DIFF_DIR/wws.proxy.conf.in" > "$scratch/wws.conf"
+        "$DIFF_DIR/lobo.proxy.conf.in" > "$scratch/lobo.conf"
 
     # the prediction: the outbound target through ws03's rewrite arithmetic
-    "$WWS" -t -p "$(pwd)/$scratch" -c wws.conf \
+    "$LOBO" -t -p "$(pwd)/$scratch" -c lobo.conf \
         --request "GET http://127.0.0.1/rewrite/a" --format json > "$scratch/predict.json" 2> "$scratch/predict.err" || {
         echo "dryrun: FAILED — proxy prediction refused (see $scratch/predict.err)" >&2
         kill "$backpid" 2>/dev/null; return 1; }
@@ -210,14 +210,14 @@ cross_proxy() {
 
     # the live side: run the exchange, then read what the backend RECORDED
     printf 'GET /rewrite/a HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$scratch/req.raw"
-    "$WWS_LIVE" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/wws.conf" 2> "$scratch/wws.err" &
+    "$LOBO_LIVE" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/lobo.conf" 2> "$scratch/lobo.err" &
     livepid=$!
     ok=1
     if send "$fport" "$scratch/req.raw" "$scratch/live"; then
         status=$(head -1 "$scratch/live" | awk '{print $2}')
         [ "$status" = "200" ] || { echo "dryrun: FAILED — live proxy answered $status" >&2; ok=0; }
     else
-        echo "dryrun: FAILED — the live proxy never answered (see $scratch/wws.err)" >&2; ok=0
+        echo "dryrun: FAILED — the live proxy never answered (see $scratch/lobo.err)" >&2; ok=0
     fi
     kill "$livepid" 2>/dev/null; wait "$livepid" 2>/dev/null
     wait "$backpid" 2>/dev/null

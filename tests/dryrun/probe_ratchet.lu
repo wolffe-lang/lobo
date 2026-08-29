@@ -6,7 +6,7 @@
 //! the raise-only constants. RAISING is routine — add the probe file,
 //! bump the number, done; LOWERING needs the reason spelled out in
 //! the commit message. Every config-corpus entry must be covered by
-//! at least one probe (tools/wws-dryrun enforces the per-config
+//! at least one probe (tools/lobo-dryrun enforces the per-config
 //! mapping and the stanza snapshots; THIS file gates the counts on
 //! the wolf side). fs lanes only (lupin has no fs by design — the
 //! dry-run's own purity tests are the three-lane story).

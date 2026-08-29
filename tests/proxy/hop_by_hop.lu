@@ -5,10 +5,10 @@
 //! stage-src: proxy http config
 //!
 //! The hop-by-hop strip list (RFC 9110 §7.6.1) as behavior. Every name
-//! wws removes on BOTH legs is asserted stripped; representative end-
+//! lobo removes on BOTH legs is asserted stripped; representative end-
 //! to-end names are asserted kept. The oracle-delta is pinned too: a
 //! custom token NAMED in a Connection list (X-Zap) is NOT stripped —
-//! the pinned nginx forwards it (probed), so wws matches for byte-
+//! the pinned nginx forwards it (probed), so lobo matches for byte-
 //! equality and this test documents that the list is not honored.
 //! PURE (proxy.is_hop_by_hop over lowercased names); all three lanes.
 
@@ -44,7 +44,7 @@ fn main() -> int {
     keep("authorization")
     keep("accept")
     // the oracle delta: a Connection-listed custom token is end-to-end
-    // to wws (the pinned nginx forwards it; the RFC list-strip would
+    // to lobo (the pinned nginx forwards it; the RFC list-strip would
     // fail the two-sided diff — the delta is named in the module doc)
     keep("x-zap")
 

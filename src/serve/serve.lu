@@ -148,7 +148,7 @@ pub fn http_date(secs: int) -> str {
 
 /// The default error body nginx serves for `code`, byte-for-byte
 /// modulo the identity footer (`server` — nginx puts its own token
-/// there, wws puts wws's; that footer is a documented server-identity
+/// there, lobo puts lobo's; that footer is a documented server-identity
 /// delta, the body analogue of the Server header). Total.
 pub fn error_body(code: int, server: str) -> str {
     let phrase = status_phrase(code)
@@ -229,11 +229,11 @@ pub struct ServerOpts {
     read_timeout_ms: int,
 }
 
-/// The wws-flavoured defaults (nginx analogues: keepalive_timeout 75s,
-/// keepalive_requests 1000). `server_tokens on` → "wws/<ver>". Total.
+/// The lobo-flavoured defaults (nginx analogues: keepalive_timeout 75s,
+/// keepalive_requests 1000). `server_tokens on` → "lobo/<ver>". Total.
 pub fn default_opts() -> ServerOpts {
     ServerOpts {
-        token: "wws/0.1.0",
+        token: "lobo/0.1.0",
         keepalive_timeout_ms: 75000,
         keepalive_requests: 1000,
         read_timeout_ms: 60000,
@@ -246,7 +246,7 @@ pub fn default_opts() -> ServerOpts {
 
 /// Assert a header VALUE carries no CR or LF, then return it. THE
 /// response-splitting defence (ws02 contract §2): every header line
-/// wws emits routes its value through here, so a CR/LF that reached a
+/// lobo emits routes its value through here, so a CR/LF that reached a
 /// value (a mis-decoded Location, a future header from config) traps
 /// rather than splitting the response. Traps `assert` on violation —
 /// a server bug, caught in-process, never a corrupt wire.
@@ -693,7 +693,7 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits) -> str ! {ba
 }
 
 /// Serve one connection to completion: the full keepalive lifecycle.
-/// SPAWN-FREE. `local_port` is the port wws is listening on (for the
+/// SPAWN-FREE. `local_port` is the port lobo is listening on (for the
 /// absolute Location of a directory redirect, matching nginx).
 /// Total: every error path resolves to a written response and/or a
 /// close; the socket is always closed before return.
@@ -847,7 +847,7 @@ pub fn serve_conn_cn(
         if pplan.is_proxy {
             if conn.is_tls(cn) {
                 eprint(
-                    "wws: [error] proxy_pass over a TLS listener is not wired yet (ws05 residue): the downstream response would bypass encryption; answering 502",
+                    "lobo: [error] proxy_pass over a TLS listener is not wired yet (ws05 residue): the downstream response would bypass encryption; answering 502",
                 )
                 send_err(mut cn, 502, false, opts.token)
                 conn.conn_close(mut cn)

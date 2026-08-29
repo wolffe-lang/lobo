@@ -12,14 +12,14 @@
 //! the real footgun is legal-but-inert directives, which the linter
 //! owns): never silently ignored, never implemented by accident.
 //! `docs/directives.md` is generated from this table in the gauntlet
-//! (tools/wws-directives) — the drop-in story's public ledger, never
+//! (tools/lobo-directives) — the drop-in story's public ledger, never
 //! hand-edited.
 
 /// One declared directive row. `contexts` is the space-joined set of
 /// context names that admit the directive (`any` admits all).
 /// `opens` is "" for a simple directive, a context name for a block,
 /// `same` for a block whose body stays in the surrounding context
-/// (`if`), or `opaque` for a block wws refuses but skips whole (the
+/// (`if`), or `opaque` for a block lobo refuses but skips whole (the
 /// lua-block family). `min_args`/`max_args` bound the argument count
 /// (`max_args` -1 = unbounded — mime.types' `at_least(1)` rows).
 /// `status` is `implemented`, `planned(<sprint>)`, or `named_error`;
@@ -56,7 +56,7 @@ fn row(mut t: Table, name: str, contexts: str, opens: str, lo: int, hi: int, sta
 /// Build the ws01 table: the structural core (implemented — the tree
 /// and include graph ARE this sprint), the serving/proxy/shell tiers
 /// (planned rows, parse-clean today, semantics at their sprint), and
-/// the named_error tier (directives wws will not implement, refused
+/// the named_error tier (directives lobo will not implement, refused
 /// by name with the block skipped where one follows).
 pub fn table() -> Table {
     var t = Table { specs: List[Spec]() }
@@ -164,7 +164,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "path replacement for the matched location part — see WWS-L003 (ws02)",
+        "path replacement for the matched location part — see LOBO-L003 (ws02)",
     )
     row(
         mut t,
@@ -297,7 +297,7 @@ pub fn table() -> Table {
         2,
         3,
         "planned(ws02)",
-        "response header — child presence drops parent set, see WWS-L002's family",
+        "response header — child presence drops parent set, see LOBO-L002's family",
     )
     row(mut t, "autoindex", "http server location", "", 1, 1, "planned(ws02)", "directory listing")
     row(mut t, "charset", "http server location if", "", 1, 1, "planned(ws02)", "response charset")
@@ -420,7 +420,7 @@ pub fn table() -> Table {
         2,
         2,
         "implemented",
-        "upstream request header — child presence drops ALL parent-level ones (WWS-L002, honored at runtime)",
+        "upstream request header — child presence drops ALL parent-level ones (LOBO-L002, honored at runtime)",
     )
     row(
         mut t,
@@ -584,7 +584,7 @@ pub fn table() -> Table {
         1,
         -1,
         "planned(ws03)",
-        "conditional block — see WWS-L001 before using inside location",
+        "conditional block — see LOBO-L001 before using inside location",
     )
     // ---- ws04: process/shell tier. The process-model DECISION: v0 is
     // ONE os process — a master task supervising N worker task-groups,
@@ -593,7 +593,7 @@ pub fn table() -> Table {
     // the only v0 mode (systemd/container reality; the oracle runs
     // daemon off in every harness case), so daemon/master_process are
     // named_error. privilege drop (user) is ws14's (run as the target
-    // user for now). control is wws-native: the loopback reload channel.
+    // user for now). control is lobo-native: the loopback reload channel.
     row(
         mut t,
         "worker_processes",
@@ -602,7 +602,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "worker task-group count (delta: wws maps workers to supervised task-groups in ONE process, not process-per-worker — crash isolation is the supervision tree; ws14 revisits process isolation)",
+        "worker task-group count (delta: lobo maps workers to supervised task-groups in ONE process, not process-per-worker — crash isolation is the supervision tree; ws14 revisits process isolation)",
     )
     row(
         mut t,
@@ -652,7 +652,7 @@ pub fn table() -> Table {
         1,
         2,
         "named_error",
-        "privilege drop is ws14's — run wws as the target user for now (nginx only warns when unprivileged)",
+        "privilege drop is ws14's — run lobo as the target user for now (nginx only warns when unprivileged)",
     )
     row(
         mut t,
@@ -682,7 +682,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "wws-native: loopback reload channel for -s (off by default; NOT an nginx directive — the oracle -t rejects it, a named delta; ws14 audits the surface)",
+        "lobo-native: loopback reload channel for -s (off by default; NOT an nginx directive — the oracle -t rejects it, a named delta; ws14 audits the surface)",
     )
     // ---- implemented at ws05: the certs-carry campaign's serving set
     row(
@@ -776,7 +776,7 @@ pub fn table() -> Table {
         0,
         0,
         "named_error",
-        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count (a }} inside a Lua comment or long string defeats the skip)",
+        "OpenResty Lua — lobo embeds no Lua; block skipped by token-level brace count (a }} inside a Lua comment or long string defeats the skip)",
     )
     row(
         mut t,
@@ -786,7 +786,7 @@ pub fn table() -> Table {
         0,
         0,
         "named_error",
-        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count",
+        "OpenResty Lua — lobo embeds no Lua; block skipped by token-level brace count",
     )
     row(
         mut t,
@@ -796,7 +796,7 @@ pub fn table() -> Table {
         0,
         0,
         "named_error",
-        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count",
+        "OpenResty Lua — lobo embeds no Lua; block skipped by token-level brace count",
     )
     row(
         mut t,
@@ -806,7 +806,7 @@ pub fn table() -> Table {
         0,
         0,
         "named_error",
-        "OpenResty Lua — wws embeds no Lua; block skipped by token-level brace count",
+        "OpenResty Lua — lobo embeds no Lua; block skipped by token-level brace count",
     )
     row(
         mut t,
@@ -816,7 +816,7 @@ pub fn table() -> Table {
         1,
         1,
         "named_error",
-        "OpenResty Lua — wws embeds no Lua",
+        "OpenResty Lua — lobo embeds no Lua",
     )
     row(
         mut t,
@@ -826,7 +826,7 @@ pub fn table() -> Table {
         2,
         2,
         "named_error",
-        "OpenResty Lua — wws embeds no Lua",
+        "OpenResty Lua — lobo embeds no Lua",
     )
     row(
         mut t,
@@ -918,7 +918,7 @@ fn lev(a: str, b: str) -> int {
 }
 
 /// The nearest known directive name to `name` — the unknown-directive
-/// error's suggestion (a wws improvement over the oracle's bare
+/// error's suggestion (a lobo improvement over the oracle's bare
 /// "unknown directive"; recorded as a -t output delta). Ties break to
 /// the first row; "" when nothing is within distance 3.
 pub fn nearest(t: Table, name: str) -> str {

@@ -28,17 +28,17 @@ fn main() -> !int {
         "default pid path is logs/nginx.pid under the prefix",
     )
 
-    let rel = config.parse_str("pid wws.pid;\nhttp {{\n}}\n", "t.conf")
+    let rel = config.parse_str("pid lobo.pid;\nhttp {{\n}}\n", "t.conf")
     assert(
-        shell.pid_path(rel, scratch) == "ws04_pid/wws.pid",
+        shell.pid_path(rel, scratch) == "ws04_pid/lobo.pid",
         "relative pid directive under prefix",
     )
 
-    let abs = config.parse_str("pid /run/wws.pid;\nhttp {{\n}}\n", "t.conf")
-    assert(shell.pid_path(abs, scratch) == "/run/wws.pid", "absolute pid directive verbatim")
+    let abs = config.parse_str("pid /run/lobo.pid;\nhttp {{\n}}\n", "t.conf")
+    assert(shell.pid_path(abs, scratch) == "/run/lobo.pid", "absolute pid directive verbatim")
 
     // write (atomic) then read back
-    let path = "ws04_pid/wws.pid"
+    let path = "ws04_pid/lobo.pid"
     shell.pid_write(path, "127.0.0.1:4321")?
     let ep = shell.pid_read(path)?
     assert(ep == "127.0.0.1:4321", "read back the written endpoint: {ep}")

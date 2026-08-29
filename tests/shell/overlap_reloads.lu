@@ -6,7 +6,7 @@
 //! THREE OVERLAPPING RELOADS (ws08 contract §3, the rig case). Hold a
 //! connection open on each of three successive generations, reload
 //! across all of them, and watch THREE generations drain at once — each
-//! visible in `wws status`, each retiring in order as its connection
+//! visible in `lobo status`, each retiring in order as its connection
 //! closes, the counts exact. This is the observable drain at depth: not
 //! one old generation but a stack of them, the operator seeing every
 //! one. Ten-run (the outcome is fixed; only the poll wait is elastic).
@@ -144,7 +144,7 @@ fn reload_to(ep: str, want_gen: int) -> () ! {io} {
 }
 
 fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
-    let text = "pid ws08_overlap/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    let text = "pid ws08_overlap/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
     fs_write_text(path, text)?
 }
 
@@ -157,7 +157,7 @@ fn main() -> !int {
     let hp = free_port()?
     let cp = free_port()?
     let ep = "127.0.0.1:{cp}"
-    let confp = "{scratch}/wws.conf"
+    let confp = "{scratch}/lobo.conf"
     // three distinct roots so each reload is a real content change, but
     // all present, so every generation serves; only the id differs
     fs_create_dir_all("{scratch}/w2")?
@@ -169,7 +169,7 @@ fn main() -> !int {
     write_conf(confp, hp, cp, "ws08_overlap/w")?
 
     var argv = List[str]()
-    (mut argv).push("target/wws-debug")
+    (mut argv).push("target/lobo-debug")
     (mut argv).push("serve")
     (mut argv).push("-p")
     (mut argv).push(".")
@@ -184,7 +184,7 @@ fn main() -> !int {
         let _ = os_wait(child) else |_| {
             0
         }
-        assert(false, "the spawned wws never became alive")
+        assert(false, "the spawned lobo never became alive")
     }
 
     var held = List[int]()

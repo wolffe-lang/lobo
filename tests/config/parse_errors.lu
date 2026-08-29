@@ -5,7 +5,7 @@
 //!
 //! The parser's named errors, each in the pinned oracle's shape
 //! (nginx/1.30.4 battery, 2026-08-27) with the transcript cited:
-//!   p04 `flurble wib;` → [emerg] unknown directive "flurble" (wws
+//!   p04 `flurble wib;` → [emerg] unknown directive "flurble" (lobo
 //!       appends a nearest-name suggestion when one is within
 //!       distance 3 — a recorded output delta, the oracle has none)
 //!   p39 `listen 80;` at main → "listen" directive is not allowed

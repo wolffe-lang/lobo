@@ -1,10 +1,10 @@
 #!/bin/sh
-# wws-interface — emit or check the checked-in `.wolfi` interface
+# lobo-interface — emit or check the checked-in `.wolfi` interface
 # snapshots (the ws00 module-boundary discipline). Make-free POSIX sh.
 #
-#   tools/wws-interface --emit    regenerate src/<mod>/<mod>.wolfi
+#   tools/lobo-interface --emit    regenerate src/<mod>/<mod>.wolfi
 #                                 (and src/root.wolfi) from the tree
-#   tools/wws-interface --check   re-emit and diff; any drift is a
+#   tools/lobo-interface --check   re-emit and diff; any drift is a
 #                                 named failure telling the ritual
 #
 # The ritual: your module's INTERNALS are yours; its `.wolfi` is a
@@ -21,7 +21,7 @@ tmp="target/ifaces.$$"
 mkdir -p "$tmp" || exit 2
 
 if ! "$WOLF" interface ./src >"$tmp/stream" 2>"$tmp/warnings"; then
-    echo "wws-interface: FAILED — \`wolf interface ./src\` did not resolve the package:" >&2
+    echo "lobo-interface: FAILED — \`wolf interface ./src\` did not resolve the package:" >&2
     cat "$tmp/warnings" >&2
     rm -rf "$tmp"
     exit 1
@@ -48,21 +48,21 @@ for f in "$tmp"/*.wolfi; do
     case "$mode" in
     --emit)
         cp "$f" "$dest"
-        echo "wws-interface: wrote $dest"
+        echo "lobo-interface: wrote $dest"
         ;;
     --check)
         if [ ! -f "$dest" ]; then
-            echo "wws-interface: FAILED — $dest is missing; run tools/wws-interface --emit and commit it as \`interface($name): …\`" >&2
+            echo "lobo-interface: FAILED — $dest is missing; run tools/lobo-interface --emit and commit it as \`interface($name): …\`" >&2
             rc=1
         elif ! diff -u "$dest" "$f" >"$tmp/diff.$name" 2>&1; then
-            echo "wws-interface: FAILED — module \`$name\` public surface drifted from its checked-in $dest:" >&2
+            echo "lobo-interface: FAILED — module \`$name\` public surface drifted from its checked-in $dest:" >&2
             cat "$tmp/diff.$name" >&2
-            echo "wws-interface: an interface change is a cross-lane contract change — run tools/wws-interface --emit and commit the snapshot ALONE, message \`interface($name): …\`" >&2
+            echo "lobo-interface: an interface change is a cross-lane contract change — run tools/lobo-interface --emit and commit the snapshot ALONE, message \`interface($name): …\`" >&2
             rc=1
         fi
         ;;
     *)
-        echo "usage: tools/wws-interface [--emit|--check]" >&2
+        echo "usage: tools/lobo-interface [--emit|--check]" >&2
         rm -rf "$tmp"
         exit 2
         ;;
@@ -74,11 +74,11 @@ for dest in src/root.wolfi src/*/*.wolfi; do
     [ -f "$dest" ] || continue
     name=$(basename "$dest" .wolfi)
     if [ ! -f "$tmp/$name.wolfi" ]; then
-        echo "wws-interface: FAILED — $dest names a module the tree no longer has" >&2
+        echo "lobo-interface: FAILED — $dest names a module the tree no longer has" >&2
         rc=1
     fi
 done
 
 rm -rf "$tmp"
-[ "$rc" = 0 ] && [ "$mode" = "--check" ] && echo "wws-interface: all module surfaces match their snapshots"
+[ "$rc" = 0 ] && [ "$mode" = "--check" ] && echo "lobo-interface: all module surfaces match their snapshots"
 exit $rc

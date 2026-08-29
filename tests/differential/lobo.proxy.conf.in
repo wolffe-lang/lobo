@@ -1,4 +1,4 @@
-# wws.proxy.conf.in — the wws proxy side of the two-sided differential.
+# lobo.proxy.conf.in — the lobo proxy side of the two-sided differential.
 # Mirrors nginx.proxy.conf.in exactly: same locations, same proxy_pass
 # arithmetic, same header directives, @PORT@/@BACKEND@ substituted.
 http {

@@ -5,7 +5,7 @@
 # CI builds it in a cached step keyed on this file — a CI step is not
 # a build script in the D33 sense (the wsc00 closeout records that
 # interpretation for review).
-# tools/wws-differential REFUSES, naming this pin, when the binary is
+# tools/lobo-differential REFUSES, naming this pin, when the binary is
 # absent or `bin/nginx -v` disagrees with `version` below. A `-V`
 # configure-line drift is reported, not gated (the version is the
 # behavioral identity; the configure line is the build recipe).

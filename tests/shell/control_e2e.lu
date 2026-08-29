@@ -5,7 +5,7 @@
 //!
 //! The control channel, end to end, against the REAL binary
 //! (os_spawn + net + fs → native+checked; lupin declines the process
-//! trio and has no fs). Spawns `target/wws-debug serve`, then drives it
+//! trio and has no fs). Spawns `target/lobo-debug serve`, then drives it
 //! as a client: fetch under generation 1, `reload` the config through
 //! the control channel, fetch again and watch the routing SWAP live —
 //! which is also the LISTENER-SURVIVAL proof (the http listener fd is
@@ -81,7 +81,7 @@ fn free_port() -> int ! {io} {
 }
 
 fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
-    let text = "pid ws04_e2e/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    let text = "pid ws04_e2e/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
     fs_write_text(path, text)?
 }
 
@@ -96,19 +96,19 @@ fn main() -> !int {
     let hp = free_port()?
     let cp = free_port()?
     let ep = "127.0.0.1:{cp}"
-    let confp = "{scratch}/wws.conf"
+    let confp = "{scratch}/lobo.conf"
     write_conf(confp, hp, cp, "ws04_e2e/A")?
 
-    // spawn the real server: target/wws-debug serve -p . -c <conf>
+    // spawn the real server: target/lobo-debug serve -p . -c <conf>
     var argv = List[str]()
-    (mut argv).push("target/wws-debug")
+    (mut argv).push("target/lobo-debug")
     (mut argv).push("serve")
     (mut argv).push("-p")
     (mut argv).push(".")
     (mut argv).push("-c")
     (mut argv).push(confp)
     let child = os_spawn(argv) else |_| {
-        assert(false, "os_spawn of target/wws-debug failed — is the debug tier built?")
+        assert(false, "os_spawn of target/lobo-debug failed — is the debug tier built?")
         0
     }
 
@@ -117,11 +117,11 @@ fn main() -> !int {
         let _ = os_wait(child) else |_| {
             0
         }
-        assert(false, "the spawned wws never became alive on {ep}")
+        assert(false, "the spawned lobo never became alive on {ep}")
     }
 
     // pid file records the control endpoint (this pin's delta)
-    let recorded = shell.pid_read("{scratch}/wws.pid") else |_| {
+    let recorded = shell.pid_read("{scratch}/lobo.pid") else |_| {
         ""
     }
     assert(recorded == ep, "pid file records the control endpoint: {recorded}")
@@ -179,7 +179,7 @@ fn main() -> !int {
     }
     // give the shutdown a moment to unlink the pid file
     time_sleep_ms(100)
-    assert(!fs_exists("{scratch}/wws.pid"), "pid file removed on stop")
+    assert(!fs_exists("{scratch}/lobo.pid"), "pid file removed on stop")
 
     fs_remove_dir_all(scratch) else |_| {}
     0

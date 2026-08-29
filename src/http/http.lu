@@ -424,7 +424,7 @@ pub fn parse_request(head: str, limits: Limits) -> Request ! {
     let after1 = rl[sp1 + 1..rl.len]
     let sp2 = after1.find(" ") else -1
     if sp2 <= 0 {
-        // no second SP: HTTP/0.9-style or a truncated line. wws
+        // no second SP: HTTP/0.9-style or a truncated line. lobo
         // requires the three-token line (delta: nginx serves 0.9).
         return malformed
     }
@@ -1029,7 +1029,7 @@ fn server_names_join(c: config.Conf, srv: int) -> str {
 /// (there is nothing to serve), so the absence of configuration is a
 /// clean not-found, not a crash. Longest-prefix location match with
 /// `=` exact taking precedence; `root` appends the URI, `alias`
-/// replaces the matched prefix (the WWS-L003 slash class applied at
+/// replaces the matched prefix (the LOBO-L003 slash class applied at
 /// runtime).
 pub fn route(c: config.Conf, path: str) -> Decision {
     var tr = trace_new()

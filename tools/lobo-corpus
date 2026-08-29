@@ -1,5 +1,5 @@
 #!/bin/sh
-# wws-corpus — the directive-file test runner. Make-free POSIX sh + jq
+# lobo-corpus — the directive-file test runner. Make-free POSIX sh + jq
 # (the one host tool the rig leans on; CI runners and dev boxes both
 # carry it — see .docs/STYLE.md on why the runner is shell while the
 # tests themselves are wolf).
@@ -13,7 +13,7 @@
 # CRLF-bearing assertions print through `str.replace("\r\n", "~")`
 # (see split_reply_edges.lu). Filed upstream: a web corpus wants \r.
 #   //! phase: run
-#   //! lanes: native checked lupin           (wws delta: in-file lane
+#   //! lanes: native checked lupin           (lobo delta: in-file lane
 #                                              routing; default all 3)
 # Member files (`//! member: true`) are modules, not tests. A lane a
 # file DECLARES must run and match — `unsupported` on a declared lane
@@ -34,7 +34,7 @@
 # repo root on every lane, so relative fs paths in tests still name
 # repo paths.
 #
-#   tools/wws-corpus [tests/...]    default: every .lu under tests/
+#   tools/lobo-corpus [tests/...]    default: every .lu under tests/
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh

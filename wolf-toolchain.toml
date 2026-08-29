@@ -14,37 +14,40 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang trunk at the s119 merge (the wsm02 bump, from 64a38f3 /
-# s115). What the bump brings wws — the three named retirements:
-# s118 os_random(n) (OS CSPRNG: getrandom/getentropy/BCryptGenRandom;
-# failure TRAPS, no fallback, no error row — ws05's interim
-# HKDF-derived TLS randomness retires, wolf-lang#143 / D19), s119's
-# #142 fix (rangeopt's stale-CFG dominance bug + the token-linearity
-# verifier refined to edge-target — the release WOLF_MIDEND=0
-# workaround retires, D18), and s119's #144 fix (List element stride
-# rounds up to the element's alignment — the bool-mixing connection
-# struct tiles, TLS joins the ws08 drain table, D20). Wolf-lang trunk
-# at wsm02 launch IS this commit, so pin == trunk == the contract's
-# named target. Build:
+# wolf-lang trunk at wsm03 acquisition (post-s127; the wsm03 bump,
+# from 53f6191 / s119). What the bump brings this repo, each measured
+# not assumed at the bump: s59 macOS/aarch64 native tier (the rig's
+# three-lane gauntlet runs on nomad-1 for the first time — deltas
+# classed per sc26), s125's second trap stderr line (`  at
+# file:line:col`; native trap transcripts re-record as a named class;
+# D60 rules the exit status per-machine, the KIND is the contract),
+# s126 D61 index-origin marker (zero cost when absent), s127's
+# release tier on macOS (LLVM constants host-derived), plus
+# s121-s124 (char D58, lsp completion, mid-end hardening, D59
+# module membership). Wolf-lang trunk at wsm03 launch IS this
+# commit, so pin == trunk. Build:
 #   cargo build --release -p wolf_driver -p wolf_rt
 # and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ —
 # the native tier needs the staticlib beside the driver.
 repo = "wolffe-lang/wolf-lang"
-rev = "53f6191ff3821ede1df6a0a18fc3fd6a079ad5bf"
+rev = "addcd7f0bd90b16bfa8bec429ab7f27c46a2c1bb"
 version_line = "wolf 0.1.0 (wolfgang)"
 
 [lupin]
-# wolf-interp trunk at the is24 merge: the #44 lint fix — a
-# tag-shaped match arm resolves as the TAG, not a fresh binding, so
-# W0305 no longer false-fires on a same-tag re-raise
-# (`refused => return refused`). The wsm01 sentinel-code reshapes in
-# rig/shell/proxy revert on this bump (ledger row D17). Bumped
-# together with [wolf] as always. Build:
-#   cargo build --release --bin lupin
-# and stage target/release/lupin into .wolf-bin/.
+# lupin at the v0.1.16 RELEASE TAG (D57: build the tag, so --version
+# claims the release with no +dev suffix; is28's v0.1.17 had not
+# shipped at wsm03 acquisition). 0.1.16 carries is25-is27; the
+# load-bearing change for this repo is is27: human trap/diag lines
+# now say line:col (lupin-lane transcripts pinning them re-record as
+# a named class; `--json` is byte-stable). The is24 #44 arm fix
+# carries forward — the wsm02 W0305 reverts hold, confirmed at this
+# pin. Bumped together with [wolf] as always. Build AT THE TAG:
+#   git checkout v0.1.16 && cargo build --release --bin lupin
+# stage target/release/lupin into .wolf-bin/, return the checkout
+# to trunk.
 repo = "wolffe-lang/wolf-interp"
-rev = "7b1363857567c6d46bd2ca6ef3873cb89388960b"
-version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 90c90df)"
+rev = "2777fa3a57aa6bcf4505b9e33e4b47d97936d19a"
+version_line = "lupin 0.1.16 (wolf-interp, reference interpreter at pin e561c6f)"
 
 [std]
 # wolf-std, pinned at the sc22 merge — the first std consumption in
@@ -68,8 +71,9 @@ version_line = "lupin 0.1.13 (wolf-interp, reference interpreter at pin 90c90df)
 # FIXED at the s119 pin, and a survivor of the same dominance class
 # ICEs in sc_muladd from a different site (the loop-versioning
 # noalias guard builds from a non-dominating len load) — wolf-lang#146,
-# filed from wsm02 with a std-free reproducer. The gauntlet's release
-# step keeps WOLF_MIDEND=0 until the #146 fix enters the [wolf] pin;
-# the flip-back rides that bump.
+# filed from wsm02 with a std-free reproducer. Re-probed at the wsm03
+# pin (addcd7f): the ICE is byte-identical — s121-s127 carry no #146
+# fix. The gauntlet's release step keeps WOLF_MIDEND=0 until the #146
+# fix enters the [wolf] pin; the flip-back rides that bump.
 repo = "wolffe-lang/wolf-std"
 rev = "b326f09fc34dc4c388d7688ba68322bf9bea0a9a"

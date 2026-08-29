@@ -2,7 +2,7 @@
 
 Every key and certificate in this directory (and in
 `tests/config-corpus/certbot-vhost/live/`) is TEST material generated
-for the ws05 rig with the host openssl (Ed25519 CA "wws TEST CA",
+for the ws05 rig with the host openssl (Ed25519 CA "lobo TEST CA",
 leaf CN=localhost SAN DNS:localhost; an RSA pair kept ONLY to prove
 the named-unsupported refusal; `reordered.pem` is the fullchain with
 the blocks deliberately swapped for the leaf-first error's test;

@@ -1,12 +1,12 @@
 # Architecture (ws00 — honest edition: mostly stubs)
 
-wws is a from-parts wolf program: zero dependencies, net/fs/process
+lobo is a from-parts wolf program: zero dependencies, net/fs/process
 via the language's builtin tiers, the pinned nginx under
 `tests/differential/` being test infrastructure rather than a
 dependency. One directory = one module (D32); every module's public
 surface is a checked-in `.wolfi` snapshot beside it (the many-hands
 rule: internals are yours, surfaces are contracts — see
-`tools/wws-interface` and CLAUDE.md).
+`tools/lobo-interface` and CLAUDE.md).
 
 ## The module map, and who calls whom
 
@@ -44,9 +44,9 @@ tests/rig/           the loopback HTTP client harness, in wolf:
                      territory)
   *.lu               directive tests + drivers (freeport, diffsend)
 tests/differential/  the pinned-nginx differential (docs/DIFFERENTIAL.md)
-tools/               wws-gauntlet and its steps (sh + jq; the tests
+tools/               lobo-gauntlet and its steps (sh + jq; the tests
                      themselves are wolf — .docs/STYLE.md records why)
 ```
 
 Every test is loopback-only, port 0 (or OS-chosen), deadline on every
-read. The gauntlet (`tools/wws-gauntlet`) is green before any commit.
+read. The gauntlet (`tools/lobo-gauntlet`) is green before any commit.

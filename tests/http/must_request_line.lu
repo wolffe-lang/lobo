@@ -9,7 +9,7 @@
 //! SP delimiters, no whitespace in the target), §3.2.2 (absolute-form
 //! authority overrides Host — a smuggling-relevant MUST). Each line
 //! is one MUST turned into a named rejection; the pure parser makes it
-//! a three-lane fact. wws requires the three-token line, so an
+//! a three-lane fact. lobo requires the three-token line, so an
 //! HTTP/0.9 request is `malformed` — a deliberate delta from nginx
 //! (which serves 0.9), documented in the differential delta list.
 

@@ -1,5 +1,5 @@
 # reverse-proxy — the proxy decision: upstream pool, peer set, the
-# set_header inheritance (location-level only — WWS-L002), variables
+# set_header inheritance (location-level only — LOBO-L002), variables
 # kept honest (no --client here, so $remote_addr would be UNRESOLVED
 # had the location named it).
 args: --request 'GET http://app.example.org/api/users?id=3'

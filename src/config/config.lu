@@ -16,10 +16,10 @@ pub fn version() -> str {
 
 /// The -t/-T verb: parse + table-check + lint, in nginx's shell
 /// shape (probe p01/p57: two `nginx: ...` lines on stderr, exit 0;
-/// `[emerg]` + `test failed`, exit 1 — wws prints the same shapes
+/// `[emerg]` + `test failed`, exit 1 — lobo prints the same shapes
 /// under its own name, deltas recorded in the ws01 status file).
 /// `dump` prints the effective config with provenance on stdout
-/// (wws's -T: per-directive `# from file:line`, chain on included
+/// (lobo's -T: per-directive `# from file:line`, chain on included
 /// hops — nginx dumps raw files instead; deliberate delta,
 /// finally-list #4). Lints render as `[warn]` lines after any error,
 /// before the verdict; they never change the exit code. Returns the
@@ -33,15 +33,15 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
     var verdict: int = 0
     if !ok(c) {
         if c.err_line == 0 {
-            eprint("wws: [emerg] {c.err}")
+            eprint("lobo: [emerg] {c.err}")
         } else {
-            eprint("wws: [emerg] {c.err} in {c.err_file}:{c.err_line}")
+            eprint("lobo: [emerg] {c.err} in {c.err_file}:{c.err_line}")
         }
         verdict = 1
     } else if delta_count(c) > 0 {
         let d = c.delta_at[0]
         eprint(
-            "wws: [emerg] directive \"{c.names[d]}\" is not implemented in wws ({c.delta_note[0]}) in {c.files[d]}:{c.lines[d]}",
+            "lobo: [emerg] directive \"{c.names[d]}\" is not implemented in lobo ({c.delta_note[0]}) in {c.files[d]}:{c.lines[d]}",
         )
         verdict = 1
     }
@@ -56,9 +56,9 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
         sslw = s.warns
         if !ssl_ok(s) {
             if s.err_line == 0 {
-                eprint("wws: [emerg] {s.err}")
+                eprint("lobo: [emerg] {s.err}")
             } else {
-                eprint("wws: [emerg] {s.err} in {s.err_file}:{s.err_line}")
+                eprint("lobo: [emerg] {s.err} in {s.err_file}:{s.err_line}")
             }
             verdict = 1
         }
@@ -66,22 +66,22 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
     let findings = lint(c)
     if !findings.is_empty() {
         for line in findings.lines() {
-            eprint("wws: [warn] {line}")
+            eprint("lobo: [warn] {line}")
         }
     }
     if !sslw.is_empty() {
         for line in sslw.lines() {
-            eprint("wws: [warn] {line}")
+            eprint("lobo: [warn] {line}")
         }
     }
     if verdict == 1 {
-        eprint("wws: configuration file {conf} test failed")
+        eprint("lobo: configuration file {conf} test failed")
         return 1
     }
     if dump {
         print_raw(render_t(c))
     }
-    eprint("wws: the configuration file {conf} syntax is ok")
-    eprint("wws: configuration file {conf} test is successful")
+    eprint("lobo: the configuration file {conf} syntax is ok")
+    eprint("lobo: configuration file {conf} test is successful")
     0
 }

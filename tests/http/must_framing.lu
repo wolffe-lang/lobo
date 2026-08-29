@@ -4,11 +4,11 @@
 //! conforms: err.union
 //! stage-src: http config
 //!
-//! RFC 9110 §8.6 (Content-Length: a single digits-only value; wws
+//! RFC 9110 §8.6 (Content-Length: a single digits-only value; lobo
 //! rejects any duplicate — stricter than "combine identical", matching
 //! the pinned oracle and the smuggling posture) and RFC 9112 §6.1
 //! (Transfer-Encoding + Content-Length together MUST be treated as an
-//! error — wws makes it 400, full stop; a Transfer-Encoding other than
+//! error — lobo makes it 400, full stop; a Transfer-Encoding other than
 //! chunked is 501, matching the oracle). Each line is one framing MUST.
 
 use http

@@ -1,9 +1,9 @@
 # The drain you can watch (ws08)
 
-nginx's `-s reload` is a shrug: the old workers drain in the dark. wws
+nginx's `-s reload` is a shrug: the old workers drain in the dark. lobo
 narrates it. An operator can see which config generation is live, how
 many connections each older generation still holds, how long it has been
-draining, and the moment it retires — from a `wws status` command and
+draining, and the moment it retires — from a `lobo status` command and
 from log events. This page is the CONTRACT for those two surfaces:
 ws09's structured logs and ws12's metrics endpoint reuse the names and
 the schema documented here, so a change to either is a change to this
@@ -58,13 +58,13 @@ number (seconds) all parse; absent or `0` means no forced timeout.
 
 ## The status surface
 
-`wws status` reads the stanza off the running master's control channel
+`lobo status` reads the stanza off the running master's control channel
 (the pid file records the control endpoint at this pin). Two formats:
 
-### `wws status` (human text, one fact per line)
+### `lobo status` (human text, one fact per line)
 
 ```
-wws status
+lobo status
 current generation: 3
 quitting: false
 generation 1: draining live=2 age-ms=1840 id=0f96da4e7e7c072a shutdown-in-ms=28160
@@ -78,7 +78,7 @@ generation 3: current live=5 age-ms=1840 id=623a301150e5f3a3
   0); it is omitted for the current generation and when no timeout is
   set.
 
-### `wws status --format json` (single line, schema-versioned)
+### `lobo status --format json` (single line, schema-versioned)
 
 ```json
 {"schema":1,"current":3,"quitting":false,"generations":[
@@ -108,7 +108,7 @@ sprint deliberately does not serialize the accept path against a reader.
 
 ## The log-event vocabulary (FROZEN)
 
-Emitted through the logging seam (ws02 — `wws: [notice] <event>` on
+Emitted through the logging seam (ws02 — `lobo: [notice] <event>` on
 stderr today; ws09 reformats these into JSON, ws12 into metrics). The
 event NAMES and FIELD KEYS are a stable contract. Six events (the
 sixth is wsm01's EXTENSION — appended, nothing renamed):
@@ -126,10 +126,10 @@ Example lifecycle of one reloaded-away generation holding two
 connections, both closing cleanly:
 
 ```
-wws: [notice] generation-draining gen=1 held=2
-wws: [notice] connection-retired gen=1 remaining=1
-wws: [notice] connection-retired gen=1 remaining=0
-wws: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840
+lobo: [notice] generation-draining gen=1 held=2
+lobo: [notice] connection-retired gen=1 remaining=1
+lobo: [notice] connection-retired gen=1 remaining=0
+lobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840
 ```
 
 ## Trigger disposition (control channel AND signals — the wsm01 flip)
@@ -150,12 +150,12 @@ ws04 built:
   outside `SIGUSR2` is indistinguishable from the probe and ignored
   until the binary-swap sprint claims UPGRADE; and with no getpid
   surface yet, the pid FILE still records the control endpoint, so
-  `wws -s reload` still sends over the channel while `kill -HUP`
+  `lobo -s reload` still sends over the channel while `kill -HUP`
   needs the pid from the process table.
 - **The control channel** (ws04) STAYS: the portable trigger, the
   Windows reload story, and the transport for `status`.
 
-The real-signal witness is `tools/wws-signal` (a gauntlet step): a
+The real-signal witness is `tools/lobo-signal` (a gauntlet step): a
 held connection, a real `kill -HUP`, the observable drain, retirement,
 then `SIGQUIT`/`SIGTERM` shutdowns — including `SIGTERM` against a
 server with NO control directive, because signals need no channel.
@@ -174,5 +174,5 @@ server with NO control directive, because signals need no channel.
 - `tests/shell/status_surface.lu` — the pure shapes (all three lanes):
   the hash, the timeout parse, the event vocabulary, the stanza
   builders, and the signal meaning/verb map.
-- `tools/wws-signal` — the REAL-SIGNAL witness (wsm01): `kill -HUP`
+- `tools/lobo-signal` — the REAL-SIGNAL witness (wsm01): `kill -HUP`
   drives the observable drain end-to-end; Linux, named skip elsewhere.

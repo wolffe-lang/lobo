@@ -5,7 +5,7 @@
 //! 2026-08-27): `unexpected ";"` (p22), `unexpected "{"` (p26),
 //! `unexpected "}"` (p25, p76), `unexpected end of file, expecting
 //! ";" or "}"` (p24) and `... expecting "}"` (p75), `unknown
-//! directive "X"` (p04 — wws appends a nearest-name suggestion, a
+//! directive "X"` (p04 — lobo appends a nearest-name suggestion, a
 //! recorded output delta), `"X" directive is not allowed here` (p39,
 //! p55), `invalid number of arguments in "X" directive` (p46, p54),
 //! `directive "X" is not terminated by ";"` (p48, p64), `directive
@@ -455,7 +455,7 @@ fn parse_file(mut c: Conf, mut w: Walker, path: str, chain: str, parent: int, ct
         utf8 => {
             set_err(
                 mut c,
-                "read() \"{path}\": the file is not UTF-8 (wws configs are UTF-8; the oracle reads bytes — recorded delta)",
+                "read() \"{path}\": the file is not UTF-8 (lobo configs are UTF-8; the oracle reads bytes — recorded delta)",
                 path,
                 0,
             )

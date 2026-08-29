@@ -1,16 +1,16 @@
 #!/bin/sh
-# wws-differential — the nginx differential harness. From ws02 wws runs
+# lobo-differential — the nginx differential harness. From ws02 lobo runs
 # BESIDE the pinned oracle: for each case, the SAME raw request is
-# replayed against the pinned nginx AND against wws (each on its own
+# replayed against the pinned nginx AND against lobo (each on its own
 # loopback ephemeral port, each started from the checked-in minimal
 # config templates), both replies are normalized by exactly the
 # checked-in NORMALIZE list, and BOTH are byte-compared to the case's
-# pinned `--- expect`. A case is green only when nginx AND wws match
+# pinned `--- expect`. A case is green only when nginx AND lobo match
 # the expected reply — the falsifiable drop-in claim (docs/DIFFERENTIAL.md).
 #
 # REFUSES, naming the pin, when the oracle is absent or drifted. The
-# wws side uses the release binary the gauntlet built (target/
-# wws-release); it is rebuilt by the gauntlet's tiers step before this
+# lobo side uses the release binary the gauntlet built (target/
+# lobo-release); it is rebuilt by the gauntlet's tiers step before this
 # runs.
 set -u
 cd "$(dirname "$0")/.." || exit 2
@@ -18,7 +18,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 DIFF_DIR=tests/differential
 BIN=$DIFF_DIR/bin/nginx
-WWS=target/wws-release
+LOBO=target/lobo-release
 pin_version=$(sed -n 's/^version = //p' $DIFF_DIR/NGINX-PIN)
 pin_configure=$(sed -n 's/^configure = //p' $DIFF_DIR/NGINX-PIN)
 
@@ -39,8 +39,8 @@ if [ "$have_configure" != "$pin_configure" ]; then
     echo "differential:   pin:   $pin_configure" >&2
     echo "differential:   built: $have_configure" >&2
 fi
-if [ ! -x "$WWS" ]; then
-    echo "differential: REFUSED — wws release binary missing at $WWS (the gauntlet's tiers step builds it before this runs)" >&2
+if [ ! -x "$LOBO" ]; then
+    echo "differential: REFUSED — lobo release binary missing at $LOBO (the gauntlet's tiers step builds it before this runs)" >&2
     exit 1
 fi
 
@@ -144,21 +144,21 @@ for case in "$DIFF_DIR"/cases/*.case; do
         [ "$ng_ok" = 1 ] && break
     done
 
-    # ---- the wws side (same request, its own port) ----
-    wws_ok=0
+    # ---- the lobo side (same request, its own port) ----
+    lobo_ok=0
     for attempt in 1 2 3; do
         wport=$(free_port) || continue
         sed -e "s|@PORT@|$wport|" -e "s|@ROOT@|$(pwd)/$scratch|" \
-            "$DIFF_DIR/wws.conf.in" > "$scratch/wws.conf"
-        "$WWS" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/wws.conf" \
-            2> "$scratch/wws.err" &
-        wwspid=$!
-        if send "$wport" "$scratch/request.raw" "$scratch/wws.actual"; then
-            wws_ok=1
+            "$DIFF_DIR/lobo.conf.in" > "$scratch/lobo.conf"
+        "$LOBO" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/lobo.conf" \
+            2> "$scratch/lobo.err" &
+        lobopid=$!
+        if send "$wport" "$scratch/request.raw" "$scratch/lobo.actual"; then
+            lobo_ok=1
         fi
-        kill "$wwspid" 2>/dev/null
-        wait "$wwspid" 2>/dev/null
-        [ "$wws_ok" = 1 ] && break
+        kill "$lobopid" 2>/dev/null
+        wait "$lobopid" 2>/dev/null
+        [ "$lobo_ok" = 1 ] && break
     done
 
     if [ "$ng_ok" != 1 ]; then
@@ -166,14 +166,14 @@ for case in "$DIFF_DIR"/cases/*.case; do
         failures=$((failures + 1))
         continue
     fi
-    if [ "$wws_ok" != 1 ]; then
-        echo "differential: FAILED — $name: wws never answered (see $scratch/wws.err)" >&2
+    if [ "$lobo_ok" != 1 ]; then
+        echo "differential: FAILED — $name: lobo never answered (see $scratch/lobo.err)" >&2
         failures=$((failures + 1))
         continue
     fi
 
     normalize < "$scratch/nginx.actual" > "$scratch/nginx.norm"
-    normalize < "$scratch/wws.actual" > "$scratch/wws.norm"
+    normalize < "$scratch/lobo.actual" > "$scratch/lobo.norm"
 
     ok=1
     if ! diff -u "$scratch/expect.norm" "$scratch/nginx.norm" > "$scratch/nginx.diff"; then
@@ -181,13 +181,13 @@ for case in "$DIFF_DIR"/cases/*.case; do
         cat "$scratch/nginx.diff" >&2
         ok=0
     fi
-    if ! diff -u "$scratch/expect.norm" "$scratch/wws.norm" > "$scratch/wws.diff"; then
-        echo "differential: FAILED — $name: WWS diverged from the expected reply (modulo NORMALIZE):" >&2
-        cat "$scratch/wws.diff" >&2
+    if ! diff -u "$scratch/expect.norm" "$scratch/lobo.norm" > "$scratch/lobo.diff"; then
+        echo "differential: FAILED — $name: LOBO diverged from the expected reply (modulo NORMALIZE):" >&2
+        cat "$scratch/lobo.diff" >&2
         ok=0
     fi
     if [ "$ok" = 1 ]; then
-        echo "differential: ok — $name (nginx/$have_version and wws both match, on loopback)"
+        echo "differential: ok — $name (nginx/$have_version and lobo both match, on loopback)"
     else
         failures=$((failures + 1))
     fi
@@ -197,5 +197,5 @@ if [ "$cases" = 0 ]; then
     echo "differential: FAILED — no case files under $DIFF_DIR/cases/" >&2
     exit 1
 fi
-echo "differential: $((cases - failures))/$cases case(s) green (oracle + wws vs expect)"
+echo "differential: $((cases - failures))/$cases case(s) green (oracle + lobo vs expect)"
 [ "$failures" = 0 ] || exit 1

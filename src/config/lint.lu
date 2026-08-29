@@ -1,12 +1,12 @@
 //! member: true
 //! config/lint — the footgun linter: a pass over the parsed tree,
-//! each lint a code + span + nginx's behavior + wws's stance, printed
+//! each lint a code + span + nginx's behavior + lobo's stance, printed
 //! by -t after errors. ws01 ships the skeleton and the three
 //! PARSE-VISIBLE footguns report 11 §1C verified (the corrected
 //! reading: nginx [emerg]s on wrong-context directives — the real
 //! class is legal-but-ambushed configuration, which is exactly what a
 //! linter can name at load time). Sources, per the ws00 verification
-//! pass (wolf/refs/articles/wws/class-c-config-footguns.md):
+//! pass (wolf/refs/articles/lobo/class-c-config-footguns.md):
 //!   L001 — nginx "If Is Evil" wiki: "In some cases it even
 //!          segfaults"; only return / rewrite...last are safe in
 //!          location-if; try_files silently disabled.
@@ -29,20 +29,20 @@ pub fn lint(c: Conf) -> str {
     "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}"
 }
 
-/// WWS-L001: `if` inside a `location` block.
+/// LOBO-L001: `if` inside a `location` block.
 fn lint_if_in_location(c: Conf) -> str {
     var out = ""
     var i: int = 0
     while i < count(c) {
         if c.names[i] == "if" && c.kinds[i] == "b" && c.ctx[i] == "location" {
-            out = "{out}WWS-L001|{c.files[i]}:{c.lines[i]}|\"if\" inside \"location\": nginx evaluates this in ways its own wiki calls unpredictable (\"If Is Evil\" — try_files silently disabled, proxy_pass URI changes, documented segfaults; only \"return\" and \"rewrite ... last\" are safe). wws parses the block today and will give it defined semantics at ws03; prefer \"map\", separate locations, or \"return\".\n"
+            out = "{out}LOBO-L001|{c.files[i]}:{c.lines[i]}|\"if\" inside \"location\": nginx evaluates this in ways its own wiki calls unpredictable (\"If Is Evil\" — try_files silently disabled, proxy_pass URI changes, documented segfaults; only \"return\" and \"rewrite ... last\" are safe). lobo parses the block today and will give it defined semantics at ws03; prefer \"map\", separate locations, or \"return\".\n"
         }
         i = i + 1
     }
     out
 }
 
-/// WWS-L002: `proxy_set_header` in a child block while an ancestor
+/// LOBO-L002: `proxy_set_header` in a child block while an ancestor
 /// level also sets some — the child's presence drops EVERY
 /// parent-level header line; the finding names exactly which lines
 /// stop applying.
@@ -86,7 +86,7 @@ fn lint_psh_shadow(c: Conf) -> str {
             }
             if !dropped.is_empty() {
                 let lines = dropped.strip_suffix(", ") else dropped
-                out = "{out}WWS-L002|{c.files[b]}:{c.lines[b]}|\"proxy_set_header\" in this block discards ALL parent-level proxy_set_header directives — nginx array directives inherit only when the current level sets NONE (proxy module docs, verbatim: inherited \"if and only if there are no proxy_set_header directives defined on the current level\"). These parent lines stop applying here: {lines}. wws keeps nginx's rule when proxying lands (ws03) and names it at load time.\n"
+                out = "{out}LOBO-L002|{c.files[b]}:{c.lines[b]}|\"proxy_set_header\" in this block discards ALL parent-level proxy_set_header directives — nginx array directives inherit only when the current level sets NONE (proxy module docs, verbatim: inherited \"if and only if there are no proxy_set_header directives defined on the current level\"). These parent lines stop applying here: {lines}. lobo keeps nginx's rule when proxying lands (ws03) and names it at load time.\n"
             }
         }
     }
@@ -107,7 +107,7 @@ fn psh_lines(c: Conf, b: int) -> str {
     out
 }
 
-/// WWS-L003: the alias off-by-slash traversal shape — a non-exact
+/// LOBO-L003: the alias off-by-slash traversal shape — a non-exact
 /// location whose prefix does NOT end in `/` holding an `alias`
 /// whose path DOES.
 fn lint_alias_slash(c: Conf) -> str {
@@ -127,7 +127,7 @@ fn lint_alias_slash(c: Conf) -> str {
                 let modifier = if n == 2 { c.argp[c.args_at[l]] } else { "" }
                 let path = c.argp[c.args_at[l] + n - 1]
                 if modifier != "=" && !path.ends_with("/") {
-                    out = "{out}WWS-L003|{c.files[i]}:{c.lines[i]}|\"alias\" ends with \"/\" under location \"{path}\", which does not: nginx replaces only the matched part, so a request for \"{path}../secret\" resolves OUTSIDE the alias root (the off-by-slash traversal — PortSwigger nginx-alias-traversal / gixy advisory; nginx upstream treats it as configuration, not a bug). wws will refuse the traversal shape when alias serves (ws02); today the fix is matching slashes on both.\n"
+                    out = "{out}LOBO-L003|{c.files[i]}:{c.lines[i]}|\"alias\" ends with \"/\" under location \"{path}\", which does not: nginx replaces only the matched part, so a request for \"{path}../secret\" resolves OUTSIDE the alias root (the off-by-slash traversal — PortSwigger nginx-alias-traversal / gixy advisory; nginx upstream treats it as configuration, not a bug). lobo will refuse the traversal shape when alias serves (ws02); today the fix is matching slashes on both.\n"
                 }
             }
         }
