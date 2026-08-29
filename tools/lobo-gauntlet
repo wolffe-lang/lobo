@@ -1,5 +1,5 @@
 #!/bin/sh
-# wws-gauntlet — the gate. GREEN BEFORE ANY COMMIT (CLAUDE.md hard
+# lobo-gauntlet — the gate. GREEN BEFORE ANY COMMIT (CLAUDE.md hard
 # rule). Make-free shell entry (the wolf-std gate is a cargo xtask;
 # this repo has no Rust, so the gate is sh — the delta and its
 # reasoning are recorded in .docs/STYLE.md). Steps, in order, each
@@ -20,7 +20,7 @@ cd "$(dirname "$0")/.." || exit 2
 
 step() {
     echo ""
-    echo "=== wws-gauntlet: $1"
+    echo "=== lobo-gauntlet: $1"
 }
 
 step "toolchain pin"
@@ -30,22 +30,22 @@ echo "lupin: $have_lupin"
 
 step "manifest"
 if ! "$WOLF" fmt --check wolf.pkg; then
-    echo "wws-gauntlet: FAILED at manifest — wolf.pkg does not parse/round-trip" >&2
+    echo "lobo-gauntlet: FAILED at manifest — wolf.pkg does not parse/round-trip" >&2
     exit 1
 fi
 echo "wolf.pkg ok"
 
 step "fmt --check (src, tests)"
 if ! "$WOLF" fmt --check src tests; then
-    echo "wws-gauntlet: FAILED at fmt — run \`$WOLF fmt src tests\` and re-check" >&2
+    echo "lobo-gauntlet: FAILED at fmt — run \`$WOLF fmt src tests\` and re-check" >&2
     exit 1
 fi
 echo "canonical"
 
 step "both tiers build"
 mkdir -p target
-if ! "$WOLF" build ./src/main.lu -o target/wws-debug; then
-    echo "wws-gauntlet: FAILED at tiers — the owned debug tier does not build" >&2
+if ! "$WOLF" build ./src/main.lu -o target/lobo-debug; then
+    echo "lobo-gauntlet: FAILED at tiers — the owned debug tier does not build" >&2
     exit 1
 fi
 # WOLF_MIDEND=0 (the driver's own escape hatch): wsm02 attempted the
@@ -55,77 +55,77 @@ fi
 # len load (std.x.crypto.curve25519.sc_muladd; std-free reproducer in
 # the filing). Filed as wolf-lang#146 from wsm02; the flip-back rides
 # the [wolf] pin bump that carries THAT fix.
-if ! WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/wws-release; then
-    echo "wws-gauntlet: FAILED at tiers — the release tier does not build" >&2
+if ! WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release; then
+    echo "lobo-gauntlet: FAILED at tiers — the release tier does not build" >&2
     exit 1
 fi
 echo "debug + release ok"
 
 step "directive docs (docs/directives.md)"
-if ! tools/wws-directives --check; then
-    echo "wws-gauntlet: FAILED at directives — see above for the ritual" >&2
+if ! tools/lobo-directives --check; then
+    echo "lobo-gauntlet: FAILED at directives — see above for the ritual" >&2
     exit 1
 fi
 
 step "interface freshness (.wolfi)"
-if ! tools/wws-interface --check; then
-    echo "wws-gauntlet: FAILED at wolfi — see above for the ritual" >&2
+if ! tools/lobo-interface --check; then
+    echo "lobo-gauntlet: FAILED at wolfi — see above for the ritual" >&2
     exit 1
 fi
 
 step "corpus (directive tests, all declared lanes)"
-if ! tools/wws-corpus; then
-    echo "wws-gauntlet: FAILED at corpus" >&2
+if ! tools/lobo-corpus; then
+    echo "lobo-gauntlet: FAILED at corpus" >&2
     exit 1
 fi
 
 step "differential (pinned nginx)"
-if ! tools/wws-differential; then
-    echo "wws-gauntlet: FAILED at differential" >&2
+if ! tools/lobo-differential; then
+    echo "lobo-gauntlet: FAILED at differential" >&2
     exit 1
 fi
 
 step "proxy differential (two-sided: client AND backend legs)"
-if ! tools/wws-proxy-differential; then
-    echo "wws-gauntlet: FAILED at proxy-differential" >&2
+if ! tools/lobo-proxy-differential; then
+    echo "lobo-gauntlet: FAILED at proxy-differential" >&2
     exit 1
 fi
 
 step "confcheck (corpus oracle parity)"
-if ! tools/wws-confcheck; then
-    echo "wws-gauntlet: FAILED at confcheck" >&2
+if ! tools/lobo-confcheck; then
+    echo "lobo-gauntlet: FAILED at confcheck" >&2
     exit 1
 fi
 
 step "dryrun (ws07: probe snapshots + the predicted-vs-live cross check)"
-if ! tools/wws-dryrun; then
-    echo "wws-gauntlet: FAILED at dryrun — the prediction drifted from the demonstration (ws07)" >&2
+if ! tools/lobo-dryrun; then
+    echo "lobo-gauntlet: FAILED at dryrun — the prediction drifted from the demonstration (ws07)" >&2
     exit 1
 fi
 
 step "shell (CLI probe table vs oracle)"
-if ! tools/wws-shell; then
-    echo "wws-gauntlet: FAILED at shell — CLI exit-code parity vs the oracle" >&2
+if ! tools/lobo-shell; then
+    echo "lobo-gauntlet: FAILED at shell — CLI exit-code parity vs the oracle" >&2
     exit 1
 fi
 
 step "signal (real SIGHUP/QUIT/TERM drive the drain; Linux, else named skip)"
-if ! tools/wws-signal; then
-    echo "wws-gauntlet: FAILED at signal — the real-signal witness (wsm01)" >&2
+if ! tools/lobo-signal; then
+    echo "lobo-gauntlet: FAILED at signal — the real-signal witness (wsm01)" >&2
     exit 1
 fi
 
-step "tls-interop (openssl s_client against a live wws HTTPS server; ws05)"
-if ! tools/wws-tls-interop; then
-    echo "wws-gauntlet: FAILED at tls-interop — the OpenSSL interop differential (ws05)" >&2
+step "tls-interop (openssl s_client against a live lobo HTTPS server; ws05)"
+if ! tools/lobo-tls-interop; then
+    echo "lobo-gauntlet: FAILED at tls-interop — the OpenSSL interop differential (ws05)" >&2
     exit 1
 fi
 
 step "tls-renewal (certbot symlink farm -> -s reload -> cert B; ws05 W4)"
-if ! tools/wws-tls-renewal; then
-    echo "wws-gauntlet: FAILED at tls-renewal — the certbot renewal-reload case (ws05)" >&2
+if ! tools/lobo-tls-renewal; then
+    echo "lobo-gauntlet: FAILED at tls-renewal — the certbot renewal-reload case (ws05)" >&2
     exit 1
 fi
 
 echo ""
-echo "wws-gauntlet: GREEN"
+echo "lobo-gauntlet: GREEN"

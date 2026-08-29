@@ -1,6 +1,6 @@
 #!/bin/sh
-# wws-tls-interop — the OpenSSL interop differential (ws05 §5). Proves
-# wws serves real TLS 1.3 to an INDEPENDENT implementation: the host
+# lobo-tls-interop — the OpenSSL interop differential (ws05 §5). Proves
+# lobo serves real TLS 1.3 to an INDEPENDENT implementation: the host
 # `openssl s_client` drives handshake, SNI selection (two certs, two
 # names on one listener), ALPN (http/1.1), cert-chain verification
 # against the harness's OWN TEST CA (tests/tls/fixtures — key material
@@ -14,18 +14,18 @@
 # validated against; a mismatch is REPORTED, not gated, since s_client
 # behavior is stable across 3.x and the wire is the real check).
 #
-#   tools/wws-tls-interop     run every case; nonzero on any red
+#   tools/lobo-tls-interop     run every case; nonzero on any red
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
 
-WWS=target/wws-release
+LOBO=target/lobo-release
 FX=tests/tls/fixtures
 CONF=tests/tls/interop.conf
 CA=$FX/ca.crt
 
-if [ ! -x "$WWS" ]; then
-    echo "tls-interop: FAILED — $WWS missing (the gauntlet's tiers step builds it)" >&2
+if [ ! -x "$LOBO" ]; then
+    echo "tls-interop: FAILED — $LOBO missing (the gauntlet's tiers step builds it)" >&2
     exit 1
 fi
 # Oracle resolution (the toolchain idiom): $OPENSSL_BIN → PATH. The
@@ -59,24 +59,24 @@ scratch=target/tls-interop
 rm -rf "$scratch"
 mkdir -p "$scratch/logs"
 
-# start wws (TLS-only, two SNI servers on one listener). The pid dir is
+# start lobo (TLS-only, two SNI servers on one listener). The pid dir is
 # the scratch; the config's paths are repo-relative and cwd is the repo
 # root (lib-toolchain does not cd), so they resolve.
-"$WWS" -p . -c "$CONF" serve >"$scratch/wws.out" 2>"$scratch/wws.err" </dev/null &
-wws_pid=$!
+"$LOBO" -p . -c "$CONF" serve >"$scratch/lobo.out" 2>"$scratch/lobo.err" </dev/null &
+lobo_pid=$!
 # wait for the TLS listen notice and learn the port
 port=""
 i=0
 while [ $i -lt 50 ]; do
-    port=$(sed -n 's/.*TLS serving on [^ ]* (port \([0-9]*\)).*/\1/p' "$scratch/wws.err" 2>/dev/null | head -1)
+    port=$(sed -n 's/.*TLS serving on [^ ]* (port \([0-9]*\)).*/\1/p' "$scratch/lobo.err" 2>/dev/null | head -1)
     [ -n "$port" ] && break
     sleep 0.1
     i=$((i + 1))
 done
 if [ -z "$port" ]; then
-    echo "tls-interop: FAILED — wws did not announce a TLS port:" >&2
-    cat "$scratch/wws.err" >&2
-    kill "$wws_pid" 2>/dev/null
+    echo "tls-interop: FAILED — lobo did not announce a TLS port:" >&2
+    cat "$scratch/lobo.err" >&2
+    kill "$lobo_pid" 2>/dev/null
     exit 1
 fi
 
@@ -89,13 +89,13 @@ req='GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n'
 # 1. TLS 1.3 handshake + chain verification against the TEST CA
 out=$(printf "$req" localhost | "$OPENSSL" s_client -connect 127.0.0.1:"$port" \
     -servername localhost -CAfile "$CA" -tls1_3 -quiet 2>"$scratch/c1.err")
-if printf '%s' "$out" | grep -q "wws TLS interop"; then
+if printf '%s' "$out" | grep -q "lobo TLS interop"; then
     pass "TLS 1.3 handshake + GET (body served)"
 else
     fail "TLS 1.3 GET did not return the body"
 fi
 if grep -qi "Verification: OK\|verify return:1" "$scratch/c1.err" 2>/dev/null || \
-   printf '%s' "$out" | grep -q "wws TLS interop"; then
+   printf '%s' "$out" | grep -q "lobo TLS interop"; then
     pass "certificate chain verified against the TEST CA"
 else
     fail "chain verification did not succeed"
@@ -151,9 +151,9 @@ else
 fi
 
 # graceful stop, then the security-floor grep of the server's OWN logs
-kill "$wws_pid" 2>/dev/null
-wait "$wws_pid" 2>/dev/null
-kill -9 "$wws_pid" 2>/dev/null
+kill "$lobo_pid" 2>/dev/null
+wait "$lobo_pid" 2>/dev/null
+kill -9 "$lobo_pid" 2>/dev/null
 
 # 8. NEVER log secrets: the server's stdout+stderr must carry no key
 # material. We grep for the hex of the actual key seed and for the
@@ -161,11 +161,11 @@ kill -9 "$wws_pid" 2>/dev/null
 seedhex=$("$OPENSSL" pkey -in "$FX/leaf.key" -text -noout 2>/dev/null \
     | tr -d ' :\n' | grep -oiE '[0-9a-f]{40,}' | head -1)
 leaked=0
-if [ -n "$seedhex" ] && grep -qiF "$seedhex" "$scratch/wws.err" "$scratch/wws.out" 2>/dev/null; then
+if [ -n "$seedhex" ] && grep -qiF "$seedhex" "$scratch/lobo.err" "$scratch/lobo.out" 2>/dev/null; then
     leaked=1
 fi
 if grep -qiE 'traffic.secret|master.secret|private key seed|write iv .*[0-9a-f]{16}|finished_key' \
-    "$scratch/wws.err" "$scratch/wws.out" 2>/dev/null; then
+    "$scratch/lobo.err" "$scratch/lobo.out" 2>/dev/null; then
     leaked=1
 fi
 if [ "$leaked" = 0 ]; then
@@ -176,4 +176,4 @@ fi
 
 echo "tls-interop: 8 cases, $red red"
 [ "$red" = 0 ] || exit 1
-echo "tls-interop: GREEN — wws serves TLS 1.3 to openssl"
+echo "tls-interop: GREEN — lobo serves TLS 1.3 to openssl"

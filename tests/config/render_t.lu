@@ -6,7 +6,7 @@
 //! The -T body, pure half (the include-chain provenance rides the
 //! same fields include_graph.lu pins on the fs lanes; the oracle's
 //! -T shape is p57 — raw files after `# configuration file <path>:`
-//! — where wws deliberately dumps the EFFECTIVE tree with
+//! — where lobo deliberately dumps the EFFECTIVE tree with
 //! per-directive `# from file:line` provenance instead, finally-list
 //! #4; the delta is recorded). Verbatim source slices survive:
 //! quoting, escapes, and interior comments print as written.

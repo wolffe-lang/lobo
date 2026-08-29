@@ -19,7 +19,7 @@
 //!       are data entries.
 //!   p44/p62 `if`/`return` are rewrite-module directives the STRIPPED
 //!       oracle lacks (unknown directive there — recorded build
-//!       delta); stock nginx admits them, wws rows say planned.
+//!       delta); stock nginx admits them, lobo rows say planned.
 
 use config
 

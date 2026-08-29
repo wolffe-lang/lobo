@@ -8,7 +8,7 @@
 //! witness's connection holder (wsm01): argv is `<port> <hold_ms>`;
 //! dial 127.0.0.1:<port>, send one keep-alive GET, read one reply
 //! chunk, then HOLD the connection open for `hold_ms` before closing —
-//! long enough for tools/wws-signal to send a real SIGHUP and watch
+//! long enough for tools/lobo-signal to send a real SIGHUP and watch
 //! the generation that owns this connection DRAIN (live=1) while a
 //! new generation serves, then watch it RETIRE when this process
 //! closes. Loopback only, forever. Failures ride out of `main` as

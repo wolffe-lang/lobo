@@ -5,9 +5,9 @@
 //!
 //! THE OBSERVABLE DRAIN (ws08, report 11 §2 item 3 — the "finally!").
 //! nginx's `-s reload` is a shrug: the operator cannot see the old
-//! workers draining. wws narrates it. This is the witness the whole
+//! workers draining. lobo narrates it. This is the witness the whole
 //! sprint exists for: spawn the real binary, hold keepalive connections
-//! on generation 1, reload, and WATCH — through `wws status` over the
+//! on generation 1, reload, and WATCH — through `lobo status` over the
 //! control channel — generation 1 drain (its live count falling) while
 //! generation 2 serves brand-new connections, and generation 1 RETIRE
 //! the moment its last connection closes.
@@ -190,7 +190,7 @@ fn http_get(port: int, path: str) -> str ! {io} {
 }
 
 fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
-    let text = "pid ws08_drain/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    let text = "pid ws08_drain/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
     fs_write_text(path, text)?
 }
 
@@ -205,18 +205,18 @@ fn main() -> !int {
     let hp = free_port()?
     let cp = free_port()?
     let ep = "127.0.0.1:{cp}"
-    let confp = "{scratch}/wws.conf"
+    let confp = "{scratch}/lobo.conf"
     write_conf(confp, hp, cp, "ws08_drain/A")?
 
     var argv = List[str]()
-    (mut argv).push("target/wws-debug")
+    (mut argv).push("target/lobo-debug")
     (mut argv).push("serve")
     (mut argv).push("-p")
     (mut argv).push(".")
     (mut argv).push("-c")
     (mut argv).push(confp)
     let child = os_spawn(argv) else |_| {
-        assert(false, "os_spawn of target/wws-debug failed — is the debug tier built?")
+        assert(false, "os_spawn of target/lobo-debug failed — is the debug tier built?")
         0
     }
 
@@ -225,7 +225,7 @@ fn main() -> !int {
         let _ = os_wait(child) else |_| {
             0
         }
-        assert(false, "the spawned wws never became alive on {ep}")
+        assert(false, "the spawned lobo never became alive on {ep}")
     }
 
     // three keepalive connections, all on generation 1, held open

@@ -3,7 +3,7 @@
 //! lanes: native checked lupin
 //! stage-src: shell config
 //!
-//! The text builders — nginx's one-fact-per-line shapes with wws's own
+//! The text builders — nginx's one-fact-per-line shapes with lobo's own
 //! identity (probed against the oracle 2026-08-27: `nginx version:
 //! nginx/1.30.4`, the `-V` build lines, and the two-line Usage). Pure,
 //! every lane. Also the signal-word table (stop=TERM, quit=QUIT,
@@ -12,22 +12,22 @@
 use shell
 
 fn main() -> int {
-    assert(shell.version_token() == "wws/0.1.0", "identity token")
-    assert(shell.version_report() == "wws version: wws/0.1.0", "version line (nginx shape)")
+    assert(shell.version_token() == "lobo/0.1.0", "identity token")
+    assert(shell.version_report() == "lobo version: lobo/0.1.0", "version line (nginx shape)")
 
     let v = shell.version_verbose()
-    assert(v.starts_with("wws version: wws/0.1.0\n"), "-V first line is the version report")
+    assert(v.starts_with("lobo version: lobo/0.1.0\n"), "-V first line is the version report")
     assert(v.contains("built with wolf 0.1.0 (wolfgang)"), "-V names the toolchain")
     assert(v.contains("tier: two-tier"), "-V names the tier posture")
     assert(v.contains("modules:"), "-V names the module set")
 
     let u = shell.usage_text()
     assert(
-        u.contains("Usage: wws [-?hvVtTq] [-s signal] [-p prefix]"),
+        u.contains("Usage: lobo [-?hvVtTq] [-s signal] [-p prefix]"),
         "usage line 1 (nginx shape)",
     )
     assert(u.contains("[-e filename] [-c filename] [-g directives]"), "usage line 2")
-    assert(u.contains("serve | directives-md"), "usage names the wws verbs")
+    assert(u.contains("serve | directives-md"), "usage names the lobo verbs")
 
     // the signal words and their unix mapping
     assert(shell.signal_ok("stop"), "stop is a verb")

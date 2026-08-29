@@ -3,7 +3,7 @@
 //! of real nginx deployments that is not static files. This module is
 //! two layers: a PURE core (pool model, smooth weighted round-robin,
 //! the proxy_pass rewrite table, the hop-by-hop discipline, the
-//! proxy_set_header inheritance WWS-L002 names, upstream-response
+//! proxy_set_header inheritance LOBO-L002 names, upstream-response
 //! parsing) that runs on all three lanes and is exhaustively unit-
 //! pinned, and an IO leg (connect → send → read → relay under
 //! deadlines, with peer failover) that runs on native + checked, and
@@ -330,7 +330,7 @@ pub struct PassTarget {
 
 /// Parse a `proxy_pass` argument. `http://pool`, `http://pool/uri`,
 /// `http://host:port/`, each probed. A `$` anywhere is the variable
-/// form: nginx changes resolution mode entirely, so wws refuses it by
+/// form: nginx changes resolution mode entirely, so lobo refuses it by
 /// name (`err` set) rather than half-emulating (report-11 Class-C).
 /// `https://` is refused by name (wsc02 owns TLS upstream legs).
 /// Whether the authority is a pool is decided by the config model (an
@@ -419,13 +419,13 @@ pub fn rewrite_target(matched: str, has_uri: bool, uri: str, path: str, query: s
 // oracle delta named
 // ------------------------------------------------------------------
 
-/// Whether a (lowercased) field name is a hop-by-hop header wws strips
+/// Whether a (lowercased) field name is a hop-by-hop header lobo strips
 /// on BOTH legs: Connection, Keep-Alive, TE, Transfer-Encoding,
 /// Trailer, Upgrade, and the Proxy-* trio (Proxy-Connection,
 /// Proxy-Authenticate, Proxy-Authorization). RFC 9110 §7.6.1 plus the
 /// probed oracle set. DELTA, named: the oracle does NOT strip the
 /// custom tokens a `Connection:` header LISTS (a probed
-/// `Connection: close, X-Zap` forwards X-Zap upstream), so wws matches
+/// `Connection: close, X-Zap` forwards X-Zap upstream), so lobo matches
 /// the oracle's FIXED set for byte-equality and does not honor the
 /// list — the RFC-correct list-strip would fail the two-sided diff.
 /// `lname` must already be lowercased. Total.
@@ -461,12 +461,12 @@ pub fn is_hop_by_hop(lname: str) -> bool {
 }
 
 // ------------------------------------------------------------------
-// proxy_set_header inheritance — WWS-L002 becomes behavior
+// proxy_set_header inheritance — LOBO-L002 becomes behavior
 // ------------------------------------------------------------------
 
 /// The effective `proxy_set_header` set for location block `loc` under
 /// server `srv` and http block `http_blk`, implementing the EXACT
-/// inheritance rule WWS-L002 names and the oracle confirms: the
+/// inheritance rule LOBO-L002 names and the oracle confirms: the
 /// INNERMOST level (location, else server, else http) that declares
 /// ANY proxy_set_header wins, and its presence discards ALL
 /// ancestor-level ones. Returns index-parallel (names, values) lists,
@@ -517,7 +517,7 @@ fn block_has_psh(c: config.Conf, blk: int) -> bool {
     false
 }
 
-/// Expand the nginx variables wws supports inside a proxy_set_header
+/// Expand the nginx variables lobo supports inside a proxy_set_header
 /// value: `$host` (the request Host), `$remote_addr` (the client
 /// address — loopback-only, so 127.0.0.1 until a peer-address builtin
 /// lands, a D-note), `$proxy_host` (the upstream authority),
@@ -936,7 +936,7 @@ fn up_header(up: UpResponse, lname: str) -> str {
 
 /// Build the client-facing response bytes from a parsed upstream
 /// response and its (already-read) body. Header order matches the
-/// pinned oracle: the upstream status line, then Server and Date (wws
+/// pinned oracle: the upstream status line, then Server and Date (lobo
 /// supplies its own — upstream's are dropped), then Content-Type and
 /// Content-Length (regenerated from the buffered body), then
 /// Connection, then the remaining upstream headers in order minus

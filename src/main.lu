@@ -1,4 +1,4 @@
-//! wws — a production web server in wolf (working name). Entry file:
+//! lobo — a production web server in wolf. Entry file:
 //! the operator shell. The CLI grammar, the text builders, the pid
 //! lifecycle, the control channel and the reload verbs are shell/'s
 //! (ws04); main is the thin dispatch over them plus the acting paths
@@ -20,9 +20,9 @@
 //! did NOT land: a getpid surface — so `-s` still SENDS over the
 //! control channel and the pid file still records the control
 //! endpoint (named residue; a real pid file follows a getpid).
-//! Signal delivery is Linux-full at this pin (non-Linux follows the
-//! task-layer port); where the listen refuses, the server says so and
-//! runs control-channel-only — a named gap, never a fake.
+//! Signal delivery is Linux+macOS at the wsm03 pin (s114/s59; other
+//! hosts follow the ports); where the listen refuses, the server says
+//! so and runs control-channel-only — a named gap, never a fake.
 //!
 //! Serve stays SPAWN-FREE (D7, ws04's shape): ONE poll loop
 //! multiplexes the http listener, the control channel, the signal
@@ -41,7 +41,7 @@
 //! flips to the forwarder the sprint after the fix enters the pin.
 //! That is what makes the DRAIN WATCHABLE (ws08): a per-generation live
 //! counter in the loop's own bookkeeping lets an operator see an old
-//! generation drain — via `wws status` and log events — while a new one
+//! generation drain — via `lobo status` and log events — while a new one
 //! serves. A reloaded-away generation keeps its FROZEN model and its
 //! open connections finish on it (the reload-under-load invariant,
 //! pinned by the rig). File-header note (F-0016): comments never sit
@@ -67,7 +67,7 @@ fn version() -> str {
 /// interface version, which is also what keeps each stub import
 /// honestly used (E0305).
 fn banner() {
-    print("wws {version()} — a web server in wolf (working name)")
+    print("lobo {version()} — a web server in wolf")
     let mods = "config {config.version()} · dryrun {dryrun.version()} · http {http.version()} · obs {obs.version()} · proxy {proxy.version()} · serve {serve.version()} · shell {shell.version()}"
     print("modules: {mods}")
 }
@@ -242,7 +242,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool) -> List[GenRow] {
                 } else {
                     nd = nd + 1
                 }
-                eprint("wws: [notice] {shell.ev_connection_retired(gen, nlive)}")
+                eprint("lobo: [notice] {shell.ev_connection_retired(gen, nlive)}")
             }
             (mut out).push(GenRow {
                 conf: g.conf,
@@ -270,7 +270,7 @@ fn retire_zero(gens: List[GenRow], now: int) -> List[GenRow] {
     for g in gens {
         if g.state == "draining" && g.live == 0 {
             let age = now - g.since_ms
-            eprint("wws: [notice] {shell.ev_generation_retired(g.gen, g.drained, g.aborted, age)}")
+            eprint("lobo: [notice] {shell.ev_generation_retired(g.gen, g.drained, g.aborted, age)}")
         } else {
             (mut out).push(g)
         }
@@ -430,7 +430,7 @@ fn ssl_listen_addr(c: config.Conf) -> str {
 fn serve_main(prefix: str, conf: str) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
-        eprint("wws: [emerg] configuration file {conf} test failed")
+        eprint("lobo: [emerg] configuration file {conf} test failed")
         return 1
     }
     let ctrl = shell.control_addr(c0)
@@ -442,10 +442,12 @@ fn serve_main(prefix: str, conf: str) -> int {
     let existing = shell.pid_read(pidp) else |_| ""
     if !existing.is_empty() {
         if shell.control_alive(existing) {
-            eprint("wws: [emerg] a wws master is already running (control {existing})")
+            eprint("lobo: [emerg] a lobo master is already running (control {existing})")
             return 1
         }
-        eprint("wws: [warn] removing stale pid file \"{pidp}\" (control {existing} not responding)")
+        eprint(
+            "lobo: [warn] removing stale pid file \"{pidp}\" (control {existing} not responding)",
+        )
     }
 
     // the plaintext listener binds the first NON-ssl listen; a config
@@ -459,11 +461,11 @@ fn serve_main(prefix: str, conf: str) -> int {
     var hport: int = 0
     if !addr.is_empty() {
         hl = net_listen(addr) else |_| {
-            eprint("wws: [emerg] bind() to {addr} failed")
+            eprint("lobo: [emerg] bind() to {addr} failed")
             return 1
         }
         hport = net_port(hl) else |_| {
-            eprint("wws: [emerg] could not read the listen port")
+            eprint("lobo: [emerg] could not read the listen port")
             return 1
         }
         have_http = true
@@ -477,7 +479,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     // loop below. The upstream gate retired at the wsm02 pin
     // (wolf-lang#144 fixed: a List row mixing bool/int/List — the
     // Sess shape — now tiles on the native tier, probed at wsm02
-    // including an imported-struct field); what remains is wws's own
+    // including an imported-struct field); what remains is lobo's own
     // work — a Conn-based conn_step (serve_request re-plumbed over
     // the conn seam), a session-carrying row table, and a TLS-holder
     // drain witness — a NAMED follow-on rider (ledger D24), the
@@ -489,7 +491,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     let tls_addr = ssl_listen_addr(c0)
     if !tls_addr.is_empty() {
         if !config.ssl_ok(ssl0) {
-            eprint("wws: [emerg] TLS configuration invalid: {ssl0.err}")
+            eprint("lobo: [emerg] TLS configuration invalid: {ssl0.err}")
             return 1
         }
         // wsm02 entropy probe (s118): TLS session keys come from
@@ -499,11 +501,11 @@ fn serve_main(prefix: str, conf: str) -> int {
         // mid-handshake. The probe bytes are discarded (never logged,
         // never reused); every handshake draws its own fresh bytes.
         if os_random(32).len != 32 {
-            eprint("wws: [emerg] entropy probe short (impossible per [os.random])")
+            eprint("lobo: [emerg] entropy probe short (impossible per [os.random])")
             return 1
         }
         tls_l = net_listen(tls_addr) else |_| {
-            eprint("wws: [emerg] bind() to TLS {tls_addr} failed")
+            eprint("lobo: [emerg] bind() to TLS {tls_addr} failed")
             return 1
         }
         let tport = net_port(tls_l) else |_| {
@@ -514,7 +516,7 @@ fn serve_main(prefix: str, conf: str) -> int {
         }
         have_tls = true
         eprint(
-            "wws: [notice] TLS serving on {tls_addr} (port {tport}); TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, certificate entries loaded: {ssl0.names.len}",
+            "lobo: [notice] TLS serving on {tls_addr} (port {tport}); TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, certificate entries loaded: {ssl0.names.len}",
         )
     }
 
@@ -526,7 +528,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     var ctrl_ep = addr
     if !ctrl.is_empty() {
         cl = net_listen(ctrl) else |_| {
-            eprint("wws: [emerg] bind() to control {ctrl} failed")
+            eprint("lobo: [emerg] bind() to control {ctrl} failed")
             return 1
         }
         let cport = net_port(cl) else |_| {
@@ -537,7 +539,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     }
 
     shell.pid_write(pidp, ctrl_ep) else |_| {
-        eprint("wws: [emerg] could not write pid file \"{pidp}\"")
+        eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
         return 1
     }
 
@@ -545,7 +547,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     let lim = http.default_limits()
     let shutdown_ms = shell.shutdown_timeout_ms(c0)
     let where = if have_http { addr } else { "(no plaintext listener)" }
-    eprint("wws: [notice] serving on {where}, control {ctrl_ep}, pid file {pidp}")
+    eprint("lobo: [notice] serving on {where}, control {ctrl_ep}, pid file {pidp}")
 
     // signal reception (wsm01, s114 in the pin): register interest in
     // RELOAD|TERMINATE|QUIT by MEANING, plus the probe bit (UPGRADE —
@@ -559,10 +561,10 @@ fn serve_main(prefix: str, conf: str) -> int {
         sig_on = false
     }
     if sig_on {
-        eprint("wws: [notice] signal reception armed (HUP=reload, TERM=stop, QUIT=quit)")
+        eprint("lobo: [notice] signal reception armed (HUP=reload, TERM=stop, QUIT=quit)")
     } else {
         eprint(
-            "wws: [notice] signal reception unavailable on this platform; the control channel is the trigger",
+            "lobo: [notice] signal reception unavailable on this platform; the control channel is the trigger",
         )
     }
 
@@ -580,8 +582,8 @@ fn serve_main(prefix: str, conf: str) -> int {
         aborted: 0,
         shash: h1,
     })
-    eprint("wws: [notice] {shell.ev_generation_loaded(1, h1)}")
-    eprint("wws: [notice] {shell.ev_generation_activated(1)}")
+    eprint("lobo: [notice] {shell.ev_generation_loaded(1, h1)}")
+    eprint("lobo: [notice] {shell.ev_generation_activated(1)}")
 
     // the connection table (parallel primitive lists — a List of a
     // local/primitive type constructs on every lane; rebuilt each pass)
@@ -636,7 +638,7 @@ fn serve_main(prefix: str, conf: str) -> int {
             }
             if m > 0 && m != sprobe {
                 verb = shell.signal_verb(m)
-                eprint("wws: [notice] {shell.ev_signal_received(m)}")
+                eprint("lobo: [notice] {shell.ev_signal_received(m)}")
             }
         }
         if cc >= 0 || !verb.is_empty() {
@@ -657,7 +659,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                 quitting = true
                 let held = held_of(gens, curgen)
                 gens = mark_draining(gens, curgen, now)
-                eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
+                eprint("lobo: [notice] {shell.ev_generation_draining(curgen, held)}")
                 gens = retire_zero(gens, now)
             } else if verb == "reopen" {
                 reply(cc, "reopen: log outputs cycled (generation {curgen})\n")
@@ -684,13 +686,13 @@ fn serve_main(prefix: str, conf: str) -> int {
                         ssl0 = nssl
                     } else {
                         eprint(
-                            "wws: [error] reloaded config has invalid TLS ({nssl.err}); keeping the previous certificates",
+                            "lobo: [error] reloaded config has invalid TLS ({nssl.err}); keeping the previous certificates",
                         )
                     }
                     gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
-                    eprint("wws: [notice] {shell.ev_generation_draining(curgen, held)}")
-                    eprint("wws: [notice] {shell.ev_generation_loaded(ng.gen, nhash)}")
-                    eprint("wws: [notice] {shell.ev_generation_activated(ng.gen)}")
+                    eprint("lobo: [notice] {shell.ev_generation_draining(curgen, held)}")
+                    eprint("lobo: [notice] {shell.ev_generation_loaded(ng.gen, nhash)}")
+                    eprint("lobo: [notice] {shell.ev_generation_activated(ng.gen)}")
                     gens = retire_zero(gens, now)
                 }
                 reply(cc, "{ng.note}\n")
@@ -728,7 +730,7 @@ fn serve_main(prefix: str, conf: str) -> int {
         // tagged to the current gen for the live counter (a reload
         // while a TLS conn serves waits for it — acceptable on
         // loopback). The #144 layout gate retired at the wsm02 pin;
-        // joining the drain table is now wws's own stepper refactor,
+        // joining the drain table is now lobo's own stepper refactor,
         // the NAMED D24 rider (see the listener comment above). A
         // stalled handshake is bounded by the read deadline, never a
         // hang.
@@ -880,23 +882,23 @@ fn signal_main(cli: shell.Cli) -> int {
     let pidp = shell.pid_path(c, cli.prefix)
     let ep = shell.pid_read(pidp) else |e| match e {
         none => {
-            eprint("wws: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
+            eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
             return 1
         },
         io => {
-            eprint("wws: [alert] could not read pid file \"{pidp}\"")
+            eprint("lobo: [alert] could not read pid file \"{pidp}\"")
             return 1
         },
     }
     let reply = shell.control_send(ep, cli.signal) else |e| match e {
         refused => {
             eprint(
-                "wws: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
+                "lobo: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
             )
             return 1
         },
         io => {
-            eprint("wws: [error] control channel error to {ep}")
+            eprint("lobo: [error] control channel error to {ep}")
             return 1
         },
     }
@@ -905,14 +907,14 @@ fn signal_main(cli: shell.Cli) -> int {
 }
 
 // ------------------------------------------------------------------
-// status — `wws status [--format json]` reads the drain you can watch
+// status — `lobo status [--format json]` reads the drain you can watch
 // off the running master's control channel (ws08)
 // ------------------------------------------------------------------
 
-/// `wws status [--format json]`: read the running master's control
+/// `lobo status [--format json]`: read the running master's control
 /// endpoint from the pid file, fetch the status stanza over the control
 /// channel (read to close — the stanza is multi-line), and print it.
-/// nginx has no status command; this is wws-native, the observable
+/// nginx has no status command; this is lobo-native, the observable
 /// drain's operator surface. Exit codes mirror `-s`: a missing pid file
 /// or a refused/dead endpoint is exit 1 with an nginx-shaped alert.
 fn status_main(cli: shell.Cli) -> int {
@@ -920,11 +922,11 @@ fn status_main(cli: shell.Cli) -> int {
     let pidp = shell.pid_path(c, cli.prefix)
     let ep = shell.pid_read(pidp) else |e| match e {
         none => {
-            eprint("wws: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
+            eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
             return 1
         },
         io => {
-            eprint("wws: [alert] could not read pid file \"{pidp}\"")
+            eprint("lobo: [alert] could not read pid file \"{pidp}\"")
             return 1
         },
     }
@@ -936,12 +938,12 @@ fn status_main(cli: shell.Cli) -> int {
     let reply = shell.control_fetch(ep, verb) else |e| match e {
         refused => {
             eprint(
-                "wws: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
+                "lobo: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
             )
             return 1
         },
         io => {
-            eprint("wws: [error] control channel error to {ep}")
+            eprint("lobo: [error] control channel error to {ep}")
             return 1
         },
     }
@@ -964,7 +966,7 @@ fn check_globals(globals: str) -> int {
     }
     let g = config.parse_str("{globals}\n", "command-line")
     if !config.ok(g) {
-        eprint("wws: [emerg] {g.err} in the -g command-line directives")
+        eprint("lobo: [emerg] {g.err} in the -g command-line directives")
         return 1
     }
     0
@@ -1004,7 +1006,7 @@ fn dryrun_main(cli: shell.Cli) -> int {
     for spec in cli.requests {
         let p = dryrun.probe_request(spec)
         if !p.input_err.is_empty() {
-            eprint("wws: {p.input_err}")
+            eprint("lobo: {p.input_err}")
             return 1
         }
         var tr = http.trace_new()
@@ -1049,7 +1051,7 @@ fn dryrun_main(cli: shell.Cli) -> int {
 fn main() -> int {
     let cli = shell.parse_cli(env_args())
     if cli.mode == "error" {
-        eprint("wws: {cli.err_msg}")
+        eprint("lobo: {cli.err_msg}")
         return cli.exit_code
     }
     if cli.mode == "banner" {

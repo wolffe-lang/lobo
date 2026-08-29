@@ -1,5 +1,5 @@
 # nginx.conf.in — the MINIMAL config for the differential oracle.
-# Rendered per case by tools/wws-differential (@PORT@ and @ROOT@
+# Rendered per case by tools/lobo-differential (@PORT@ and @ROOT@
 # substituted) into the case's scratch dir; every path below is
 # RELATIVE so it lands inside that scratch dir via `nginx -p` — a
 # test rig never scribbles on system paths. Loopback only, always.

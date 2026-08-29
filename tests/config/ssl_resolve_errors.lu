@@ -4,7 +4,7 @@
 //! stage-src: config
 //!
 //! ws05 §2: the ssl_* config subset resolves and every refusal is
-//! NAMED — the honest-scope posture (a cert wws cannot validate is a
+//! NAMED — the honest-scope posture (a cert lobo cannot validate is a
 //! config error, never a silent accept). Drives config.ssl_resolve
 //! over the checked-in TEST fixtures (tests/tls/fixtures — marked
 //! TEST there): the clean fullchain pair, the RSA key refusal, the

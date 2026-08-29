@@ -22,7 +22,7 @@
 //!   p32 a literal include naming a missing file is
 //!       open() "<path>" failed (2: No such file or directory).
 //!   p34/p37 an include CYCLE dumps the oracle's core (exit 139,
-//!       segfault — self-include and mutual). wws refuses by name
+//!       segfault — self-include and mutual). lobo refuses by name
 //!       with the chain printed; the crash transcript is the evidence
 //!       that carrying the chain is not gold-plating.
 //!   p77/p78 include works INSIDE types and map blocks (whose other

@@ -4,10 +4,10 @@
 //! conforms: err.union, err.propagate
 //! stage-src: proxy http config obs serve conn tls
 //!
-//! The 504 path, live: wws proxies to an upstream that ACCEPTS but
+//! The 504 path, live: lobo proxies to an upstream that ACCEPTS but
 //! never replies (a listener left un-accepted — the kernel completes
 //! the handshake in the backlog, so connect and write succeed and the
-//! READ leg times out). With proxy_read_timeout small, wws must answer
+//! READ leg times out). With proxy_read_timeout small, lobo must answer
 //! "504 Gateway Time-out" with the gateway shape (probed oracle: text/
 //! html, Connection close, the nginx page modulo the identity footer).
 //! No spawn: the un-accepted backlog connection is the whole trick.
@@ -47,7 +47,7 @@ fn main() -> !int {
     let rd = net_accept(l)?
 
     let date = "Thu, 01 Jan 2026 00:00:00 GMT"
-    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "wws/0.1.0", date, false) else |_| {
+    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false) else |_| {
         assert(false, "proxy.run should not raise on a read timeout")
         return 1
     }

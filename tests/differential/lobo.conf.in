@@ -1,7 +1,7 @@
-# wws.conf.in — the wws side of the differential, rendered per case by
-# tools/wws-differential (@PORT@ and @ROOT@ substituted) into the
+# lobo.conf.in — the lobo side of the differential, rendered per case by
+# tools/lobo-differential (@PORT@ and @ROOT@ substituted) into the
 # case's scratch dir. Mirrors nginx.conf.in: the same one type, the
-# same root, loopback only. wws runs beside the pinned oracle and both
+# same root, loopback only. lobo runs beside the pinned oracle and both
 # replies go through the one differ (ws02).
 http {
   types {

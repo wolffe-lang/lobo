@@ -4,7 +4,7 @@
 //! conforms: err.union, err.propagate
 //! stage-src: proxy http config obs serve conn tls
 //!
-//! The 502 path, live and end-to-end: wws proxies to a DEAD upstream
+//! The 502 path, live and end-to-end: lobo proxies to a DEAD upstream
 //! (a port bound then closed → connect refused) and must answer the
 //! client "502 Bad Gateway" with the gateway shape the oracle draws
 //! (probed: Content-Type text/html, Connection close, the nginx error
@@ -57,7 +57,7 @@ fn main() -> !int {
     let rd = net_accept(l)?
 
     let date = "Thu, 01 Jan 2026 00:00:00 GMT"
-    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "wws/0.1.0", date, false) else |_| {
+    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false) else |_| {
         assert(false, "proxy.run should not raise on a refused upstream")
         return 1
     }

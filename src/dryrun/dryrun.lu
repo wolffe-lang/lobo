@@ -386,7 +386,7 @@ pub fn why_prose(code: str) -> str {
 
 /// The one-line precedence summary the stanza teaches. nginx's real
 /// order is `=` exact, then `^~`/plain longest prefix, then regex in
-/// file order, then plain longest prefix; wws at this pin has no
+/// file order, then plain longest prefix; lobo at this pin has no
 /// regex matching, so the effective order is the first two. Total.
 pub fn precedence_prose() -> str {
     "= exact > longest prefix (regex is parse-only at this pin and never wins)"
@@ -828,7 +828,7 @@ fn jstr(s: str) -> str {
 /// `requests`, comma-joined by the caller, closed by `json_close`.
 /// Total.
 pub fn json_open() -> str {
-    "{{\"schema\":{schema()},\"tool\":\"wws --request\",\"requests\":["
+    "{{\"schema\":{schema()},\"tool\":\"lobo --request\",\"requests\":["
 }
 
 /// The document closer. Total.

@@ -1,5 +1,5 @@
 #!/bin/sh
-# wws-tls-renewal — the certbot renewal-reload case (ws05 §4, the W4
+# lobo-tls-renewal — the certbot renewal-reload case (ws05 §4, the W4
 # hard-minimum proof). A REAL certbot layout: a live/<domain>/ symlink
 # farm (fullchain.pem + privkey.pem symlinks into archive/), resolved
 # at load. Serve under cert A, repoint the symlinks to cert B exactly
@@ -12,14 +12,14 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
 
-WWS=target/wws-release
+LOBO=target/lobo-release
 FX=tests/tls/fixtures
 CA=$FX/ca.crt
-if [ ! -x "$WWS" ]; then
-    echo "tls-renewal: FAILED — $WWS missing" >&2
+if [ ! -x "$LOBO" ]; then
+    echo "tls-renewal: FAILED — $LOBO missing" >&2
     exit 1
 fi
-# Oracle resolution (the toolchain idiom, same as wws-tls-interop):
+# Oracle resolution (the toolchain idiom, same as lobo-tls-interop):
 # $OPENSSL_BIN → PATH; macOS's LibreSSL `openssl` cannot drive the
 # TLS 1.3 s_client probes, so a non-OpenSSL oracle refuses by name.
 OPENSSL="${OPENSSL_BIN:-}"
@@ -51,8 +51,8 @@ cp "$FX/alt.key"           "$scratch/archive/privkeyB.pem"
 ln -sf ../archive/fullchainA.pem "$scratch/live/fullchain.pem"
 ln -sf ../archive/privkeyA.pem   "$scratch/live/privkey.pem"
 
-cat > "$scratch/wws.conf" <<EOF
-pid $scratch/wws.pid;
+cat > "$scratch/lobo.conf" <<EOF
+pid $scratch/lobo.pid;
 control 127.0.0.1:0;
 events {
 }
@@ -73,20 +73,20 @@ red=0
 pass() { echo "tls-renewal: ok — $1"; }
 fail() { echo "tls-renewal: FAILED — $1" >&2; red=$((red + 1)); }
 
-"$WWS" -p . -c "$scratch/wws.conf" serve >"$scratch/wws.out" 2>"$scratch/wws.err" </dev/null &
-wws_pid=$!
+"$LOBO" -p . -c "$scratch/lobo.conf" serve >"$scratch/lobo.out" 2>"$scratch/lobo.err" </dev/null &
+lobo_pid=$!
 port=""
 i=0
 while [ $i -lt 50 ]; do
-    port=$(sed -n 's/.*TLS serving on [^ ]* (port \([0-9]*\)).*/\1/p' "$scratch/wws.err" | head -1)
+    port=$(sed -n 's/.*TLS serving on [^ ]* (port \([0-9]*\)).*/\1/p' "$scratch/lobo.err" | head -1)
     [ -n "$port" ] && break
     sleep 0.1
     i=$((i + 1))
 done
 if [ -z "$port" ]; then
     echo "tls-renewal: FAILED — no TLS port announced:" >&2
-    cat "$scratch/wws.err" >&2
-    kill "$wws_pid" 2>/dev/null
+    cat "$scratch/lobo.err" >&2
+    kill "$lobo_pid" 2>/dev/null
     exit 1
 fi
 
@@ -100,7 +100,7 @@ ln -sfn ../archive/fullchainB.pem "$scratch/live/fullchain.pem"
 ln -sfn ../archive/privkeyB.pem   "$scratch/live/privkey.pem"
 
 # -s reload over the control channel (the certbot post-hook)
-"$WWS" -p . -c "$scratch/wws.conf" -s reload >"$scratch/reload.out" 2>"$scratch/reload.err"
+"$LOBO" -p . -c "$scratch/lobo.conf" -s reload >"$scratch/reload.out" 2>"$scratch/reload.err"
 sleep 0.4
 
 subj_after=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername localhost \
@@ -108,21 +108,21 @@ subj_after=$(echo | "$OPENSSL" s_client -connect 127.0.0.1:"$port" -servername l
 case "$subj_after" in *alt.example*) pass "after -s reload: new connections get cert B (CN=alt.example)" ;; *) fail "after-reload cert was: $subj_after" ;; esac
 
 # the reload was logged as a generation event (the observable drain)
-if grep -q "generation-loaded gen=2" "$scratch/wws.err"; then
+if grep -q "generation-loaded gen=2" "$scratch/lobo.err"; then
     pass "reload advanced the generation (gen 2 loaded)"
 else
     fail "no generation-2 load event after reload"
 fi
 
-kill "$wws_pid" 2>/dev/null
-wait "$wws_pid" 2>/dev/null
-kill -9 "$wws_pid" 2>/dev/null
+kill "$lobo_pid" 2>/dev/null
+wait "$lobo_pid" 2>/dev/null
+kill -9 "$lobo_pid" 2>/dev/null
 
 # a BROKEN symlink is the named config error (not a crash, not a silent
 # plaintext fallback)
 rm -f "$scratch/live/fullchain.pem"
 ln -s ../archive/does-not-exist.pem "$scratch/live/fullchain.pem"
-terr=$("$WWS" -p . -c "$scratch/wws.conf" -t 2>&1)
+terr=$("$LOBO" -p . -c "$scratch/lobo.conf" -t 2>&1)
 tcode=$?
 if [ "$tcode" != 0 ] && printf '%s' "$terr" | grep -qi "cannot load certificate"; then
     pass "a broken symlink is the named config error at -t"

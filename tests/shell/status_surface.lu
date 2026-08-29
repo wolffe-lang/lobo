@@ -57,7 +57,7 @@ fn main() -> !int {
     // ---- the status stanza (human text)
     assert(shell.status_schema() == 1, "schema version 1")
     let head = shell.status_head_text(2, false)
-    assert(head.contains("wws status\n"), "text header identity line")
+    assert(head.contains("lobo status\n"), "text header identity line")
     assert(head.contains("current generation: 2\n"), "text names the current generation")
     assert(head.contains("quitting: false\n"), "text carries the quit posture")
     let cur_line = shell.status_line_text(2, 0, "current", 100, "abcd", -1)
@@ -91,7 +91,7 @@ fn main() -> !int {
     // ---- the signal surface (wsm01, s114 in the pin), PURE half:
     // the meaning constants, the meaning→verb map every trigger
     // shares, and the vocabulary EXTENSION event. The real delivery
-    // is witnessed by tools/wws-signal against the live binary.
+    // is witnessed by tools/lobo-signal against the live binary.
     assert(shell.sig_reload() == 1, "RELOAD is bit 1 (SIGHUP)")
     assert(shell.sig_terminate() == 2, "TERMINATE is bit 2 (SIGTERM)")
     assert(shell.sig_quit() == 4, "QUIT is bit 4 (SIGQUIT)")

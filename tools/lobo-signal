@@ -1,5 +1,5 @@
 #!/bin/sh
-# wws-signal — the REAL-SIGNAL witness (wsm01, s114 in the pin): a
+# lobo-signal — the REAL-SIGNAL witness (wsm01, s114 in the pin): a
 # genuine SIGHUP / SIGQUIT / SIGTERM — sent with kill(1), the test
 # harness's signal path; the server's os pid is the shell's `$!`,
 # because nothing in wolf exposes a getpid yet (the named residue —
@@ -30,18 +30,18 @@ cd "$(dirname "$0")/.." || exit 2
 case "$(uname -s)" in
 Linux | Darwin) ;;
 *)
-    echo "wws-signal: SKIPPED — signal delivery is Linux+macOS at this pin (s114/s59); other hosts follow the ports (named platform gap)"
+    echo "lobo-signal: SKIPPED — signal delivery is Linux+macOS at this pin (s114/s59); other hosts follow the ports (named platform gap)"
     exit 0
     ;;
 esac
 
-WWS="$(pwd)/target/wws-release"
-if [ ! -x "$WWS" ]; then
-    echo "wws-signal: FAILED — $WWS missing; the gauntlet's build step makes it" >&2
+LOBO="$(pwd)/target/lobo-release"
+if [ ! -x "$LOBO" ]; then
+    echo "lobo-signal: FAILED — $LOBO missing; the gauntlet's build step makes it" >&2
     exit 1
 fi
 
-scratch="target/wws-signal"
+scratch="target/lobo-signal"
 rm -rf "$scratch"
 mkdir -p "$scratch/A" "$scratch/B"
 echo "SIG-GEN-A" > "$scratch/A/index.html"
@@ -49,7 +49,7 @@ echo "SIG-GEN-B" > "$scratch/B/index.html"
 
 red=0
 total=0
-say() { echo "wws-signal: $1"; }
+say() { echo "lobo-signal: $1"; }
 check() { # check <desc> <ok(0/1)>
     total=$((total + 1))
     if [ "$2" = 0 ]; then
@@ -62,18 +62,18 @@ check() { # check <desc> <ok(0/1)>
 
 hp=$("$WOLF" run ./tests/rig/freeport.lu)
 ctp=$("$WOLF" run ./tests/rig/freeport.lu)
-conf="$scratch/wws.conf"
+conf="$scratch/lobo.conf"
 render() { # render <root>
-    printf 'pid %s/wws.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+    printf 'pid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
         "$scratch" "$ctp" "$hp" "$1" > "$conf"
 }
 render "$scratch/A"
 
-"$WWS" serve -p . -c "$conf" 2> "$scratch/wws.log" &
+"$LOBO" serve -p . -c "$conf" 2> "$scratch/lobo.log" &
 pid=$!
 
-# status text via the wws CLI (reads the pid file's control endpoint)
-status_text() { "$WWS" status -p . -c "$conf" 2>/dev/null; }
+# status text via the lobo CLI (reads the pid file's control endpoint)
+status_text() { "$LOBO" status -p . -c "$conf" 2>/dev/null; }
 poll() { # poll <desc> <grep-pattern> — up to ~8s
     i=0
     while [ $i -lt 80 ]; do
@@ -128,7 +128,7 @@ fi
 kill -QUIT "$pid"
 wait "$pid"
 check "SIGQUIT exits 0 (graceful quit)" $?
-if [ -f "$scratch/wws.pid" ]; then
+if [ -f "$scratch/lobo.pid" ]; then
     check "pid file removed on quit" 1
 else
     check "pid file removed on quit" 0
@@ -140,7 +140,7 @@ for ev in \
     "signal-received sig=quit verb=quit" \
     "generation-draining gen=1 held=1" \
     "generation-retired gen=1 drained=1"; do
-    if grep -q "$ev" "$scratch/wws.log"; then
+    if grep -q "$ev" "$scratch/lobo.log"; then
         check "log event: $ev" 0
     else
         check "log event: $ev" 1
@@ -149,27 +149,27 @@ done
 
 # 5. REAL SIGTERM on a server with NO control directive: the fast
 # shutdown needs no channel (nginx parity: `kill -TERM` always works).
-printf 'pid %s/wws2.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
-    "$scratch" "$hp" "$scratch/A" > "$scratch/wws2.conf"
-"$WWS" serve -p . -c "$scratch/wws2.conf" 2> "$scratch/wws2.log" &
+printf 'pid %s/lobo2.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+    "$scratch" "$hp" "$scratch/A" > "$scratch/lobo2.conf"
+"$LOBO" serve -p . -c "$scratch/lobo2.conf" 2> "$scratch/lobo2.log" &
 pid2=$!
 i=0
 while [ $i -lt 80 ]; do
-    if grep -q "generation-activated gen=1" "$scratch/wws2.log" 2>/dev/null; then break; fi
+    if grep -q "generation-activated gen=1" "$scratch/lobo2.log" 2>/dev/null; then break; fi
     sleep 0.1
     i=$((i + 1))
 done
 kill -TERM "$pid2"
 wait "$pid2"
 check "SIGTERM exits 0 with no control channel configured" $?
-if grep -q "signal-received sig=terminate verb=stop" "$scratch/wws2.log"; then
+if grep -q "signal-received sig=terminate verb=stop" "$scratch/lobo2.log"; then
     check "log event: signal-received sig=terminate verb=stop" 0
 else
     check "log event: signal-received sig=terminate verb=stop" 1
 fi
 
 if [ "$red" != 0 ]; then
-    echo "wws-signal: RED — $red of $total checks failed (logs under $scratch/)" >&2
+    echo "lobo-signal: RED — $red of $total checks failed (logs under $scratch/)" >&2
     exit 1
 fi
-echo "wws-signal: $total/$total checks green (a real SIGHUP drove the observable drain)"
+echo "lobo-signal: $total/$total checks green (a real SIGHUP drove the observable drain)"

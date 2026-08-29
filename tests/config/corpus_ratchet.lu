@@ -6,7 +6,7 @@
 //! THE RATCHET (contract target 4): the real-config corpus under
 //! tests/config-corpus/, every config classified, counts GATED, zero
 //! silent outcomes. fs lanes only (lupin has no fs by design). The
-//! oracle-parity half lives in tools/wws-confcheck (running child
+//! oracle-parity half lives in tools/lobo-confcheck (running child
 //! processes needs the sh harness — F-0065/wolf-lang#129, ws00's D3
 //! routing); THIS file is the wolf-side classification gate.
 //! Classes:

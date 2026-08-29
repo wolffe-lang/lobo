@@ -1,16 +1,16 @@
 #!/bin/sh
-# wws-confcheck — the corpus ORACLE-PARITY harness: every config under
+# lobo-confcheck — the corpus ORACLE-PARITY harness: every config under
 # tests/config-corpus/ is run through BOTH `nginx -t` (the pinned
-# oracle) and `wws -t`, and both exit codes must match the config's
+# oracle) and `lobo -t`, and both exit codes must match the config's
 # checked-in annotation header:
-#   # wws-corpus: oracle-exit=N wws-exit=M [delta=<why they differ>]
+#   # lobo-corpus: oracle-exit=N lobo-exit=M [delta=<why they differ>]
 # A config with no annotation FAILS (zero silent outcomes — the
 # ratchet's other half; the wolf-side classification gate is
-# tests/config/corpus_ratchet.lu). Where oracle-exit != wws-exit the
+# tests/config/corpus_ratchet.lu). Where oracle-exit != lobo-exit the
 # annotation MUST carry a delta= reason (the named-delta discipline:
 # the pinned oracle is built --without rewrite/gzip and without
 # ssl/pcre, so several stock-nginx-clean shapes fail THERE and not in
-# wws — each such divergence is named, per config, in the file
+# lobo — each such divergence is named, per config, in the file
 # itself).
 # -T is held to the -t exit on both sides (the p57 contract: same
 # verdict, dump on stdout).
@@ -20,15 +20,15 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 
 NGINX="$(pwd)/tests/differential/bin/nginx"
-WWS="$(pwd)/target/wws-debug"
+LOBO="$(pwd)/target/lobo-debug"
 pin_version=$(sed -n 's/^version = //p' tests/differential/NGINX-PIN)
 
 if [ ! -x "$NGINX" ]; then
     echo "confcheck: REFUSED — pinned oracle missing at $NGINX (nginx/$pin_version; build per docs/DIFFERENTIAL.md)" >&2
     exit 1
 fi
-if [ ! -x "$WWS" ]; then
-    echo "confcheck: FAILED — $WWS missing; the gauntlet's build step makes it" >&2
+if [ ! -x "$LOBO" ]; then
+    echo "confcheck: FAILED — $LOBO missing; the gauntlet's build step makes it" >&2
     exit 1
 fi
 
@@ -41,22 +41,22 @@ for dir in tests/config-corpus/*/; do
     name=$(basename "$dir")
     conf="$dir/nginx.conf"
     total=$((total + 1))
-    ann=$(grep -m1 '^# wws-corpus: oracle-exit=' "$conf" || true)
+    ann=$(grep -m1 '^# lobo-corpus: oracle-exit=' "$conf" || true)
     if [ -z "$ann" ]; then
-        echo "confcheck: FAILED — $name has no oracle annotation (# wws-corpus: oracle-exit=N wws-exit=M ...); silent corpus members are forbidden" >&2
+        echo "confcheck: FAILED — $name has no oracle annotation (# lobo-corpus: oracle-exit=N lobo-exit=M ...); silent corpus members are forbidden" >&2
         red=$((red + 1))
         continue
     fi
     want_oracle=$(printf '%s' "$ann" | sed -n 's/.*oracle-exit=\([0-9]*\).*/\1/p')
-    want_wws=$(printf '%s' "$ann" | sed -n 's/.*wws-exit=\([0-9]*\).*/\1/p')
+    want_lobo=$(printf '%s' "$ann" | sed -n 's/.*lobo-exit=\([0-9]*\).*/\1/p')
     delta=$(printf '%s' "$ann" | sed -n 's/.*delta=\(.*\)$/\1/p')
-    if [ -z "$want_oracle" ] || [ -z "$want_wws" ]; then
+    if [ -z "$want_oracle" ] || [ -z "$want_lobo" ]; then
         echo "confcheck: FAILED — $name: malformed annotation \`$ann\`" >&2
         red=$((red + 1))
         continue
     fi
-    if [ "$want_oracle" != "$want_wws" ] && [ -z "$delta" ]; then
-        echo "confcheck: FAILED — $name: exits diverge ($want_oracle vs $want_wws) with NO delta= reason; name the divergence or fix it" >&2
+    if [ "$want_oracle" != "$want_lobo" ] && [ -z "$delta" ]; then
+        echo "confcheck: FAILED — $name: exits diverge ($want_oracle vs $want_lobo) with NO delta= reason; name the divergence or fix it" >&2
         red=$((red + 1))
         continue
     fi
@@ -68,10 +68,10 @@ for dir in tests/config-corpus/*/; do
 
     ( cd "$scratch" && "$NGINX" -t -p "$(pwd)" -c nginx.conf -e error.log ) >/dev/null 2>"$scratch/oracle.err"
     got_oracle=$?
-    "$WWS" -t -p "$scratch" -c nginx.conf >/dev/null 2>"$scratch/wws.err"
-    got_wws=$?
-    "$WWS" -T -p "$scratch" -c nginx.conf >"$scratch/wws.dump" 2>/dev/null
-    got_wws_T=$?
+    "$LOBO" -t -p "$scratch" -c nginx.conf >/dev/null 2>"$scratch/lobo.err"
+    got_lobo=$?
+    "$LOBO" -T -p "$scratch" -c nginx.conf >"$scratch/lobo.dump" 2>/dev/null
+    got_lobo_T=$?
     ( cd "$scratch" && "$NGINX" -T -p "$(pwd)" -c nginx.conf -e error.log ) >/dev/null 2>&1
     got_oracle_T=$?
 
@@ -81,13 +81,13 @@ for dir in tests/config-corpus/*/; do
         sed 's/^/confcheck:   oracle: /' "$scratch/oracle.err" >&2
         ok=0
     fi
-    if [ "$got_wws" != "$want_wws" ]; then
-        echo "confcheck: FAILED — $name: wws -t exited $got_wws, annotation says $want_wws:" >&2
-        sed 's/^/confcheck:   wws: /' "$scratch/wws.err" >&2
+    if [ "$got_lobo" != "$want_lobo" ]; then
+        echo "confcheck: FAILED — $name: lobo -t exited $got_lobo, annotation says $want_lobo:" >&2
+        sed 's/^/confcheck:   lobo: /' "$scratch/lobo.err" >&2
         ok=0
     fi
-    if [ "$got_wws_T" != "$got_wws" ]; then
-        echo "confcheck: FAILED — $name: wws -T exited $got_wws_T but -t exited $got_wws (p57: same verdict)" >&2
+    if [ "$got_lobo_T" != "$got_lobo" ]; then
+        echo "confcheck: FAILED — $name: lobo -T exited $got_lobo_T but -t exited $got_lobo (p57: same verdict)" >&2
         ok=0
     fi
     if [ "$got_oracle_T" != "$got_oracle" ]; then
@@ -98,12 +98,12 @@ for dir in tests/config-corpus/*/; do
         red=$((red + 1))
         continue
     fi
-    if [ "$want_oracle" = "$want_wws" ]; then
+    if [ "$want_oracle" = "$want_lobo" ]; then
         parity=$((parity + 1))
-        echo "confcheck: ok — $name (oracle $got_oracle = wws $got_wws)"
+        echo "confcheck: ok — $name (oracle $got_oracle = lobo $got_lobo)"
     else
         annotated_delta=$((annotated_delta + 1))
-        echo "confcheck: ok — $name (oracle $got_oracle vs wws $got_wws; named: ${delta%%;*})"
+        echo "confcheck: ok — $name (oracle $got_oracle vs lobo $got_lobo; named: ${delta%%;*})"
     fi
 done
 

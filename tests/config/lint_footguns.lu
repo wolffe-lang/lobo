@@ -4,15 +4,15 @@
 //! stage-src: config
 //!
 //! The three parse-visible footguns from report 11 §1C AS VERIFIED
-//! (wolf/refs/articles/wws/class-c-config-footguns.md), each firing
-//! on its exhibit with a span, naming nginx's behavior and wws's
+//! (wolf/refs/articles/lobo/class-c-config-footguns.md), each firing
+//! on its exhibit with a span, naming nginx's behavior and lobo's
 //! stance:
-//!   WWS-L001 if-inside-location (the "If Is Evil" wiki class)
-//!   WWS-L002 proxy_set_header child presence discarding ALL parent
+//!   LOBO-L001 if-inside-location (the "If Is Evil" wiki class)
+//!   LOBO-L002 proxy_set_header child presence discarding ALL parent
 //!            lines (proxy module docs' iff-none inheritance rule) —
 //!            the finding names exactly which parent lines stop
 //!            applying
-//!   WWS-L003 the alias off-by-slash traversal shape (PortSwigger/
+//!   LOBO-L003 the alias off-by-slash traversal shape (PortSwigger/
 //!            gixy advisory)
 //! And the negative space: the clean shapes fire nothing.
 
@@ -28,9 +28,9 @@ fn main() -> int {
             "t.conf",
         ),
     )
-    assert(l1.contains("WWS-L001|t.conf:7|"), "L001 span: got\n{l1}")
+    assert(l1.contains("LOBO-L001|t.conf:7|"), "L001 span: got\n{l1}")
     assert(l1.contains("If Is Evil"), "L001 cites the wiki")
-    assert(l1.contains("wws parses the block today"), "L001 wws stance")
+    assert(l1.contains("lobo parses the block today"), "L001 lobo stance")
     // ...and NOT on if-in-server (legal, unambushed).
     let l1n = config.
         lint(
@@ -40,7 +40,7 @@ fn main() -> int {
             "t.conf",
         ),
     )
-    assert(!l1n.contains("WWS-L001"), "no L001 outside location: got\n{l1n}")
+    assert(!l1n.contains("LOBO-L001"), "no L001 outside location: got\n{l1n}")
 
     // L002: a child location setting one header discards BOTH parent
     // levels' lines — the finding names each of them.
@@ -52,12 +52,12 @@ fn main() -> int {
             "t.conf",
         ),
     )
-    assert(l2.contains("WWS-L002|t.conf:8|"), "L002 span is the child block: got\n{l2}")
+    assert(l2.contains("LOBO-L002|t.conf:8|"), "L002 span is the child block: got\n{l2}")
     assert(l2.contains("t.conf:6, t.conf:7"), "L002 names the server-level lines")
     assert(l2.contains("t.conf:4"), "L002 names the http-level line")
     assert(l2.contains("if and only if there are no proxy_set_header"), "L002 quotes the rule")
     // The server level itself also shadows http's line.
-    assert(l2.contains("WWS-L002|t.conf:5|"), "L002 fires per shadowing level: got\n{l2}")
+    assert(l2.contains("LOBO-L002|t.conf:5|"), "L002 fires per shadowing level: got\n{l2}")
     // ...and a single level sets headers with no ancestors: clean.
     let l2n = config.
         lint(
@@ -67,7 +67,7 @@ fn main() -> int {
             "t.conf",
         ),
     )
-    assert(!l2n.contains("WWS-L002"), "no L002 without a shadowed parent: got\n{l2n}")
+    assert(!l2n.contains("LOBO-L002"), "no L002 without a shadowed parent: got\n{l2n}")
 
     // L003: prefix without trailing slash + alias with one.
     let l3 = config.
@@ -78,7 +78,7 @@ fn main() -> int {
             "t.conf",
         ),
     )
-    assert(l3.contains("WWS-L003|t.conf:6|"), "L003 span: got\n{l3}")
+    assert(l3.contains("LOBO-L003|t.conf:6|"), "L003 span: got\n{l3}")
     assert(l3.contains("off-by-slash"), "L003 names the class")
     assert(l3.contains("/i../secret"), "L003 shows the escape under this location")
     // Matching slashes: clean. Exact-match location: clean.
@@ -90,6 +90,6 @@ fn main() -> int {
             "t.conf",
         ),
     )
-    assert(!l3n.contains("WWS-L003"), "no L003 on matched slashes or exact: got\n{l3n}")
+    assert(!l3n.contains("LOBO-L003"), "no L003 on matched slashes or exact: got\n{l3n}")
     0
 }

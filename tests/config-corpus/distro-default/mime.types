@@ -1,4 +1,4 @@
-# wws-corpus: source=nginx-1.30.4 tarball conf/mime.types (verbatim below this header) license=BSD-2-Clause (nginx's own LICENSE)
+# lobo-corpus: source=nginx-1.30.4 tarball conf/mime.types (verbatim below this header) license=BSD-2-Clause (nginx's own LICENSE)
 
 types {
     text/html                                        html htm shtml;

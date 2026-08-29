@@ -14,7 +14,7 @@
 //!   -c/-e no arg → exit 1, `requires file name`
 //!   -p (no arg)  → exit 1, `requires directory name`
 //!   -g (no arg)  → exit 1, `requires parameter`
-//! wws matches the exit codes and the message shapes (own "wws:"
+//! lobo matches the exit codes and the message shapes (own "lobo:"
 //! identity); the identity delta is the only divergence.
 
 use shell
@@ -42,7 +42,7 @@ fn four(a: str, b: str, c: str, d: str) -> List[str] {
 }
 
 fn main() -> int {
-    // no args: the wws banner
+    // no args: the lobo banner
     let empty = List[str]()
     assert(shell.parse_cli(empty).mode == "banner", "no args → banner")
 

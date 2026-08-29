@@ -58,8 +58,8 @@ pub fn version() -> str {
 /// banner | version | version_verbose | help | check | dump | docs |
 /// serve | signal | status | error. `signal` carries the validated
 /// verb when `mode == "signal"`. `format` is the `--format` value
-/// (default "text", "json" for the machine-readable `wws status`).
-/// `err_msg` is the nginx-shaped diagnostic (own identity: "wws: …" for
+/// (default "text", "json" for the machine-readable `lobo status`).
+/// `err_msg` is the nginx-shaped diagnostic (own identity: "lobo: …" for
 /// "nginx: …") and `exit_code` the code to return when `mode ==
 /// "error"` (or a terminal mode's code). The path knobs (`prefix`,
 /// `conf`, `errlog`, `globals`) and `quiet` carry through to the acting
@@ -114,7 +114,7 @@ pub fn signal_unix(name: str) -> str {
 /// PURE and total: never touches fs/net, never traps. Mirrors nginx's
 /// getopt discipline — mode flags (`-v -V -t -T -h -?`), the quiet
 /// modifier (`-q`), the arg-taking options (`-s -p -c -e -g`), and
-/// wws's own verbs (`serve`, `directives-md`). An option missing its
+/// lobo's own verbs (`serve`, `directives-md`). An option missing its
 /// argument, an unknown option, or an invalid signal word is
 /// `mode == "error"` with the oracle-shaped message and exit 1.
 pub fn parse_cli(args: List[str]) -> Cli {
@@ -280,21 +280,21 @@ pub fn parse_cli(args: List[str]) -> Cli {
 }
 
 // ------------------------------------------------------------------
-// the text builders — nginx's one-fact-per-line shapes, wws identity.
+// the text builders — nginx's one-fact-per-line shapes, lobo identity.
 // nginx prints all of these to STDERR (measured against the oracle);
 // the entry follows suit.
 // ------------------------------------------------------------------
 
-/// The server identity token, "wws/<ver>" (nginx: "nginx/1.30.4").
+/// The server identity token, "lobo/<ver>" (nginx: "nginx/1.30.4").
 /// Total.
 pub fn version_token() -> str {
-    "wws/0.1.0"
+    "lobo/0.1.0"
 }
 
-/// The one-line version report (`-v`): "wws version: wws/0.1.0"
+/// The one-line version report (`-v`): "lobo version: lobo/0.1.0"
 /// (nginx: "nginx version: nginx/1.30.4"). Total.
 pub fn version_report() -> str {
-    "wws version: {version_token()}"
+    "lobo version: {version_token()}"
 }
 
 /// The `-V` build metadata, nginx's one-line-per-fact shape: identity,
@@ -309,16 +309,16 @@ pub fn version_verbose() -> str {
     s
 }
 
-/// The usage text (`-h`/`-?`/`help`), nginx's Usage shape plus wws's
+/// The usage text (`-h`/`-?`/`help`), nginx's Usage shape plus lobo's
 /// own verbs on a trailing line. Total.
 pub fn usage_text() -> str {
     var s = "{version_report()}\n"
-    s = "{s}Usage: wws [-?hvVtTq] [-s signal] [-p prefix]\n"
+    s = "{s}Usage: lobo [-?hvVtTq] [-s signal] [-p prefix]\n"
     s = "{s}           [-e filename] [-c filename] [-g directives]\n"
-    s = "{s}       wws -t --request '<method> <scheme>://<host>/<path>' ...\n"
+    s = "{s}       lobo -t --request '<method> <scheme>://<host>/<path>' ...\n"
     s = "{s}           [--sni name] [--client addr] [--stat] [--format json]\n"
     s = "{s}           (the config dry-run: what would this config DO — ws07)\n"
-    s = "{s}       wws [serve | directives-md]   (wws-native verbs)\n"
+    s = "{s}       lobo [serve | directives-md]   (lobo-native verbs)\n"
     s
 }
 
@@ -351,7 +351,7 @@ pub fn pid_path(c: config.Conf, prefix: str) -> str {
 }
 
 /// Write `endpoint` to the pid file atomically: create the parent
-/// directory if absent (wws owns its runtime dirs — nginx's logs/ is
+/// directory if absent (lobo owns its runtime dirs — nginx's logs/ is
 /// there by its install), write a sibling temp file, then rename over
 /// the target, so a concurrent reader sees either the old file or the
 /// whole new one, never a partial write. Rows: fs `io` (a write or
@@ -780,7 +780,7 @@ pub fn signal_verb(m: int) -> str {
 
 // ---- the log-event vocabulary (FROZEN; documented in docs/) ---------
 // Each builder returns the event BODY: a stable name then space-
-// separated key=value fields. The entry prefixes "wws: [notice] " and
+// separated key=value fields. The entry prefixes "lobo: [notice] " and
 // emits through the logging seam (eprint, ws02); ws09 reformats these
 // names into JSON and ws12 into metrics, so the NAMES and FIELD KEYS
 // are a contract, not decoration.
@@ -838,13 +838,13 @@ pub fn status_schema() -> int {
     1
 }
 
-/// The human status stanza's header (`wws status`): the identity line,
+/// The human status stanza's header (`lobo status`): the identity line,
 /// the current generation, and the quit posture — one fact per line,
 /// nginx's shape. The entry appends one `status_line_text` per
 /// generation. Read over the control channel to the peer's close (the
 /// stanza is multi-line), so `control_fetch` reads it. Total.
 pub fn status_head_text(current: int, quitting: bool) -> str {
-    var s = "wws status\n"
+    var s = "lobo status\n"
     s = "{s}current generation: {current}\n"
     s = "{s}quitting: {bool_word(quitting)}\n"
     s

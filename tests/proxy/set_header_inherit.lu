@@ -4,14 +4,14 @@
 //! conforms: err.union
 //! stage-src: proxy http config
 //!
-//! proxy_set_header inheritance — WWS-L002 as RUNTIME BEHAVIOR, and
+//! proxy_set_header inheritance — LOBO-L002 as RUNTIME BEHAVIOR, and
 //! the lint co-firing beside it (the charter's carry-AND-warn posture).
 //! The EXACT rule the pinned oracle confirmed (probed: a location that
 //! sets any proxy_set_header drops the http-level X-Http-Level from the
 //! upstream request): the innermost level with any proxy_set_header
 //! wins and discards ALL ancestor-level ones. This test builds the
 //! config model, then asserts BOTH:
-//!   (1) config.lint reports WWS-L002 on the child block (the load-time
+//!   (1) config.lint reports LOBO-L002 on the child block (the load-time
 //!       name), and
 //!   (2) proxy.set_headers resolves the child's set ALONE at runtime
 //!       (the parent's X-Http-Level is gone) — carry AND warn.
@@ -54,16 +54,16 @@ http {{
 """
     let c = config.parse_str(src, "inherit.conf")
 
-    // (1) the lint names WWS-L002 on the child block
+    // (1) the lint names LOBO-L002 on the child block
     let report = config.lint(c)
-    assert(report.contains("WWS-L002"), "lint must report WWS-L002")
+    assert(report.contains("LOBO-L002"), "lint must report LOBO-L002")
 
     // (2) runtime: /def/ inherits the http-level set (no local psh)
     let def_set = effective_names(c, "/def/x")
     assert(def_set == "X-Http-Level", "def should inherit http-level, got `{def_set}`")
 
     // (2) runtime: /loc/ sets its own → the parent's X-Http-Level is
-    // DISCARDED (WWS-L002 honored), only X-Loc remains
+    // DISCARDED (LOBO-L002 honored), only X-Loc remains
     let loc_set = effective_names(c, "/loc/x")
     assert(loc_set == "X-Loc", "loc should discard parent, got `{loc_set}`")
     assert(!loc_set.contains("X-Http-Level"), "parent header must be gone at the child")

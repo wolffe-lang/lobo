@@ -13,11 +13,11 @@ HTTP/1.1 200 OK
 Server: <normalized>
 Date: <normalized>
 Content-Type: text/html
-Content-Length: 78
+Content-Length: 79
 Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
 Connection: close
-ETag: "6955b900-4e"
+ETag: "6955b900-4f"
 Accept-Ranges: bytes
 
 <!doctype html>
-<html><body>wws differential case: static_basic</body></html>
+<html><body>lobo differential case: static_basic</body></html>

@@ -8,7 +8,7 @@
 //! (ws02 §4): no socket, no fs, no clock — which is exactly why it runs
 //! on all three lanes here while serve/'s io does not. Longest-prefix
 //! location match with `=` exact winning; `root` appends the URI,
-//! `alias` replaces the matched prefix (WWS-L003's class at runtime).
+//! `alias` replaces the matched prefix (LOBO-L003's class at runtime).
 //! ws07's dry-run and ws11's replay consume this same function.
 
 use config

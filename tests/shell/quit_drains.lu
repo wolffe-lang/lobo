@@ -99,7 +99,7 @@ fn open_held(port: int) -> int ! {io} {
 }
 
 fn write_conf(path: str, hp: int, cp: int) -> () ! {not_found, denied, io} {
-    let text = "pid ws08_quit/wws.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root ws08_quit/w; }}\n}}\n"
+    let text = "pid ws08_quit/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root ws08_quit/w; }}\n}}\n"
     fs_write_text(path, text)?
 }
 
@@ -112,12 +112,12 @@ fn main() -> !int {
     let hp = free_port()?
     let cp = free_port()?
     let ep = "127.0.0.1:{cp}"
-    let confp = "{scratch}/wws.conf"
-    let pidp = "{scratch}/wws.pid"
+    let confp = "{scratch}/lobo.conf"
+    let pidp = "{scratch}/lobo.pid"
     write_conf(confp, hp, cp)?
 
     var argv = List[str]()
-    (mut argv).push("target/wws-debug")
+    (mut argv).push("target/lobo-debug")
     (mut argv).push("serve")
     (mut argv).push("-p")
     (mut argv).push(".")
@@ -132,7 +132,7 @@ fn main() -> !int {
         let _ = os_wait(child) else |_| {
             0
         }
-        assert(false, "the spawned wws never became alive")
+        assert(false, "the spawned lobo never became alive")
     }
 
     // hold a connection on generation 1, then quit

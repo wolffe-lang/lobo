@@ -28,10 +28,10 @@ fn main() -> !int {
 
     // generation 1 routes into A
     fs_write_text(
-        "{root}/wws.conf",
+        "{root}/lobo.conf",
         "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
     )?
-    let g1 = shell.gen_new(config.load(root, "wws.conf"))
+    let g1 = shell.gen_new(config.load(root, "lobo.conf"))
     assert(g1.gen == 1, "first generation is 1")
     assert(g1.ok, "generation 1 loaded ok")
     let d1 = http.route(g1.conf, "/index.html")
@@ -39,10 +39,10 @@ fn main() -> !int {
 
     // rewrite the config to route into B, then reload → generation 2
     fs_write_text(
-        "{root}/wws.conf",
+        "{root}/lobo.conf",
         "http {{\n  server {{ listen 8080; root ws04_reload/B; }}\n}}\n",
     )?
-    let g2 = shell.reload(root, "wws.conf", g1)
+    let g2 = shell.reload(root, "lobo.conf", g1)
     assert(g2.ok, "reload succeeded")
     assert(g2.gen == 2, "generation bumped to 2")
     let d2 = http.route(g2.conf, "/index.html")
@@ -56,8 +56,8 @@ fn main() -> !int {
 
     // reload a BROKEN config: the old generation KEEPS serving, the
     // generation does not move (nginx contract).
-    fs_write_text("{root}/wws.conf", "http {{\n  server {{ listen\n")?
-    let g3 = shell.reload(root, "wws.conf", g2)
+    fs_write_text("{root}/lobo.conf", "http {{\n  server {{ listen\n")?
+    let g3 = shell.reload(root, "lobo.conf", g2)
     assert(!g3.ok, "a broken reload is rejected")
     assert(g3.gen == 2, "a rejected reload keeps the generation at 2")
     let d3 = http.route(g3.conf, "/index.html")
@@ -68,10 +68,10 @@ fn main() -> !int {
 
     // a good reload after a bad one advances again (to 3)
     fs_write_text(
-        "{root}/wws.conf",
+        "{root}/lobo.conf",
         "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
     )?
-    let g4 = shell.reload(root, "wws.conf", g3)
+    let g4 = shell.reload(root, "lobo.conf", g3)
     assert(g4.ok && g4.gen == 3, "a good reload after a bad one advances to 3")
     assert(
         http.route(g4.conf, "/index.html").fs_path == "ws04_reload/A/index.html",

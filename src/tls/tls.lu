@@ -26,7 +26,7 @@
 //! silent truncation is how response-injection hides.
 //! Never log secrets: nothing in this module prints key material,
 //! secrets, or handshake randoms at any level — the rig greps the
-//! server's logs after the TLS suite (tools/wws-tls-interop).
+//! server's logs after the TLS suite (tools/lobo-tls-interop).
 //! RANDOMNESS (wsm02, the #143 retirement): handshake randoms and
 //! the X25519 ephemeral are drawn from `os_random` — the OS CSPRNG
 //! (s118; [os.random.sole] makes it the only sanctioned source of
@@ -655,7 +655,7 @@ fn ext_alpn(proto: str) -> List[int] {
 /// Log a handshake failure with the §6 alert NAME (protocol-layer,
 /// pre-HTTP — never an HTTP response; the oracle logs these at info).
 fn log_hs_fail(code: int, why: str) {
-    eprint("wws: [info] TLS handshake failed: {alert_name(code)} ({why})")
+    eprint("lobo: [info] TLS handshake failed: {alert_name(code)} ({why})")
 }
 
 /// Accept one TLS 1.3 session on `fd` (the server handshake, §4.1):
@@ -971,7 +971,7 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
             z.buf = List[int]()
             z.got_close = true
             z.trunc = true
-            eprint("wws: [info] TLS: peer EOF without close_notify (truncation, counted)")
+            eprint("lobo: [info] TLS: peer EOF without close_notify (truncation, counted)")
             return closed
         }
         if rt.1 == 2 {
@@ -995,7 +995,7 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
             return io
         }
         let inner = record.open(z.rkey, z.riv, z.rseq, r.raw) else |_| {
-            eprint("wws: [info] TLS: record failed to deprotect ({alert_name(20)})")
+            eprint("lobo: [info] TLS: record failed to deprotect ({alert_name(20)})")
             send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 20)
             z.wseq = z.wseq + 1
             return io
@@ -1012,7 +1012,7 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
                 z.got_close = true
             } else {
                 if content.len >= 2 {
-                    eprint("wws: [info] TLS: client alert {alert_name(content[1])}")
+                    eprint("lobo: [info] TLS: client alert {alert_name(content[1])}")
                 }
                 z.got_close = true
             }
@@ -1021,7 +1021,7 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
             // this pin (the rekey sprint); anything else is equally
             // unexpected here
             eprint(
-                "wws: [info] TLS: post-handshake message refused ({alert_name(10)} — KeyUpdate is named residue)",
+                "lobo: [info] TLS: post-handshake message refused ({alert_name(10)} — KeyUpdate is named residue)",
             )
             send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 10)
             z.wseq = z.wseq + 1
