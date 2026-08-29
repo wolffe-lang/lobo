@@ -1,11 +1,12 @@
-// wolf.pkg — the wws manifest (working name; the public name is
-// undecided and this repo has no remote until the human chooses it).
-// Zero dependencies, by charter: wws is a from-parts wolf program.
-// The pinned nginx under tests/differential/ is TEST INFRASTRUCTURE,
-// not a dependency (D15-spirit, the ws00 contract's reading).
-// `name` is a placeholder scope: it changes exactly once, at naming.
+// wolf.pkg — the lobo manifest. Named Lobo (D64, 2026-08-29): Seton's
+// wolf no trap could take, for the server whose charter is nginx
+// without its owned bugs. The scope stays local/ until ws16 opens the
+// public door (wolffe-lang/lobo). Zero dependencies, by charter: lobo
+// is a from-parts wolf program. The pinned nginx under
+// tests/differential/ is TEST INFRASTRUCTURE, not a dependency
+// (D15-spirit, the ws00 contract's reading).
 pkg {
-    name:    "local/wws",
+    name:    "local/lobo",
     version: "0.0.1",
     edition: "1",
 }
