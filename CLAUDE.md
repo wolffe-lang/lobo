@@ -1,8 +1,10 @@
-# wolf-wws — agent guidance
+# Lobo (wolf-wws) — agent guidance
 
 A production web server in wolf, and a flagship many-hands wolf
-codebase. Working name; NO public remote until the human names it —
-never create one.
+codebase. Named **Lobo** by the human 2026-08-29 (D64); the code
+spells `wws` until wsm03 lands the rename. NO public remote until
+ws16 opens the door — a private org remote is the orchestrator's
+call, never a lane's.
 
 ## Read before writing a line of wolf
 1. `.docs/refs/AN_AGENTS_GUIDE_TO_WRITING_GOOD_WOLF.md` — the living

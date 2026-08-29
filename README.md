@@ -1,7 +1,9 @@
-# wolf-wws
+# Lobo
 
-> Working name. The public name is undecided and this repo has no
-> remote until it is chosen.
+> Named 2026-08-29 (D64): **Lobo** — Seton's wolf no trap could take.
+> The code still spells `wws` (binary, tools, control channel, test
+> transcripts) until wsm03 lands the rename under its gauntlet. The
+> repo goes public under `wolffe-lang/lobo` at ws16, "the door opens".
 
 A production web server, written in wolf. The charter: **nginx,
 rewritten without their owned bugs, so that a 20-year nginx user
