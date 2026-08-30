@@ -1,0 +1,42 @@
+# ACME-PIN — the harness ACME test CA's provenance (ws06 §5)
+#
+# The contract §5 asks for "a pinned local ACME test CA (the pebble-
+# class tool): ACME-PIN file (version + sha256 + fetch provenance),
+# refuse-if-absent, CI builds it cached exactly like the nginx pin".
+# It named pebble as the PATTERN and left the door open: "the pebble
+# pattern, but wolf-native or vendored per the contract's word".
+#
+# THE DECISION (recorded here, deltas to the wsc02 closeout): the CA
+# is WOLF-NATIVE, not a vendored binary. It is tests/rig/acmeca/
+# acmeca.lu, built from source by the harness against src/acme (the
+# same DER writers lobo signs and validates with — one encoder, two
+# sides, so a differential disagreement is the protocol's, never the
+# plumbing's). This is the dogfood rule the whole rig already follows
+# (rigback, httpc, echosrv are all wolf); a vendored Go pebble would be
+# the ONLY non-wolf, non-nginx external artifact in the tree, against
+# CLAUDE.md's "Dependencies: none — the only external artifact is the
+# PINNED nginx binary". So there is nothing to FETCH and nothing to
+# sha256: the CA's identity is its source under version control, built
+# fresh each run (sub-second) — the "cached build" the contract wants
+# is the wolf toolchain's own, already pinned in wolf-toolchain.toml.
+#
+# provenance     : wolf-native, in-tree (tests/rig/acmeca/acmeca.lu)
+# built-against  : src/acme (staged beside it, the corpus stage-src rule)
+# toolchain      : the pin in wolf-toolchain.toml (wolf @ addcd7f)
+# fetch          : NONE — no external artifact, no network, ever
+# refuse-if      : the harness (tools/lobo-acme) refuses if the CA does
+#                  not BUILD (the wolf-native analogue of refuse-if-
+#                  absent); a missing/broken CA is a red gauntlet.
+# loopback-law   : the CA binds 127.0.0.1:0 and its validation dial-back
+#                  targets 127.0.0.1 by construction — enforced in code
+#                  (dial_ok / the challenge portfile is a loopback addr)
+#                  AND proven by the harness's loopback-law case (an
+#                  https:// cert_ca is refused at -t).
+# crypto scope   : Ed25519 end to end (the jose seam's frozen word: the
+#                  local test CA speaks Ed25519, no P-256 at this pin).
+#
+# If a future sprint wants byte-for-byte parity against the REAL pebble
+# (a second oracle, the nginx-differential pattern for ACME), that is a
+# named follow-on: it needs a vendored binary and this file grows the
+# version+sha256+fetch lines then. Today the wolf-native CA is the
+# oracle, and it is honest about being one.
