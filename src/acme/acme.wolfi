@@ -1,7 +1,7 @@
 module pkg :: acme
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 98c9d69a3035be10b44857b130c2bf709636360a512bf30f7e82f283832904e8
-  pkg_hash    98c9d69a3035be10b44857b130c2bf709636360a512bf30f7e82f283832904e8
+  export_hash b7693c6356ca4048a6b324a25ec7868d6e8ce48c6837d677d45625d99bf4c888
+  pkg_hash    b7693c6356ca4048a6b324a25ec7868d6e8ce48c6837d677d45625d99bf4c888
   deps:
     std.base64  fd7ecc755f5ac5a3daa22c95fdb0b078bd4746e4b32c09e3db1962262c2d93c7
     std.x.crypto.curve25519  5ade65db4f1ebf167305462ee17e25e9884c74fce252ac70eed0140cf32936cd
@@ -12,43 +12,51 @@ module pkg :: acme
     [1] pub account_key_path — fn account_key_path(store: str) -> str
     [2] pub alg_ed25519 — fn alg_ed25519() -> prelude.List[int] · regions () -> ρ_caller
     [3] pub b64url_of — fn b64url_of(b: prelude.List[int]) -> str · regions (ρ1) -> -
-    [4] pub cert_expiry — fn cert_expiry(store: str, primary: str) -> int
-    [5] pub csr_build — fn csr_build(seed: prelude.List[int], names: str) -> prelude.List[int] · regions (ρ1, -) -> ρ_caller
-    [6] pub der_bitstring — fn der_bitstring(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [7] pub der_cat — fn der_cat(a: prelude.List[int], b: prelude.List[int]) -> prelude.List[int] · regions (ρ1, ρ2) -> ρ_caller
-    [8] pub der_hdr — fn der_hdr(tag: int, len: int) -> prelude.List[int] · regions (-, -) -> ρ_caller
-    [9] pub der_ia5 — fn der_ia5(s: str) -> prelude.List[int] · regions (-) -> ρ_caller
-    [10] pub der_int — fn der_int(v: int) -> prelude.List[int] · regions (-) -> ρ_caller
-    [11] pub der_int_bytes — fn der_int_bytes(raw: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [12] pub der_octet — fn der_octet(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [13] pub der_oid — fn der_oid(dotted: str) -> prelude.List[int] · regions (-) -> ρ_caller
-    [14] pub der_seq — fn der_seq(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [15] pub der_set — fn der_set(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [16] pub der_utf8 — fn der_utf8(s: str) -> prelude.List[int] · regions (-) -> ρ_caller
-    [17] pub der_wrap — fn der_wrap(tag: int, body: prelude.List[int]) -> prelude.List[int] · regions (-, ρ1) -> ρ_caller
-    [18] pub flow_new — fn flow_new(store: str, names: str, contact: str, ca_url: str, renew_before_s: int, check_interval_s: int) -> self.Flow · regions (-, -, -, -, -, -) -> ρ_caller
-    [19] pub install — fn install(store: str, primary: str, key_pem: str, chain_pem: str) -> () ! {io}
-    [20] pub js_arr_first — fn js_arr_first(body: str, key: str) -> str
-    [21] pub js_http01 — fn js_http01(body: str) -> (str, str) · regions (-) -> ρ_caller
-    [22] pub js_str — fn js_str(body: str, key: str) -> str
-    [23] pub keygen — fn keygen() -> prelude.List[int] · regions () -> ρ_caller
-    [24] pub name_cn — fn name_cn(cn: str) -> prelude.List[int] · regions (-) -> ρ_caller
-    [25] pub pem_blocks_of — fn pem_blocks_of(text: str, label: str, mut lens: prelude.List[int]) -> prelude.List[int] ! {bad} · regions (-, -, ρ1) -> ρ_caller
-    [26] pub pem_wrap — fn pem_wrap(label: str, der_bytes: prelude.List[int]) -> str · regions (-, ρ1) -> -
-    [27] pub pkcs8_ed25519 — fn pkcs8_ed25519(seed: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [28] pub pkcs8_seed — fn pkcs8_seed(der_bytes: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [29] pub pub_of — fn pub_of(seed: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [30] pub san_ext — fn san_ext(names: str) -> prelude.List[int] · regions (-) -> ρ_caller
-    [31] pub san_names — fn san_names(names: str) -> prelude.List[int] · regions (-) -> ρ_caller
-    [32] pub sign_of — fn sign_of(seed: prelude.List[int], msg: prelude.List[int]) -> prelude.List[int] · regions (ρ1, ρ2) -> ρ_caller
-    [33] pub spki_ed25519 — fn spki_ed25519(pubkey: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
-    [34] pub status_path — fn status_path(store: str) -> str
-    [35] pub status_write — fn status_write(store: str, primary: str, expiry: int, attempt_ms: int, result: str) -> () ! {io}
-    [36] pub store_write — fn store_write(path: str, text: str) -> () ! {io}
-    [37] pub tick — fn tick(mut fl: self.Flow, now_ms: int) -> str · regions (ρ1, -) -> -
-    [38] pub url_split — fn url_split(url: str) -> (str, str) · regions (-) -> ρ_caller
-    [39] pub verify_of — fn verify_of(pubkey: prelude.List[int], msg: prelude.List[int], sig: prelude.List[int]) -> bool · regions (ρ1, ρ2, ρ3) -> -
-    [40] pub version — fn version() -> str
-    [41] pub Flow — struct Flow { state: str, store: str, names: str, primary: str, contact: str, ca_url: str, renew_before_s: int, check_interval_s: int, url_nonce: str, url_account: str, url_order: str, nonce: str, kid: str, order_url: str, authz_url: str, finalize_url: str, chall_token: str, acct_seed: prelude.List[int], cert_seed: prelude.List[int], next_ms: int, backoff_s: int, retry_after_s: int, attempts: int, err: str }
-    [42] pub Resp — struct Resp { status: int, nonce: str, location: str, retry_after: int, body: str }
+    [4] pub bc_ca_ext — fn bc_ca_ext() -> prelude.List[int] · regions () -> ρ_caller
+    [5] pub cert_expiry — fn cert_expiry(store: str, primary: str) -> int
+    [6] pub cert_mint — fn cert_mint(ca_seed: prelude.List[int], issuer_cn: str, leaf_pub: prelude.List[int], subject_names: str, serial: int, not_before: int, not_after: int, is_ca: bool) -> prelude.List[int] · regions (ρ1, -, ρ2, -, -, -, -, -) -> ρ_caller
+    [7] pub civil — fn civil(secs: int) -> (int, int, int, int, int, int) · regions (-) -> ρ_caller
+    [8] pub csr_build — fn csr_build(seed: prelude.List[int], names: str) -> prelude.List[int] · regions (ρ1, -) -> ρ_caller
+    [9] pub days_from_civil — fn days_from_civil(y0: int, mo: int, d: int) -> int
+    [10] pub der_bitstring — fn der_bitstring(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [11] pub der_cat — fn der_cat(a: prelude.List[int], b: prelude.List[int]) -> prelude.List[int] · regions (ρ1, ρ2) -> ρ_caller
+    [12] pub der_hdr — fn der_hdr(tag: int, len: int) -> prelude.List[int] · regions (-, -) -> ρ_caller
+    [13] pub der_ia5 — fn der_ia5(s: str) -> prelude.List[int] · regions (-) -> ρ_caller
+    [14] pub der_int — fn der_int(v: int) -> prelude.List[int] · regions (-) -> ρ_caller
+    [15] pub der_int_bytes — fn der_int_bytes(raw: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [16] pub der_octet — fn der_octet(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [17] pub der_oid — fn der_oid(dotted: str) -> prelude.List[int] · regions (-) -> ρ_caller
+    [18] pub der_seq — fn der_seq(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [19] pub der_set — fn der_set(body: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [20] pub der_utctime — fn der_utctime(secs: int) -> prelude.List[int] · regions (-) -> ρ_caller
+    [21] pub der_utf8 — fn der_utf8(s: str) -> prelude.List[int] · regions (-) -> ρ_caller
+    [22] pub der_wrap — fn der_wrap(tag: int, body: prelude.List[int]) -> prelude.List[int] · regions (-, ρ1) -> ρ_caller
+    [23] pub flow_new — fn flow_new(store: str, names: str, contact: str, ca_url: str, renew_before_s: int, check_interval_s: int) -> self.Flow · regions (-, -, -, -, -, -) -> ρ_caller
+    [24] pub install — fn install(store: str, primary: str, key_pem: str, chain_pem: str) -> () ! {io}
+    [25] pub js_arr_first — fn js_arr_first(body: str, key: str) -> str
+    [26] pub js_http01 — fn js_http01(body: str) -> (str, str) · regions (-) -> ρ_caller
+    [27] pub js_str — fn js_str(body: str, key: str) -> str
+    [28] pub keygen — fn keygen() -> prelude.List[int] · regions () -> ρ_caller
+    [29] pub ku_ext — fn ku_ext(is_ca: bool) -> prelude.List[int] · regions (-) -> ρ_caller
+    [30] pub name_cn — fn name_cn(cn: str) -> prelude.List[int] · regions (-) -> ρ_caller
+    [31] pub packed_to_unix — fn packed_to_unix(packed: int) -> int
+    [32] pub pem_blocks_of — fn pem_blocks_of(text: str, label: str, mut lens: prelude.List[int]) -> prelude.List[int] ! {bad} · regions (-, -, ρ1) -> ρ_caller
+    [33] pub pem_wrap — fn pem_wrap(label: str, der_bytes: prelude.List[int]) -> str · regions (-, ρ1) -> -
+    [34] pub pkcs8_ed25519 — fn pkcs8_ed25519(seed: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [35] pub pkcs8_seed — fn pkcs8_seed(der_bytes: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [36] pub pub_of — fn pub_of(seed: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [37] pub san_ext — fn san_ext(names: str) -> prelude.List[int] · regions (-) -> ρ_caller
+    [38] pub san_names — fn san_names(names: str) -> prelude.List[int] · regions (-) -> ρ_caller
+    [39] pub sign_of — fn sign_of(seed: prelude.List[int], msg: prelude.List[int]) -> prelude.List[int] · regions (ρ1, ρ2) -> ρ_caller
+    [40] pub spki_ed25519 — fn spki_ed25519(pubkey: prelude.List[int]) -> prelude.List[int] · regions (ρ1) -> ρ_caller
+    [41] pub status_path — fn status_path(store: str) -> str
+    [42] pub status_write — fn status_write(store: str, primary: str, expiry: int, attempt_ms: int, result: str) -> () ! {io}
+    [43] pub store_write — fn store_write(path: str, text: str) -> () ! {io}
+    [44] pub tick — fn tick(mut fl: self.Flow, now_ms: int) -> str · regions (ρ1, -) -> -
+    [45] pub to_unix — fn to_unix(y: int, mo: int, d: int, h: int, mi: int, s: int) -> int
+    [46] pub url_split — fn url_split(url: str) -> (str, str) · regions (-) -> ρ_caller
+    [47] pub verify_of — fn verify_of(pubkey: prelude.List[int], msg: prelude.List[int], sig: prelude.List[int]) -> bool · regions (ρ1, ρ2, ρ3) -> -
+    [48] pub version — fn version() -> str
+    [49] pub Flow — struct Flow { state: str, store: str, names: str, primary: str, contact: str, ca_url: str, renew_before_s: int, check_interval_s: int, url_nonce: str, url_account: str, url_order: str, nonce: str, kid: str, order_url: str, authz_url: str, finalize_url: str, chall_token: str, acct_seed: prelude.List[int], cert_seed: prelude.List[int], next_ms: int, backoff_s: int, retry_after_s: int, attempts: int, err: str }
+    [50] pub Resp — struct Resp { status: int, nonce: str, location: str, retry_after: int, body: str }
 
