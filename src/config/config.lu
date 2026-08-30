@@ -63,6 +63,20 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws06: the cert-auto half of -t — the pure shape checks (names,
+    // listeners, the CA this pin can dial) and the store write-probe
+    // (the contract's write-access rule; nginx -t opens its logs, lobo
+    // probes its store). One named [emerg], first failure wins.
+    if verdict == 0 {
+        var cerr = auto_check(c)
+        if cerr.is_empty() {
+            cerr = auto_store_probe(c, prefix)
+        }
+        if !cerr.is_empty() {
+            eprint("lobo: [emerg] {cerr}")
+            verdict = 1
+        }
+    }
     let findings = lint(c)
     if !findings.is_empty() {
         for line in findings.lines() {

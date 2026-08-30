@@ -864,6 +864,36 @@ pub fn ssl_resolve(c: Conf, prefix: str) -> SslConf {
                 s.on = true
                 let cert_arg = nearest_arg(c, srv, "ssl_certificate")
                 let key_arg = nearest_arg(c, srv, "ssl_certificate_key")
+                if cert_arg.1 < 0 && auto_server(c) == srv {
+                    // ws06: a cert-auto block resolves its pair from
+                    // the STORE. Not-yet-issued is PENDING, never a
+                    // config error — the server starts, serves the
+                    // challenge route, and the issuance's own reload
+                    // brings the entry in (the never-block-serving
+                    // pitfall). A store pair that EXISTS but fails
+                    // validation is loud, exactly like the dance's.
+                    let names6 = server_names_of(c, srv)
+                    let primary = first_word(names6)
+                    let store6 = auto_store(c, prefix)
+                    let cp6 = "{store6}/{primary}/fullchain.pem"
+                    let kp6 = "{store6}/{primary}/privkey.pem"
+                    if fs_exists(cp6) && fs_exists(kp6) {
+                        let before6 = s.names.len
+                        load_pair(mut s, prefix, cp6, kp6, names6, c.files[srv], c.lines[srv])
+                        if s.names.len > before6 && is_default {
+                            s.default_at = before6
+                        }
+                    } else {
+                        ssl_warn(
+                            mut s,
+                            "\"cert auto\": no certificate for \"{primary}\" in the store yet — TLS for this block waits on ACME issuance (the challenge route serves meanwhile; this is the cold-start posture, not an error)",
+                        )
+                    }
+                    check_protocols(c, srv, mut s)
+                    check_ciphers(c, srv, mut s)
+                    srv = srv + 1
+                    continue
+                }
                 if cert_arg.1 < 0 {
                     ssl_err(
                         mut s,

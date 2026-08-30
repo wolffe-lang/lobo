@@ -1,0 +1,58 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: config
+//!
+//! ws06 §1: the store write-probe half of the cert-auto -t (contract:
+//! "-t validates ... write access to the store"). A creatable store
+//! passes and leaves no probe litter; a store path that cannot be a
+//! directory (its parent is a FILE) is the named refusal. The pending
+//! (not-yet-issued) resolve posture is pinned too: ssl_resolve over a
+//! cert-auto block with an empty store is CLEAN with the cold-start
+//! warn, never an error — the never-block-serving pitfall. fs — the
+//! native + checked lanes (lupin has no fs).
+
+use config
+
+fn conf_store(store: str) -> config.Conf {
+    let body = "events {{\n}}\nhttp {{\n    server {{\n        listen 127.0.0.1:0 ssl;\n        server_name auto.test;\n        cert auto;\n        cert_ca http://127.0.0.1:14000/dir;\n        cert_store {store};\n    }}\n    server {{\n        listen 127.0.0.1:0;\n    }}\n}}\n"
+    config.parse_str(body, "cert_auto_store.test")
+}
+
+fn main() -> int {
+    let scratch = "target/cert-auto-store-test"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all(scratch) else |_| {
+        assert(false, "cannot create the test scratch dir")
+    }
+
+    // 1. a writable (creatable) store passes, probe file removed
+    let ok = conf_store("{scratch}/store")
+    assert(config.auto_check(ok) == "", "pure half clean")
+    assert(config.auto_store_probe(ok, ".") == "", "writable store probes clean")
+    assert(fs_exists("{scratch}/store"), "the store dir was created")
+    assert(!fs_exists("{scratch}/store/.lobo-store-probe"), "no probe litter")
+
+    // 2. a store whose parent is a FILE is the named refusal
+    fs_write_text("{scratch}/blocker", "not a dir\n") else |_| {
+        assert(false, "cannot write the blocker file")
+    }
+    let bad = conf_store("{scratch}/blocker/store")
+    let msg = config.auto_store_probe(bad, ".")
+    assert(!msg.is_empty(), "unusable store is refused")
+    assert(msg.contains("cannot create certificate store"), "the refusal is named: {msg}")
+
+    // 3. pending resolve: cert-auto block, empty store — CLEAN, warns,
+    // zero entries (TLS waits on issuance; serving never blocks)
+    let pend = config.ssl_resolve(conf_store("{scratch}/store"), ".")
+    assert(config.ssl_ok(pend), "pending auto entry is not an error: {pend.err}")
+    assert(pend.on, "ssl is on (the listen says so)")
+    assert(pend.names.len == 0, "no entry until issuance")
+    assert(
+        pend.warns.contains("no certificate for \"auto.test\" in the store yet"),
+        "the cold-start warn is named: {pend.warns}",
+    )
+
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

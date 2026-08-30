@@ -1,0 +1,322 @@
+//! member: true
+//! config/certauto — the `cert auto` half of the model (ws06):
+//! accessors for the cert* directive family and the -t validation the
+//! contract names (a resolvable server_name, a plaintext listener for
+//! the HTTP-01 challenge, a writable store, a CA the pin can actually
+//! dial). Lives in config/ because -t owns config-time validation —
+//! the ws05 sslcert precedent, verbatim.
+//! Scope, honest (the aged-contract deltas, routed to the wsc02
+//! closeout): the std.x.tls ladder has no CLIENT handshake at this
+//! pin, so the ACME conversation is plain http over LOOPBACK only —
+//! an https:// or non-loopback cert_ca is a NAMED -t refusal citing
+//! the gate (this is also the contract's loopback-law unit-refusal:
+//! no harness config can reach a non-loopback CA, by construction).
+//! "Resolvable" server_name is name-shape validation at this pin (no
+//! DNS lookup exists, and the loopback law would forbid it in every
+//! test); wildcards are refused by name (DNS-01 is the wildcard path,
+//! a post-v1 row). ONE cert-auto server block at v0 — a second is a
+//! named refusal (multi-domain issuance is a named follow-on).
+//! Lane note: everything except the store write-probe is pure over
+//! the frozen model and runs on all three lanes; the probe is fs
+//! (native + checked), exactly the sslcert split.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+// ------------------------------------------------------------------
+// accessors — the cert* family read off the frozen model
+// ------------------------------------------------------------------
+
+/// The row index of the server block carrying `cert auto` (-1 when no
+/// block does; the FIRST such block when several — auto_check refuses
+/// the several case by name). Total.
+pub fn auto_server(c: Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "cert" && c.args_n[i] >= 1 && c.argp[c.args_at[i]] == "auto" {
+            return c.parent[i]
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// Whether the model carries a `cert auto` server block. Total.
+pub fn auto_on(c: Conf) -> bool {
+    auto_server(c) >= 0
+}
+
+/// The space-joined server_name list of the cert-auto block ("" when
+/// none — auto_check refuses that shape). Total.
+pub fn auto_names(c: Conf) -> str {
+    let srv = auto_server(c)
+    if srv < 0 {
+        return ""
+    }
+    server_names_of(c, srv)
+}
+
+/// The first word of a space-joined list ("" when empty). Total.
+fn first_word(s: str) -> str {
+    for w in s.words() {
+        return w
+    }
+    ""
+}
+
+/// The PRIMARY name of the cert-auto block — the first server_name,
+/// the store directory's name and the CSR's CN ("" when no auto
+/// block). Total.
+pub fn auto_primary(c: Conf) -> str {
+    first_word(auto_names(c))
+}
+
+/// The value of a cert-family simple directive, looked up from the
+/// cert-auto block outward (server, then http/main), or `fallback`
+/// when absent anywhere. Total.
+fn auto_arg(c: Conf, name: str, fallback: str) -> str {
+    var srv = auto_server(c)
+    if srv < 0 {
+        srv = 0
+    }
+    let got = nearest_arg(c, srv, name)
+    if got.1 < 0 {
+        return fallback
+    }
+    got.0
+}
+
+/// The certificate store root (contract: defaults under the prefix).
+/// A relative path resolves against `prefix`, the -p rule everywhere.
+/// Total.
+pub fn auto_store(c: Conf, prefix: str) -> str {
+    let raw = auto_arg(c, "cert_store", "certs")
+    against_prefix(prefix, raw)
+}
+
+/// The challenge webroot inside the store: HTTP-01 tokens are files
+/// here, written atomically and served by the implicit
+/// /.well-known/acme-challenge/ route — the same fs mechanism the
+/// certbot webroot flow uses, so the dance and the dance-free path
+/// exercise ONE serving surface. Total.
+pub fn auto_challenge_dir(c: Conf, prefix: str) -> str {
+    "{auto_store(c, prefix)}/challenge"
+}
+
+/// The ACME directory URL. The DEFAULT is deliberately empty at this
+/// pin: with no client TLS rung there is no CA lobo could reach whose
+/// URL would be a safe default, and defaulting to the production
+/// Let's Encrypt directory would make every misconfigured test one
+/// typo from a real CA — the loopback law says no. auto_check demands
+/// an explicit loopback http:// URL. Total.
+pub fn auto_ca(c: Conf) -> str {
+    auto_arg(c, "cert_ca", "")
+}
+
+/// The ACME account contact ("" when absent; sent as mailto: at
+/// account creation when present). Total.
+pub fn auto_contact(c: Conf) -> str {
+    auto_arg(c, "cert_contact", "")
+}
+
+/// `cert_renew_before` in seconds (default 30 days — the contract's
+/// renew-under-30 rule). Total.
+pub fn auto_renew_before_s(c: Conf) -> int {
+    parse_dur_s(auto_arg(c, "cert_renew_before", "30d"))
+}
+
+/// `cert_check_interval` in seconds (default daily). Total.
+pub fn auto_check_interval_s(c: Conf) -> int {
+    parse_dur_s(auto_arg(c, "cert_check_interval", "1d"))
+}
+
+/// nginx time units to SECONDS: bare digits are seconds; `s`, `m`,
+/// `h`, `d` suffixes scale. Junk parses to what the digits said (the
+/// shell parse_dur_ms posture — arity is the table's, values are
+/// lenient). Total.
+fn parse_dur_s(raw: str) -> int {
+    let s = raw.trim()
+    if s.is_empty() {
+        return 0
+    }
+    if s.ends_with("d") {
+        return dur_digits(s.strip_suffix("d") else "") * 86400
+    }
+    if s.ends_with("h") {
+        return dur_digits(s.strip_suffix("h") else "") * 3600
+    }
+    if s.ends_with("m") {
+        return dur_digits(s.strip_suffix("m") else "") * 60
+    }
+    if s.ends_with("s") {
+        return dur_digits(s.strip_suffix("s") else "")
+    }
+    dur_digits(s)
+}
+
+/// A run of ASCII digits as a non-negative int; the scan stops at the
+/// first non-digit. Total.
+fn dur_digits(s: str) -> int {
+    var v: int = 0
+    for x in s.bytes() {
+        if x < 48 || x > 57 {
+            return v
+        }
+        v = v * 10 + (x - 48)
+    }
+    v
+}
+
+// ------------------------------------------------------------------
+// -t validation (contract §1) — every refusal NAMED, with the fix in
+// the message (the find-or-named-error rule: the error TELLS the
+// operator what to add)
+// ------------------------------------------------------------------
+
+/// A hostname `cert auto` can put in a CSR at v0: non-empty, no
+/// wildcard (DNS-01 territory, post-v1), bytes drawn from
+/// [A-Za-z0-9.-] only. Total.
+fn name_usable(name: str) -> bool {
+    if name.is_empty() {
+        return false
+    }
+    for b in name.bytes() {
+        let alpha = b >= 97 && b <= 122 || b >= 65 && b <= 90
+        let digit = b >= 48 && b <= 57
+        if !alpha && !digit && !(b == 46) && !(b == 45) {
+            return false
+        }
+    }
+    true
+}
+
+/// Whether `url` is a loopback plain-http directory URL — the only
+/// CA shape this pin can dial (see the file header). Total.
+fn ca_loopback(url: str) -> bool {
+    if url.starts_with("http://127.0.0.1:") || url.starts_with("http://127.0.0.1/") {
+        return true
+    }
+    if url.starts_with("http://localhost:") || url.starts_with("http://localhost/") {
+        return true
+    }
+    false
+}
+
+/// The pure half of the cert-auto -t validation: "" when clean, else
+/// ONE named [emerg] message (location text included) — the first
+/// failure wins, the -t single-error posture. Pure; all three lanes.
+pub fn auto_check(c: Conf) -> str {
+    // every `cert` directive must say `auto` (the one v0 verb)
+    var i: int = 0
+    let total = c.names.len
+    var autos: int = 0
+    var first_srv: int = -1
+    var cert_row: int = -1
+    while i < total {
+        if c.names[i] == "cert" {
+            let v = if c.args_n[i] >= 1 { c.argp[c.args_at[i]] } else { "" }
+            if v != "auto" {
+                return "invalid value \"{v}\" in \"cert\" directive, it must be \"auto\" in {c.files[i]}:{c.lines[i]}"
+            }
+            autos = autos + 1
+            if first_srv < 0 {
+                first_srv = c.parent[i]
+                cert_row = i
+            } else if c.parent[i] != first_srv {
+                return "a second \"cert auto\" server block in {c.files[i]}:{c.lines[i]} — ONE cert-auto block at v0 (multi-domain issuance is a named follow-on; put every name of this certificate in the one block's server_name)"
+            }
+        }
+        i = i + 1
+    }
+    if autos == 0 {
+        return ""
+    }
+    let srv = first_srv
+    let cfile = c.files[cert_row]
+    let cline = c.lines[cert_row]
+
+    // the auto block must not ALSO carry the dance — coexistence is
+    // BLOCKS side by side, never both mechanisms in one block
+    var j: int = 0
+    while j < total {
+        if c.names[j] == "ssl_certificate" && c.parent[j] == srv {
+            return "\"cert auto\" beside \"ssl_certificate\" in one server block in {c.files[j]}:{c.lines[j]} — one block, one mechanism: keep the certbot block as it is and give \"cert auto\" its own server block (coexistence is the posture)"
+        }
+        j = j + 1
+    }
+
+    // a resolvable server_name (name-shape at this pin; no wildcards)
+    let names = server_names_of(c, srv)
+    if names.is_empty() {
+        return "\"cert auto\" requires a \"server_name\" in its server block (the certificate's subject names) in {cfile}:{cline}"
+    }
+    for nm in names.words() {
+        if nm.contains("*") {
+            return "\"cert auto\" cannot issue for wildcard name \"{nm}\" — HTTP-01 proves one host at a time; DNS-01 is the wildcard path (post-v1, named) in {cfile}:{cline}"
+        }
+        if !name_usable(nm) {
+            return "\"cert auto\" cannot issue for server_name \"{nm}\" — not a DNS hostname shape in {cfile}:{cline}"
+        }
+    }
+
+    // the auto block itself must serve TLS
+    var has_ssl_listen = false
+    var k: int = 0
+    while k < total {
+        if c.names[k] == "listen" && c.parent[k] == srv && arg_has(c, k, "ssl") {
+            has_ssl_listen = true
+        }
+        k = k + 1
+    }
+    if !has_ssl_listen {
+        return "\"cert auto\" in a server block with no \"listen ... ssl\" — the acquired certificate would serve nothing; add ssl to this block's listen in {cfile}:{cline}"
+    }
+
+    // a plaintext listener must exist somewhere for the challenge
+    // (find-or-named-error: the message says the exact block to add)
+    var has_plain = false
+    var m: int = 0
+    while m < total {
+        if c.names[m] == "listen" && !arg_has(c, m, "ssl") {
+            has_plain = true
+        }
+        m = m + 1
+    }
+    if !has_plain {
+        return "\"cert auto\" needs a plaintext http listener to answer the HTTP-01 challenge and this config has none — add a block like: server {{ listen 80; }} (the challenge route is served from it automatically) in {cfile}:{cline}"
+    }
+
+    // the CA this pin can dial (the loopback-law unit refusal)
+    let ca = auto_ca(c)
+    if ca.is_empty() {
+        return "\"cert auto\" requires \"cert_ca\" naming the ACME directory URL — at this pin a loopback http:// directory (the std.x.tls ladder has no client handshake yet, so a real CA is unreachable; the flip rides that rung) in {cfile}:{cline}"
+    }
+    if ca.starts_with("https://") {
+        return "\"cert_ca\" is https:// — lobo has no TLS client at this pin (std.x.tls ships the server handshake only; the client rung is a NAMED roadmap row, ws05 D21/D25) and will not pretend: use the loopback harness directory until that rung lands in {cfile}:{cline}"
+    }
+    if !ca_loopback(ca) {
+        return "\"cert_ca\" is not a loopback URL — at this pin the ACME dialer speaks plain http to 127.0.0.1 ONLY (the loopback law; a plaintext conversation with a remote CA would be dishonest) in {cfile}:{cline}"
+    }
+
+    ""
+}
+
+/// The fs half of the cert-auto -t validation: the store must be
+/// creatable and writable (probe file written and removed — nginx -t
+/// opens its logs; lobo probes its store). "" when clean, else the
+/// named message. fs — native + checked only. Total otherwise.
+pub fn auto_store_probe(c: Conf, prefix: str) -> str {
+    if !auto_on(c) {
+        return ""
+    }
+    let store = auto_store(c, prefix)
+    fs_create_dir_all(store) else |_| {
+        return "\"cert auto\": cannot create certificate store \"{store}\" (mkdir failed — check the path and its permissions, or set \"cert_store\")"
+    }
+    let probe = "{store}/.lobo-store-probe"
+    fs_write_text(probe, "probe\n") else |_| {
+        return "\"cert auto\": certificate store \"{store}\" is not writable (probe write failed — the store holds private keys and must be writable by the server user)"
+    }
+    fs_remove(probe) else |_| {}
+    ""
+}
