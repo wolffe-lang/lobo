@@ -1,16 +1,18 @@
 //! check: run(exit=0)
 //! phase: run
-//! lanes: native checked
+//! lanes: native
 //! stage-src: acme config
 //!
 //! ws06 §2/§3: the acme material half — DER writers, the Ed25519 key
 //! round trip (pkcs8 write → own reader AND config's reader agree),
 //! the CSR shape (a SEQUENCE carrying the SAN names), PEM in both
-//! directions, and the atomic store (write-rename, per-domain dirs,
-//! account key separate, expiry read back). fs — native + checked
-//! (the store half rules lupin out); the pure DER/PEM half would run
-//! on lupin too but the store asserts share the body, so the file
-//! declares the two fs lanes.
+//! directions, the atomic store (write-rename, per-domain dirs,
+//! account key separate, expiry read back), the renewal clock, and
+//! cert_mint's wolf-side round trip. NATIVE only: fs rules lupin out,
+//! and the checked tier's miri-lite step budget is spent by the
+//! Ed25519 signatures (csr_build + cert_mint) — the ws05 ssl-resolve
+//! test is native-only for exactly this reason. The pure DER shapes
+//! (no crypto) run native+checked in der_shapes.
 //! The CSR's cryptographic correctness (OpenSSL verifies the
 //! self-signature, the CN, the SAN, the Ed25519 alg) is pinned by
 //! the interop harness against a real oracle; this unit pins the
@@ -133,7 +135,54 @@ fn main() -> int {
     assert(exp > 0, "a real leaf yields a positive notAfter")
     assert(acme.cert_expiry(fx_store, "absent.example") == 0, "a missing cert reads 0")
 
+    // 9. the renewal clock: civil <-> unix round trips, and the packed
+    // yyyymmddhhmmss unpack the daemon compares against wall time. A
+    // wrong converter here is the classic off-by-timezone renewal bug
+    // (the contract's clock-skew pitfall), so pin exact instants.
+    // 2026-08-30 17:11:14 UTC:
+    assert(acme.to_unix(2026, 8, 30, 17, 11, 14) == 1788109874, "to_unix pins a known instant")
+    assert(acme.to_unix(1970, 1, 1, 0, 0, 0) == 0, "the epoch is 0")
+    assert(acme.to_unix(2000, 1, 1, 0, 0, 0) == 946684800, "Y2K midnight UTC")
+    // civil is the inverse of to_unix
+    let c = acme.civil(1788109874)
+    assert(c.0 == 2026 && c.1 == 8 && c.2 == 30, "civil recovers the date")
+    assert(c.3 == 17 && c.4 == 11 && c.5 == 14, "civil recovers the time")
+    // the packed form the daemon unpacks: 20260830171114 -> that unix
+    assert(
+        acme.packed_to_unix(20260830171114) == 1788109874,
+        "packed yyyymmddhhmmss unpacks to unix",
+    )
+
+    // 10. cert_mint: a minted leaf parses back, chains to its issuer,
+    // and its notAfter unpacks to the validity we set. (OpenSSL
+    // verifies the full chain in the interop rig; this pins the
+    // wolf-side round trip.)
+    let ca_seed = acme.keygen()
+    let ca_pub = acme.pub_of(ca_seed)
+    let nb = acme.to_unix(2026, 1, 1, 0, 0, 0)
+    let na = nb + 7776000
+    let leaf_seed = acme.keygen()
+    let leaf_der = acme.
+        cert_mint(
+        ca_seed,
+        "Test CA",
+        acme.pub_of(leaf_seed),
+        "mint.test alt.test",
+        7,
+        nb,
+        na,
+        false,
+    )
+    let mstore = "target/acme-mint-store"
+    fs_remove_dir_all(mstore) else |_| {}
+    acme.store_write("{mstore}/mint.test/fullchain.pem", acme.pem_wrap("CERTIFICATE", leaf_der)) else |_| {
+        assert(false, "could not stage the minted leaf")
+    }
+    let mexp = acme.cert_expiry(mstore, "mint.test")
+    assert(mexp == na, "the minted leaf's notAfter unpacks to the validity we set: {mexp} vs {na}")
+
     fs_remove_dir_all(store) else |_| {}
     fs_remove_dir_all(fx_store) else |_| {}
+    fs_remove_dir_all(mstore) else |_| {}
     0
 }

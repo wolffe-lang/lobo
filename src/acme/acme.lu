@@ -272,6 +272,203 @@ pub fn san_ext(names: str) -> List[int] {
 }
 
 // ------------------------------------------------------------------
+// certificate minting — the harness CA's half (the two sides share
+// one encoder, so a differential disagreement is the protocol's).
+// NOT a serving path: lobo VALIDATES certificates (std.x.tls.cert),
+// it does not issue them; this is the pebble-class test CA's tool,
+// exercised only by the loopback rig.
+// ------------------------------------------------------------------
+
+/// Two-digit zero-pad for a UTCTime field. Total.
+fn pad2u(n: int) -> str {
+    if n < 10 {
+        return "0{n}"
+    }
+    "{n}"
+}
+
+/// Break a UTC unix-seconds instant into (year, month, day, hour,
+/// minute, second) by Howard Hinnant's civil-from-days. Total for
+/// non-negative input.
+pub fn civil(secs: int) -> (int, int, int, int, int, int) {
+    let days = secs / 86400
+    let tod = secs - days * 86400
+    let hh = tod / 3600
+    let mi = (tod - hh * 3600) / 60
+    let ss = tod - hh * 3600 - mi * 60
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    var y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    var mo = mp + 3
+    if mp >= 10 {
+        mo = mp - 9
+    }
+    if mo <= 2 {
+        y = y + 1
+    }
+    (y, mo, d, hh, mi, ss)
+}
+
+/// Howard Hinnant's days_from_civil: the count of days from the unix
+/// epoch (1970-01-01) to `y-mo-d` (proleptic Gregorian, mo in 1..12).
+/// The inverse of `civil`. Total.
+pub fn days_from_civil(y0: int, mo: int, d: int) -> int {
+    var y = y0
+    if mo <= 2 {
+        y = y - 1
+    }
+    var era = y / 400
+    if y < 0 {
+        era = (y - 399) / 400
+    }
+    let yoe = y - era * 400
+    var mm = mo + 9
+    if mo > 2 {
+        mm = mo - 3
+    }
+    let doy = (153 * mm + 2) / 5 + d - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    era * 146097 + doe - 719468
+}
+
+/// The unix seconds of a UTC `y-mo-d h:mi:s`. Total.
+pub fn to_unix(y: int, mo: int, d: int, h: int, mi: int, s: int) -> int {
+    days_from_civil(y, mo, d) * 86400 + h * 3600 + mi * 60 + s
+}
+
+/// The unix seconds of a std.x.tls.cert packed `yyyymmddhhmmss`
+/// timestamp (the form `Cert.not_after`/`not_before` carry — NOT unix;
+/// they are monotone-comparable but not linear in seconds, so the
+/// renewal clock unpacks them here). Total.
+pub fn packed_to_unix(packed: int) -> int {
+    let s = packed % 100
+    let mi = packed / 100 % 100
+    let h = packed / 10000 % 100
+    let d = packed / 1000000 % 100
+    let mo = packed / 100000000 % 100
+    let y = packed / 10000000000
+    to_unix(y, mo, d, h, mi, s)
+}
+
+/// A UTCTime (0x17) for a unix instant — YYMMDDHHMMSSZ, the RFC 5280
+/// §4.1.2.5.1 form for years 1950..2049. The harness CA's validity
+/// dates sit inside that window. Total.
+pub fn der_utctime(secs: int) -> List[int] {
+    let c = civil(secs)
+    var yy = c.0 % 100
+    let s = "{pad2u(yy)}{pad2u(c.1)}{pad2u(c.2)}{pad2u(c.3)}{pad2u(c.4)}{pad2u(c.5)}Z"
+    der_wrap(23, s.bytes())
+}
+
+/// basicConstraints Extension. `is_ca` true emits a CRITICAL cA:TRUE
+/// (RFC 5280 §4.2.1.9 marks it critical for a CA); false omits the
+/// extension (the caller simply does not add it for a leaf). Total.
+pub fn bc_ca_ext() -> List[int] {
+    // Extension ::= SEQ { extnID, critical BOOLEAN TRUE, extnValue
+    // OCTET STRING { SEQ { BOOLEAN TRUE } } }
+    var tru = List[int]()
+    (mut tru).push(1)
+    (mut tru).push(1)
+    (mut tru).push(255)
+    var crit = List[int]()
+    (mut crit).push(1)
+    (mut crit).push(1)
+    (mut crit).push(255)
+    der_seq(der_cat(der_cat(der_oid("2.5.29.19"), crit), der_octet(der_seq(tru))))
+}
+
+/// keyUsage Extension for a CA (critical; keyCertSign + cRLSign) or a
+/// leaf (digitalSignature). RFC 5280 §4.2.1.3. Total.
+pub fn ku_ext(is_ca: bool) -> List[int] {
+    // BIT STRING of the usage bits, DER-minimal
+    var bits = List[int]()
+    (mut bits).push(3)
+    if is_ca {
+        // keyCertSign (bit 5) + cRLSign (bit 6): byte 0x06, one unused
+        // bit position rounding — encode as 03 02 01 06
+        (mut bits).push(2)
+        (mut bits).push(1)
+        (mut bits).push(6)
+    } else {
+        // digitalSignature (bit 0): 03 02 07 80
+        (mut bits).push(2)
+        (mut bits).push(7)
+        (mut bits).push(128)
+    }
+    var crit = List[int]()
+    (mut crit).push(1)
+    (mut crit).push(1)
+    (mut crit).push(255)
+    der_seq(der_cat(der_cat(der_oid("2.5.29.15"), crit), der_octet(bits)))
+}
+
+/// Mint an Ed25519 certificate: the harness CA signs `subject_names`
+/// (space-joined; the first is the CN) with `ca_seed`, under issuer
+/// `issuer_cn`, valid `[not_before, not_after]` unix. `leaf_pub` is
+/// the subject's public key; `serial` a small positive int. `is_ca`
+/// adds basicConstraints cA:TRUE + the CA keyUsage (a self-signed CA
+/// passes `subject_names` == `issuer_cn` and its own pubkey). Returns
+/// the DER certificate. Total.
+pub fn cert_mint(
+    ca_seed: List[int],
+    issuer_cn: str,
+    leaf_pub: List[int],
+    subject_names: str,
+    serial: int,
+    not_before: int,
+    not_after: int,
+    is_ca: bool,
+) -> List[int] {
+    // the subject CN: for a leaf it is the first DNS name; for a
+    // self-signed CA it is the issuer name itself (subject == issuer),
+    // which lets a CA name carry spaces the DNS-name path never sees.
+    var subject_cn = issuer_cn
+    if !is_ca {
+        subject_cn = ""
+        for w in subject_names.words() {
+            if subject_cn.is_empty() {
+                subject_cn = w
+            }
+        }
+    }
+    let version = der_wrap(160, der_int(2))
+    let validity = der_seq(der_cat(der_utctime(not_before), der_utctime(not_after)))
+    var exts = List[int]()
+    if is_ca {
+        exts = der_cat(exts, bc_ca_ext())
+    } else {
+        exts = der_cat(exts, san_ext(subject_names))
+    }
+    exts = der_cat(exts, ku_ext(is_ca))
+    let ext_block = der_wrap(163, der_seq(exts))
+    let tbs = der_seq(
+        der_cat(
+            der_cat(
+                der_cat(
+                    der_cat(
+                        der_cat(
+                            der_cat(der_cat(version, der_int(serial)), alg_ed25519()),
+                            name_cn(issuer_cn),
+                        ),
+                        validity,
+                    ),
+                    name_cn(subject_cn),
+                ),
+                spki_ed25519(leaf_pub),
+            ),
+            ext_block,
+        ),
+    )
+    let sig = sign_of(ca_seed, tbs)
+    der_seq(der_cat(der_cat(tbs, alg_ed25519()), der_bitstring(sig)))
+}
+
+// ------------------------------------------------------------------
 // keys and PEM
 // ------------------------------------------------------------------
 
@@ -472,11 +669,13 @@ pub fn install(store: str, primary: str, key_pem: str, chain_pem: str) -> () ! {
     store_write("{store}/{primary}/fullchain.pem", chain_pem)?
 }
 
-/// The notAfter (unix seconds, UTC) of the STORED leaf for `primary`,
-/// or 0 when no readable certificate is there. The renewal daemon's
-/// one clock input — std.x.tls.cert parses, UTC everywhere (the
-/// contract's clock-skew pitfall: the comparison is unix-to-unix,
-/// no timezone arithmetic anywhere). Native/checked (fs).
+/// The notAfter of the STORED leaf for `primary` in UNIX SECONDS
+/// (UTC), or 0 when no readable certificate is there. The renewal
+/// daemon's one clock input. std.x.tls.cert carries `not_after` in its
+/// packed `yyyymmddhhmmss` form (monotone but not linear in seconds),
+/// so it is UNPACKED to unix here — the renewal math is unix-to-unix,
+/// no timezone arithmetic anywhere (the clock-skew pitfall).
+/// Native/checked (fs).
 pub fn cert_expiry(store: str, primary: str) -> int {
     let text = fs_read_text("{store}/{primary}/fullchain.pem") else |_| {
         return 0
@@ -498,7 +697,7 @@ pub fn cert_expiry(store: str, primary: str) -> int {
     let c = cert.parse(leaf) else |_| {
         return 0
     }
-    c.not_after
+    packed_to_unix(c.not_after)
 }
 
 /// The renewal-status file path (one line per fact; `lobo cert
