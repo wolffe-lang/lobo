@@ -642,10 +642,20 @@ pub fn tick(mut fl: Flow, now_ms: int) -> str {
         ) else |_| {}
         return ev
     }
-    if ev.is_empty() && (fl.state == "polling" || fl.state == "certpoll") {
-        // the CA is validating or signing: poll again shortly (the
-        // dial-back is served by the loop in between)
-        fl.next_ms = now_ms + 250
+    if ev.is_empty() && fl.state == "polling" {
+        // AUTHORIZATION pending: the CA validates by DIALING BACK the
+        // http-01 challenge route, which this single-threaded server
+        // can only serve while it is NOT blocked in an ACME request.
+        // So wait a generous beat before the next authz poll, leaving
+        // a wide window in which the loop is back in its accept path
+        // serving the dial-back. (A blocking poll that overlapped the
+        // dial-back would deadlock — client and CA each waiting on the
+        // other; this interval is what keeps them out of phase.)
+        fl.next_ms = now_ms + 800
+    } else if ev.is_empty() && fl.state == "certpoll" {
+        // ORDER finalization: no dial-back — the CA signs on its own,
+        // so poll again promptly.
+        fl.next_ms = now_ms + 150
     }
     ev
 }

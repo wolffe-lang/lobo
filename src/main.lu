@@ -577,7 +577,13 @@ fn serve_main(prefix: str, conf: str) -> int {
         config.auto_renew_before_s(c0),
         config.auto_check_interval_s(c0),
     )
-    let where = if have_http { addr } else { "(no plaintext listener)" }
+    // announce the BOUND plaintext port (not the configured addr,
+    // which may carry :0) so a client — the ACME challenge dial-back
+    // included — can find the http listener. The TLS notice already
+    // prints its bound port.
+    let where = if have_http { "127.0.0.1:{hport} (port {hport})" } else {
+        "(no plaintext listener)"
+    }
     eprint("lobo: [notice] serving on {where}, control {ctrl_ep}, pid file {pidp}")
 
     // signal reception (wsm01, s114 in the pin): register interest in
