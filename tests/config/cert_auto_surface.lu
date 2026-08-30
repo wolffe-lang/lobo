@@ -1,0 +1,179 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! ws06 §1: the `cert auto` surface — table rows for the cert*
+//! family, the accessors with their defaults, the L004 one-way-door
+//! lint, and every NAMED -t refusal auto_check owns: a non-auto
+//! value, a second auto block, both mechanisms in one block, a
+//! missing/wildcard/malformed server_name, a TLS-less auto block, a
+//! config with no plaintext listener for the challenge, and the CA
+//! shapes this pin refuses by name (absent, https://, non-loopback —
+//! the loopback-law unit refusal the contract demands). Pure over
+//! parse_str; all three lanes.
+
+use config
+
+fn conf_of(body: str) -> config.Conf {
+    config.parse_str(body, "cert_auto_surface.test")
+}
+
+fn base(auto_extra: str, more_blocks: str) -> str {
+    "events {{\n}}\nhttp {{\n    server {{\n        listen 127.0.0.1:0 ssl;\n{auto_extra}    }}\n{more_blocks}}}\n"
+}
+
+fn plain_block() -> str {
+    "    server {{\n        listen 127.0.0.1:0;\n    }}\n"
+}
+
+fn good_body() -> str {
+    base(
+        "        server_name auto.test www.auto.test;\n        cert auto;\n        cert_ca http://127.0.0.1:14000/dir;\n",
+        plain_block(),
+    )
+}
+
+fn main() -> int {
+    // 1. the table rows exist, server/http contexts, one arg, native
+    let t = config.table()
+    let rc = config.find(t, "cert", "server")
+    assert(rc >= 0, "cert@server row exists")
+    let sp = config.spec_at(t, rc)
+    assert(sp.status == "implemented", "cert is implemented at ws06")
+    assert(sp.min_args == 1 && sp.max_args == 1, "cert takes exactly one arg")
+    assert(sp.note.contains("lobo-native"), "the row says lobo-native")
+    assert(config.find(t, "cert", "http") == -2, "cert is server-context only")
+    assert(config.find(t, "cert_ca", "http") >= 0, "cert_ca allowed at http")
+    assert(config.find(t, "cert_store", "server") >= 0, "cert_store allowed at server")
+    assert(config.find(t, "cert_contact", "server") >= 0, "cert_contact row exists")
+    assert(config.find(t, "cert_renew_before", "server") >= 0, "cert_renew_before row exists")
+    assert(config.find(t, "cert_check_interval", "server") >= 0, "cert_check_interval row exists")
+
+    // 2. accessors and defaults over a clean model
+    let g = conf_of(good_body())
+    assert(config.ok(g), "clean auto config parses: {g.err}")
+    assert(config.auto_on(g), "auto_on sees the block")
+    assert(config.auto_server(g) >= 0, "auto_server finds the block")
+    assert(config.auto_names(g) == "auto.test www.auto.test", "names joined")
+    assert(config.auto_primary(g) == "auto.test", "primary is the first name")
+    assert(config.auto_ca(g) == "http://127.0.0.1:14000/dir", "cert_ca read")
+    assert(config.auto_contact(g) == "", "no contact by default")
+    assert(config.auto_store(g, "/p") == "/p/certs", "store defaults under the prefix")
+    assert(config.auto_challenge_dir(g, "/p") == "/p/certs/challenge", "challenge dir")
+    assert(config.auto_renew_before_s(g) == 2592000, "renew_before defaults 30d")
+    assert(config.auto_check_interval_s(g) == 86400, "check_interval defaults 1d")
+    assert(config.auto_check(g) == "", "clean model has no auto_check finding")
+
+    // 3. explicit values, time units, absolute store
+    let e = conf_of(
+        base(
+            "        server_name auto.test;\n        cert auto;\n        cert_ca http://localhost:900/d;\n        cert_store /var/lobo/certs;\n        cert_contact admin@auto.test;\n        cert_renew_before 12h;\n        cert_check_interval 90s;\n",
+            plain_block(),
+        ),
+    )
+    assert(config.auto_store(e, "/p") == "/var/lobo/certs", "absolute store wins")
+    assert(config.auto_contact(e) == "admin@auto.test", "contact read")
+    assert(config.auto_renew_before_s(e) == 43200, "12h parses")
+    assert(config.auto_check_interval_s(e) == 90, "90s parses")
+    assert(config.auto_check(e) == "", "explicit clean model passes: {config.auto_check(e)}")
+
+    // 4. a non-auto model answers the empty/neutral values
+    let n = conf_of(base("        server_name plain.test;\n", plain_block()))
+    assert(!config.auto_on(n), "no cert auto")
+    assert(config.auto_check(n) == "", "no auto block, no finding")
+
+    // 5. the L004 one-way-door lint fires once, on the cert row
+    let l = config.lint(g)
+    assert(l.contains("LOBO-L004"), "L004 fires on cert auto")
+    assert(l.contains("ONE-WAY DOOR"), "the lint says the one-way-door sentence")
+    assert(config.lint(n) == "", "no lint on a certless config")
+
+    // 6. the named refusals, one by one (first-failure-wins posture)
+    let bad_val = conf_of(
+        base("        server_name a.test;\n        cert manual;\n", plain_block()),
+    )
+    assert(config.auto_check(bad_val).contains("must be \"auto\""), "non-auto value refused")
+
+    let both = conf_of(
+        base(
+            "        server_name a.test;\n        cert auto;\n        cert_ca http://127.0.0.1:1/d;\n        ssl_certificate x.pem;\n        ssl_certificate_key x.key;\n",
+            plain_block(),
+        ),
+    )
+    assert(
+        config.auto_check(both).contains("one block, one mechanism"),
+        "auto beside ssl_certificate refused: {config.auto_check(both)}",
+    )
+
+    let second = conf_of(
+        base(
+            "        server_name a.test;\n        cert auto;\n        cert_ca http://127.0.0.1:1/d;\n",
+            "    server {{\n        listen 127.0.0.1:0 ssl;\n        server_name b.test;\n        cert auto;\n    }}\n{plain_block()}",
+        ),
+    )
+    assert(
+        config.auto_check(second).contains("second \"cert auto\""),
+        "two auto blocks refused: {config.auto_check(second)}",
+    )
+
+    let noname = conf_of(base("        cert auto;\n", plain_block()))
+    assert(
+        config.auto_check(noname).contains("requires a \"server_name\""),
+        "missing server_name refused",
+    )
+
+    let wild = conf_of(
+        base("        server_name *.auto.test;\n        cert auto;\n", plain_block()),
+    )
+    assert(config.auto_check(wild).contains("wildcard"), "wildcard refused, DNS-01 named")
+
+    let shape = conf_of(base("        server_name a_b.test;\n        cert auto;\n", plain_block()))
+    assert(config.auto_check(shape).contains("not a DNS hostname shape"), "underscore name refused")
+
+    let no_ssl = conf_of(
+        "events {{\n}}\nhttp {{\n    server {{\n        listen 127.0.0.1:0;\n        server_name a.test;\n        cert auto;\n    }}\n}}\n",
+    )
+    assert(
+        config.auto_check(no_ssl).contains("no \"listen ... ssl\""),
+        "TLS-less auto block refused",
+    )
+
+    let no_plain = conf_of(
+        base(
+            "        server_name a.test;\n        cert auto;\n        cert_ca http://127.0.0.1:1/d;\n",
+            "",
+        ),
+    )
+    assert(
+        config.auto_check(no_plain).contains("listen 80"),
+        "no plaintext listener: the error says the exact block to add",
+    )
+
+    let no_ca = conf_of(base("        server_name a.test;\n        cert auto;\n", plain_block()))
+    assert(config.auto_check(no_ca).contains("requires \"cert_ca\""), "absent cert_ca refused")
+
+    let https = conf_of(
+        base(
+            "        server_name a.test;\n        cert auto;\n        cert_ca https://acme-v02.api.letsencrypt.org/directory;\n",
+            plain_block(),
+        ),
+    )
+    assert(
+        config.auto_check(https).contains("no TLS client at this pin"),
+        "https cert_ca refused citing the std.x.tls client gate",
+    )
+
+    let remote = conf_of(
+        base(
+            "        server_name a.test;\n        cert auto;\n        cert_ca http://10.0.0.5/dir;\n",
+            plain_block(),
+        ),
+    )
+    assert(
+        config.auto_check(remote).contains("loopback law"),
+        "non-loopback cert_ca refused — the loopback-law unit refusal",
+    )
+
+    0
+}

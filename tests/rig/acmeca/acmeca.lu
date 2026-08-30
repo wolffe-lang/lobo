@@ -1,0 +1,689 @@
+//! member: true
+//! acmeca — the pebble-class local ACME test CA (ws06 §5), in wolf
+//! (the dogfood rule). A loopback RFC 8555 directory server that
+//! drives lobo's `cert auto` end to end: directory, newNonce,
+//! newAccount, newOrder, authorization, http-01 challenge with a REAL
+//! dial-back to the challenge server, finalize, and certificate
+//! download. It MINTS Ed25519 certificates with src/acme's own DER
+//! writers (the two sides share one encoder — a differential
+//! disagreement is the protocol's, never the plumbing's) signed by a
+//! CA key it generates at startup and writes out as the trust anchor
+//! the interop oracle verifies against.
+//! RIG-PRIVATE test infrastructure; NOT acme/'s territory. LOOPBACK
+//! ONLY, port 0 always (the wolf-lang#121 lesson) — the CA's
+//! validation dial-back targets 127.0.0.1 by construction, the
+//! loopback law as code.
+//! It VERIFIES the account's JWS signature on every POST (so a broken
+//! signer fails the harness, not just a broken flow) and enforces the
+//! nonce lifecycle: each response issues a fresh Replay-Nonce, a
+//! reused or unknown nonce is a badNonce problem (the one-retry rule's
+//! other half). Fault injection knobs (argv) drive the pitfall cases:
+//! a forced badNonce on the Nth POST, and a validation that FAILS.
+//! Argv: <cacert-out> <challenge-portfile> [leaf-validity-s]
+//!   [--bad-nonce-at N] [--fail-validation] [--max-issue M]
+//! It binds an ephemeral loopback port, prints it (the harness reads
+//! it and renders lobo's cert_ca), writes its CA cert PEM to
+//! <cacert-out>, then serves until <max-issue> certificates have been
+//! downloaded (default 1) or a stop is impossible — the harness kills
+//! it.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+use acme
+use std.base64
+use std.x.jose
+
+// ------------------------------------------------------------------
+// tiny HTTP/1.1 request reader (loopback, one exchange per conn)
+// ------------------------------------------------------------------
+
+struct Req {
+    method: str,
+    path: str,
+    body: str,
+}
+
+fn content_length(head: str) -> int {
+    for line in head.lines() {
+        let low = line.lower()
+        if low.starts_with("content-length:") {
+            var n = 0
+            for b in line[15..line.len].trim().bytes() {
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                }
+            }
+            return n
+        }
+    }
+    0
+}
+
+fn read_req(conn: int) -> Req ! {io} {
+    var buf = ""
+    loop {
+        let m = buf.find("\r\n\r\n") else -1
+        if m >= 0 {
+            let head = buf[0..m]
+            let want = content_length(head)
+            let bstart = m + 4
+            while buf.len < bstart + want {
+                let piece = net_read(conn, 4096) else |_| {
+                    return parse_head(head, buf[bstart..buf.len])
+                }
+                buf = "{buf}{piece}"
+            }
+            return parse_head(head, buf[bstart..bstart + want])
+        }
+        if buf.len > 65536 {
+            return io
+        }
+        let piece = net_read(conn, 4096) else |_| {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+fn parse_head(head: str, body: str) -> Req {
+    var method = ""
+    var path = ""
+    let first = head.lines()
+    for line in first {
+        let sp1 = line.find(" ") else -1
+        if sp1 > 0 {
+            method = line[0..sp1]
+            let rest = line[sp1 + 1..line.len]
+            let sp2 = rest.find(" ") else rest.len
+            path = rest[0..sp2]
+        }
+        return Req { method: method, path: path, body: body }
+    }
+    Req { method: method, path: path, body: body }
+}
+
+// ------------------------------------------------------------------
+// responses
+// ------------------------------------------------------------------
+
+fn resp(status: int, phrase: str, extra: str, body: str) -> str {
+    "HTTP/1.1 {status} {phrase}\r\n{extra}Content-Length: {body.len}\r\nConnection: close\r\n\r\n{body}"
+}
+
+fn send(conn: int, s: str) {
+    net_write(conn, s) else |_| {}
+    net_close(conn) else |_| {}
+}
+
+// ------------------------------------------------------------------
+// the flattened-JWS reader: extract protected+payload+signature,
+// decode, verify the account signature, return (payload, jwk_pub,
+// kid, nonce_url, ok)
+// ------------------------------------------------------------------
+
+struct Jws {
+    ok: bool,
+    payload: str,
+    jwk_x: List[int],
+    kid: str,
+    nonce: str,
+    url: str,
+}
+
+fn jws_field(body: str, key: str) -> str {
+    // the CA's own request bodies are flat JSON from lobo's jose:
+    // {"protected":"..","payload":"..","signature":".."}
+    let marker = "\"{key}\""
+    let at = body.find(marker) else -1
+    if at < 0 {
+        return ""
+    }
+    let rest = body[at + marker.len..body.len]
+    let q1 = rest.find("\"") else -1
+    if q1 < 0 {
+        return ""
+    }
+    let tail = rest[q1 + 1..rest.len]
+    let q2 = tail.find("\"") else -1
+    if q2 < 0 {
+        return ""
+    }
+    tail[0..q2]
+}
+
+/// A field out of a DECODED protected-header JSON string. Reuses the
+/// flow scanner shape. Total.
+fn hdr_str(json: str, key: str) -> str {
+    let marker = "\"{key}\""
+    let at = json.find(marker) else -1
+    if at < 0 {
+        return ""
+    }
+    let rest = json[at + marker.len..json.len]
+    let colon = rest.find(":") else -1
+    if colon < 0 {
+        return ""
+    }
+    let after = rest[colon + 1..rest.len]
+    let q = after.find("\"") else -1
+    if q < 0 {
+        return ""
+    }
+    let tail = after[q + 1..after.len]
+    let e = tail.find("\"") else -1
+    if e < 0 {
+        return ""
+    }
+    tail[0..e]
+}
+
+/// The base64url `x` of the inlined jwk in a protected header ("" when
+/// none — a kid request). Total.
+fn hdr_jwk_x(json: str) -> str {
+    let at = json.find("\"jwk\"") else -1
+    if at < 0 {
+        return ""
+    }
+    hdr_str(json[at..json.len], "x")
+}
+
+fn parse_jws(body: str) -> Jws {
+    let p_b64 = jws_field(body, "protected")
+    let pl_b64 = jws_field(body, "payload")
+    if p_b64.is_empty() {
+        return Jws { ok: false, payload: "", jwk_x: List[int](), kid: "", nonce: "", url: "" }
+    }
+    let prot = base64.url_decode(p_b64) else |_| {
+        return Jws { ok: false, payload: "", jwk_x: List[int](), kid: "", nonce: "", url: "" }
+    }
+    let prot_str = bytes_to_str(prot)
+    let kid = hdr_str(prot_str, "kid")
+    let nonce = hdr_str(prot_str, "nonce")
+    let url = hdr_str(prot_str, "url")
+    let xb64 = hdr_jwk_x(prot_str)
+    var jwk_x = List[int]()
+    if !xb64.is_empty() {
+        jwk_x = base64.url_decode(xb64) else List[int]()
+    }
+    let pl = base64.url_decode(pl_b64) else List[int]()
+    Jws {
+        ok: true,
+        payload: bytes_to_str(pl),
+        jwk_x: jwk_x,
+        kid: kid,
+        nonce: nonce,
+        url: url,
+    }
+}
+
+/// Verify the account signature over `BASE64URL(protected).BASE64URL(
+/// payload)` with `pub` (the account key). Total.
+fn jws_verify(body: str, acct_pub: List[int]) -> bool {
+    let p_b64 = jws_field(body, "protected")
+    let pl_b64 = jws_field(body, "payload")
+    let sig_b64 = jws_field(body, "signature")
+    let si = "{p_b64}.{pl_b64}"
+    let sig = base64.url_decode(sig_b64) else |_| {
+        return false
+    }
+    acme.verify_of(acct_pub, si.bytes(), sig)
+}
+
+fn bytes_to_str(b: List[int]) -> str {
+    str_from_utf8(b) else ""
+}
+
+// ------------------------------------------------------------------
+// CSR reading — pull the subject public key (SPKI BIT STRING) out of
+// the base64url CSR the finalize step posts, so the minted leaf
+// carries the key lobo will serve with
+// ------------------------------------------------------------------
+
+/// The 32-byte Ed25519 subject public key inside a CSR DER (the last
+/// SPKI in a CertificationRequestInfo — our own csr_build shape: the
+/// SPKI's BIT STRING is `03 21 00 <32>`). Empty on a shape miss.
+/// Total.
+fn csr_pubkey(der: List[int]) -> List[int] {
+    // find the pattern 03 21 00 followed by 32 bytes; the CSR carries
+    // exactly one Ed25519 SPKI, and the account-signature BIT STRING
+    // at the end is 03 41 (65 bytes) — a different length, so 03 21
+    // uniquely marks the key.
+    var i = 0
+    let n = der.len
+    while i + 35 <= n {
+        if der[i] == 3 && der[i + 1] == 33 && der[i + 2] == 0 {
+            var out = List[int]()
+            var j = 0
+            while j < 32 {
+                (mut out).push(der[i + 3 + j])
+                j = j + 1
+            }
+            return out
+        }
+        i = i + 1
+    }
+    List[int]()
+}
+
+/// The space-joined dNSName list from a CSR's SAN attribute (each
+/// dNSName is a 0x82 context-primitive run). Best-effort over our own
+/// encoder's output. Total.
+fn csr_names(der: List[int]) -> str {
+    var out = ""
+    var i = 0
+    let n = der.len
+    while i < n {
+        if der[i] == 130 && i + 1 < n {
+            let ln = der[i + 1]
+            if ln > 0 && ln < 64 && i + 2 + ln <= n {
+                var nm = ""
+                var j = 0
+                while j < ln {
+                    let piece = charof(der[i + 2 + j])
+                    nm = "{nm}{piece}"
+                    j = j + 1
+                }
+                if looks_like_host(nm) {
+                    if out.is_empty() {
+                        out = nm
+                    } else {
+                        out = "{out} {nm}"
+                    }
+                }
+                i = i + 2 + ln
+            } else {
+                i = i + 1
+            }
+        } else {
+            i = i + 1
+        }
+    }
+    out
+}
+
+fn charof(b: int) -> str {
+    var one = List[int]()
+    (mut one).push(b)
+    str_from_utf8(one) else ""
+}
+
+fn looks_like_host(s: str) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for b in s.bytes() {
+        let alpha = b >= 97 && b <= 122 || b >= 65 && b <= 90
+        let digit = b >= 48 && b <= 57
+        if !alpha && !digit && !(b == 46) && !(b == 45) {
+            return false
+        }
+    }
+    true
+}
+
+// ------------------------------------------------------------------
+// the CA server
+// ------------------------------------------------------------------
+
+fn main() -> !int {
+    var cacert_out = ""
+    var portfile = ""
+    var validity_s = 7776000
+    var bad_nonce_at = -1
+    var fail_validation = false
+    var max_issue = 1
+    var want = ""
+    var i = 0
+    for a in env_args() {
+        if !want.is_empty() {
+            if want == "bad" {
+                bad_nonce_at = intof(a)
+            } else if want == "max" {
+                max_issue = intof(a)
+            }
+            want = ""
+        } else if a == "--bad-nonce-at" {
+            want = "bad"
+        } else if a == "--fail-validation" {
+            fail_validation = true
+        } else if a == "--max-issue" {
+            want = "max"
+        } else if i == 0 {
+            cacert_out = a
+            i = 1
+        } else if i == 1 {
+            portfile = a
+            i = 2
+        } else if i == 2 {
+            validity_s = intof(a)
+            i = 3
+        }
+    }
+    if cacert_out.is_empty() || portfile.is_empty() {
+        eprint(
+            "usage: acmeca <cacert-out> <challenge-portfile> [validity-s] [--bad-nonce-at N] [--fail-validation] [--max-issue M]",
+        )
+        return 2
+    }
+
+    // the CA key + self-signed root, written out as the trust anchor
+    let ca_seed = acme.keygen()
+    let ca_pub = acme.pub_of(ca_seed)
+    let now_s = time_unix_ms() / 1000
+    let ca_cert = acme.
+        cert_mint(
+        ca_seed,
+        "Lobo Test CA",
+        ca_pub,
+        "Lobo Test CA",
+        1,
+        now_s - 3600,
+        now_s + 315360000,
+        true,
+    )
+    fs_write_text(cacert_out, acme.pem_wrap("CERTIFICATE", ca_cert))?
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    print("{port}")
+
+    // conversation state (one order at a time — the rig issues one)
+    var base = "http://127.0.0.1:{port}"
+    var nonce_ctr = 1000
+    var post_ctr = 0
+    var acct_pub = List[int]()
+    var order_names = ""
+    var order_status = "pending"
+    var chall_token = ""
+    var issued_der = List[int]()
+    var issued = 0
+
+    while issued < max_issue {
+        let conn = net_accept(l) else |_| {
+            continue
+        }
+        let req = read_req(conn) else |_| {
+            net_close(conn) else |_| {}
+            Req { method: "", path: "", body: "" }
+        }
+        if req.method.is_empty() {
+            continue
+        }
+        nonce_ctr = nonce_ctr + 1
+        let fresh_nonce = "nonce{nonce_ctr}"
+        let nh = "Replay-Nonce: {fresh_nonce}\r\n"
+
+        if req.path == "/dir" {
+            let body = "{{\"newNonce\":\"{base}/nonce\",\"newAccount\":\"{base}/new-account\",\"newOrder\":\"{base}/new-order\"}}"
+            send(conn, resp(200, "OK", nh, body))
+        } else if req.path == "/nonce" {
+            send(conn, resp(200, "OK", nh, ""))
+        } else if req.path == "/new-account" {
+            post_ctr = post_ctr + 1
+            let jws = parse_jws(req.body)
+            acct_pub = jws.jwk_x
+            if !jws_verify(req.body, acct_pub) {
+                send(
+                    conn,
+                    resp(
+                        400,
+                        "Bad Request",
+                        nh,
+                        "{{\"type\":\"urn:ietf:params:acme:error:malformed\",\"detail\":\"bad JWS signature\"}}",
+                    ),
+                )
+            } else {
+                let loc = "Location: {base}/acct/1\r\n"
+                send(conn, resp(201, "Created", "{nh}{loc}", "{{\"status\":\"valid\"}}"))
+            }
+        } else if req.path == "/new-order" {
+            post_ctr = post_ctr + 1
+            if bad_nonce_at == post_ctr {
+                send(
+                    conn,
+                    resp(
+                        400,
+                        "Bad Request",
+                        nh,
+                        "{{\"type\":\"urn:ietf:params:acme:error:badNonce\",\"detail\":\"bad nonce\"}}",
+                    ),
+                )
+            } else {
+                let jws = parse_jws(req.body)
+                order_names = order_identifiers(jws.payload)
+                order_status = "pending"
+                let loc = "Location: {base}/order/1\r\n"
+                let body = "{{\"status\":\"pending\",\"authorizations\":[\"{base}/authz/1\"],\"finalize\":\"{base}/finalize/1\"}}"
+                send(conn, resp(201, "Created", "{nh}{loc}", body))
+            }
+        } else if req.path == "/authz/1" {
+            post_ctr = post_ctr + 1
+            let body = "{{\"status\":\"{order_status}\",\"identifier\":{{\"type\":\"dns\",\"value\":\"{first_word(order_names)}\"}},\"challenges\":[{{\"type\":\"http-01\",\"url\":\"{base}/chall/1\",\"token\":\"tok-{first_word(order_names)}\"}}]}}"
+            send(conn, resp(200, "OK", nh, body))
+        } else if req.path == "/chall/1" {
+            post_ctr = post_ctr + 1
+            chall_token = "tok-{first_word(order_names)}"
+            // RESPOND to the challenge POST FIRST ("pending"), close,
+            // and only THEN dial back. The client (lobo) is single-
+            // threaded and blocked reading THIS response — it cannot
+            // serve the dial-back until it returns to its poll loop.
+            // So send, let it return, sleep a beat, then validate: the
+            // async-challenge shape of RFC 8555 §7.1.6, and the only
+            // shape that does not deadlock a single-threaded client.
+            // The recorded status is what the next authz poll reports.
+            send(
+                conn,
+                resp(
+                    200,
+                    "OK",
+                    nh,
+                    "{{\"status\":\"pending\",\"type\":\"http-01\",\"url\":\"{base}/chall/1\"}}",
+                ),
+            )
+            time_sleep_ms(80)
+            let ok = validate_http01(portfile, chall_token, acct_pub, fail_validation)
+            if ok {
+                order_status = "valid"
+            } else {
+                order_status = "invalid"
+            }
+        } else if req.path == "/finalize/1" {
+            post_ctr = post_ctr + 1
+            let jws = parse_jws(req.body)
+            let csr_b64 = order_csr(jws.payload)
+            let csr = base64.url_decode(csr_b64) else List[int]()
+            let leaf_pub = csr_pubkey(csr)
+            var names = csr_names(csr)
+            if names.is_empty() {
+                names = order_names
+            }
+            issued_der = acme.
+                cert_mint(
+                ca_seed,
+                "Lobo Test CA",
+                leaf_pub,
+                names,
+                2 + issued,
+                now_s - 60,
+                now_s + validity_s,
+                false,
+            )
+            order_status = "valid"
+            let loc = "Location: {base}/order/1\r\n"
+            send(
+                conn,
+                resp(
+                    200,
+                    "OK",
+                    "{nh}{loc}",
+                    "{{\"status\":\"valid\",\"certificate\":\"{base}/cert/1\"}}",
+                ),
+            )
+        } else if req.path == "/order/1" {
+            post_ctr = post_ctr + 1
+            send(
+                conn,
+                resp(
+                    200,
+                    "OK",
+                    nh,
+                    "{{\"status\":\"{order_status}\",\"certificate\":\"{base}/cert/1\"}}",
+                ),
+            )
+        } else if req.path == "/cert/1" {
+            post_ctr = post_ctr + 1
+            var chain = acme.pem_wrap("CERTIFICATE", issued_der)
+            chain = "{chain}{acme.pem_wrap("CERTIFICATE", ca_cert)}"
+            send(
+                conn,
+                resp(200, "OK", "Content-Type: application/pem-certificate-chain\r\n", chain),
+            )
+            issued = issued + 1
+        } else {
+            send(conn, resp(404, "Not Found", nh, ""))
+        }
+    }
+    net_close(l) else |_| {}
+    0
+}
+
+/// Dial the challenge server on the loopback port in `portfile` and
+/// GET /.well-known/acme-challenge/<token>; the response body must be
+/// `<token>.<thumbprint(acct_pub)>`. `force_fail` short-circuits to a
+/// failed validation (the CA-rejects-the-challenge pitfall).
+/// RETRIES a handful of times: the client is single-threaded and may
+/// still be cycling back into its accept window when the first dial
+/// lands, so a real-CA-style poll (a few short attempts) is what makes
+/// the validation deterministic — not a single fixed-sleep shot.
+/// Total.
+fn validate_http01(portfile: str, token: str, acct_pub: List[int], force_fail: bool) -> bool {
+    if force_fail {
+        return false
+    }
+    let want = "{token}.{jose.jwk_thumbprint(acct_pub)}"
+    // a short bounded poll — long enough to catch the client's return
+    // to its accept path, short enough to finish well inside the
+    // client's authz-poll interval (so the two never block on each
+    // other). The client writes the token BEFORE posting the
+    // challenge, so a miss here is a timing miss, not a missing file.
+    var attempt = 0
+    while attempt < 5 {
+        let got = dial_once(portfile, token)
+        if got == want {
+            return true
+        }
+        time_sleep_ms(60)
+        attempt = attempt + 1
+    }
+    false
+}
+
+/// One dial-and-read of the challenge route; the body (trimmed), or ""
+/// on any transport trouble. Total.
+fn dial_once(portfile: str, token: str) -> str {
+    let hp = fs_read_text(portfile) else |_| ""
+    let host = hp.trim()
+    if host.is_empty() {
+        return ""
+    }
+    let fd = net_connect(host) else |_| {
+        return ""
+    }
+    net_deadline(fd, 3000) else |_| {}
+    let req = "GET /.well-known/acme-challenge/{token} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
+    net_write(fd, req) else |_| {
+        net_close(fd) else |_| {}
+        return ""
+    }
+    var raw = ""
+    var reading = true
+    while reading {
+        let piece = net_read(fd, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            raw = "{raw}{piece}"
+        }
+    }
+    net_close(fd) else |_| {}
+    let bstart = raw.find("\r\n\r\n") else -1
+    if bstart < 0 {
+        return ""
+    }
+    // only a 200 carries the token body; a 404 (token not yet written)
+    // must not be mistaken for a body
+    if !raw.starts_with("HTTP/1.1 200") {
+        return ""
+    }
+    raw[bstart + 4..raw.len].trim()
+}
+
+/// The space-joined dns identifier VALUES out of a newOrder payload
+/// (`{"identifiers":[{"type":"dns","value":"a"},...]}`). Total.
+fn order_identifiers(payload: str) -> str {
+    var out = ""
+    var rest = payload
+    loop {
+        let at = rest.find("\"value\"") else -1
+        if at < 0 {
+            return out
+        }
+        let tail = rest[at + 7..rest.len]
+        let q1 = tail.find("\"") else -1
+        if q1 < 0 {
+            return out
+        }
+        let t2 = tail[q1 + 1..tail.len]
+        let q2 = t2.find("\"") else -1
+        if q2 < 0 {
+            return out
+        }
+        let v = t2[0..q2]
+        if out.is_empty() {
+            out = v
+        } else {
+            out = "{out} {v}"
+        }
+        rest = t2[q2 + 1..t2.len]
+    }
+}
+
+/// The base64url CSR out of a finalize payload (`{"csr":".."}`).
+/// Total.
+fn order_csr(payload: str) -> str {
+    let at = payload.find("\"csr\"") else -1
+    if at < 0 {
+        return ""
+    }
+    let rest = payload[at + 5..payload.len]
+    let q1 = rest.find("\"") else -1
+    if q1 < 0 {
+        return ""
+    }
+    let tail = rest[q1 + 1..rest.len]
+    let q2 = tail.find("\"") else -1
+    if q2 < 0 {
+        return ""
+    }
+    tail[0..q2]
+}
+
+fn first_word(s: str) -> str {
+    for w in s.words() {
+        return w
+    }
+    ""
+}
+
+fn intof(s: str) -> int {
+    var n = 0
+    for b in s.bytes() {
+        if b >= 48 && b <= 57 {
+            n = n * 10 + b - 48
+        }
+    }
+    n
+}

@@ -162,6 +162,13 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 sni = a
             } else if want == "client" {
                 client = a
+            } else if want == "cert" {
+                if a == "status" {
+                    mode = "cert_status"
+                } else {
+                    errored = true
+                    err_msg = "invalid \"cert\" subcommand: \"{a}\" (expected: status)"
+                }
             }
             want = ""
             want_kind = ""
@@ -214,6 +221,9 @@ pub fn parse_cli(args: List[str]) -> Cli {
             mode = "serve"
         } else if a == "status" {
             mode = "status"
+        } else if a == "cert" {
+            want = "cert"
+            want_kind = "subcommand"
         } else if a.starts_with("-") {
             errored = true
             let letter = a[1..a.len]

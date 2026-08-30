@@ -26,7 +26,7 @@
 /// frozen model; -t renders these as `[warn]` lines (they never
 /// change the exit code).
 pub fn lint(c: Conf) -> str {
-    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}"
+    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}"
 }
 
 /// LOBO-L001: `if` inside a `location` block.
@@ -130,6 +130,26 @@ fn lint_alias_slash(c: Conf) -> str {
                     out = "{out}LOBO-L003|{c.files[i]}:{c.lines[i]}|\"alias\" ends with \"/\" under location \"{path}\", which does not: nginx replaces only the matched part, so a request for \"{path}../secret\" resolves OUTSIDE the alias root (the off-by-slash traversal — PortSwigger nginx-alias-traversal / gixy advisory; nginx upstream treats it as configuration, not a bug). lobo will refuse the traversal shape when alias serves (ws02); today the fix is matching slashes on both.\n"
                 }
             }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L004 (ws06): the cert* directive family is lobo-NATIVE — the
+/// WWS-L-native class. Fires ONCE, on the `cert` directive, and says
+/// the one-way-door sentence out loud: a config that adopts `cert
+/// auto` cannot be carried back to nginx (its -t rejects the name);
+/// the certbot layout it replaces still loads in both servers. The
+/// pre-ws06 native directive (`control`) predates this class and its
+/// note lives in the table; new native surface lints from here on.
+fn lint_cert_native(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "cert" {
+            out = "{out}LOBO-L004|{c.files[i]}:{c.lines[i]}|\"cert\" is lobo-native (WWS-L-native class): nginx -t rejects this directive, so adopting \"cert auto\" is a ONE-WAY DOOR out of nginx-carryable configs — deliberate and documented (the ws06 charter clause). The certbot flow keeps working: delete the cert* lines and restore ssl_certificate/ssl_certificate_key to walk back.\n"
+            return out
         }
         i = i + 1
     }

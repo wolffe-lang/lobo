@@ -767,6 +767,73 @@ pub fn table() -> Table {
         "planned(wsc02)",
         "OCSP verification",
     )
+    // ---- implemented at ws06: certificates without the dance (ACME).
+    // The cert* family is lobo-native (the L004 one-way door: an nginx
+    // -t rejects these names — the linter says so at load). HTTP-01
+    // against a LOOPBACK directory at this pin: the std.x.tls ladder
+    // has no client handshake yet, so an https:// or non-loopback
+    // cert_ca is refused BY NAME at -t citing the gate (the D21/D25
+    // rider); the flip rides the std client rung, not this table.
+    row(
+        mut t,
+        "cert",
+        "server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (ws06): \"cert auto\" — the server acquires, renews and rotates its own certificate via ACME HTTP-01; the certbot dance keeps working beside it (coexistence is the posture). NOT an nginx directive (L004 one-way door)",
+    )
+    row(
+        mut t,
+        "cert_contact",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (ws06): ACME account contact (a mailto: URL or bare address) sent at account creation",
+    )
+    row(
+        mut t,
+        "cert_ca",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (ws06): the ACME directory URL. LOOPBACK http:// ONLY at this pin — the std.x.tls ladder has no client handshake, so a real (https) CA is refused by name at -t until that rung lands (named gate)",
+    )
+    row(
+        mut t,
+        "cert_store",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (ws06): where acquired certificates live (default: <prefix>/certs) — per-domain dirs, account key separate, every artifact written atomically (write+rename)",
+    )
+    row(
+        mut t,
+        "cert_renew_before",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (ws06): renew when the certificate has less than this long to live (nginx time units; default 30d)",
+    )
+    row(
+        mut t,
+        "cert_check_interval",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (ws06): how often the renewal daemon wakes to check expiry (nginx time units; default 1d — sub-daily values are the harness's, not production advice)",
+    )
     // ---- named_error: refused by name, never silently
     row(
         mut t,

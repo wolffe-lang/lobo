@@ -47,6 +47,7 @@
 //! pinned by the rig). File-header note (F-0016): comments never sit
 //! directly above a dotted call.
 
+use acme
 use config
 use conn
 use dryrun
@@ -543,10 +544,46 @@ fn serve_main(prefix: str, conf: str) -> int {
         return 1
     }
 
-    let opts = serve.default_opts()
+    var opts = serve.default_opts()
     let lim = http.default_limits()
     let shutdown_ms = shell.shutdown_timeout_ms(c0)
-    let where = if have_http { addr } else { "(no plaintext listener)" }
+
+    // ws06: the ACME renewal daemon. When `cert auto` is on, arm the
+    // challenge webroot (the http-01 route serves from it) and build
+    // the issuance flow, ticked spawn-free in the poll loop below. The
+    // flow is entirely async to the accept path — a server with `cert
+    // auto` and no cert yet serves the challenge and the pending-TLS
+    // posture ssl_resolve set (the never-block-serving pitfall).
+    var have_auto = config.auto_on(c0)
+    var chall_dir = ""
+    if have_auto {
+        chall_dir = config.auto_challenge_dir(c0, prefix)
+        fs_create_dir_all(chall_dir) else |_| {}
+        opts = serve.ServerOpts {
+            token: opts.token,
+            keepalive_timeout_ms: opts.keepalive_timeout_ms,
+            keepalive_requests: opts.keepalive_requests,
+            read_timeout_ms: opts.read_timeout_ms,
+            challenge_dir: chall_dir,
+        }
+    }
+    let auto_primary = config.auto_primary(c0)
+    var flow = acme.
+        flow_new(
+        config.auto_store(c0, prefix),
+        config.auto_names(c0),
+        config.auto_contact(c0),
+        config.auto_ca(c0),
+        config.auto_renew_before_s(c0),
+        config.auto_check_interval_s(c0),
+    )
+    // announce the BOUND plaintext port (not the configured addr,
+    // which may carry :0) so a client — the ACME challenge dial-back
+    // included — can find the http listener. The TLS notice already
+    // prints its bound port.
+    let where = if have_http { "127.0.0.1:{hport} (port {hport})" } else {
+        "(no plaintext listener)"
+    }
     eprint("lobo: [notice] serving on {where}, control {ctrl_ep}, pid file {pidp}")
 
     // signal reception (wsm01, s114 in the pin): register interest in
@@ -823,6 +860,35 @@ fn serve_main(prefix: str, conf: str) -> int {
         cserved = nserved
         cidle = nidle
 
+        // 3b. ws06: the renewal daemon tick — spawn-free, in the loop's
+        // own bookkeeping (D7). Acts only when the flow's schedule is
+        // due (a comparison otherwise), so the accept path never waits
+        // on ACME. On issuance the running server REBUILDS its frozen
+        // SslConf from the store and swaps it — no reload, no deploy
+        // hook: certbot's dance eliminated (the "finally"). Every
+        // failure is LOUD (an error log line per attempt) with the
+        // named reason the flow carries.
+        if have_auto && running && !quitting {
+            let ev = acme.tick(mut flow, now)
+            if ev == "issued" {
+                let rssl = config.ssl_resolve(conf_for(gens, current_gen(gens)), prefix)
+                if config.ssl_ok(rssl) {
+                    ssl0 = rssl
+                    eprint(
+                        "lobo: [notice] cert auto: issued/renewed {auto_primary}; new TLS connections serve the fresh certificate (no reload)",
+                    )
+                } else {
+                    eprint(
+                        "lobo: [error] cert auto: issued a certificate the server cannot load ({rssl.err}); keeping the previous certificates",
+                    )
+                }
+            } else if ev == "failed" {
+                eprint(
+                    "lobo: [error] cert auto: issuance/renewal attempt failed: {flow.err} (will retry with backoff)",
+                )
+            }
+        }
+
         // 4. retire drained generations, 5. finish a quit once empty
         gens = retire_zero(gens, now)
         if quitting && cfds.len == 0 {
@@ -948,6 +1014,64 @@ fn status_main(cli: shell.Cli) -> int {
         },
     }
     print_raw("{reply}\n")
+    0
+}
+
+// ------------------------------------------------------------------
+// cert status — `lobo cert status` reads the renewal daemon's own
+// record off the store (ws06 §4): the domain, its certificate expiry,
+// and the last attempt/result — the operator's one-glance answer.
+// nginx has no analogue; lobo-native. Exit is nonzero (a `-t`-style
+// failure signal) when a cert-auto config's certificate is MISSING or
+// the last renewal attempt FAILED, so a monitor can gate on it.
+// ------------------------------------------------------------------
+
+/// `lobo cert status`: read the store's status file and the stored
+/// leaf's expiry, print one fact per line, exit nonzero on a missing
+/// certificate or a failed last attempt. Offline — the only fs is the
+/// store, never a socket.
+fn cert_status_main(cli: shell.Cli) -> int {
+    let c = config.load(cli.prefix, cli.conf)
+    if !config.auto_on(c) {
+        eprint("lobo: [error] cert status: no \"cert auto\" server block in {cli.conf}")
+        return 1
+    }
+    let store = config.auto_store(c, cli.prefix)
+    let primary = config.auto_primary(c)
+    let now_s = time_unix_ms() / 1000
+    let expiry = acme.cert_expiry(store, primary)
+    print_raw("domain: {primary}\n")
+    print_raw("store: {store}\n")
+    if expiry == 0 {
+        print_raw("certificate: NONE (not yet issued — the challenge route serves meanwhile)\n")
+    } else {
+        let remaining = expiry - now_s
+        let days = remaining / 86400
+        print_raw("certificate: present\n")
+        print_raw("expires_unix: {expiry}\n")
+        print_raw("expires_in_days: {days}\n")
+    }
+    // the daemon's last-attempt record, if any
+    let rec = fs_read_text(acme.status_path(store)) else |_| ""
+    var failed = false
+    if !rec.is_empty() {
+        for line in rec.lines() {
+            if line.starts_with("last_result ") {
+                let r = line[12..line.len]
+                print_raw("last_result: {r}\n")
+                if r.starts_with("failed") {
+                    failed = true
+                }
+            } else if line.starts_with("last_attempt_ms ") {
+                print_raw("last_attempt_ms: {line[16..line.len]}\n")
+            }
+        }
+    } else {
+        print_raw("last_result: (no attempt recorded yet)\n")
+    }
+    if expiry == 0 || failed {
+        return 1
+    }
     0
 }
 
@@ -1092,6 +1216,9 @@ fn main() -> int {
     }
     if cli.mode == "status" {
         return status_main(cli)
+    }
+    if cli.mode == "cert_status" {
+        return cert_status_main(cli)
     }
     if cli.mode == "serve" {
         return serve_main(cli.prefix, cli.conf)

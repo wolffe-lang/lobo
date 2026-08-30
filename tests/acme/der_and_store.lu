@@ -1,0 +1,188 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native
+//! stage-src: acme config
+//!
+//! ws06 §2/§3: the acme material half — DER writers, the Ed25519 key
+//! round trip (pkcs8 write → own reader AND config's reader agree),
+//! the CSR shape (a SEQUENCE carrying the SAN names), PEM in both
+//! directions, the atomic store (write-rename, per-domain dirs,
+//! account key separate, expiry read back), the renewal clock, and
+//! cert_mint's wolf-side round trip. NATIVE only: fs rules lupin out,
+//! and the checked tier's miri-lite step budget is spent by the
+//! Ed25519 signatures (csr_build + cert_mint) — the ws05 ssl-resolve
+//! test is native-only for exactly this reason. The pure DER shapes
+//! (no crypto) run native+checked in der_shapes.
+//! The CSR's cryptographic correctness (OpenSSL verifies the
+//! self-signature, the CN, the SAN, the Ed25519 alg) is pinned by
+//! the interop harness against a real oracle; this unit pins the
+//! SHAPE and the round trips that stay inside wolf.
+
+use acme
+use config
+
+fn main() -> int {
+    // 1. DER length encoding across the boundaries
+    let h0 = acme.der_hdr(4, 0)
+    assert(h0.len == 2 && h0[1] == 0, "short length")
+    let h127 = acme.der_hdr(4, 127)
+    assert(h127[1] == 127, "127 is one byte")
+    let h128 = acme.der_hdr(4, 128)
+    assert(h128[1] == 129 && h128[2] == 128, "128 is 0x81 0x80")
+    let h300 = acme.der_hdr(4, 300)
+    assert(h300[1] == 130 && h300[2] == 1 && h300[3] == 44, "300 is 0x82 0x01 0x2c")
+
+    // 2. der_int minimal + positivity pad
+    let i0 = acme.der_int(0)
+    assert(i0.len == 3 && i0[0] == 2 && i0[1] == 1 && i0[2] == 0, "INTEGER 0")
+    let i128 = acme.der_int(128)
+    assert(i128[1] == 2 && i128[2] == 0 && i128[3] == 128, "128 gets the sign pad")
+
+    // 3. the Ed25519 OID and SPKI shape
+    let alg = acme.alg_ed25519()
+    assert(alg[0] == 48, "alg is a SEQUENCE")
+    // 1.3.101.112 -> 06 03 2b 65 70
+    assert(alg[2] == 6 && alg[4] == 43 && alg[5] == 101 && alg[6] == 112, "the Ed25519 OID bytes")
+
+    // 4. key round trip: our writer, our reader, AND config's reader
+    let seed = "a 32-byte ed25519 secret key !!!".bytes()
+    let pk8 = acme.pkcs8_ed25519(seed)
+    let back = acme.pkcs8_seed(pk8)
+    assert(back.len == 32, "our reader recovers 32 bytes")
+    var same = true
+    var i = 0
+    while i < 32 {
+        if back[i] != seed[i] {
+            same = false
+        }
+        i = i + 1
+    }
+    assert(same, "the seed round-trips byte for byte")
+    let kinfo = config.pkcs8_parse(pk8)
+    assert(kinfo.alg == "ed25519", "config's PKCS#8 parser agrees on the alg")
+    assert(kinfo.seed.len == 32, "config's parser recovers the seed")
+
+    // 5. the CSR is a SEQUENCE and carries both SAN names
+    let csr = acme.csr_build(seed, "auto.test www.auto.test")
+    assert(csr[0] == 48, "the CSR is a SEQUENCE")
+    assert(csr.len > 100, "the CSR has real content")
+    let csr_pem = acme.pem_wrap("CERTIFICATE REQUEST", csr)
+    assert(csr_pem.starts_with("-----BEGIN CERTIFICATE REQUEST-----"), "CSR PEM label")
+    assert(csr_pem.contains("-----END CERTIFICATE REQUEST-----\n"), "CSR PEM close")
+
+    // 6. PEM writer/reader round trip
+    let blob = acme.der_octet("hello der".bytes())
+    let pem = acme.pem_wrap("CERTIFICATE", blob)
+    var lens = List[int]()
+    let dec = acme.pem_blocks_of(pem, "CERTIFICATE", mut lens) else |_| {
+        assert(false, "pem_blocks_of failed on our own output")
+        List[int]()
+    }
+    assert(lens.len == 1 && lens[0] == blob.len, "one block, right length")
+    var pem_ok = true
+    var j = 0
+    while j < blob.len {
+        if dec[j] != blob[j] {
+            pem_ok = false
+        }
+        j = j + 1
+    }
+    assert(pem_ok, "PEM round-trips the DER bytes")
+
+    // 7. the store: atomic write, per-domain dir, account key separate
+    let store = "target/acme-der-store"
+    fs_remove_dir_all(store) else |_| {}
+    let a1 = acme.account_key(store) else |_| {
+        assert(false, "account_key create failed")
+        List[int]()
+    }
+    assert(a1.len == 32, "account key is 32 bytes")
+    assert(fs_exists(acme.account_key_path(store)), "account.key written")
+    let a2 = acme.account_key(store) else |_| {
+        assert(false, "account_key reuse failed")
+        List[int]()
+    }
+    var reuse = true
+    var k = 0
+    while k < 32 {
+        if a1[k] != a2[k] {
+            reuse = false
+        }
+        k = k + 1
+    }
+    assert(reuse, "account key is REUSED, not regenerated")
+
+    let cert_seed = acme.keygen()
+    let key_pem = acme.pem_wrap("PRIVATE KEY", acme.pkcs8_ed25519(cert_seed))
+    acme.install(store, "auto.test", key_pem, csr_pem) else |_| {
+        assert(false, "install failed")
+    }
+    assert(fs_exists("{store}/auto.test/privkey.pem"), "per-domain key")
+    assert(fs_exists("{store}/auto.test/fullchain.pem"), "per-domain chain")
+    // the account key sits OUTSIDE the domain dir
+    assert(!fs_exists("{store}/auto.test/account.key"), "account key is not in the domain dir")
+
+    // 8. expiry read of a real stored leaf (a fixture cert with a
+    // known notAfter — reuse the ws05 test fixture)
+    let fx_store = "target/acme-expiry-store"
+    fs_remove_dir_all(fx_store) else |_| {}
+    let fx = fs_read_text("tests/tls/fixtures/fullchain.pem") else |_| ""
+    assert(!fx.is_empty(), "the ws05 fixture chain is readable")
+    acme.store_write("{fx_store}/localhost/fullchain.pem", fx) else |_| {
+        assert(false, "could not stage the fixture chain")
+    }
+    let exp = acme.cert_expiry(fx_store, "localhost")
+    assert(exp > 0, "a real leaf yields a positive notAfter")
+    assert(acme.cert_expiry(fx_store, "absent.example") == 0, "a missing cert reads 0")
+
+    // 9. the renewal clock: civil <-> unix round trips, and the packed
+    // yyyymmddhhmmss unpack the daemon compares against wall time. A
+    // wrong converter here is the classic off-by-timezone renewal bug
+    // (the contract's clock-skew pitfall), so pin exact instants.
+    // 2026-08-30 17:11:14 UTC:
+    assert(acme.to_unix(2026, 8, 30, 17, 11, 14) == 1788109874, "to_unix pins a known instant")
+    assert(acme.to_unix(1970, 1, 1, 0, 0, 0) == 0, "the epoch is 0")
+    assert(acme.to_unix(2000, 1, 1, 0, 0, 0) == 946684800, "Y2K midnight UTC")
+    // civil is the inverse of to_unix
+    let c = acme.civil(1788109874)
+    assert(c.0 == 2026 && c.1 == 8 && c.2 == 30, "civil recovers the date")
+    assert(c.3 == 17 && c.4 == 11 && c.5 == 14, "civil recovers the time")
+    // the packed form the daemon unpacks: 20260830171114 -> that unix
+    assert(
+        acme.packed_to_unix(20260830171114) == 1788109874,
+        "packed yyyymmddhhmmss unpacks to unix",
+    )
+
+    // 10. cert_mint: a minted leaf parses back, chains to its issuer,
+    // and its notAfter unpacks to the validity we set. (OpenSSL
+    // verifies the full chain in the interop rig; this pins the
+    // wolf-side round trip.)
+    let ca_seed = acme.keygen()
+    let ca_pub = acme.pub_of(ca_seed)
+    let nb = acme.to_unix(2026, 1, 1, 0, 0, 0)
+    let na = nb + 7776000
+    let leaf_seed = acme.keygen()
+    let leaf_der = acme.
+        cert_mint(
+        ca_seed,
+        "Test CA",
+        acme.pub_of(leaf_seed),
+        "mint.test alt.test",
+        7,
+        nb,
+        na,
+        false,
+    )
+    let mstore = "target/acme-mint-store"
+    fs_remove_dir_all(mstore) else |_| {}
+    acme.store_write("{mstore}/mint.test/fullchain.pem", acme.pem_wrap("CERTIFICATE", leaf_der)) else |_| {
+        assert(false, "could not stage the minted leaf")
+    }
+    let mexp = acme.cert_expiry(mstore, "mint.test")
+    assert(mexp == na, "the minted leaf's notAfter unpacks to the validity we set: {mexp} vs {na}")
+
+    fs_remove_dir_all(store) else |_| {}
+    fs_remove_dir_all(fx_store) else |_| {}
+    fs_remove_dir_all(mstore) else |_| {}
+    0
+}

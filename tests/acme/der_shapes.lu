@@ -1,0 +1,154 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: acme
+//!
+//! ws06 §2 material pins, the PURE half — the DER writers the CSR and
+//! the harness CA build from, byte-exact against X.690/RFC 5280
+//! vectors worked by hand. The encoder alone (no key, no store): the
+//! store round trip and the crypto live in der_and_store. Native +
+//! checked — the module's sibling flow.lu speaks net, so the whole
+//! `acme` module is off the lupin lane (net has no sockets there);
+//! the pure encoder would run on lupin in isolation, but a test
+//! stages the whole module. If the pinned encoder ever drifts a
+//! length or an OID byte, a signature or a certificate silently
+//! corrupts — these are the guard.
+
+use acme
+
+fn eq(a: List[int], b: List[int]) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    var i = 0
+    while i < a.len {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn lit(bytes: List[int]) -> List[int] {
+    bytes
+}
+
+fn main() -> int {
+    // header lengths across the definite-length boundaries
+    let h0 = acme.der_hdr(4, 0)
+    assert(h0.len == 2 && h0[0] == 4 && h0[1] == 0, "0x04 0x00")
+    assert(acme.der_hdr(4, 127)[1] == 127, "127 short form")
+    let h128 = acme.der_hdr(4, 128)
+    assert(h128[1] == 129 && h128[2] == 128, "128 -> 0x81 0x80")
+    let h255 = acme.der_hdr(4, 255)
+    assert(h255[1] == 129 && h255[2] == 255, "255 -> 0x81 0xff")
+    let h256 = acme.der_hdr(4, 256)
+    assert(h256[1] == 130 && h256[2] == 1 && h256[3] == 0, "256 -> 0x82 0x01 0x00")
+
+    // INTEGER minimality and the positivity pad
+    var i0 = List[int]()
+    (mut i0).push(2)
+    (mut i0).push(1)
+    (mut i0).push(0)
+    assert(eq(acme.der_int(0), i0), "INTEGER 0 = 02 01 00")
+    var i127 = List[int]()
+    (mut i127).push(2)
+    (mut i127).push(1)
+    (mut i127).push(127)
+    assert(eq(acme.der_int(127), i127), "INTEGER 127 = 02 01 7f")
+    var i128 = List[int]()
+    (mut i128).push(2)
+    (mut i128).push(2)
+    (mut i128).push(0)
+    (mut i128).push(128)
+    assert(eq(acme.der_int(128), i128), "INTEGER 128 = 02 02 00 80 (sign pad)")
+    var i256 = List[int]()
+    (mut i256).push(2)
+    (mut i256).push(2)
+    (mut i256).push(1)
+    (mut i256).push(0)
+    assert(eq(acme.der_int(256), i256), "INTEGER 256 = 02 02 01 00")
+
+    // der_int_bytes: strip leading zeros, pad, all-zero -> 1
+    var raw = List[int]()
+    (mut raw).push(0)
+    (mut raw).push(0)
+    (mut raw).push(200)
+    var want = List[int]()
+    (mut want).push(2)
+    (mut want).push(2)
+    (mut want).push(0)
+    (mut want).push(200)
+    assert(eq(acme.der_int_bytes(raw), want), "0x0000c8 -> 02 02 00 c8")
+    var zero = List[int]()
+    (mut zero).push(0)
+    (mut zero).push(0)
+    var one = List[int]()
+    (mut one).push(2)
+    (mut one).push(1)
+    (mut one).push(1)
+    assert(eq(acme.der_int_bytes(zero), one), "all-zero serial -> INTEGER 1 (positivity)")
+
+    // OID encoding: 1.3.101.112 (Ed25519) and 2.5.29.17 (SAN)
+    let ed = acme.der_oid("1.3.101.112")
+    var ed_want = List[int]()
+    (mut ed_want).push(6)
+    (mut ed_want).push(3)
+    (mut ed_want).push(43)
+    (mut ed_want).push(101)
+    (mut ed_want).push(112)
+    assert(eq(ed, ed_want), "Ed25519 OID = 06 03 2b 65 70")
+    let san = acme.der_oid("2.5.29.17")
+    var san_want = List[int]()
+    (mut san_want).push(6)
+    (mut san_want).push(3)
+    (mut san_want).push(85)
+    (mut san_want).push(29)
+    (mut san_want).push(17)
+    assert(eq(san, san_want), "SAN OID = 06 03 55 1d 11")
+    // a multi-byte arc (the RSA extensionRequest OID's 113549)
+    let big = acme.der_oid("1.2.840.113549.1.9.14")
+    assert(big[0] == 6, "OID tag")
+    assert(big[2] == 42, "first two arcs 1.2 -> 0x2a")
+    // 840 = 0x86 0x48 in base-128
+    assert(big[3] == 134 && big[4] == 72, "840 -> 0x86 0x48")
+
+    // BIT STRING carries the zero-unused-bits prefix
+    var key = List[int]()
+    (mut key).push(170)
+    (mut key).push(187)
+    let bs = acme.der_bitstring(key)
+    assert(
+        bs[0] == 3 && bs[1] == 3 && bs[2] == 0 && bs[3] == 170 && bs[4] == 187,
+        "BIT STRING 03 03 00 aa bb",
+    )
+
+    // SEQUENCE/SET/OCTET tags
+    var body = List[int]()
+    (mut body).push(1)
+    assert(acme.der_seq(body)[0] == 48, "SEQUENCE tag 0x30")
+    assert(acme.der_set(body)[0] == 49, "SET tag 0x31")
+    assert(acme.der_octet(body)[0] == 4, "OCTET STRING tag 0x04")
+
+    // the SPKI wraps alg + bitstring in a SEQUENCE
+    var pk = List[int]()
+    var p = 0
+    while p < 32 {
+        (mut pk).push(p)
+        p = p + 1
+    }
+    let spki = acme.spki_ed25519(pk)
+    assert(spki[0] == 48, "SPKI is a SEQUENCE")
+    // last 35 bytes are the BIT STRING (03 21 00 <32 key bytes>)
+    let at = spki.len - 35
+    assert(spki[at] == 3 && spki[at + 1] == 33 && spki[at + 2] == 0, "SPKI key BIT STRING 03 21 00")
+
+    // the SAN extension value carries dNSName [2] entries (0x82)
+    let sv = acme.san_names("a.test b.test")
+    assert(sv[0] == 48, "GeneralNames SEQUENCE")
+    assert(sv[2] == 130, "first name is dNSName context tag 0x82")
+
+    let _ = lit(body)
+    0
+}

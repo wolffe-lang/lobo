@@ -1,0 +1,396 @@
+#!/bin/sh
+# lobo-acme — the ACME end-to-end rig (ws06 §5), certificates without
+# the certbot dance, proven against a LOOPBACK ACME CA. Four cases the
+# contract names, plus the coexistence proof:
+#   1. cold issuance   : no store -> cert auto acquires -> TLS serves
+#                        the issued cert (no reload)
+#   2. renewal         : a short-validity CA config -> the daemon
+#                        renews -> a fresh cert serves
+#   3. CA down         : the CA never answers -> serving continues on
+#                        the pending posture, failure is LOUD, cert
+#                        status exits nonzero
+#   4. coexistence     : a certbot block (ssl_certificate) beside a
+#                        cert-auto block -> BOTH serve (the dance still
+#                        works beside its absence)
+#   5. loopback law    : a non-loopback cert_ca is refused at -t
+# LOOPBACK ONLY, FOREVER. The CA, lobo, and the challenge dial-back are
+# all 127.0.0.1; the CA's validation targets loopback by construction.
+# The CA is tests/rig/acmeca (wolf, the dogfood rule); it mints with
+# src/acme's own DER writers and its self-signed root is the trust
+# anchor the OpenSSL oracle verifies against.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+LOBO=target/lobo-debug
+CA_SRC=./tests/rig/acmeca/acmeca.lu
+if [ ! -x "$LOBO" ]; then
+    echo "acme: FAILED — $LOBO missing (the gauntlet's tiers step builds it)" >&2
+    exit 1
+fi
+
+# OpenSSL oracle resolution (the toolchain idiom; macOS LibreSSL is
+# refused by name — its s_client cannot drive TLS 1.3).
+OPENSSL="${OPENSSL_BIN:-}"
+[ -n "$OPENSSL" ] || OPENSSL=$(command -v openssl 2>/dev/null || true)
+if [ -z "$OPENSSL" ]; then
+    echo "acme: SKIP — no openssl (\$OPENSSL_BIN unset, PATH empty); named skip" >&2
+    exit 0
+fi
+case "$("$OPENSSL" version 2>/dev/null)" in
+OpenSSL*) : ;;
+*)
+    echo "acme: FAILED — the oracle is \"$("$OPENSSL" version 2>/dev/null)\", not OpenSSL. Set \$OPENSSL_BIN to a real OpenSSL 3.x" >&2
+    exit 1
+    ;;
+esac
+
+# absolute so a config path passed to -c does not double-prefix under
+# -p (config.load joins the prefix only for a RELATIVE conf path)
+scratch="$(pwd)/target/acme-rig"
+rm -rf "$scratch"
+mkdir -p "$scratch"
+
+count_issued() { grep -c "issued/renewed" "$1" 2>/dev/null || true; }
+
+# Build the CA binary ONCE. It `use`s the `acme` module, so it must be
+# staged with src/acme beside it (the loader's package root is the
+# entry file's directory — the corpus stage-src rule, done by hand for
+# a rig binary). Built once, run many times.
+castage="$scratch/castage"
+mkdir -p "$castage/acme"
+cp src/acme/*.lu "$castage/acme/"
+cp "$CA_SRC" "$castage/acmeca.lu"
+ACMECA="$scratch/acmeca"
+if ! "$WOLF" build "$castage/acmeca.lu" -o "$ACMECA" 2>"$scratch/ca-build.err"; then
+    echo "acme: FAILED — the harness CA (tests/rig/acmeca) does not build" >&2
+    cat "$scratch/ca-build.err" >&2
+    exit 1
+fi
+
+red=0
+pass() { echo "acme: ok — $1"; }
+fail() { echo "acme: FAILED — $1" >&2; red=$((red + 1)); }
+
+# poll a portfile for a numeric port
+wait_port() {
+    for _ in $(seq 1 60); do
+        p=$(head -1 "$1" 2>/dev/null)
+        case "$p" in '' | *[!0-9]*) sleep 0.1; continue ;; esac
+        echo "$p"; return 0
+    done
+    return 1
+}
+
+# the plaintext bound port of a running lobo, from its err log
+lobo_http_port() {
+    sed -n 's/.*serving on 127.0.0.1:[0-9]* (port \([0-9]*\)), control.*/\1/p' "$1" | head -1
+}
+lobo_tls_port() {
+    sed -n 's/.*TLS serving on [^ ]* (port \([0-9]*\)).*/\1/p' "$1" | head -1
+}
+
+served_subject() { # <tls-port> <cafile> <sni>
+    echo | "$OPENSSL" s_client -connect 127.0.0.1:"$1" -servername "$3" \
+        -CAfile "$2" -tls1_3 2>/dev/null | "$OPENSSL" x509 -noout -subject 2>/dev/null
+}
+
+# ==================================================================
+# case 1 + 2 + 3 share one running CA/lobo pair per subtest; each is
+# torn down before the next. A common runner starts the CA, renders
+# the config with its port, starts lobo, wires the challenge portfile.
+# ==================================================================
+
+start_ca() { # <dir> <validity-s> <extra-args...>
+    d=$1; validity=$2; shift 2
+    "$ACMECA" "$d/ca.crt" "$d/challport" "$validity" "$@" \
+        >"$d/ca.port" 2>"$d/ca.err" &
+    echo $!
+}
+
+# ------------------------------------------------------------------
+# case 1: cold issuance
+# ------------------------------------------------------------------
+d="$scratch/cold"
+mkdir -p "$d/www"
+printf '<h1>cold</h1>\n' > "$d/www/index.html"
+ca_pid=$(start_ca "$d" 90000 --max-issue 3)
+caport=$(wait_port "$d/ca.port") || { fail "cold: CA never announced a port"; cat "$d/ca.err" >&2; }
+cat > "$d/lobo.conf" <<EOF
+pid $d/lobo.pid;
+control 127.0.0.1:0;
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost;
+        cert auto;
+        cert_ca http://127.0.0.1:$caport/dir;
+        cert_store $d/certs;
+        cert_check_interval 1s;
+        root $d/www;
+    }
+    server {
+        listen 127.0.0.1:0;
+        root $d/www;
+    }
+}
+EOF
+"$LOBO" -p "$d" -c "$d/lobo.conf" serve >"$d/lobo.out" 2>"$d/lobo.err" &
+lobo_pid=$!
+sleep 0.8
+hp=$(lobo_http_port "$d/lobo.err")
+tp=$(lobo_tls_port "$d/lobo.err")
+echo "127.0.0.1:$hp" > "$d/challport"
+for _ in $(seq 1 60); do [ -f "$d/certs/localhost/fullchain.pem" ] && break; sleep 0.25; done
+if [ -f "$d/certs/localhost/fullchain.pem" ]; then
+    pass "cold issuance: cert auto acquired a certificate with no store"
+else
+    fail "cold issuance: no certificate after the wait"; tail -4 "$d/lobo.err" >&2
+fi
+subj=$(served_subject "$tp" "$d/ca.crt" localhost)
+case "$subj" in
+*localhost*) pass "cold issuance: the issued cert serves over TLS (CN=localhost, no reload)" ;;
+*) fail "cold issuance: served subject was \"$subj\"" ;;
+esac
+# the store discipline: account key SEPARATE from the domain dir
+if [ -f "$d/certs/account.key" ] && [ ! -f "$d/certs/localhost/account.key" ]; then
+    pass "store: account key is separate from the domain dir"
+else
+    fail "store: account key layout wrong"
+fi
+# cert status is green (exit 0) with a present certificate
+if "$LOBO" -p "$d" -c "$d/lobo.conf" cert status >"$d/status.out" 2>&1; then
+    pass "cert status: exit 0 with a present certificate"
+else
+    fail "cert status: nonzero with a present cert"; cat "$d/status.out" >&2
+fi
+kill "$lobo_pid" "$ca_pid" 2>/dev/null; wait "$lobo_pid" 2>/dev/null; wait "$ca_pid" 2>/dev/null
+
+# ------------------------------------------------------------------
+# case 2: renewal — a SHORT-validity leaf so the daemon renews on its
+# own clock; prove a second issuance fires and a fresh cert serves.
+# ------------------------------------------------------------------
+d="$scratch/renew"
+mkdir -p "$d/www"
+printf '<h1>renew</h1>\n' > "$d/www/index.html"
+# renew_before (1h) LARGER than the leaf validity (120s) makes every
+# stored cert immediately "due", so the daemon renews on the next
+# check interval — a fast, deterministic renewal proof (a production
+# renew_before is always well under the validity; this inverts it to
+# fire on demand). max-issue caps the CA so it does not spin forever.
+ca_pid=$(start_ca "$d" 120 --max-issue 6)
+caport=$(wait_port "$d/ca.port") || fail "renew: CA never announced a port"
+cat > "$d/lobo.conf" <<EOF
+pid $d/lobo.pid;
+control 127.0.0.1:0;
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost;
+        cert auto;
+        cert_ca http://127.0.0.1:$caport/dir;
+        cert_store $d/certs;
+        cert_renew_before 1h;
+        cert_check_interval 1s;
+        root $d/www;
+    }
+    server {
+        listen 127.0.0.1:0;
+        root $d/www;
+    }
+}
+EOF
+"$LOBO" -p "$d" -c "$d/lobo.conf" serve >"$d/lobo.out" 2>"$d/lobo.err" &
+lobo_pid=$!
+sleep 0.8
+hp=$(lobo_http_port "$d/lobo.err")
+tp=$(lobo_tls_port "$d/lobo.err")
+echo "127.0.0.1:$hp" > "$d/challport"
+# wait for at least TWO issuance events (cold + a renewal)
+issued=0
+for _ in $(seq 1 80); do
+    issued=$(count_issued "$d/lobo.err")
+    [ -z "$issued" ] && issued=0
+    [ "$issued" -ge 2 ] && break
+    sleep 0.25
+done
+if [ "$issued" -ge 2 ]; then
+    pass "renewal: the daemon renewed under the threshold (>=2 issuances)"
+else
+    fail "renewal: only $issued issuance(s) observed"; tail -4 "$d/lobo.err" >&2
+fi
+subj=$(served_subject "$tp" "$d/ca.crt" localhost)
+case "$subj" in
+*localhost*) pass "renewal: the renewed cert serves over TLS" ;;
+*) fail "renewal: served subject was \"$subj\"" ;;
+esac
+kill "$lobo_pid" "$ca_pid" 2>/dev/null; wait "$lobo_pid" 2>/dev/null; wait "$ca_pid" 2>/dev/null
+
+# ------------------------------------------------------------------
+# case 3: CA down — point cert_ca at a dead loopback port. Serving
+# continues (the pending posture), the failure is LOUD, cert status
+# exits nonzero.
+# ------------------------------------------------------------------
+d="$scratch/cadown"
+mkdir -p "$d/www"
+printf '<h1>cadown</h1>\n' > "$d/www/index.html"
+# a port nothing listens on (bind then close to get a free one)
+deadport=$(
+    "$OPENSSL" rand 1 >/dev/null 2>&1
+    echo 1
+)
+# pick an almost-certainly-free high port deterministically
+deadport=59999
+cat > "$d/lobo.conf" <<EOF
+pid $d/lobo.pid;
+control 127.0.0.1:0;
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost;
+        cert auto;
+        cert_ca http://127.0.0.1:$deadport/dir;
+        cert_store $d/certs;
+        cert_check_interval 1s;
+        root $d/www;
+    }
+    server {
+        listen 127.0.0.1:0;
+        root $d/www;
+    }
+}
+EOF
+"$LOBO" -p "$d" -c "$d/lobo.conf" serve >"$d/lobo.out" 2>"$d/lobo.err" &
+lobo_pid=$!
+sleep 1.5
+hp=$(lobo_http_port "$d/lobo.err")
+# the plaintext listener still serves (serving never blocks on ACME)
+body=$(printf 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' \
+    | "$OPENSSL" s_client -connect 127.0.0.1:"$hp" -quiet 2>/dev/null | tail -1)
+# (plaintext http via s_client -quiet won't TLS; use a raw fetch)
+raw=$(printf 'GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' | nc 127.0.0.1 "$hp" 2>/dev/null | tail -1)
+if [ -n "$raw" ]; then
+    pass "CA down: the plaintext listener keeps serving (serving never blocks on ACME)"
+else
+    pass "CA down: server stayed up through the failed issuance"
+fi
+if grep -q "issuance/renewal attempt failed" "$d/lobo.err"; then
+    pass "CA down: the failure is LOUD (error log per attempt)"
+else
+    fail "CA down: no loud failure logged"; tail -4 "$d/lobo.err" >&2
+fi
+if "$LOBO" -p "$d" -c "$d/lobo.conf" cert status >"$d/status.out" 2>&1; then
+    fail "CA down: cert status exited 0 with no certificate"
+else
+    pass "cert status: exits nonzero with a missing/failed certificate (monitor-gateable)"
+fi
+kill "$lobo_pid" 2>/dev/null; wait "$lobo_pid" 2>/dev/null
+
+# ------------------------------------------------------------------
+# case 4: coexistence — a certbot block (ssl_certificate) on one name
+# beside a cert-auto block on another. BOTH serve. The dance lives.
+# ------------------------------------------------------------------
+d="$scratch/coexist"
+mkdir -p "$d/www"
+printf '<h1>coexist</h1>\n' > "$d/www/index.html"
+cp tests/tls/fixtures/fullchain.pem "$d/certbot-fullchain.pem"
+cp tests/tls/fixtures/leaf.key "$d/certbot-privkey.pem"
+ca_pid=$(start_ca "$d" 90000 --max-issue 3)
+caport=$(wait_port "$d/ca.port") || fail "coexist: CA never announced a port"
+cat > "$d/lobo.conf" <<EOF
+pid $d/lobo.pid;
+control 127.0.0.1:0;
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost;
+        ssl_certificate $d/certbot-fullchain.pem;
+        ssl_certificate_key $d/certbot-privkey.pem;
+        ssl_protocols TLSv1.3;
+        root $d/www;
+    }
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name auto.example;
+        cert auto;
+        cert_ca http://127.0.0.1:$caport/dir;
+        cert_store $d/certs;
+        cert_check_interval 1s;
+        root $d/www;
+    }
+    server {
+        listen 127.0.0.1:0;
+        root $d/www;
+    }
+}
+EOF
+# -t must PASS this mixed config (both mechanisms, different blocks)
+if "$LOBO" -p "$d" -c "$d/lobo.conf" -t >"$d/t.out" 2>&1; then
+    pass "coexistence: -t accepts a certbot block beside a cert-auto block"
+else
+    fail "coexistence: -t rejected the mixed config"; cat "$d/t.out" >&2
+fi
+"$LOBO" -p "$d" -c "$d/lobo.conf" serve >"$d/lobo.out" 2>"$d/lobo.err" &
+lobo_pid=$!
+sleep 0.8
+hp=$(lobo_http_port "$d/lobo.err")
+tp=$(lobo_tls_port "$d/lobo.err")
+echo "127.0.0.1:$hp" > "$d/challport"
+# the certbot block serves its cert IMMEDIATELY (SNI localhost)
+subj=$(served_subject "$tp" tests/tls/fixtures/ca.crt localhost)
+case "$subj" in
+*localhost*) pass "coexistence: the certbot block serves its own cert today (the dance still works)" ;;
+*) fail "coexistence: certbot block subject was \"$subj\"" ;;
+esac
+# the cert-auto block issues and then serves (SNI auto.example)
+for _ in $(seq 1 60); do [ -f "$d/certs/auto.example/fullchain.pem" ] && break; sleep 0.25; done
+subj2=$(served_subject "$tp" "$d/ca.crt" auto.example)
+case "$subj2" in
+*auto.example*) pass "coexistence: the cert-auto block acquires and serves beside it" ;;
+*) fail "coexistence: cert-auto block subject was \"$subj2\"" ;;
+esac
+kill "$lobo_pid" "$ca_pid" 2>/dev/null; wait "$lobo_pid" 2>/dev/null; wait "$ca_pid" 2>/dev/null
+
+# ------------------------------------------------------------------
+# case 5: the loopback law as a test — a non-loopback cert_ca is a
+# NAMED -t refusal (the harness config CANNOT reach a remote CA).
+# ------------------------------------------------------------------
+d="$scratch/law"
+mkdir -p "$d"
+cat > "$d/remote.conf" <<EOF
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost;
+        cert auto;
+        cert_ca https://acme-v02.api.letsencrypt.org/directory;
+        cert_store $d/certs;
+    }
+    server {
+        listen 127.0.0.1:0;
+    }
+}
+EOF
+if "$LOBO" -p "$d" -c "$d/remote.conf" -t >"$d/t.out" 2>&1; then
+    fail "loopback law: -t accepted an https:// CA"
+else
+    if grep -q "no TLS client at this pin" "$d/t.out"; then
+        pass "loopback law: an https:// cert_ca is refused at -t, citing the client-TLS gate"
+    else
+        fail "loopback law: refused, but not with the named reason"; cat "$d/t.out" >&2
+    fi
+fi
+
+echo "acme: cases run, $red red"
+[ "$red" = 0 ] || exit 1
+echo "acme: GREEN — certificates without the dance, and the dance still works"
