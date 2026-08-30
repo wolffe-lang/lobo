@@ -227,6 +227,7 @@ pub struct ServerOpts {
     keepalive_timeout_ms: int,
     keepalive_requests: int,
     read_timeout_ms: int,
+    challenge_dir: str,
 }
 
 /// The lobo-flavoured defaults (nginx analogues: keepalive_timeout 75s,
@@ -237,6 +238,7 @@ pub fn default_opts() -> ServerOpts {
         keepalive_timeout_ms: 75000,
         keepalive_requests: 1000,
         read_timeout_ms: 60000,
+        challenge_dir: "",
     }
 }
 
@@ -570,6 +572,7 @@ fn handle_request(
     token: str,
     keep: bool,
     local_port: int,
+    challenge_dir: str,
 ) -> bool ! {closed, io} {
     // method: GET and HEAD serve; anything else is 405 (the CVE
     // corpus's POSTs are already rejected at parse when they smuggle)
@@ -577,6 +580,40 @@ fn handle_request(
     if req.method != "GET" && !is_head {
         send_err(mut cn, 405, false, token)
         return true
+    }
+
+    // ws06: the ACME HTTP-01 challenge self-serves. When a challenge
+    // dir is armed (cert auto is on) a GET under
+    // /.well-known/acme-challenge/<token> is answered from it BEFORE
+    // routing — the same webroot mechanism certbot's http-01 uses, so
+    // the dance and the dance-free path exercise one serving surface.
+    // The token is a single base64url path segment; anything with a
+    // slash or a dot-dot is refused (no traversal into the store).
+    if !challenge_dir.is_empty() {
+        let cprefix = "/.well-known/acme-challenge/"
+        if norm_path.starts_with(cprefix) {
+            let tok = norm_path[cprefix.len..norm_path.len]
+            if tok.is_empty() || tok.contains("/") || tok.contains("..") {
+                send_err(mut cn, 404, false, token)
+                return true
+            }
+            let body = fs_read_text("{challenge_dir}/{tok}") else |_| {
+                send_err(mut cn, 404, false, token)
+                return true
+            }
+            var h = "HTTP/1.1 200 OK\r\n"
+            h = "{h}{hline("Server", token)}"
+            h = "{h}{hline("Date", now_date())}"
+            h = "{h}{hline("Content-Type", "application/octet-stream")}"
+            h = "{h}{hline("Content-Length", "{body.len}")}"
+            h = "{h}{hline("Connection", keep_token(keep))}"
+            h = "{h}\r\n"
+            if !is_head {
+                h = "{h}{body}"
+            }
+            write_all(mut cn, h)?
+            return !keep
+        }
     }
 
     let d = http.route(c, norm_path)
@@ -859,7 +896,16 @@ pub fn serve_conn_cn(
                 return
             }
         } else {
-            should_close = handle_request(mut cn, c, req, norm, opts.token, keep, local_port) else |_| {
+            should_close = handle_request(
+                mut cn,
+                c,
+                req,
+                norm,
+                opts.token,
+                keep,
+                local_port,
+                opts.challenge_dir,
+            ) else |_| {
                 conn.conn_close(mut cn)
                 return
             }
@@ -985,7 +1031,16 @@ pub fn serve_request(
             return ReqOut { close: true, carry: "" }
         }
     } else {
-        should_close = handle_request(mut cn, c, req, norm, opts.token, keep, local_port) else |_| {
+        should_close = handle_request(
+            mut cn,
+            c,
+            req,
+            norm,
+            opts.token,
+            keep,
+            local_port,
+            opts.challenge_dir,
+        ) else |_| {
             return ReqOut { close: true, carry: "" }
         }
     }
