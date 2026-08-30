@@ -1,7 +1,7 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 11af3b292d113ae00321dfafaecf920e7f2ef9ad0414d7c59bf7d9fff6cd3e0b
-  pkg_hash    11af3b292d113ae00321dfafaecf920e7f2ef9ad0414d7c59bf7d9fff6cd3e0b
+  export_hash 288572dac226f6c9963cc7285c717c0b2a96ae93b319fa2963ed6b28e08632bb
+  pkg_hash    288572dac226f6c9963cc7285c717c0b2a96ae93b319fa2963ed6b28e08632bb
   deps:
     config  de327173135b9c2e74ee311266777c4d97e5cd900242661a9c560fa4c8a78192
     conn  14fb0378f5db6c34acdc898129841fd62d581508d6a2f41781a7e87f84571aad
@@ -26,5 +26,5 @@ module pkg :: serve
     [15] pub version — fn version() -> str
     [16] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int }
     [17] pub ReqOut — struct ReqOut { close: bool, carry: str }
-    [18] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int }
+    [18] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str }
 
