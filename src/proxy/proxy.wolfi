@@ -1,10 +1,10 @@
 module pkg :: proxy
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash f1ffb62c633a4513e1dde8ba5357c1db6b86915ec7c09f7223e36a0607f917ae
-  pkg_hash    f1ffb62c633a4513e1dde8ba5357c1db6b86915ec7c09f7223e36a0607f917ae
+  export_hash ca6dcdb936fc7edeae31947ab9620339a30c42b4c5d1dce528ff9c216f9b24ed
+  pkg_hash    ca6dcdb936fc7edeae31947ab9620339a30c42b4c5d1dce528ff9c216f9b24ed
   deps:
-    config  d0125ffaf32b2e05c7fd6e59d71dc467a909bd3766fc0420063e918bece00fed
-    http  47faf7571c8e9cb705ad5560e499afd21cd8a502c8eeaad6b82811b644de584c
+    config  de327173135b9c2e74ee311266777c4d97e5cd900242661a9c560fa4c8a78192
+    http  6045282abe97af4d4a1c02d9280ee08b501472ef4efbffe13b8dde4088c9201b
   items:
     [0] pub build_upstream — fn build_upstream(c: config.Conf, req: http.Request, pl: self.Plan, phost: str, pport: int, remote_addr: str, body: str) -> str · regions (ρ1, ρ2, ρ3, -, -, -, -) -> -
     [1] pub expand_var — fn expand_var(v: str, host: str, remote_addr: str, proxy_host: str, inbound_xff: str) -> str
