@@ -1,0 +1,651 @@
+//! member: true
+//! acme/flow — the RFC 8555 conversation (ws06 §2/§4): the loopback
+//! HTTP client, the JOSE envelope calls (std.x.jose, the sc19 seam
+//! frozen for exactly this consumer), and the issuance state machine
+//! the serve loop steps WITHOUT ever blocking the accept path (the
+//! never-block-serving pitfall: every step is a handful of loopback
+//! round trips; between steps the loop serves — including the
+//! challenge dial-back the CA makes mid-flow).
+//! The nonce lifecycle (contract pitfall): every response's
+//! Replay-Nonce replaces the held nonce; a badNonce rejection is
+//! retried ONCE with the fresh nonce the rejection carried (RFC 8555
+//! §6.5), then the attempt fails into backoff — the harness CA's
+//! fault injection pins both halves.
+//! The renewal daemon (§4) lives here as `tick`: wake on
+//! cert_check_interval, renew under cert_renew_before, exponential
+//! backoff on failure with Retry-After honored, every failure LOUD
+//! (the entry logs the event this fn returns). UTC unix seconds
+//! everywhere — no timezone arithmetic anywhere (the clock-skew
+//! pitfall).
+//! LOOPBACK LAW, enforced twice: config -t refuses a non-loopback
+//! cert_ca, and the dialer here refuses a non-loopback host AGAIN at
+//! run time (defense in depth; the refusal is a named error, never a
+//! quiet dial).
+//! JSON posture, honest: responses are read with a targeted scanner
+//! pinned to RFC 8555 field names against the pinned harness CA (the
+//! only CA this pin can reach). std.x.json stays out: its enum/Map
+//! surface costs compiler lanes (F-0012/F-0029, the jose header's own
+//! reasoning). When the client-TLS rung opens the real-CA door, the
+//! scanner's replacement rides that sprint.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+use std.x.jose
+
+// ------------------------------------------------------------------
+// the loopback HTTP/1.1 client
+// ------------------------------------------------------------------
+
+/// One parsed HTTP response: the status code, the three headers ACME
+/// steers by, and the body.
+pub struct Resp {
+    status: int,
+    nonce: str,
+    location: str,
+    retry_after: int,
+    body: str,
+}
+
+/// Split an http:// URL into (host:port, path). Port 80 is implied
+/// when absent; path defaults to "/". Total.
+pub fn url_split(url: str) -> (str, str) {
+    var rest = url.strip_prefix("http://") else url
+    let slash = rest.find("/") else -1
+    var hostport = rest
+    var path = "/"
+    if slash >= 0 {
+        hostport = rest[0..slash]
+        path = rest[slash..rest.len]
+    }
+    if !hostport.contains(":") {
+        hostport = "{hostport}:80"
+    }
+    (hostport, path)
+}
+
+/// Whether `hostport` is loopback — the only host the dialer will
+/// touch at this pin (see the header). Total.
+fn dial_ok(hostport: str) -> bool {
+    hostport.starts_with("127.0.0.1:") || hostport.starts_with("localhost:")
+}
+
+/// One HTTP transaction: dial loopback, send `req`, read to close
+/// (the harness CA answers Connection: close). Deadline-bounded so a
+/// wedged CA is a named failure, never a hung serve loop. Rows: io
+/// (dial refusal, deadline, write trouble — and the loopback-law
+/// refusal, logged by the caller as its own named error).
+fn http_txn(hostport: str, req: str) -> str ! {io} {
+    if !dial_ok(hostport) {
+        return io
+    }
+    let fd = net_connect(hostport) else |_| {
+        return io
+    }
+    net_deadline(fd, 5000) else |_| {}
+    net_write(fd, req) else |_| {
+        net_close(fd) else |_| {}
+        return io
+    }
+    var out = ""
+    var reading = true
+    while reading {
+        let piece = net_read(fd, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            out = "{out}{piece}"
+        }
+    }
+    net_close(fd) else |_| {}
+    out
+}
+
+/// The integer after "HTTP/1.1 " ("0" shapes parse to 0 — a 0 status
+/// is the caller's transport-error signal). Total.
+fn status_of(raw: str) -> int {
+    let sp = raw.find(" ") else -1
+    if sp < 0 {
+        return 0
+    }
+    var v = 0
+    var seen = false
+    for b in raw[sp + 1..raw.len].bytes() {
+        if b >= 48 && b <= 57 {
+            v = v * 10 + (b - 48)
+            seen = true
+        } else if seen {
+            return v
+        } else {
+            return 0
+        }
+    }
+    v
+}
+
+/// A header's value out of a raw response (case-insensitive name;
+/// "" when absent). Total.
+fn header_of(raw: str, name: str) -> str {
+    let hb = raw.find("\r\n\r\n") else raw.len
+    let head = raw[0..hb]
+    let want = name.lower()
+    for line in head.lines() {
+        let colon = line.find(":") else -1
+        if colon > 0 {
+            let n = line[0..colon].trim()
+            if n.lower() == want {
+                return line[colon + 1..line.len].trim()
+            }
+        }
+    }
+    ""
+}
+
+/// Parse a raw response into Resp. A transport failure parses to
+/// status 0. Total.
+fn parse_resp(raw: str) -> Resp {
+    let hb = raw.find("\r\n\r\n") else -1
+    var body = ""
+    if hb >= 0 {
+        body = raw[hb + 4..raw.len]
+    }
+    var ra = 0
+    let rah = header_of(raw, "retry-after")
+    if !rah.is_empty() {
+        for b in rah.bytes() {
+            if b >= 48 && b <= 57 {
+                ra = ra * 10 + (b - 48)
+            }
+        }
+    }
+    Resp {
+        status: status_of(raw),
+        nonce: header_of(raw, "replay-nonce"),
+        location: header_of(raw, "location"),
+        retry_after: ra,
+        body: body,
+    }
+}
+
+/// An unauthenticated GET (the directory, and the nonce endpoint —
+/// RFC 8555 allows GET on both). Rows: io.
+fn http_get(url: str) -> Resp ! {io} {
+    let hp = url_split(url)
+    let req = "GET {hp.1} HTTP/1.1\r\nHost: {hp.0}\r\nConnection: close\r\n\r\n"
+    let raw = http_txn(hp.0, req)?
+    parse_resp(raw)
+}
+
+/// A signed ACME POST: flattened JWS carrying `payload` to `url`.
+/// The protected header inlines the account JWK while `kid` is empty
+/// (newAccount) and names the account URL thereafter (§6.2). Rows:
+/// io.
+fn http_post_jws(hostport: str, path: str, url: str, jws_body: str) -> Resp ! {io} {
+    let req = "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/jose+json\r\nContent-Length: {jws_body.len}\r\nConnection: close\r\n\r\n{jws_body}"
+    let raw = http_txn(hostport, req)?
+    parse_resp(raw)
+}
+
+// ------------------------------------------------------------------
+// the targeted JSON scanner (header: pinned to RFC 8555 names,
+// against the pinned harness CA)
+// ------------------------------------------------------------------
+
+/// The string value of `"key"` in `body` ("" when absent). Handles
+/// the \" and \\ escapes our field values can carry; the harness CA
+/// emits no others. Total.
+pub fn js_str(body: str, key: str) -> str {
+    let marker = "\"{key}\""
+    let at = body.find(marker) else -1
+    if at < 0 {
+        return ""
+    }
+    let rest = body[at + marker.len..body.len]
+    let colon = rest.find(":") else -1
+    if colon < 0 {
+        return ""
+    }
+    let after = rest[colon + 1..rest.len]
+    let q = after.find("\"") else -1
+    if q < 0 {
+        return ""
+    }
+    var out = ""
+    var esc = false
+    var i = q + 1
+    let bytes6 = after.bytes()
+    let n = bytes6.len
+    while i < n {
+        let b = bytes6[i]
+        if esc {
+            if b == 110 {
+                out = "{out}\n"
+            } else {
+                let piece = after.get(i..i + 1) else ""
+                out = "{out}{piece}"
+            }
+            esc = false
+        } else if b == 92 {
+            esc = true
+        } else if b == 34 {
+            return out
+        } else {
+            let piece = after.get(i..i + 1) else ""
+            out = "{out}{piece}"
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// The first string element of the array value of `"key"` ("" when
+/// absent) — the one-authorization order this client creates (§7.4:
+/// one identifier in, one authorization back). Total.
+pub fn js_arr_first(body: str, key: str) -> str {
+    let marker = "\"{key}\""
+    let at = body.find(marker) else -1
+    if at < 0 {
+        return ""
+    }
+    let rest = body[at + marker.len..body.len]
+    let open = rest.find("[") else -1
+    if open < 0 {
+        return ""
+    }
+    let seg = rest[open..rest.len]
+    let q1 = seg.find("\"") else -1
+    if q1 < 0 {
+        return ""
+    }
+    let tail = seg[q1 + 1..seg.len]
+    let q2 = tail.find("\"") else -1
+    if q2 < 0 {
+        return ""
+    }
+    tail[0..q2]
+}
+
+/// The http-01 member of an authorization's challenges array, as the
+/// (url, token) pair — ("", "") when the authorization offers none.
+/// The scan anchors on the "http-01" type tag and reads within that
+/// object (the harness CA emits type first; RFC-shaped either way
+/// for any CA that does the same). Total.
+pub fn js_http01(body: str) -> (str, str) {
+    let at = body.find("\"http-01\"") else -1
+    if at < 0 {
+        return ("", "")
+    }
+    let seg = body[at..body.len]
+    let close = seg.find("}}") else seg.len
+    let obj = seg[0..close]
+    (js_str(obj, "url"), js_str(obj, "token"))
+}
+
+// ------------------------------------------------------------------
+// the issuance flow — stepped from the serve loop
+// ------------------------------------------------------------------
+
+/// The whole issuance/renewal state, held by the entry beside its
+/// generation table. States: "idle" (watching expiry), "start" (an
+/// attempt is due), "polling" (challenge answered, authorization
+/// pending — the CA's dial-back happens NOW, served by the loop
+/// between ticks), "certpoll" (finalized, waiting for the
+/// certificate), "off" (no cert auto). `err` carries the last named
+/// failure; `backoff_s` the current retry ladder rung.
+pub struct Flow {
+    state: str,
+    store: str,
+    names: str,
+    primary: str,
+    contact: str,
+    ca_url: str,
+    renew_before_s: int,
+    check_interval_s: int,
+    // directory + conversation state
+    url_nonce: str,
+    url_account: str,
+    url_order: str,
+    nonce: str,
+    kid: str,
+    order_url: str,
+    authz_url: str,
+    finalize_url: str,
+    chall_token: str,
+    acct_seed: List[int],
+    cert_seed: List[int],
+    // scheduling
+    next_ms: int,
+    backoff_s: int,
+    retry_after_s: int,
+    attempts: int,
+    err: str,
+}
+
+/// A fresh flow for the cert-auto block ("off" when `names` is empty
+/// — the entry then never ticks it). The first tick acts immediately.
+/// Total.
+pub fn flow_new(
+    store: str,
+    names: str,
+    contact: str,
+    ca_url: str,
+    renew_before_s: int,
+    check_interval_s: int,
+) -> Flow {
+    var primary = ""
+    for w in names.words() {
+        if primary.is_empty() {
+            primary = w
+        }
+    }
+    var st = "idle"
+    if names.is_empty() {
+        st = "off"
+    }
+    Flow {
+        state: st,
+        store: store,
+        names: names,
+        primary: primary,
+        contact: contact,
+        ca_url: ca_url,
+        renew_before_s: renew_before_s,
+        check_interval_s: check_interval_s,
+        url_nonce: "",
+        url_account: "",
+        url_order: "",
+        nonce: "",
+        kid: "",
+        order_url: "",
+        authz_url: "",
+        finalize_url: "",
+        chall_token: "",
+        acct_seed: List[int](),
+        cert_seed: List[int](),
+        next_ms: 0,
+        backoff_s: 0,
+        retry_after_s: 0,
+        attempts: 0,
+        err: "",
+    }
+}
+
+/// A signed POST to `url` with the one-retry badNonce rule: on a 400
+/// whose body names urn:ietf:params:acme:error:badNonce, take the
+/// fresh nonce the rejection carried and retry ONCE (§6.5); any
+/// second rejection is the caller's failure to route into backoff.
+/// Every response's Replay-Nonce replaces the held nonce. Rows: io.
+fn post(mut fl: Flow, url: str, payload: str) -> Resp ! {io} {
+    var attempt = 0
+    loop {
+        let hp = url_split(url)
+        var protected = ""
+        if fl.kid.is_empty() {
+            let pubkey = pub_of(fl.acct_seed)
+            protected = jose.acme_protected_jwk(pubkey, fl.nonce, url)
+        } else {
+            protected = jose.acme_protected_kid(fl.kid, fl.nonce, url)
+        }
+        let body = jose.acme_body(fl.acct_seed, protected, payload.bytes())
+        let r = http_post_jws(hp.0, hp.1, url, body)?
+        if !r.nonce.is_empty() {
+            fl.nonce = r.nonce
+        }
+        if r.retry_after > 0 {
+            fl.retry_after_s = r.retry_after
+        }
+        if r.status == 400 && r.body.contains("urn:ietf:params:acme:error:badNonce") && attempt == 0 {
+            attempt = 1
+            continue
+        }
+        return r
+    }
+}
+
+/// One issuance attempt advanced as far as it can go without waiting
+/// on the CA. Returns "" (nothing to report / still waiting),
+/// "issued" (the new pair is INSTALLED — the entry swaps generations
+/// now), or "failed" (fl.err says why; the entry logs LOUD and tick
+/// schedules the backoff). fs+net; native/checked.
+fn step(mut fl: Flow, now_ms: int) -> str {
+    if fl.state == "start" {
+        // account key (create-or-reuse), directory, nonce, account
+        fl.acct_seed = account_key(fl.store) else |_| {
+            return fail(mut fl, "cannot read or create the account key under {fl.store}")
+        }
+        let dir = http_get(fl.ca_url) else |_| {
+            return fail(mut fl, "cannot reach the ACME directory {fl.ca_url}")
+        }
+        if dir.status != 200 {
+            return fail(mut fl, "ACME directory {fl.ca_url} answered {dir.status}")
+        }
+        fl.url_nonce = js_str(dir.body, "newNonce")
+        fl.url_account = js_str(dir.body, "newAccount")
+        fl.url_order = js_str(dir.body, "newOrder")
+        if fl.url_nonce.is_empty() || fl.url_account.is_empty() || fl.url_order.is_empty() {
+            return fail(
+                mut fl,
+                "ACME directory {fl.ca_url} is missing newNonce/newAccount/newOrder",
+            )
+        }
+        let nr = http_get(fl.url_nonce) else |_| {
+            return fail(mut fl, "cannot fetch a nonce from {fl.url_nonce}")
+        }
+        if nr.nonce.is_empty() {
+            return fail(mut fl, "the nonce endpoint sent no Replay-Nonce")
+        }
+        fl.nonce = nr.nonce
+        fl.kid = ""
+        var acct_payload = "{{\"termsOfServiceAgreed\":true}}"
+        if !fl.contact.is_empty() {
+            var contact = fl.contact
+            if !contact.starts_with("mailto:") {
+                contact = "mailto:{contact}"
+            }
+            acct_payload = "{{\"termsOfServiceAgreed\":true,\"contact\":[\"{contact}\"]}}"
+        }
+        let acct_url = fl.url_account
+        let ar = post(mut fl, acct_url, acct_payload) else |_| {
+            return fail(mut fl, "newAccount POST failed (transport)")
+        }
+        if ar.status != 200 && ar.status != 201 {
+            return fail(mut fl, "newAccount answered {ar.status}: {ar.body}")
+        }
+        if ar.location.is_empty() {
+            return fail(mut fl, "newAccount sent no account URL (Location)")
+        }
+        fl.kid = ar.location
+
+        // order for every name of the block
+        var ids = ""
+        for nm in fl.names.words() {
+            let one = "{{\"type\":\"dns\",\"value\":\"{nm}\"}}"
+            if ids.is_empty() {
+                ids = one
+            } else {
+                ids = "{ids},{one}"
+            }
+        }
+        let order_ep = fl.url_order
+        let or = post(mut fl, order_ep, "{{\"identifiers\":[{ids}]}}") else |_| {
+            return fail(mut fl, "newOrder POST failed (transport)")
+        }
+        if or.status != 201 {
+            return fail(mut fl, "newOrder answered {or.status}: {or.body}")
+        }
+        fl.order_url = or.location
+        fl.authz_url = js_arr_first(or.body, "authorizations")
+        fl.finalize_url = js_str(or.body, "finalize")
+        if fl.order_url.is_empty() || fl.authz_url.is_empty() || fl.finalize_url.is_empty() {
+            return fail(mut fl, "newOrder reply is missing order/authorization/finalize URLs")
+        }
+
+        // the authorization's http-01 challenge: write the key
+        // authorization into the challenge webroot (atomic — the
+        // serving side reads old-or-whole), then tell the CA to
+        // validate. The dial-back arrives while the loop serves.
+        let az_ep = fl.authz_url
+        let az = post(mut fl, az_ep, "") else |_| {
+            return fail(mut fl, "authorization fetch failed (transport)")
+        }
+        if az.status != 200 {
+            return fail(mut fl, "authorization fetch answered {az.status}")
+        }
+        let ch = js_http01(az.body)
+        if ch.0.is_empty() || ch.1.is_empty() {
+            return fail(mut fl, "the authorization offers no http-01 challenge")
+        }
+        fl.chall_token = ch.1
+        let keyauth = "{ch.1}.{jose.jwk_thumbprint(pub_of(fl.acct_seed))}"
+        store_write("{fl.store}/challenge/{ch.1}", keyauth) else |_| {
+            return fail(mut fl, "cannot write the challenge token under {fl.store}/challenge")
+        }
+        let cr = post(mut fl, ch.0, "{{}}") else |_| {
+            return fail(mut fl, "challenge POST failed (transport)")
+        }
+        if cr.status != 200 {
+            return fail(mut fl, "challenge POST answered {cr.status}: {cr.body}")
+        }
+        fl.state = "polling"
+        return ""
+    }
+
+    if fl.state == "polling" {
+        let az_ep = fl.authz_url
+        let az = post(mut fl, az_ep, "") else |_| {
+            return fail(mut fl, "authorization poll failed (transport)")
+        }
+        let st = js_str(az.body, "status")
+        if st == "pending" {
+            return ""
+        }
+        if st != "valid" {
+            return fail(
+                mut fl,
+                "authorization ended \"{st}\" (the CA could not validate the challenge): {az.body}",
+            )
+        }
+        // valid: fresh certificate key (contract §3 — a new pair per
+        // issuance), CSR, finalize
+        fl.cert_seed = keygen()
+        let csr = csr_build(fl.cert_seed, fl.names)
+        let csr64 = b64url_of(csr)
+        let fin_ep = fl.finalize_url
+        let fr = post(mut fl, fin_ep, "{{\"csr\":\"{csr64}\"}}") else |_| {
+            return fail(mut fl, "finalize POST failed (transport)")
+        }
+        if fr.status != 200 {
+            return fail(mut fl, "finalize answered {fr.status}: {fr.body}")
+        }
+        fl.state = "certpoll"
+        return step(mut fl, now_ms)
+    }
+
+    if fl.state == "certpoll" {
+        let order_poll = fl.order_url
+        let og = post(mut fl, order_poll, "") else |_| {
+            return fail(mut fl, "order poll failed (transport)")
+        }
+        let st = js_str(og.body, "status")
+        if st == "processing" || st == "ready" {
+            return ""
+        }
+        if st != "valid" {
+            return fail(mut fl, "order ended \"{st}\": {og.body}")
+        }
+        let cert_url = js_str(og.body, "certificate")
+        if cert_url.is_empty() {
+            return fail(mut fl, "a valid order carries no certificate URL")
+        }
+        let cg = post(mut fl, cert_url, "") else |_| {
+            return fail(mut fl, "certificate download failed (transport)")
+        }
+        if cg.status != 200 || !cg.body.contains("BEGIN CERTIFICATE") {
+            return fail(mut fl, "certificate download answered {cg.status}")
+        }
+        let key_pem = pem_wrap("PRIVATE KEY", pkcs8_ed25519(fl.cert_seed))
+        install(fl.store, fl.primary, key_pem, cg.body) else |_| {
+            return fail(mut fl, "cannot install the issued pair under {fl.store}/{fl.primary}")
+        }
+        fs_remove("{fl.store}/challenge/{fl.chall_token}") else |_| {}
+        let expiry = cert_expiry(fl.store, fl.primary)
+        status_write(fl.store, fl.primary, expiry, now_ms, "issued") else |_| {}
+        fl.state = "idle"
+        fl.backoff_s = 0
+        fl.err = ""
+        fl.next_ms = now_ms + fl.check_interval_s * 1000
+        return "issued"
+    }
+
+    ""
+}
+
+/// Route a failure: record it, clean the challenge token, schedule
+/// the retry (exponential from 2s, capped at a day — and Retry-After,
+/// when the CA said one, wins; the caller applies it via fl.next_ms
+/// already set here). Returns "failed". Total.
+fn fail(mut fl: Flow, why: str) -> str {
+    fl.err = why
+    fl.state = "start"
+    if !fl.chall_token.is_empty() {
+        fs_remove("{fl.store}/challenge/{fl.chall_token}") else |_| {}
+        fl.chall_token = ""
+    }
+    if fl.backoff_s <= 0 {
+        fl.backoff_s = 2
+    } else {
+        fl.backoff_s = fl.backoff_s * 2
+    }
+    if fl.backoff_s > 86400 {
+        fl.backoff_s = 86400
+    }
+    fl.attempts = fl.attempts + 1
+    "failed"
+}
+
+/// The daemon tick, called every poll pass by the entry: acts only
+/// when `now_ms` has reached the flow's own schedule, so its cost in
+/// the serve loop is a comparison. Returns "" / "issued" /
+/// "failed" (fl.err names why — the entry logs it LOUD every
+/// attempt). fs+net; native/checked.
+pub fn tick(mut fl: Flow, now_ms: int) -> str {
+    if fl.state == "off" || now_ms < fl.next_ms {
+        return ""
+    }
+    if fl.state == "idle" {
+        let expiry = cert_expiry(fl.store, fl.primary)
+        let due = expiry == 0 || expiry - now_ms / 1000 < fl.renew_before_s
+        if !due {
+            fl.next_ms = now_ms + fl.check_interval_s * 1000
+            return ""
+        }
+        fl.state = "start"
+    }
+    let ev = step(mut fl, now_ms)
+    if ev == "failed" {
+        // Retry-After, when the CA said one, wins over the ladder
+        // (the contract's rate-limit discipline)
+        var wait = fl.backoff_s
+        if fl.retry_after_s > wait {
+            wait = fl.retry_after_s
+        }
+        fl.retry_after_s = 0
+        fl.next_ms = now_ms + wait * 1000
+        status_write(
+            fl.store,
+            fl.primary,
+            cert_expiry(fl.store, fl.primary),
+            now_ms,
+            "failed: {fl.err}",
+        ) else |_| {}
+        return ev
+    }
+    if ev.is_empty() && (fl.state == "polling" || fl.state == "certpoll") {
+        // the CA is validating or signing: poll again shortly (the
+        // dial-back is served by the loop in between)
+        fl.next_ms = now_ms + 250
+    }
+    ev
+}

@@ -1,0 +1,534 @@
+//! member: true
+//! acme — certificates without the dance (ws06): the RFC 8555 client
+//! core. This file is the MATERIAL half — DER writers (the CSR the
+//! finalize step posts, and the primitives the harness CA reuses to
+//! mint), Ed25519 keys (os_random seed → curve25519), PEM in both
+//! directions, the atomic store, and certificate-expiry reading for
+//! the renewal daemon. The PROTOCOL half (the loopback HTTP client
+//! and the issuance state machine) is flow.lu, same module.
+//! Scope, honest: EdDSA/Ed25519 END TO END — the account key signs
+//! JWS per std.x.jose (the sc19 seam, frozen for this sprint: "the
+//! pinned local test CA speaks Ed25519, so there is NO P-256"), and
+//! the certificate key is Ed25519 because lobo can serve nothing else
+//! (ws05's honest-scope rule). ES256 arrives with the crypto ladder's
+//! breadth rung; the contract's ES256 line is an aged assumption,
+//! routed to the wsc02 closeout.
+//! Store discipline (contract §3): every artifact is written SIBLING
+//! TEMP + RENAME so a reader sees old-or-whole, never a torn write.
+//! Private-key MODES are the named residue: the fs tier has no
+//! chmod/mode surface at this pin (the ws05 finding, re-probed this
+//! sprint) — keys land with the process umask and the risk is
+//! documented here and in the ledger; the upstream ask owns the fix.
+//! Dependencies: std only (jose/curve25519/base64/x.tls.cert) — the
+//! module takes SCALARS from the entry (store path, names, CA URL),
+//! never a config.Conf: the config seam stays in config/.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+use std.base64
+use std.x.tls.cert
+// ------------------------------------------------------------------
+// curve25519 indirection — one import site for the module (flow.lu
+// signs JWS through std.x.jose, which brings its own)
+// ------------------------------------------------------------------
+
+use std.x.crypto.curve25519
+
+/// This module's interface version. Total; never traps.
+#[allow(w0314)]
+pub fn version() -> str {
+    "0.1.0"
+}
+
+// ------------------------------------------------------------------
+// DER writers — X.690 DER, definite lengths only. Public: the CSR
+// builder below uses them, and the harness CA (tests/rig/acmeca)
+// mints its certificates from the same primitives, so the two sides
+// of the differential share one encoder and disagreements are the
+// protocol's, never the plumbing's.
+// ------------------------------------------------------------------
+
+/// A DER header (tag + definite length) followed by nothing — the
+/// caller appends the body it measured. Total for len >= 0 (asserts
+/// otherwise; lengths here are always measured .len values).
+pub fn der_hdr(tag: int, len: int) -> List[int] {
+    assert(len >= 0, "DER length cannot be negative")
+    var out = List[int]()
+    (mut out).push(tag)
+    if len < 128 {
+        (mut out).push(len)
+        return out
+    }
+    if len < 256 {
+        (mut out).push(129)
+        (mut out).push(len)
+        return out
+    }
+    if len < 65536 {
+        (mut out).push(130)
+        (mut out).push(len / 256)
+        (mut out).push(len % 256)
+        return out
+    }
+    // three length bytes carries 16MB — nothing this module builds
+    // gets near it
+    (mut out).push(131)
+    (mut out).push(len / 65536)
+    (mut out).push(len / 256 % 256)
+    (mut out).push(len % 256)
+    out
+}
+
+/// `tag` wrapping `body`. Total.
+pub fn der_wrap(tag: int, body: List[int]) -> List[int] {
+    var out = der_hdr(tag, body.len)
+    for b in body {
+        (mut out).push(b)
+    }
+    out
+}
+
+/// SEQUENCE (0x30). Total.
+pub fn der_seq(body: List[int]) -> List[int] {
+    der_wrap(48, body)
+}
+
+/// SET (0x31). Total.
+pub fn der_set(body: List[int]) -> List[int] {
+    der_wrap(49, body)
+}
+
+/// OCTET STRING (0x04). Total.
+pub fn der_octet(body: List[int]) -> List[int] {
+    der_wrap(4, body)
+}
+
+/// BIT STRING (0x03) with zero unused bits — the only shape X.509
+/// keys and signatures use. Total.
+pub fn der_bitstring(body: List[int]) -> List[int] {
+    var inner = List[int]()
+    (mut inner).push(0)
+    for b in body {
+        (mut inner).push(b)
+    }
+    der_wrap(3, inner)
+}
+
+/// UTF8String (0x0c) over the bytes of `s`. Total.
+pub fn der_utf8(s: str) -> List[int] {
+    der_wrap(12, s.bytes())
+}
+
+/// IA5String (0x16) over the bytes of `s` (SAN dNSName payloads —
+/// hostnames are ASCII by the time they reach a SAN). Total.
+pub fn der_ia5(s: str) -> List[int] {
+    der_wrap(22, s.bytes())
+}
+
+/// A small non-negative INTEGER (0x02) — versions and the like.
+/// Minimal encoding with the sign-bit pad X.690 demands. Total for
+/// v >= 0.
+pub fn der_int(v: int) -> List[int] {
+    assert(v >= 0, "der_int is non-negative")
+    var digits = List[int]()
+    var x = v
+    if x == 0 {
+        (mut digits).push(0)
+    }
+    while x > 0 {
+        (mut digits).push(x % 256)
+        x = x / 256
+    }
+    // digits are little-endian; emit big-endian with a leading zero
+    // when the top bit is set (positivity pad)
+    var body = List[int]()
+    let n = digits.len
+    if digits[n - 1] >= 128 {
+        (mut body).push(0)
+    }
+    var i = n - 1
+    while i >= 0 {
+        (mut body).push(digits[i])
+        i = i - 1
+    }
+    der_wrap(2, body)
+}
+
+/// A positive INTEGER from raw big-endian bytes (serials). Leading
+/// zeros stripped, positivity pad applied; all-zero input encodes as
+/// INTEGER 1 (a serial must be positive — RFC 5280 §4.1.2.2). Total.
+pub fn der_int_bytes(raw: List[int]) -> List[int] {
+    var start = 0
+    let n = raw.len
+    while start < n && raw[start] == 0 {
+        start = start + 1
+    }
+    if start == n {
+        return der_int(1)
+    }
+    var body = List[int]()
+    if raw[start] >= 128 {
+        (mut body).push(0)
+    }
+    var i = start
+    while i < n {
+        (mut body).push(raw[i])
+        i = i + 1
+    }
+    der_wrap(2, body)
+}
+
+/// An OBJECT IDENTIFIER (0x06) from its dotted string. Total for
+/// well-formed dotted OIDs (the callers pass literals).
+pub fn der_oid(dotted: str) -> List[int] {
+    var arcs = List[int]()
+    for part in dotted.split(".") {
+        var v: int = 0
+        for b in part.bytes() {
+            if b >= 48 && b <= 57 {
+                v = v * 10 + (b - 48)
+            }
+        }
+        (mut arcs).push(v)
+    }
+    assert(arcs.len >= 2, "an OID has at least two arcs")
+    var body = List[int]()
+    let first = arcs[0] * 40 + arcs[1]
+    push_base128(mut body, first)
+    var i = 2
+    while i < arcs.len {
+        push_base128(mut body, arcs[i])
+        i = i + 1
+    }
+    der_wrap(6, body)
+}
+
+/// Append `v` in base-128 with continuation bits (X.690 §8.19.2).
+/// Total for v >= 0.
+fn push_base128(mut out: List[int], v: int) {
+    if v < 128 {
+        (mut out).push(v)
+        return
+    }
+    var digits = List[int]()
+    var x = v
+    while x > 0 {
+        (mut digits).push(x % 128)
+        x = x / 128
+    }
+    var i = digits.len - 1
+    while i >= 1 {
+        (mut out).push(128 + digits[i])
+        i = i - 1
+    }
+    (mut out).push(digits[0])
+}
+
+/// Concatenate DER pieces. Total.
+pub fn der_cat(a: List[int], b: List[int]) -> List[int] {
+    var out = List[int]()
+    for x in a {
+        (mut out).push(x)
+    }
+    for x in b {
+        (mut out).push(x)
+    }
+    out
+}
+
+/// The Ed25519 AlgorithmIdentifier: SEQUENCE { OID 1.3.101.112 } —
+/// RFC 8410's no-params rule. Total.
+pub fn alg_ed25519() -> List[int] {
+    der_seq(der_oid("1.3.101.112"))
+}
+
+/// SubjectPublicKeyInfo for an Ed25519 public key (RFC 8410 §4).
+/// Total.
+pub fn spki_ed25519(pubkey: List[int]) -> List[int] {
+    der_seq(der_cat(alg_ed25519(), der_bitstring(pubkey)))
+}
+
+/// An X.501 Name of one CN RDN: SEQ { SET { SEQ { OID 2.5.4.3,
+/// UTF8String cn } } }. Total.
+pub fn name_cn(cn: str) -> List[int] {
+    der_seq(der_set(der_seq(der_cat(der_oid("2.5.4.3"), der_utf8(cn)))))
+}
+
+/// The subjectAltName EXTENSION VALUE (the inner GeneralNames
+/// SEQUENCE of dNSName entries) for a space-joined name list. Total.
+pub fn san_names(names: str) -> List[int] {
+    var body = List[int]()
+    for nm in names.words() {
+        // dNSName is [2] IMPLICIT IA5String — context primitive 0x82
+        body = der_cat(body, der_wrap(130, nm.bytes()))
+    }
+    der_seq(body)
+}
+
+/// The subjectAltName Extension (OID 2.5.29.17, non-critical, value
+/// wrapped in the OCTET STRING RFC 5280 demands). Total.
+pub fn san_ext(names: str) -> List[int] {
+    der_seq(der_cat(der_oid("2.5.29.17"), der_octet(san_names(names))))
+}
+
+// ------------------------------------------------------------------
+// keys and PEM
+// ------------------------------------------------------------------
+
+/// A fresh Ed25519 seed from the OS CSPRNG ([os.random.sole] — traps
+/// on an entropy-less host rather than degrade; the serve entry
+/// probes entropy at startup so that death is loud and early). Total
+/// otherwise.
+pub fn keygen() -> List[int] {
+    os_random(32)
+}
+
+/// PKCS#8 PrivateKeyInfo DER for an Ed25519 seed (RFC 5958 + RFC
+/// 8410: version 0, the Ed25519 AlgorithmIdentifier, the seed as an
+/// OCTET STRING inside the privateKey OCTET STRING). The exact shape
+/// config.pkcs8_parse reads back — the round trip is a test. Total.
+pub fn pkcs8_ed25519(seed: List[int]) -> List[int] {
+    assert(seed.len == 32, "an Ed25519 seed is 32 bytes")
+    der_seq(der_cat(der_cat(der_int(0), alg_ed25519()), der_octet(der_octet(seed))))
+}
+
+/// base64url (no pad, RFC 4648 §5) — the encoding every ACME field
+/// carries (the CSR included, §7.4). Total.
+pub fn b64url_of(b: List[int]) -> str {
+    base64.url_encode(b)
+}
+
+/// Wrap DER in a PEM block: standard base64 (RFC 4648 §4, padded —
+/// NOT the url alphabet JOSE uses), 64-character lines. Total.
+pub fn pem_wrap(label: str, der_bytes: List[int]) -> str {
+    let b = base64.encode(der_bytes)
+    var out = "-----BEGIN {label}-----\n"
+    var i = 0
+    let n = b.len
+    while i < n {
+        var end = i + 64
+        if end > n {
+            end = n
+        }
+        out = "{out}{b[i..end]}\n"
+        i = end
+    }
+    "{out}-----END {label}-----\n"
+}
+
+/// Every DER block under `label` in a PEM text, concatenated, with
+/// per-block lengths pushed into `lens`. The decoder tolerates CRLF
+/// and blank lines; a malformed base64 body is the `bad` row. (The
+/// sslcert PEM reader is config/'s own — this one keeps acme
+/// config-free; both are pinned by tests against the same fixtures.)
+pub fn pem_blocks_of(text: str, label: str, mut lens: List[int]) -> List[int] ! {bad} {
+    var out = List[int]()
+    let begin = "-----BEGIN {label}-----"
+    let fin = "-----END {label}-----"
+    var rest = text
+    loop {
+        let at = rest.find(begin) else -1
+        if at < 0 {
+            return out
+        }
+        let tail = rest[at + begin.len..rest.len]
+        let stop = tail.find(fin) else -1
+        if stop < 0 {
+            return bad
+        }
+        let body = tail[0..stop]
+        var clean = ""
+        for line in body.lines() {
+            clean = "{clean}{line.trim()}"
+        }
+        let der_bytes = base64.decode(clean) else |_| {
+            return bad
+        }
+        var n = 0
+        for b in der_bytes {
+            (mut out).push(b)
+            n = n + 1
+        }
+        (mut lens).push(n)
+        rest = tail[stop + fin.len..tail.len]
+    }
+}
+
+// ------------------------------------------------------------------
+// the CSR (RFC 2986) — what finalize posts, base64url-encoded
+// ------------------------------------------------------------------
+
+/// A CertificationRequest DER for `names` (space-joined; the first is
+/// the CN) signed with the Ed25519 `seed` — the certificate key,
+/// never the account key (the RFC 8555 §7.4 split). Carries the SAN
+/// list as an extensionRequest attribute (OID 1.2.840.113549.1.9.14),
+/// exactly where CAs read it from. Total.
+pub fn csr_build(seed: List[int], names: str) -> List[int] {
+    var primary = ""
+    for w in names.words() {
+        if primary.is_empty() {
+            primary = w
+        }
+    }
+    let pubkey = pub_of(seed)
+    // Extensions ::= SEQUENCE OF Extension — just the SAN
+    let exts = der_seq(san_ext(names))
+    // extensionRequest attribute: SEQ { OID, SET { Extensions } }
+    let attr = der_seq(der_cat(der_oid("1.2.840.113549.1.9.14"), der_set(exts)))
+    // attributes [0] IMPLICIT (context constructed 0xa0)
+    let attrs = der_wrap(160, attr)
+    let cri = der_seq(
+        der_cat(der_cat(der_cat(der_int(0), name_cn(primary)), spki_ed25519(pubkey)), attrs),
+    )
+    let sig = sign_of(seed, cri)
+    der_seq(der_cat(der_cat(cri, alg_ed25519()), der_bitstring(sig)))
+}
+
+// ------------------------------------------------------------------
+// the store (contract §3) — per-domain dirs, account key separate,
+// atomic write-rename everywhere
+// ------------------------------------------------------------------
+
+/// Write `text` to `path` atomically: sibling temp, then rename (the
+/// shell pid_write discipline). Parent directories are created. Row:
+/// io.
+pub fn store_write(path: str, text: str) -> () ! {io} {
+    let slash = path.rfind("/") else -1
+    if slash > 0 {
+        fs_create_dir_all(path[0..slash]) else |_| {
+            return io
+        }
+    }
+    let tmp = "{path}.new"
+    fs_write_text(tmp, text) else |_| {
+        return io
+    }
+    fs_rename(tmp, path) else |_| {
+        return io
+    }
+}
+
+/// The account-key path (separate from every domain dir — contract
+/// §3). Total.
+pub fn account_key_path(store: str) -> str {
+    "{store}/account.key"
+}
+
+/// Load the Ed25519 account seed from the store, or create one and
+/// persist it (create-or-reuse — RFC 8555 account reuse rides the
+/// key). Row: io (a store this fn cannot write is issuance-fatal;
+/// the caller reports loudly). Native/checked (fs).
+pub fn account_key(store: str) -> List[int] ! {io} {
+    let path = account_key_path(store)
+    let existing = fs_read_text(path) else |_| ""
+    if !existing.is_empty() {
+        var lens = List[int]()
+        let der_bytes = pem_blocks_of(existing, "PRIVATE KEY", mut lens) else |_| {
+            return io
+        }
+        if lens.is_empty() {
+            return io
+        }
+        let seed = pkcs8_seed(der_bytes)
+        if seed.len == 32 {
+            return seed
+        }
+        return io
+    }
+    let seed = keygen()
+    store_write(path, pem_wrap("PRIVATE KEY", pkcs8_ed25519(seed)))?
+    seed
+}
+
+/// The 32-byte seed inside a PKCS#8 Ed25519 PrivateKeyInfo (the
+/// minimal read this module needs back from its own writer; the
+/// config-side parser is the cross-check in tests). Empty list when
+/// the shape is not the one pkcs8_ed25519 writes. Total.
+pub fn pkcs8_seed(der_bytes: List[int]) -> List[int] {
+    // SEQ { INT 0, SEQ { OID }, OCTET { OCTET { seed32 } } } — the
+    // writer's exact shape: find the last 34 bytes 04 20 <32>.
+    let n = der_bytes.len
+    var out = List[int]()
+    if n < 36 {
+        return out
+    }
+    let at = n - 34
+    if der_bytes[at] != 4 || der_bytes[at + 1] != 32 {
+        return out
+    }
+    var i = at + 2
+    while i < n {
+        (mut out).push(der_bytes[i])
+        i = i + 1
+    }
+    out
+}
+
+/// Install an issued certificate: the key PEM and the fullchain PEM
+/// land under `store`/`primary`/ atomically, key first (a reader that
+/// sees the chain sees its key). Row: io.
+pub fn install(store: str, primary: str, key_pem: str, chain_pem: str) -> () ! {io} {
+    store_write("{store}/{primary}/privkey.pem", key_pem)?
+    store_write("{store}/{primary}/fullchain.pem", chain_pem)?
+}
+
+/// The notAfter (unix seconds, UTC) of the STORED leaf for `primary`,
+/// or 0 when no readable certificate is there. The renewal daemon's
+/// one clock input — std.x.tls.cert parses, UTC everywhere (the
+/// contract's clock-skew pitfall: the comparison is unix-to-unix,
+/// no timezone arithmetic anywhere). Native/checked (fs).
+pub fn cert_expiry(store: str, primary: str) -> int {
+    let text = fs_read_text("{store}/{primary}/fullchain.pem") else |_| {
+        return 0
+    }
+    var lens = List[int]()
+    let der_bytes = pem_blocks_of(text, "CERTIFICATE", mut lens) else |_| {
+        return 0
+    }
+    if lens.is_empty() {
+        return 0
+    }
+    var leaf = List[int]()
+    var i = 0
+    let n = lens[0]
+    while i < n {
+        (mut leaf).push(der_bytes[i])
+        i = i + 1
+    }
+    let c = cert.parse(leaf) else |_| {
+        return 0
+    }
+    c.not_after
+}
+
+/// The renewal-status file path (one line per fact; `lobo cert
+/// status` reads it beside the certificates themselves). Total.
+pub fn status_path(store: str) -> str {
+    "{store}/status"
+}
+
+/// Persist the daemon's last-attempt record (atomic like everything
+/// here; best-effort — a failed status write is logged by the caller,
+/// never fatal to serving). Row: io.
+pub fn status_write(store: str, primary: str, expiry: int, attempt_ms: int, result: str) -> () ! {
+    io,
+} {
+    let body = "domain {primary}\nexpiry_unix {expiry}\nlast_attempt_ms {attempt_ms}\nlast_result {result}\n"
+    store_write(status_path(store), body)
+}
+
+/// The Ed25519 public key of `seed`. Total (curve25519's contract).
+pub fn pub_of(seed: List[int]) -> List[int] {
+    curve25519.public(seed)
+}
+
+/// Ed25519-sign `msg` with `seed`. Total (curve25519's contract).
+pub fn sign_of(seed: List[int], msg: List[int]) -> List[int] {
+    curve25519.sign(seed, msg)
+}
+
+/// Ed25519 verification (the harness CA's half, shared so the two
+/// sides cannot drift). Total.
+pub fn verify_of(pubkey: List[int], msg: List[int], sig: List[int]) -> bool {
+    curve25519.verify(pubkey, msg, sig)
+}
