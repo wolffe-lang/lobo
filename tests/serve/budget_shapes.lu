@@ -1,0 +1,69 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: serve conn tls proxy http config obs
+//!
+//! The ws10 budget's PURE shapes (docs/BUDGET.md): resolve_limits off
+//! parsed models (defaults, fence overrides, 0-means-unlimited, the
+//! buffer math, budget arming, server-over-http resolution), and the
+//! 503 response shape (nginx's own phrase and error body; a budget
+//! refusal always carries Connection: close).
+
+use config
+use http
+use serve
+
+fn lim_of(src: str) -> http.Limits {
+    serve.resolve_limits(config.parse_str(src, "t.conf"))
+}
+
+fn main() -> !int {
+    // ---- defaults: no directives = the nginx-shaped default_limits
+    let d = lim_of("http {{\n  server {{ listen 8080; }}\n}}\n")
+    let base = http.default_limits()
+    assert(d.max_body == base.max_body, "default max_body carries (1m)")
+    assert(d.max_request_line == base.max_request_line, "default request line (8k)")
+    assert(d.max_header_total == base.max_header_total, "default header total (32k)")
+    assert(d.memory_budget == 0, "no memory_budget directive -> budget off")
+
+    // ---- the fence overrides
+    let f = lim_of(
+        "http {{\n  client_max_body_size 2k;\n  large_client_header_buffers 2 1k;\n  server {{ listen 8080; }}\n}}\n",
+    )
+    assert(f.max_body == 2048, "client_max_body_size 2k -> 2048")
+    assert(f.max_request_line == 1024, "buffer size bounds the request line")
+    assert(f.max_header_line == 1024, "buffer size bounds each header line")
+    assert(f.max_header_total == 2048, "n x size bounds the block")
+
+    // ---- 0 = unlimited maps to the parser's own CL ceiling
+    let z = lim_of("http {{\n  client_max_body_size 0;\n  server {{ listen 8080; }}\n}}\n")
+    assert(z.max_body == 999999999999999, "0 -> the parse_length ceiling (unlimited)")
+
+    // ---- the budget arms; server-level wins (first-server resolution)
+    let b = lim_of(
+        "http {{\n  memory_budget 1m;\n  server {{ listen 8080; memory_budget 8k; }}\n}}\n",
+    )
+    assert(b.memory_budget == 8192, "server memory_budget wins: {b.memory_budget}")
+
+    // ---- an invalid value keeps the default (-t named it; load is tolerant)
+    let t = lim_of("http {{\n  client_max_body_size 10x;\n  server {{ listen 8080; }}\n}}\n")
+    assert(t.max_body == base.max_body, "invalid size falls back to the default")
+
+    // ---- the 503 shape: nginx's phrase, the default body, always close
+    assert(
+        serve.status_phrase(503) == "Service Temporarily Unavailable",
+        "the 503 phrase is nginx's own",
+    )
+    let resp = serve.error_response(503, false, "Thu, 01 Jan 2026 00:00:00 GMT", "lobo/0.1.0")
+    assert(
+        resp.starts_with("HTTP/1.1 503 Service Temporarily Unavailable\r\n"),
+        "status line: {resp}",
+    )
+    assert(resp.contains("Connection: close"), "a budget 503 always closes")
+    assert(
+        resp.contains("<center><h1>503 Service Temporarily Unavailable</h1></center>"),
+        "the default error body shape",
+    )
+
+    0
+}

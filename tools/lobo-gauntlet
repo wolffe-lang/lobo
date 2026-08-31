@@ -127,6 +127,12 @@ if ! tools/lobo-signal; then
     exit 1
 fi
 
+step "membudget (ws10 structure audit: keepalive drives, bodies die per-response; the str half is named wolf-lang#191)"
+if ! tools/lobo-membudget; then
+    echo "lobo-gauntlet: FAILED at membudget — the structure-audit witness (ws10)" >&2
+    exit 1
+fi
+
 step "tls-interop (openssl s_client against a live lobo HTTPS server; ws05)"
 if ! tools/lobo-tls-interop; then
     echo "lobo-gauntlet: FAILED at tls-interop — the OpenSSL interop differential (ws05)" >&2

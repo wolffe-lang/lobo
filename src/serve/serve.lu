@@ -76,6 +76,9 @@ pub fn status_phrase(code: int) -> str {
     if code == 501 {
         return "Not Implemented"
     }
+    if code == 503 {
+        return "Service Temporarily Unavailable"
+    }
     "Status"
 }
 
@@ -241,6 +244,56 @@ pub fn default_opts() -> ServerOpts {
         read_timeout_ms: 60000,
         challenge_dir: "",
     }
+}
+
+/// The effective Limits off a frozen model (ws10): the fence
+/// directives override the nginx-shaped defaults, `memory_budget`
+/// arms the per-request admitted-bytes budget (0 = off) —
+/// docs/BUDGET.md is the model. Resolution is config's
+/// first-server-else-http (the D29 pattern). An invalid value keeps
+/// the default (the -t half named it; load stays tolerant), and
+/// `client_max_body_size 0` maps to the parser's own Content-Length
+/// ceiling (nginx's 0-means-unlimited). Total.
+pub fn resolve_limits(c: config.Conf) -> http.Limits {
+    var lim = http.default_limits()
+    let bm = config.body_max(c)
+    if bm == 0 {
+        lim.max_body = 999999999999999
+    } else if bm > 0 {
+        lim.max_body = bm
+    }
+    let hb = config.header_buffers(c)
+    if hb.0 > 0 && hb.1 > 0 {
+        lim.max_request_line = hb.1
+        lim.max_header_line = hb.1
+        lim.max_header_total = hb.0 * hb.1
+    }
+    lim.memory_budget = config.mem_budget(c)
+    lim
+}
+
+// ------------------------------------------------------------------
+// the budget meter (ws10) — the per-request admitted-bytes charge.
+// The rule, written before the code (docs/BUDGET.md): the FENCE
+// fires first, the budget second, at every site; a budget 503 always
+// closes (shedding memory is the point). Sites: head (after a clean
+// parse), body (pre-admission on a declared length), body-chunked
+// (while accumulating), file (from stat, before any response byte).
+// ------------------------------------------------------------------
+
+/// The running charge of one request. `site` non-empty = the budget
+/// refused at that site (`limit`/`would` are the event's numbers);
+/// `used` is the admitted-bytes total either way — the high-water
+/// the status surface aggregates.
+struct Charge {
+    used: int,
+    site: str,
+    limit: int,
+    would: int,
+}
+
+fn charge_new(budget: int) -> Charge {
+    Charge { used: 0, site: "", limit: budget, would: 0 }
 }
 
 // ------------------------------------------------------------------
@@ -493,6 +546,7 @@ fn serve_file(
     is_head: bool,
     local_port: int,
     mut acc: obs.Access,
+    mut chg: Charge,
 ) -> bool ! {closed, io} {
     let size = fs_size(path) else |e| match e {
         not_found => {
@@ -538,6 +592,25 @@ fn serve_file(
         return !keep
     }
 
+    // ws10, the `file` site: the response body this request is about
+    // to materialize, known deterministically from the stat — a whole
+    // small file, or one 64 KiB stream chunk; HEAD materializes
+    // nothing. Fence-free site (nothing bounds response size), so the
+    // budget alone rules; refused BEFORE any response byte is written.
+    var fcharge = 0
+    if !is_head {
+        fcharge = if size <= 65536 { size } else { 65536 }
+    }
+    if chg.limit > 0 && chg.used + fcharge > chg.limit {
+        chg.site = "file"
+        chg.would = chg.used + fcharge
+        acc.status = 503
+        acc.body_bytes = err_len(503, false, token)
+        send_err(mut cn, 503, false, token)
+        return true
+    }
+    chg.used = chg.used + fcharge
+
     acc.status = 200
     acc.body_bytes = if is_head { 0 } else { size }
     var head = "HTTP/1.1 200 OK\r\n"
@@ -561,15 +634,85 @@ fn serve_file(
     // BYTES, not text (wsm01, s115/#137): a static file is bytes —
     // a PNG, a gzip, a favicon — and the old `fs_read_text` 500'd on
     // the first non-UTF-8 byte (deferral D8, now retired here).
+    // ws10 (the structure audit): the body bytes live in a per-
+    // response REGION and die wholesale at its close — without it
+    // every served body is charged to the process root region for the
+    // process's whole life ([mem.region.create.3]: the ambient region
+    // is the caller's, and no caller up this tree scoped one).
     if size <= 65536 {
-        let body = fs_read_bytes(path) else |_| {
+        if conn.is_tls(cn) {
+            // TLS: the session write is a REAL potential retainer (the
+            // record layer buffers through `sess`), so the body cannot
+            // die in a per-response region — the TLS region story
+            // rides the D24 stepper refactor, named residue.
+            let body = fs_read_bytes(path) else |_| {
+                acc.status = 500
+                acc.body_bytes = err_len(500, false, token)
+                send_err(mut cn, 500, false, token)
+                return true
+            }
+            write_all(mut cn, head)?
+            write_bytes_all(mut cn, body)?
+            return !keep
+        }
+        // plaintext: the body bytes live in a per-response REGION and
+        // die wholesale at its close (the ws10 structure audit —
+        // without it every served body is charged to the process root
+        // region for the process's whole life, [mem.region.create.3]).
+        // The write goes through the bare fd: a socket write stores
+        // nothing, and the fd path is what lets the checker see that
+        // (a `mut cn` write inside the region is E1010 — the TLS arm
+        // above is the retaining case it guards against).
+        let sock = conn.fd(cn)
+        var failed = false
+        // 0 clean, 1 closed, 2 io — the write rows carried across the
+        // region boundary as a scalar (heap values must not escape it)
+        var wcode = 0
+        region resp {
+            let body = fs_read_bytes(path) else |_| {
+                failed = true
+                List[int]()
+            }
+            if !failed {
+                net_write(sock, head) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+                if wcode == 0 {
+                    net_write_bytes(sock, body) else |e| match e {
+                        closed => {
+                            wcode = 1
+                        },
+                        invalid => {
+                            wcode = 2
+                        },
+                        io => {
+                            wcode = 2
+                        },
+                    }
+                }
+            }
+            // the block's tail is a scalar on purpose: a call-tailed
+            // region block reads as "the region's value escapes" to
+            // the checker (E1010), and nothing here escapes
+            wcode = wcode
+        }
+        if failed {
             acc.status = 500
             acc.body_bytes = err_len(500, false, token)
             send_err(mut cn, 500, false, token)
             return true
         }
-        write_all(mut cn, head)?
-        write_bytes_all(mut cn, body)?
+        if wcode == 1 {
+            return closed
+        }
+        if wcode == 2 {
+            return io
+        }
         return !keep
     }
 
@@ -584,24 +727,93 @@ fn serve_file(
         return true
     }
     var streaming = true
+    if conn.is_tls(cn) {
+        // TLS: unregioned, as the small path (the session may retain;
+        // D24 residue). Byte-identical behavior to the pre-audit code.
+        while streaming {
+            var bad = false
+            let chunk = fs_read_chunk(fd, 65536) else |e| match e {
+                eof => {
+                    streaming = false
+                    List[int]()
+                },
+                io => {
+                    bad = true
+                    List[int]()
+                },
+            }
+            if bad {
+                fs_close(fd) else |_| {}
+                return true
+            }
+            if chunk.len > 0 {
+                var wcode = 0
+                write_bytes_all(mut cn, chunk) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+                if wcode != 0 {
+                    fs_close(fd) else |_| {}
+                    if wcode == 1 {
+                        return closed
+                    }
+                    return io
+                }
+            }
+        }
+        fs_close(fd) else |_| {}
+        return !keep
+    }
+    let sock = conn.fd(cn)
     while streaming {
         var bad = false
-        let chunk = fs_read_chunk(fd, 65536) else |e| match e {
-            eof => {
-                streaming = false
-                List[int]()
-            },
-            io => {
-                bad = true
-                List[int]()
-            },
+        var wcode = 0
+        // per-chunk region (ws10 audit): a 64 KiB chunk dies at each
+        // `}` instead of accumulating in the root region for the whole
+        // file length; the failed-write path also closes the fd, which
+        // the pre-audit `?` re-raise leaked.
+        region chunkr {
+            let chunk = fs_read_chunk(fd, 65536) else |e| match e {
+                eof => {
+                    streaming = false
+                    List[int]()
+                },
+                io => {
+                    bad = true
+                    List[int]()
+                },
+            }
+            if !bad && chunk.len > 0 {
+                net_write_bytes(sock, chunk) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    invalid => {
+                        wcode = 2
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+            }
+            // scalar tail on purpose — see the small-path region note
+            wcode = wcode
         }
         if bad {
             fs_close(fd) else |_| {}
             return true
         }
-        if chunk.len > 0 {
-            write_bytes_all(mut cn, chunk)?
+        if wcode == 1 {
+            fs_close(fd) else |_| {}
+            return closed
+        }
+        if wcode == 2 {
+            fs_close(fd) else |_| {}
+            return io
         }
     }
     fs_close(fd) else |_| {}
@@ -629,6 +841,7 @@ fn handle_request(
     local_port: int,
     challenge_dir: str,
     mut acc: obs.Access,
+    mut chg: Charge,
 ) -> bool ! {closed, io} {
     // method: GET and HEAD serve; anything else is 405 (the CVE
     // corpus's POSTs are already rejected at parse when they smuggle)
@@ -714,7 +927,18 @@ fn handle_request(
         for name in idxs {
             let cand = join_fs(d.fs_path, name)
             if fs_is_file(cand) {
-                return serve_file(mut cn, c, req, cand, token, keep, is_head, local_port, mut acc)
+                return serve_file(
+                    mut cn,
+                    c,
+                    req,
+                    cand,
+                    token,
+                    keep,
+                    is_head,
+                    local_port,
+                    mut acc,
+                    mut chg,
+                )
             }
         }
         // no index, autoindex off → 403 (nginx)
@@ -725,7 +949,18 @@ fn handle_request(
     }
 
     if fs_is_file(d.fs_path) {
-        return serve_file(mut cn, c, req, d.fs_path, token, keep, is_head, local_port, mut acc)
+        return serve_file(
+            mut cn,
+            c,
+            req,
+            d.fs_path,
+            token,
+            keep,
+            is_head,
+            local_port,
+            mut acc,
+            mut chg,
+        )
     }
 
     acc.status = 404
@@ -770,11 +1005,20 @@ fn half_close_drain(mut cn: conn.Conn) {
 }
 
 /// Accumulate a chunked body until its terminating zero-chunk, then
-/// validate it through http.decode_chunked. Returns the leftover
-/// after the body. A framing error is `bad` (→ 400), an over-limit
-/// body `big` (→ 413); net trouble is `io`. Bounded by twice
-/// `max_body` so a peer dribbling forever cannot pin memory.
-fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits) -> str ! {bad, big, io} {
+/// validate it through http.decode_chunked. Returns (leftover after
+/// the body, admitted body bytes). A framing error is `bad` (→ 400),
+/// an over-limit body `big` (→ 413), a body that would blow the
+/// memory budget `over` (→ 503 — checked WHILE accumulating, the
+/// fence's `big` first at each step, per docs/BUDGET.md's order;
+/// `used` is the request's charge so far); net trouble is `io`.
+/// Bounded by twice `max_body` so a peer dribbling forever cannot
+/// pin memory.
+fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -> (str, int) ! {
+    bad,
+    big,
+    over,
+    io,
+} {
     var buf = carry
     let cap = limits.max_body * 2
     loop {
@@ -789,10 +1033,13 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits) -> str ! {ba
                     return big
                 },
             }
-            return ""
+            return ("", buf.len)
         }
         if buf.len > cap {
             return big
+        }
+        if limits.memory_budget > 0 && used + buf.len > limits.memory_budget {
+            return over
         }
         let piece = conn.conn_read(mut cn, 4096) else |_| {
             return io
@@ -885,15 +1132,34 @@ pub fn serve_conn_cn(
             },
         }
 
+        // ws10, the `head` site: fences (414/400) already spoke above;
+        // the budget rules what they admitted. A budget 503 always
+        // closes — shedding memory is the point (docs/BUDGET.md).
+        var chg = charge_new(limits.memory_budget)
+        chg.used = hr.head.len
+        if chg.limit > 0 && chg.used > chg.limit {
+            send_err(mut cn, 503, false, opts.token)
+            conn.conn_close(mut cn)
+            return
+        }
+
         // body framing: buffer a fixed-length body (a proxied request
         // forwards it; a static one discards it), validate a chunked
         // one; an over-size length body is 413 with the half-close
-        // drain (the client must still read the 413)
+        // drain (the client must still read the 413). Fence first,
+        // budget second (the ws10 `body` site: a declared length is
+        // refused PRE-ADMISSION — zero body bytes read).
         var rest = hr.rest
         var body = ""
         if req.body_mode == "length" {
             if req.content_length > limits.max_body {
                 send_err(mut cn, 413, false, opts.token)
+                half_close_drain(mut cn)
+                conn.conn_close(mut cn)
+                return
+            }
+            if chg.limit > 0 && chg.used + req.content_length > chg.limit {
+                send_err(mut cn, 503, false, opts.token)
                 half_close_drain(mut cn)
                 conn.conn_close(mut cn)
                 return
@@ -904,8 +1170,9 @@ pub fn serve_conn_cn(
             }
             body = taken.0
             rest = taken.1
+            chg.used = chg.used + body.len
         } else if req.body_mode == "chunked" {
-            rest = read_chunked(mut cn, rest, limits) else |e| match e {
+            let ck = read_chunked(mut cn, rest, limits, chg.used) else |e| match e {
                 bad => {
                     send_err(mut cn, 400, false, opts.token)
                     conn.conn_close(mut cn)
@@ -917,11 +1184,19 @@ pub fn serve_conn_cn(
                     conn.conn_close(mut cn)
                     return
                 },
+                over => {
+                    send_err(mut cn, 503, false, opts.token)
+                    half_close_drain(mut cn)
+                    conn.conn_close(mut cn)
+                    return
+                },
                 io => {
                     conn.conn_close(mut cn)
                     return
                 },
             }
+            rest = ck.0
+            chg.used = chg.used + ck.1
         }
 
         // decode → normalize → map, in that ORDER (the traversal
@@ -991,6 +1266,7 @@ pub fn serve_conn_cn(
                 local_port,
                 opts.challenge_dir,
                 mut acc0,
+                mut chg,
             ) else |_| {
                 conn.conn_close(mut cn)
                 return
@@ -1022,12 +1298,36 @@ pub fn serve_conn_cn(
 /// on a kept-alive connection, and the ACCESS RECORD (ws09): `logged`
 /// says a request was actually served (a record exists to log); `acc`
 /// is what serve knew — the entry stamps times and renders it through
-/// the configured sinks.
+/// the configured sinks. ws10 adds the budget outcome: `bud_site` is
+/// non-empty when the memory budget refused (head|body|body-chunked|
+/// file — the entry emits `budget-exceeded` and counts it),
+/// `bud_limit`/`bud_would` its numbers, and `mem_hw` the request's
+/// admitted-bytes total (the per-generation high-water's feed).
 pub struct ReqOut {
     close: bool,
     carry: str,
     logged: bool,
     acc: obs.Access,
+    bud_site: str,
+    bud_limit: int,
+    bud_would: int,
+    mem_hw: int,
+}
+
+/// A ReqOut off a finished (or refused) request — every serve_request
+/// exit builds through here so the budget fields never straggle.
+/// Total.
+fn req_out(close: bool, carry: str, acc: obs.Access, chg: Charge) -> ReqOut {
+    ReqOut {
+        close: close,
+        carry: carry,
+        logged: true,
+        acc: acc,
+        bud_site: chg.site,
+        bud_limit: chg.limit,
+        bud_would: chg.would,
+        mem_hw: chg.used,
+    }
 }
 
 /// Serve ONE already-framed request — its header block `head` read,
@@ -1053,33 +1353,47 @@ pub fn serve_request(
     var cn = conn_mod_plain(conn)
     var acc = obs.access_new()
     acc.request = raw_line(head)
+    var chg = charge_new(limits.memory_budget)
     let req = http.parse_request(head, limits) else |e| match e {
         malformed => {
             acc.status = 400
             acc.body_bytes = err_len(400, false, opts.token)
             send_err(mut cn, 400, false, opts.token)
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
         },
         uri_too_long => {
             acc.status = 414
             acc.body_bytes = err_len(414, false, opts.token)
             send_err(mut cn, 414, false, opts.token)
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
         },
         too_large => {
             acc.status = 400
             acc.body_bytes = err_len(400, true, opts.token)
             send_err(mut cn, 400, true, opts.token)
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
         },
         unimplemented => {
             acc.status = 501
             acc.body_bytes = err_len(501, false, opts.token)
             send_err(mut cn, 501, false, opts.token)
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
         },
     }
     fill_req_acc(mut acc, req)
+
+    // ws10, the `head` site: the fences above (414/400) fire first;
+    // the budget rules what they admitted (docs/BUDGET.md's order).
+    // A budget 503 always closes — shedding memory is the point.
+    chg.used = head.len
+    if chg.limit > 0 && chg.used > chg.limit {
+        chg.site = "head"
+        chg.would = chg.used
+        acc.status = 503
+        acc.body_bytes = err_len(503, false, opts.token)
+        send_err(mut cn, 503, false, opts.token)
+        return req_out(true, "", acc, chg)
+    }
 
     var rest = rest0
     var body = ""
@@ -1089,51 +1403,76 @@ pub fn serve_request(
             acc.body_bytes = err_len(413, false, opts.token)
             send_err(mut cn, 413, false, opts.token)
             half_close_drain(mut cn)
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
+        }
+        // the ws10 `body` site: refused PRE-ADMISSION — the declared
+        // length would blow the budget, so zero body bytes are read
+        if chg.limit > 0 && chg.used + req.content_length > chg.limit {
+            chg.site = "body"
+            chg.would = chg.used + req.content_length
+            acc.status = 503
+            acc.body_bytes = err_len(503, false, opts.token)
+            send_err(mut cn, 503, false, opts.token)
+            half_close_drain(mut cn)
+            return req_out(true, "", acc, chg)
         }
         let taken = take_length(mut cn, rest, req.content_length) else |_| {
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
         }
         body = taken.0
         rest = taken.1
+        chg.used = chg.used + body.len
     } else if req.body_mode == "chunked" {
-        rest = read_chunked(mut cn, rest, limits) else |e| match e {
+        let ck = read_chunked(mut cn, rest, limits, chg.used) else |e| match e {
             bad => {
                 acc.status = 400
                 acc.body_bytes = err_len(400, false, opts.token)
                 send_err(mut cn, 400, false, opts.token)
-                return ReqOut { close: true, carry: "", logged: true, acc: acc }
+                return req_out(true, "", acc, chg)
             },
             big => {
                 acc.status = 413
                 acc.body_bytes = err_len(413, false, opts.token)
                 send_err(mut cn, 413, false, opts.token)
                 half_close_drain(mut cn)
-                return ReqOut { close: true, carry: "", logged: true, acc: acc }
+                return req_out(true, "", acc, chg)
+            },
+            over => {
+                // the ws10 `body-chunked` site: the accumulating body
+                // crossed the budget mid-read; shed
+                chg.site = "body-chunked"
+                chg.would = chg.limit + 1
+                acc.status = 503
+                acc.body_bytes = err_len(503, false, opts.token)
+                send_err(mut cn, 503, false, opts.token)
+                half_close_drain(mut cn)
+                return req_out(true, "", acc, chg)
             },
             io => {
-                return ReqOut { close: true, carry: "", logged: true, acc: acc }
+                return req_out(true, "", acc, chg)
             },
         }
+        rest = ck.0
+        chg.used = chg.used + ck.1
     }
 
     let decoded = http.percent_decode(req.path) else |_| {
         acc.status = 400
         acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return ReqOut { close: true, carry: "", logged: true, acc: acc }
+        return req_out(true, "", acc, chg)
     }
     if http.has_control(decoded) {
         acc.status = 400
         acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return ReqOut { close: true, carry: "", logged: true, acc: acc }
+        return req_out(true, "", acc, chg)
     }
     let norm = http.normalize_path(decoded) else {
         acc.status = 400
         acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return ReqOut { close: true, carry: "", logged: true, acc: acc }
+        return req_out(true, "", acc, chg)
     }
 
     let keep = req.keepalive && served + 1 < opts.keepalive_requests
@@ -1154,7 +1493,7 @@ pub fn serve_request(
         acc.status = pacc.status
         acc.body_bytes = pacc.body_bytes
         if raised {
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
         }
     } else {
         var raised = false
@@ -1168,18 +1507,24 @@ pub fn serve_request(
             local_port,
             opts.challenge_dir,
             mut acc,
+            mut chg,
         ) else |_| {
             raised = true
             true
         }
         if raised {
-            return ReqOut { close: true, carry: "", logged: true, acc: acc }
+            return req_out(true, "", acc, chg)
         }
     }
-    if should_close || !keep {
-        return ReqOut { close: true, carry: "", logged: true, acc: acc }
+    if !chg.site.is_empty() {
+        // a budget refusal deeper in the tree (the `file` site) wrote
+        // its 503; a budget 503 always closes
+        return req_out(true, "", acc, chg)
     }
-    ReqOut { close: false, carry: rest, logged: true, acc: acc }
+    if should_close || !keep {
+        return req_out(true, "", acc, chg)
+    }
+    req_out(false, rest, acc, chg)
 }
 
 /// A header-block boundary search: `ready` when `buf` holds a full
@@ -1217,6 +1562,28 @@ pub struct ConnStep {
     served: int,
     logged: bool,
     acc: obs.Access,
+    bud_site: str,
+    bud_limit: int,
+    bud_would: int,
+    mem_hw: int,
+}
+
+/// A ConnStep with NO served request (idle poll, peer close, a
+/// pre-parse 400): zero budget fields; `logged` says whether `acc`
+/// carries a record. Total.
+fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access) -> ConnStep {
+    ConnStep {
+        active: active,
+        close: close,
+        carry: carry,
+        served: served,
+        logged: logged,
+        acc: acc,
+        bud_site: "",
+        bud_limit: 0,
+        bud_would: 0,
+        mem_hw: 0,
+    }
 }
 
 /// A full head is present in `buf` at `cut`: split it, arm the
@@ -1236,23 +1603,17 @@ fn step_serve(
     net_deadline(conn, opts.read_timeout_ms) else |_| {}
     let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served)
     let ns = served + 1
-    if ro.close {
-        return ConnStep {
-            active: true,
-            close: true,
-            carry: "",
-            served: ns,
-            logged: ro.logged,
-            acc: ro.acc,
-        }
-    }
     ConnStep {
         active: true,
-        close: false,
-        carry: ro.carry,
+        close: ro.close,
+        carry: if ro.close { "" } else { ro.carry },
         served: ns,
         logged: ro.logged,
         acc: ro.acc,
+        bud_site: ro.bud_site,
+        bud_limit: ro.bud_limit,
+        bud_would: ro.bud_would,
+        mem_hw: ro.mem_hw,
     }
 }
 
@@ -1287,45 +1648,17 @@ pub fn conn_step(
         acc4.request = raw_line(buf)
         acc4.status = 400
         acc4.body_bytes = err_len(400, true, opts.token)
-        return ConnStep {
-            active: true,
-            close: true,
-            carry: "",
-            served: served,
-            logged: true,
-            acc: acc4,
-        }
+        return step_out(true, true, "", served, true, acc4)
     }
     net_deadline(conn, poll_ms) else |_| {
-        return ConnStep {
-            active: false,
-            close: true,
-            carry: buf,
-            served: served,
-            logged: false,
-            acc: obs.access_new(),
-        }
+        return step_out(false, true, buf, served, false, obs.access_new())
     }
     let piece = net_read(conn, 4096) else |e| match e {
         closed => {
-            return ConnStep {
-                active: false,
-                close: true,
-                carry: buf,
-                served: served,
-                logged: false,
-                acc: obs.access_new(),
-            }
+            return step_out(false, true, buf, served, false, obs.access_new())
         },
         timeout => {
-            return ConnStep {
-                active: false,
-                close: false,
-                carry: buf,
-                served: served,
-                logged: false,
-                acc: obs.access_new(),
-            }
+            return step_out(false, false, buf, served, false, obs.access_new())
         },
         utf8 => {
             send_err(mut cn, 400, false, opts.token)
@@ -1333,49 +1666,21 @@ pub fn conn_step(
             acc5.request = raw_line(buf)
             acc5.status = 400
             acc5.body_bytes = err_len(400, false, opts.token)
-            return ConnStep {
-                active: true,
-                close: true,
-                carry: "",
-                served: served,
-                logged: true,
-                acc: acc5,
-            }
+            return step_out(true, true, "", served, true, acc5)
         },
         io => {
-            return ConnStep {
-                active: false,
-                close: true,
-                carry: buf,
-                served: served,
-                logged: false,
-                acc: obs.access_new(),
-            }
+            return step_out(false, true, buf, served, false, obs.access_new())
         },
     }
     if piece.is_empty() {
-        return ConnStep {
-            active: false,
-            close: true,
-            carry: buf,
-            served: served,
-            logged: false,
-            acc: obs.access_new(),
-        }
+        return step_out(false, true, buf, served, false, obs.access_new())
     }
     buf = "{buf}{piece}"
     let cut = head_cut(buf)
     if cut.ready {
         return step_serve(conn, c, opts, limits, local_port, buf, cut, served)
     }
-    ConnStep {
-        active: true,
-        close: false,
-        carry: buf,
-        served: served,
-        logged: false,
-        acc: obs.access_new(),
-    }
+    step_out(true, false, buf, served, false, obs.access_new())
 }
 
 // ------------------------------------------------------------------

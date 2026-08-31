@@ -1,5 +1,23 @@
 # Changelog
 
+## ws10 — 2026-08-31 — the budget is real
+
+Per-vhost memory budgets, enforced: `memory_budget <size>;` refuses a
+request that would blow its budget with a 503-with-a-name (nginx's
+answer is the OOM killer), deterministically per exceed-site
+(head/body/body-chunked/file, fence-first at every site), observable
+as the `budget-exceeded` error event and the status stanza's per-gen
+`mem-hw`/`budget-503s` aggregates. The perimeter fence lands
+nginx-named: `client_max_body_size` and `large_client_header_buffers`
+implemented with the oracle's own invalid-value spellings. The
+structure audit — the sprint's soul — found lobo held ZERO region
+blocks (every allocation process-lifetime): response bodies now die
+in per-response regions (~290 → ~25 KB/request, the
+`lobo-membudget` gauntlet witness pins bodies-O(1) differentially),
+and the str half plus the region query/cap are filed as the sprint's
+three upstream asks (wolf-lang#187/#191/#192; #187 owns the gated
+region-cap half). docs/BUDGET.md is the model. Corpus 184 → 195.
+
 ## ws09 — 2026-08-30 — logs that parse
 
 `log_format`, `access_log` and `error_log` carry: the escape rules

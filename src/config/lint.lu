@@ -26,7 +26,7 @@
 /// frozen model; -t renders these as `[warn]` lines (they never
 /// change the exit code).
 pub fn lint(c: Conf) -> str {
-    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}{lint_log_inert(c)}{lint_log_native(c)}{lint_log_loses(c)}"
+    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}{lint_log_inert(c)}{lint_log_native(c)}{lint_log_loses(c)}{lint_budget_native(c)}{lint_body_size_inert(c)}"
 }
 
 /// LOBO-L001: `if` inside a `location` block.
@@ -247,6 +247,39 @@ fn lint_log_loses(c: Conf) -> str {
                     }
                 }
             }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L008 (ws10): `memory_budget` is lobo-NATIVE (the WWS-L-native
+/// class, L004's pattern): nginx -t rejects the name — its answer to
+/// memory pressure is the OOM killer, which is exactly the charter
+/// clause this directive retires. Fires once, on the first row.
+fn lint_budget_native(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "memory_budget" {
+            out = "{out}LOBO-L008|{c.files[i]}:{c.lines[i]}|\"memory_budget\" is lobo-native (WWS-L-native class): nginx -t rejects it — nginx's answer to memory pressure is the OOM killer, lobo's is a 503 with a name (docs/BUDGET.md). Delete the line to walk back to an nginx-carryable config; the fence directives (client_max_body_size, large_client_header_buffers) carry in both servers.\n"
+            return out
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L009 (ws10): a location-level `client_max_body_size` PARSES
+/// but does not yet apply — limits resolve at http/server level while
+/// server selection is host-blind (the L005 pattern; the row lifts
+/// with per-location resolution, the sprint D22/D29 also wait on).
+fn lint_body_size_inert(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "client_max_body_size" && c.ctx[i] != "http" && c.ctx[i] != "server" {
+            out = "{out}LOBO-L009|{c.files[i]}:{c.lines[i]}|\"client_max_body_size\" at {c.ctx[i]} level parses but does not APPLY at this pin: lobo resolves limits at http/server level only (ws10 v0). Move the directive up a level, or wait for the per-location resolution row.\n"
         }
         i = i + 1
     }

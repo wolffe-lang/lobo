@@ -164,6 +164,12 @@ pub fn has_control(s: str) -> bool {
 /// "Request Header Or Cookie Too Large"). `max_headers` caps the
 /// field count, `max_header_total` the header block's bytes. Chunk
 /// framing bounds live with the decoder (`max_chunk_digits`).
+/// `memory_budget` (ws10) is a DIFFERENT instrument riding the same
+/// struct: the per-request admitted-bytes budget (0 = off) — the
+/// fence bounds inputs with input-shaped statuses (400/413/414), the
+/// budget bounds a request's admitted memory with a 503; the fence
+/// fires first at every site (docs/BUDGET.md). serve/ enforces it;
+/// the parser never reads it.
 pub struct Limits {
     max_request_line: int,
     max_header_line: int,
@@ -171,6 +177,7 @@ pub struct Limits {
     max_header_total: int,
     max_chunk_digits: int,
     max_body: int,
+    memory_budget: int,
 }
 
 /// nginx-compatible defaults: 8k request line and header field
@@ -191,6 +198,7 @@ pub fn default_limits() -> Limits {
         max_header_total: 32768,
         max_chunk_digits: 15,
         max_body: 1048576,
+        memory_budget: 0,
     }
 }
 

@@ -1,0 +1,173 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked
+//! conforms: err.propagate
+//!
+//! memdrive — rig DRIVER (the corpus lane runs it bare, which
+//! exercises exactly the no-argument usage path: exit 2). The ws10
+//! structure-audit's load shape: argv is `<port> <count>`; dial
+//! 127.0.0.1:<port> ONCE and send `count` keep-alive GETs over that
+//! single connection, each carrying a ~4 KiB padding header (so a
+//! per-request leak would be LOUD in the process's memory), reading
+//! every response to its Content-Length end. The point is the ONE
+//! connection: tools/lobo-membudget samples the server's RSS around
+//! this drive — N requests over one conn must grow the conn's
+//! holdings O(1), not O(N) (the ws10 target-1 leak-shaped witness,
+//! the is15-reproducer discipline applied to lobo). A close before
+//! `count` responses is a named failure, not a shrug — the keepalive
+//! half of the witness. Loopback only, forever.
+
+/// Parse a decimal port from argv — `io` on anything not 1..65535 (a
+/// driver argument error, not a case outcome).
+fn to_port(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 {
+            return io
+        }
+        if b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 65535 {
+            return io
+        }
+    }
+    if n == 0 {
+        return io
+    }
+    n
+}
+
+/// Parse a positive decimal request count — `io` past 100000 (a
+/// longer drive is a harness bug, not a case).
+fn to_count(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 {
+            return io
+        }
+        if b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 100000 {
+            return io
+        }
+    }
+    if n == 0 {
+        return io
+    }
+    n
+}
+
+/// The ~4 KiB padding header value (the leak amplifier: a request
+/// head the server must buffer, big enough that keeping N of them
+/// alive is unmissable in RSS). Total.
+fn pad_value() -> str {
+    var v = "p"
+    while v.len < 4096 {
+        v = "{v}{v}"
+    }
+    v[0..4096]
+}
+
+/// The Content-Length of a response head ("" fields → -1: the driver
+/// only serves fixed-length replies, anything else is a rig bug).
+/// Total.
+fn content_length_of(head: str) -> int {
+    for line in head.lines() {
+        let low = line.lower()
+        if low.starts_with("content-length:") {
+            var n: int = 0
+            var seen = false
+            for b in low[15..low.len].bytes() {
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                    seen = true
+                }
+            }
+            if seen {
+                return n
+            }
+        }
+    }
+    -1
+}
+
+/// Read one full fixed-length response off `c` (head to CRLFCRLF,
+/// then Content-Length body bytes). Returns the leftover bytes after
+/// the response (pipelining safety; normally ""). `io` on any net
+/// trouble or a close mid-response.
+fn read_response(c: int, carry: str) -> str ! {io} {
+    var buf = carry
+    var marker: int = -1
+    while marker < 0 {
+        let m = buf.find("\r\n\r\n") else -1
+        if m >= 0 {
+            marker = m
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                return io
+            }
+            if piece.is_empty() {
+                return io
+            }
+            buf = "{buf}{piece}"
+        }
+    }
+    let head = buf[0..marker]
+    if !head.starts_with("HTTP/1.1 200") {
+        return io
+    }
+    let cl = content_length_of(head)
+    if cl < 0 {
+        return io
+    }
+    var rest = buf[marker + 4..buf.len]
+    while rest.len < cl {
+        let piece = net_read(c, 4096) else |_| {
+            return io
+        }
+        if piece.is_empty() {
+            return io
+        }
+        rest = "{rest}{piece}"
+    }
+    rest[cl..rest.len]
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len != 3 {
+        eprint("usage: memdrive <port> <count> <abs-path>")
+        return 2
+    }
+    let port = to_port(args[0])?
+    let count = to_count(args[1])?
+    let path = args[2]
+    if !path.starts_with("/") {
+        eprint("usage: memdrive <port> <count> <abs-path>")
+        return 2
+    }
+    let pad = pad_value()
+    let c = net_connect("127.0.0.1:{port}")?
+    net_deadline(c, 8000)?
+    var served: int = 0
+    var carry = ""
+    while served < count {
+        let req = "GET {path} HTTP/1.1\r\nHost: x\r\nX-Pad: {pad}\r\nConnection: keep-alive\r\n\r\n"
+        net_write(c, req)?
+        carry = read_response(c, carry)?
+        served = served + 1
+    }
+    net_close(c) else |_| {}
+    print("memdrive: served={served} conn=1")
+    0
+}

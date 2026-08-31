@@ -1,0 +1,106 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config obs
+//!
+//! The ws10 fence-and-budget directive family (docs/BUDGET.md §fence):
+//! accessors off the frozen model (first-server-else-http resolution,
+//! the D29 pattern), the -t half's oracle-shaped diagnostics (probed
+//! 2026-08-31 against the pinned nginx: invalid size values, `0`
+//! valid for client_max_body_size, 0-count/0-size buffers refused),
+//! the lobo-native memory_budget's L008 one-way-door lint, and the
+//! L009 location-inert note.
+
+use config
+
+fn conf_of(body: str) -> config.Conf {
+    config.parse_str("http {{\n{body}\n  server {{ listen 8080; }}\n}}\n", "t.conf")
+}
+
+fn main() -> !int {
+    // ---- defaults: absent directives answer the sentinel shapes
+    let c0 = conf_of("")
+    assert(config.ok(c0), "empty http config parses")
+    assert(config.body_max(c0) == -1, "no client_max_body_size -> -1 (serve defaults 1m)")
+    let hb0 = config.header_buffers(c0)
+    assert(hb0.0 == -1 && hb0.1 == -1, "no large_client_header_buffers -> (-1,-1)")
+    assert(config.mem_budget(c0) == 0, "no memory_budget -> 0 (off)")
+
+    // ---- http-level values, nginx units
+    let c1 = conf_of(
+        "  client_max_body_size 1m;\n  large_client_header_buffers 2 4k;\n  memory_budget 64k;",
+    )
+    assert(config.body_max(c1) == 1048576, "1m -> bytes")
+    let hb1 = config.header_buffers(c1)
+    assert(hb1.0 == 2 && hb1.1 == 4096, "2 4k -> (2, 4096)")
+    assert(config.mem_budget(c1) == 65536, "64k budget")
+    assert(config.limits_check(c1).is_empty(), "valid family passes -t")
+
+    // ---- 0 is VALID for client_max_body_size (unlimited, nginx's rule)
+    let c2 = conf_of("  client_max_body_size 0;")
+    assert(config.body_max(c2) == 0, "0 -> unlimited")
+    assert(config.limits_check(c2).is_empty(), "0 body size passes -t (probed)")
+
+    // ---- server-level wins over http-level (first-server resolution)
+    let c3 = config.
+        parse_str(
+        "http {{\n  client_max_body_size 1m;\n  memory_budget 1m;\n  server {{ listen 8080; client_max_body_size 2k; memory_budget 4k; }}\n}}\n",
+        "t.conf",
+    )
+    assert(config.body_max(c3) == 2048, "server client_max_body_size wins")
+    assert(config.mem_budget(c3) == 4096, "server memory_budget wins")
+
+    // ---- the -t half: oracle-shaped invalid-value spellings
+    let e1 = config.limits_check(conf_of("  client_max_body_size 10x;"))
+    assert(
+        e1 == "\"client_max_body_size\" directive invalid value in t.conf:2",
+        "bad body size named: {e1}",
+    )
+    let e2 = config.limits_check(conf_of("  large_client_header_buffers 0 8k;"))
+    assert(
+        e2 == "\"large_client_header_buffers\" directive invalid value in t.conf:2",
+        "0-count buffers named: {e2}",
+    )
+    let e3 = config.limits_check(conf_of("  large_client_header_buffers 4 0;"))
+    assert(!e3.is_empty(), "0-size buffers refused")
+    let e4 = config.limits_check(conf_of("  memory_budget abc;"))
+    assert(e4 == "\"memory_budget\" directive invalid value in t.conf:2", "bad budget named: {e4}")
+    let e5 = config.limits_check(conf_of("  client_header_buffer_size 0;"))
+    assert(!e5.is_empty(), "0 client_header_buffer_size refused")
+    assert(
+        config.limits_check(conf_of("  client_header_buffer_size 1k;")).is_empty(),
+        "valid client_header_buffer_size passes (parse-clean, planned ws15)",
+    )
+
+    // ---- memory_budget 0 = off, valid
+    let c4 = conf_of("  memory_budget 0;")
+    assert(config.mem_budget(c4) == 0, "0 budget = off")
+    assert(config.limits_check(c4).is_empty(), "0 budget passes -t")
+
+    // ---- lints: L008 native one-way door, L009 location-inert
+    let l1 = config.lint(conf_of("  memory_budget 64k;"))
+    assert(l1.contains("LOBO-L008"), "memory_budget lints L008: {l1}")
+    assert(l1.contains("lobo-native"), "L008 says the class out loud")
+    let c5 = config.
+        parse_str(
+        "http {{\n  server {{ listen 8080; location / {{ client_max_body_size 5m; }} }}\n}}\n",
+        "t.conf",
+    )
+    assert(config.ok(c5), "location-level client_max_body_size parses (nginx context)")
+    let l2 = config.lint(c5)
+    assert(l2.contains("LOBO-L009"), "location-level body size lints L009: {l2}")
+    assert(
+        config.lint(conf_of("  client_max_body_size 1m;")).contains("LOBO-L00") == false,
+        "http-level body size lints nothing",
+    )
+
+    // ---- contexts: memory_budget refuses outside http/server
+    let c6 = config.
+        parse_str(
+        "http {{\n  server {{ listen 8080; location / {{ memory_budget 1m; }} }}\n}}\n",
+        "t.conf",
+    )
+    assert(!config.ok(c6), "memory_budget in location is the parser's own named error")
+
+    0
+}

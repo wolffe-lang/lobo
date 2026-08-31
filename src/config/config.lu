@@ -88,6 +88,16 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws10: the fence-and-budget half of -t — every size directive's
+    // value parses (oracle-shaped spellings, probed). One named
+    // [emerg], first failure wins.
+    if verdict == 0 {
+        let merr = limits_check(c)
+        if !merr.is_empty() {
+            eprint("lobo: [emerg] {merr}")
+            verdict = 1
+        }
+    }
     let findings = lint(c)
     if !findings.is_empty() {
         for line in findings.lines() {
