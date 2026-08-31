@@ -109,18 +109,30 @@ sprint deliberately does not serialize the accept path against a reader.
 ## The log-event vocabulary (FROZEN)
 
 Emitted through the logging seam (ws02 — `lobo: [notice] <event>` on
-stderr today; ws09 reformats these into JSON, ws12 into metrics). The
-event NAMES and FIELD KEYS are a stable contract. Six events (the
-sixth is wsm01's EXTENSION — appended, nothing renamed):
+stderr, UNCHANGED by ws09; when an `error_log` file is configured the
+same events land there too, level-gated, in nginx's text shape or as
+schema-versioned JSON lines — docs/LOGGING.md). The event NAMES and
+FIELD KEYS are a stable contract; ws09's JSON door renders them
+verbatim (`"event":"<name>"` plus one member per field, digit values
+typed as numbers, keys byte-identical — `age-ms` stays `age-ms`).
+Six events (the sixth is wsm01's EXTENSION — appended, nothing
+renamed); the LEVEL column is ws09's (§5: the wws mapping is
+documented per event, not vibes):
 
-| event | fields | emitted when |
-|-------|--------|--------------|
-| `generation-loaded` | `gen`, `id` | a config generation is parsed and frozen (start, or a successful reload) |
-| `generation-activated` | `gen` | a generation becomes the live, accepting one |
-| `generation-draining` | `gen`, `held` | a generation stops accepting and begins draining, still holding `held` connections |
-| `connection-retired` | `gen`, `remaining` | one connection on a draining generation closed; `remaining` still held |
-| `generation-retired` | `gen`, `drained`, `aborted`, `age-ms` | a draining generation reached zero (or timed out): `drained` closed cleanly, `aborted` force-closed by the timeout |
-| `signal-received` | `sig`, `verb` | a real OS signal arrived and was mapped to an operator verb (wsm01): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb — the line that tells a signal-driven reload from a control-channel one |
+| event | level | fields | emitted when |
+|-------|-------|--------|--------------|
+| `generation-loaded` | notice | `gen`, `id` | a config generation is parsed and frozen (start, or a successful reload) |
+| `generation-activated` | notice | `gen` | a generation becomes the live, accepting one |
+| `generation-draining` | notice | `gen`, `held` | a generation stops accepting and begins draining, still holding `held` connections |
+| `connection-retired` | notice | `gen`, `remaining` | one connection on a draining generation closed; `remaining` still held |
+| `generation-retired` | notice | `gen`, `drained`, `aborted`, `age-ms` | a draining generation reached zero (or timed out): `drained` closed cleanly, `aborted` force-closed by the timeout |
+| `signal-received` | notice | `sig`, `verb` | a real OS signal arrived and was mapped to an operator verb (wsm01): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb — the line that tells a signal-driven reload from a control-channel one |
+
+Beside the vocabulary, the prose notices ride the same seam with
+their own levels: serving-on / signal-arming / reopen / ACME issuance
+at `notice`; sink-drop reports at `warn`; ACME failures and
+cert-keep errors at `error`; startup refusals at `emerg` (stderr —
+they precede the sinks). docs/LOGGING.md is the full ladder story.
 
 Example lifecycle of one reloaded-away generation holding two
 connections, both closing cleanly:
