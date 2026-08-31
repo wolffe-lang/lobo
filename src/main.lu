@@ -1211,6 +1211,10 @@ fn main() -> int {
         print_raw(config.directives_markdown())
         return 0
     }
+    if cli.mode == "logvars" {
+        print_raw(obs.vars_markdown())
+        return 0
+    }
     if cli.mode == "signal" {
         return signal_main(cli)
     }

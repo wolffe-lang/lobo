@@ -217,6 +217,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
             stat = true
         } else if a == "directives-md" {
             mode = "docs"
+        } else if a == "logvars-md" {
+            mode = "logvars"
         } else if a == "serve" {
             mode = "serve"
         } else if a == "status" {
@@ -328,7 +330,7 @@ pub fn usage_text() -> str {
     s = "{s}       lobo -t --request '<method> <scheme>://<host>/<path>' ...\n"
     s = "{s}           [--sni name] [--client addr] [--stat] [--format json]\n"
     s = "{s}           (the config dry-run: what would this config DO — ws07)\n"
-    s = "{s}       lobo [serve | directives-md]   (lobo-native verbs)\n"
+    s = "{s}       lobo [serve | directives-md | logvars-md]   (lobo-native verbs)\n"
     s
 }
 
