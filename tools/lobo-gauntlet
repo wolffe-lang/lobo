@@ -97,6 +97,12 @@ if ! tools/lobo-proxy-differential; then
     exit 1
 fi
 
+step "log differential (ws09: same log_format, same requests, byte-compared modulo timestamps)"
+if ! tools/lobo-logdiff; then
+    echo "lobo-gauntlet: FAILED at logdiff" >&2
+    exit 1
+fi
+
 step "confcheck (corpus oracle parity)"
 if ! tools/lobo-confcheck; then
     echo "lobo-gauntlet: FAILED at confcheck" >&2

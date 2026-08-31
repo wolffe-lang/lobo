@@ -1,0 +1,242 @@
+#!/bin/sh
+# lobo-logdiff — the ACCESS-LOG differential (ws09 §4): the SAME
+# log_format directives on the pinned oracle and on lobo, the SAME raw
+# requests replayed against both, and the log LINES byte-compared
+# modulo exactly two named normalizations:
+#   1. timestamps ([$time_local] brackets and $time_iso8601) — wall
+#      clock, legitimately different on every run (and lobo logs UTC,
+#      a named delta docs/LOGGING.md carries);
+#   2. nothing else. $body_bytes_sent appears only in the all-200
+#      round, because an ERROR page's length carries the server-
+#      identity footer (the documented body delta) — the error round's
+#      formats deliberately omit it rather than fuzz it.
+# This is the escape-rule probe set (quote, backslash, ESC, TAB, BS,
+# FF, DEL, é; a %-encoded target; a garbage line with a bare CR) held
+# CONTINUOUSLY against the live oracle — the evidence the ws09 probe
+# pins cite. Two rounds:
+#   ok  — all-200 requests; combined (the compiled-in default, with
+#         $body_bytes_sent) + an escape=default field format
+#   err — 404/400 requests; a bracket-clock format + escape=json
+# Refuses like the differential when the oracle or the release lobo is
+# missing. Loopback only, ephemeral ports, everything under target/.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+DIFF_DIR=tests/differential
+BIN=$DIFF_DIR/bin/nginx
+LOBO=target/lobo-release
+pin_version=$(sed -n 's/^version = //p' $DIFF_DIR/NGINX-PIN)
+
+if [ ! -x "$BIN" ]; then
+    echo "logdiff: REFUSED — pinned nginx binary missing at $BIN (build it per docs/DIFFERENTIAL.md)" >&2
+    exit 1
+fi
+have_version=$("$BIN" -v 2>&1 | sed -n 's|^nginx version: nginx/||p')
+if [ "$have_version" != "$pin_version" ]; then
+    echo "logdiff: REFUSED — $BIN is nginx/$have_version, the pin is nginx/$pin_version" >&2
+    exit 1
+fi
+if [ ! -x "$LOBO" ]; then
+    echo "logdiff: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2
+    exit 1
+fi
+
+free_port() {
+    for _ in 1 2 3 4 5; do
+        p=$("$WOLF" run ./tests/rig/freeport.lu 2>/dev/null)
+        case "$p" in '' | *[!0-9]*) continue ;; esac
+        echo "$p"
+        return 0
+    done
+    return 1
+}
+
+send() { # send <port> <reqfile> <outfile>
+    _port=$1
+    _req=$2
+    _out=$3
+    for _poll in $(seq 1 50); do
+        if "$WOLF" run ./tests/rig/diffsend.lu "$_port" "$_req" > "$_out" 2> "$_out.err"; then
+            return 0
+        fi
+        grep -q 'error: refused' "$_out.err" || return 1
+        sleep 0.1
+    done
+    return 1
+}
+
+# normalize <in >out — the two named timestamp normalizations
+normalize() {
+    sed -E \
+        -e 's|\[[0-9]{2}/[A-Za-z]{3}/[0-9]{4}:[0-9]{2}:[0-9]{2}:[0-9]{2} [+-][0-9]{4}\]|[T]|g' \
+        -e 's|[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}[+-][0-9]{2}:[0-9]{2}|T|g'
+}
+
+# the log directive block, IDENTICAL on both sides — the compat claim
+log_block() {
+    cat <<'EOF'
+    log_format defb '$remote_addr|$request|$status|$body_bytes_sent|$http_x_probe|$http_x_missing|$remote_user|';
+    log_format defe 'E|$request|$status|[$time_local]|$time_iso8601|$http_x_probe|';
+    log_format pj escape=json 'J|$request|$status|$http_x_probe|$http_x_missing|';
+EOF
+}
+
+# render_confs <scratch> <port> <round>
+render_confs() {
+    _s=$1
+    _p=$2
+    _round=$3
+    if [ "$_round" = ok ]; then
+        _al='    access_log logs/combined.log;
+    access_log logs/defb.log defb;'
+        _logs="combined defb"
+    else
+        _al='    access_log logs/defe.log defe;
+    access_log logs/pj.log pj;'
+        _logs="defe pj"
+    fi
+    {
+        echo 'daemon off;'
+        echo 'pid nginx.pid;'
+        echo 'error_log error.log;'
+        echo
+        echo 'events {'
+        echo '}'
+        echo
+        echo 'http {'
+        log_block
+        echo "$_al"
+        echo '    types {'
+        echo '        text/html html;'
+        echo '    }'
+        echo '    server {'
+        echo "        listen 127.0.0.1:$_p;"
+        echo "        root $PWD/$_s/www;"
+        echo '    }'
+        echo '}'
+    } > "$_s/nginx.conf"
+    {
+        echo 'http {'
+        log_block
+        echo "$_al"
+        echo '  types { text/html html; }'
+        echo '  server {'
+        echo "    listen 127.0.0.1:$_p;"
+        echo "    root $PWD/$_s/www;"
+        echo '    index index.html;'
+        echo '  }'
+        echo '}'
+    } > "$_s/lobo.conf"
+    echo "$_logs"
+}
+
+# write_requests <scratch> <round> ; echoes the request names
+write_requests() {
+    _s=$1
+    if [ "$2" = ok ]; then
+        # q1: the full adversarial header byte set (all classes the
+        # ws09 probes pinned), still a 200
+        printf 'GET /index.html HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Probe: q"b\\e\033t\tu\303\251z\010y\014x\177w end\r\nUser-Agent: logdiff-UA/1.0\r\nReferer: http://r.example/x\r\nConnection: close\r\n\r\n' > "$_s/q1.raw"
+        # q2: a plain 200 with no optional headers (missing -> - / '')
+        printf 'GET /index.html HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$_s/q2.raw"
+        echo "q1 q2"
+    else
+        # e1: RAW percent-encoded target (404 both sides)
+        printf 'GET /%%41%%2e%%2e/x?q=%%20sp HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n' > "$_s/e1.raw"
+        # e2: a garbage request line with a bare CR (400; the oracle
+        # logs it cut at the CR — pinned, both sides)
+        printf 'BOGUS\rGARBAGE\r\n\r\n' > "$_s/e2.raw"
+        # e3: a plain 404 with an adversarial header (escape=json leg)
+        printf 'GET /nosuch HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Probe: a"b\\c\033d\r\nConnection: close\r\n\r\n' > "$_s/e3.raw"
+        echo "e1 e2 e3"
+    fi
+}
+
+# run_side <side> <scratch> <round> — starts the server, replays, kills
+run_side() {
+    _side=$1
+    _s=$2
+    _round=$3
+    _port=$(free_port) || return 1
+    _reqs=$(write_requests "$_s" "$_round")
+    _logs=$(render_confs "$_s" "$_port" "$_round")
+    mkdir -p "$_s/$_side-logs"
+    if [ "$_side" = nginx ]; then
+        rm -f "$_s"/logs/*.log 2>/dev/null
+        mkdir -p "$_s/logs"
+        "$BIN" -p "$PWD/$_s" -c nginx.conf -e error.log &
+        _pid=$!
+    else
+        rm -f "$_s"/logs/*.log 2>/dev/null
+        mkdir -p "$_s/logs"
+        "$LOBO" serve -p "$PWD/$_s" -c "$PWD/$_s/lobo.conf" 2> "$_s/lobo.err" &
+        _pid=$!
+    fi
+    _ok=1
+    for _r in $_reqs; do
+        if ! send "$_port" "$_s/$_r.raw" "$_s/$_side.$_r.reply"; then
+            _ok=0
+        fi
+    done
+    sleep 0.4
+    kill "$_pid" 2>/dev/null
+    wait "$_pid" 2>/dev/null
+    for _lg in $_logs; do
+        mv "$_s/logs/$_lg.log" "$_s/$_side-logs/$_lg.log" 2>/dev/null
+    done
+    [ "$_ok" = 1 ]
+}
+
+failures=0
+checks=0
+for round in ok err; do
+    S="target/logdiff/$round"
+    rm -rf "$S"
+    mkdir -p "$S/www"
+    printf '<x>logdiff body</x>\n' > "$S/www/index.html"
+    find "$S/www" -type f -exec touch -d '2026-01-01T00:00:00Z' {} +
+
+    if ! run_side nginx "$S" "$round"; then
+        echo "logdiff: FAILED — $round: nginx never answered" >&2
+        failures=$((failures + 1))
+        continue
+    fi
+    if ! run_side lobo "$S" "$round"; then
+        echo "logdiff: FAILED — $round: lobo never answered (see $S/lobo.err)" >&2
+        failures=$((failures + 1))
+        continue
+    fi
+
+    if [ "$round" = ok ]; then logs="combined defb"; want_lines=2; else logs="defe pj"; want_lines=3; fi
+    for lg in $logs; do
+        checks=$((checks + 1))
+        na="$S/nginx-logs/$lg.log"
+        la="$S/lobo-logs/$lg.log"
+        if [ ! -s "$na" ]; then
+            echo "logdiff: FAILED — $round/$lg: the ORACLE wrote no lines" >&2
+            failures=$((failures + 1)); continue
+        fi
+        if [ ! -s "$la" ]; then
+            echo "logdiff: FAILED — $round/$lg: LOBO wrote no lines" >&2
+            failures=$((failures + 1)); continue
+        fi
+        got_lines=$(wc -l < "$la" | tr -d ' ')
+        if [ "$got_lines" != "$want_lines" ]; then
+            echo "logdiff: FAILED — $round/$lg: lobo wrote $got_lines line(s), the request set has $want_lines" >&2
+            failures=$((failures + 1)); continue
+        fi
+        normalize < "$na" > "$na.norm"
+        normalize < "$la" > "$la.norm"
+        if ! diff -u "$na.norm" "$la.norm" > "$S/$lg.diff"; then
+            echo "logdiff: FAILED — $round/$lg: lobo's log diverged from the oracle's (modulo timestamps):" >&2
+            cat "$S/$lg.diff" >&2
+            failures=$((failures + 1)); continue
+        fi
+        echo "logdiff: ok — $round/$lg ($got_lines line(s) byte-identical to nginx/$have_version, modulo timestamps)"
+    done
+done
+
+echo "logdiff: $((checks - failures))/$checks log(s) byte-identical (same log_format, same requests, oracle vs lobo)"
+[ "$failures" = 0 ] || exit 1
+echo "logdiff: GREEN — nginx's own tooling parses lobo's logs, because they are nginx's bytes"
