@@ -835,6 +835,17 @@ pub fn ev_signal_received(m: int) -> str {
     "signal-received sig={signal_name(m)} verb={signal_verb(m)}"
 }
 
+/// A request was refused by its vhost's `memory_budget` (ws10 — the
+/// vocabulary's seventh event, appended, nothing renamed): `gen` the
+/// generation that served it, `site` the deterministic exceed-site
+/// (head|body|body-chunked|file), `budget` the configured bytes,
+/// `would` what admitting the request would have charged. Level
+/// `error` (a shed request is an operator's signal, not a notice).
+/// The refused request also writes an ordinary 503 access line.
+pub fn ev_budget_exceeded(gen: int, site: str, budget: int, would: int) -> str {
+    "budget-exceeded gen={gen} site={site} budget={budget} would={would}"
+}
+
 // ---- the status surface --------------------------------------------
 // SCALAR builders, not List-of-struct: the checked tier refuses a
 // `List[<imported struct>]()` construction (generic data across a
@@ -864,10 +875,23 @@ pub fn status_head_text(current: int, quitting: bool) -> str {
 
 /// One generation's line in the human status table. `remaining_ms` is
 /// the worker_shutdown_timeout remaining for a draining generation, or
-/// -1 when none applies (a current generation, or no timeout). Includes
-/// the trailing newline. Total.
-pub fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int) -> str {
-    var line = "generation {gen}: {state} live={live} age-ms={age_ms} id={hash}"
+/// -1 when none applies (a current generation, or no timeout). ws10
+/// appends the budget aggregates (additive — every earlier fact keeps
+/// its place): `mem-hw` is the high-water admitted bytes of any single
+/// request served under the generation, `budget-503s` its refusal
+/// count (0 0 when no budget is armed — the facts stay printed so a
+/// parser never branches). Includes the trailing newline. Total.
+pub fn status_line_text(
+    gen: int,
+    live: int,
+    state: str,
+    age_ms: int,
+    hash: str,
+    remaining_ms: int,
+    mem_hw: int,
+    budget_503s: int,
+) -> str {
+    var line = "generation {gen}: {state} live={live} age-ms={age_ms} id={hash} mem-hw={mem_hw} budget-503s={budget_503s}"
     if remaining_ms >= 0 {
         line = "{line} shutdown-in-ms={remaining_ms}"
     }
@@ -883,9 +907,20 @@ pub fn status_json_open(current: int, quitting: bool) -> str {
 }
 
 /// One generation as a JSON object (no leading comma, no newline) — the
-/// entry joins these with commas. Total.
-pub fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int) -> str {
-    "{{\"gen\":{gen},\"state\":\"{state}\",\"live\":{live},\"age_ms\":{age_ms},\"id\":\"{hash}\",\"shutdown_remaining_ms\":{remaining_ms}}}"
+/// entry joins these with commas. ws10 adds `mem_high_water` and
+/// `budget_503s` (additive members; schema stays 1 — nothing renamed
+/// or moved, the ws07 convention for a widening). Total.
+pub fn status_json_obj(
+    gen: int,
+    state: str,
+    live: int,
+    age_ms: int,
+    hash: str,
+    remaining_ms: int,
+    mem_hw: int,
+    budget_503s: int,
+) -> str {
+    "{{\"gen\":{gen},\"state\":\"{state}\",\"live\":{live},\"age_ms\":{age_ms},\"id\":\"{hash}\",\"mem_high_water\":{mem_hw},\"budget_503s\":{budget_503s},\"shutdown_remaining_ms\":{remaining_ms}}}"
 }
 
 /// The JSON status stanza's close: `]}`. Total.

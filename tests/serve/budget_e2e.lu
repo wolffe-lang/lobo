@@ -1,0 +1,183 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! THE BUDGET, END TO END (ws10 target 3's pin): spawn the real lobo
+//! under a config with a deliberately tiny `memory_budget`, drive a
+//! large-header request through the step loop, and assert the WHOLE
+//! observable story: the wire 503 (Service Temporarily Unavailable,
+//! Connection: close), the ordinary 503 access-log line, the
+//! `budget-exceeded` error-log event with its frozen field keys
+//! (gen/site/budget/would), and the status stanza's per-generation
+//! aggregates (`mem-hw`, `budget-503s`) in both the human text and
+//! the schema-1 JSON. A served under-budget request feeds `mem-hw`
+//! without a refusal. Loopback only, OS-chosen ports, scratch cleared
+//! at START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn ask(port: int, reqtext: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn line_with(text: str, needle: str) -> str {
+    for l in text.lines() {
+        if l.contains(needle) {
+            return l
+        }
+    }
+    ""
+}
+
+fn pad(n: int) -> str {
+    var v = "p"
+    while v.len < n {
+        v = "{v}{v}"
+    }
+    v[0..n]
+}
+
+fn main() -> !int {
+    let d = "ws10_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/index.html", "BUDGET-E2E\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid ws10_e2e/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  access_log ws10_e2e/access.log;\n  error_log ws10_e2e/error.log info;\n  memory_budget 2k;\n  server {{ listen 127.0.0.1:{hp}; root ws10_e2e/w; index index.html; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // 1. an under-budget request serves and feeds mem-hw
+    let r1 = ask(hp, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r1.starts_with("HTTP/1.1 200 OK"), "under budget serves: {r1}")
+
+    // 2. the large-header request: over the 2k budget, under the fences
+    let r2 = ask(
+        hp,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nX-Pad: {pad(3000)}\r\nConnection: close\r\n\r\n",
+    )?
+    assert(
+        r2.starts_with("HTTP/1.1 503 Service Temporarily Unavailable"),
+        "the 503 with a name: {r2}",
+    )
+    assert(line_with(r2, "Connection:").contains("close"), "the refusal closes: {r2}")
+
+    // 3. the status stanza carries the aggregates, text and JSON
+    time_sleep_ms(200)
+    let st = shell.control_fetch(ep, "status") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "status fetch failed")
+        ""
+    }
+    let g1 = line_with(st, "generation 1:")
+    assert(g1.contains("budget-503s=1"), "one refusal counted: {g1}")
+    assert(g1.contains("mem-hw="), "the high-water fact prints: {g1}")
+    assert(!g1.contains("mem-hw=0 "), "a served request raised the high-water: {g1}")
+    let sj = shell.control_fetch(ep, "status json") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "status json fetch failed")
+        ""
+    }
+    assert(sj.contains("\"schema\":1"), "schema stays 1 (additive widening): {sj}")
+    assert(sj.contains("\"budget_503s\":1"), "json counts the refusal: {sj}")
+    assert(sj.contains("\"mem_high_water\":"), "json carries the high-water: {sj}")
+
+    // quit — flush-on-quit puts both log stories on disk
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "lobo exited 0 (got {code})")
+
+    // 4. the access log: the refused request is an ORDINARY 503 line
+    let acc = fs_read_text("{d}/access.log")?
+    let a503 = line_with(acc, " 503 ")
+    assert(!a503.is_empty(), "the 503 access line exists:\n{acc}")
+    assert(a503.contains("\"GET /index.html HTTP/1.1\" 503 "), "the raw line + status: {a503}")
+    assert(
+        line_with(acc, " 200 ").contains("\"GET /index.html HTTP/1.1\" 200 "),
+        "the 200 line too",
+    )
+
+    // 5. the error log: the budget-exceeded event, frozen field keys
+    let el = fs_read_text("{d}/error.log")?
+    let ev = line_with(el, "budget-exceeded")
+    assert(!ev.is_empty(), "the budget-exceeded event exists:\n{el}")
+    assert(ev.contains("[error]"), "at level error: {ev}")
+    assert(ev.contains("budget-exceeded gen=1 site=head budget=2048 would="), "the fields: {ev}")
+
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

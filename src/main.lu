@@ -123,7 +123,12 @@ fn read_command(conn: int) -> str {
 /// connections) or "draining" (a reloaded-away generation still holding
 /// connections). `loaded_ms` is when it was created, `since_ms` when it
 /// began draining (0 while current). `drained`/`aborted` accumulate its
-/// retirement accounting; `shash` is its content-hash id.
+/// retirement accounting; `shash` is its content-hash id. ws10: `lim`
+/// is the generation's FROZEN effective Limits (fence + budget resolve
+/// once at freeze, exactly like the model — a draining generation
+/// keeps serving under ITS numbers); `mem_hw` the high-water admitted
+/// bytes of any single request it served; `bud_hits` its budget-503
+/// count.
 struct GenRow {
     conf: config.Conf,
     gen: int,
@@ -134,6 +139,9 @@ struct GenRow {
     drained: int,
     aborted: int,
     shash: str,
+    lim: http.Limits,
+    mem_hw: int,
+    bud_hits: int,
 }
 
 /// The generation number of the current (accepting) row, or -1. Total.
@@ -214,6 +222,66 @@ fn bump_live(gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
                 drained: g.drained,
                 aborted: g.aborted,
                 shash: g.shash,
+                lim: g.lim,
+                mem_hw: g.mem_hw,
+                bud_hits: g.bud_hits,
+            })
+        } else {
+            (mut out).push(g)
+        }
+    }
+    out
+}
+
+/// The frozen effective Limits a connection tagged `gen` serves under
+/// (the same freeze-and-fall-back rule as conf_for). Total.
+fn lim_for(gens: List[GenRow], gen: int) -> http.Limits {
+    let i = index_of(gens, gen)
+    if i >= 0 {
+        return gens[i].lim
+    }
+    if gens.len > 0 {
+        return gens[0].lim
+    }
+    http.default_limits()
+}
+
+/// Fold one served request's budget outcome into its generation's
+/// aggregates: raise the high-water mark, count a refusal. Rebuilds
+/// only when something changed (the per-request hot path pays a
+/// comparison, not a rebuild). Total.
+fn note_request(gens: List[GenRow], gen: int, hw: int, hit: bool) -> List[GenRow] {
+    let i = index_of(gens, gen)
+    if i < 0 {
+        return gens
+    }
+    if !hit && hw <= gens[i].mem_hw {
+        return gens
+    }
+    var out = List[GenRow]()
+    for g in gens {
+        if g.gen == gen {
+            var nhw = g.mem_hw
+            if hw > nhw {
+                nhw = hw
+            }
+            var nhits = g.bud_hits
+            if hit {
+                nhits = nhits + 1
+            }
+            (mut out).push(GenRow {
+                conf: g.conf,
+                gen: g.gen,
+                live: g.live,
+                state: g.state,
+                loaded_ms: g.loaded_ms,
+                since_ms: g.since_ms,
+                drained: g.drained,
+                aborted: g.aborted,
+                shash: g.shash,
+                lim: g.lim,
+                mem_hw: nhw,
+                bud_hits: nhits,
             })
         } else {
             (mut out).push(g)
@@ -255,6 +323,9 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
                 drained: nd,
                 aborted: na,
                 shash: g.shash,
+                lim: g.lim,
+                mem_hw: g.mem_hw,
+                bud_hits: g.bud_hits,
             })
         } else {
             (mut out).push(g)
@@ -303,11 +374,15 @@ fn start_reload(
                 drained: g.drained,
                 aborted: g.aborted,
                 shash: g.shash,
+                lim: g.lim,
+                mem_hw: g.mem_hw,
+                bud_hits: g.bud_hits,
             })
         } else {
             (mut out).push(g)
         }
     }
+    let nlim = serve.resolve_limits(newconf)
     (mut out).push(GenRow {
         conf: newconf,
         gen: newgen,
@@ -318,6 +393,9 @@ fn start_reload(
         drained: 0,
         aborted: 0,
         shash: newhash,
+        lim: nlim,
+        mem_hw: 0,
+        bud_hits: 0,
     })
     out
 }
@@ -338,6 +416,9 @@ fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
                 drained: g.drained,
                 aborted: g.aborted,
                 shash: g.shash,
+                lim: g.lim,
+                mem_hw: g.mem_hw,
+                bud_hits: g.bud_hits,
             })
         } else {
             (mut out).push(g)
@@ -371,6 +452,8 @@ fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: boo
                 gen_age(g, now),
                 g.shash,
                 gen_remaining(g, shutdown_ms, now),
+                g.mem_hw,
+                g.bud_hits,
             )
             s = "{s}{sep}{obj}"
         }
@@ -378,7 +461,7 @@ fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: boo
     }
     var s = shell.status_head_text(cur, quitting)
     for g in gens {
-        s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now))}"
+        s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now), g.mem_hw, g.bud_hits)}"
     }
     s
 }
@@ -698,7 +781,12 @@ fn serve_main(prefix: str, conf: str) -> int {
     }
 
     var opts = serve.default_opts()
-    let lim = http.default_limits()
+    // ws10: the effective Limits (fence + budget) freeze PER
+    // GENERATION beside the model — resolved here for gen 1, by
+    // start_reload for successors, and read back per connection
+    // through lim_for (a draining generation keeps serving under ITS
+    // numbers, the frozen-model discipline).
+    let lim1 = serve.resolve_limits(c0)
     let shutdown_ms = shell.shutdown_timeout_ms(c0)
 
     // ws09: the log outputs — per-output bounded sinks off the frozen
@@ -781,6 +869,9 @@ fn serve_main(prefix: str, conf: str) -> int {
         drained: 0,
         aborted: 0,
         shash: h1,
+        lim: lim1,
+        mem_hw: 0,
+        bud_hits: 0,
     })
     ev_log(mut elog, "notice", shell.ev_generation_loaded(1, h1))
     ev_log(mut elog, "notice", shell.ev_generation_activated(1))
@@ -978,7 +1069,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                     net_close(tconn) else |_| {}
                 } else {
                     var tcn = conn.tls_conn(tconn, z)
-                    serve.serve_conn_cn(mut tcn, tconf, opts, lim, hport)
+                    serve.serve_conn_cn(mut tcn, tconf, opts, lim_for(gens, tgen), hport)
                 }
                 gens = on_conn_close(gens, tgen, false, mut elog)
             }
@@ -1005,7 +1096,7 @@ fn serve_main(prefix: str, conf: str) -> int {
             let idle0 = cidle[k]
             let cs0 = cstart[k]
             let cconf = conf_for(gens, cg)
-            let st = serve.conn_step(fd, cconf, opts, lim, hport, car, sv, 12)
+            let st = serve.conn_step(fd, cconf, opts, lim_for(gens, cg), hport, car, sv, 12)
             var close_it = st.close
             var new_idle = idle0
             if st.active {
@@ -1025,6 +1116,19 @@ fn serve_main(prefix: str, conf: str) -> int {
                 a2.req_ms = span
                 (mut pass_accs).push(AccRow { a: a2 })
                 new_start = now
+                // ws10: the budget observability — a refusal is a LOUD
+                // error event (the ws09 seam) and the generation's
+                // counters move; every served request feeds the
+                // high-water aggregate
+                let hit = !st.bud_site.is_empty()
+                if hit {
+                    ev_log(
+                        mut elog,
+                        "error",
+                        shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would),
+                    )
+                }
+                gens = note_request(gens, cg, st.mem_hw, hit)
             } else if !st.active && st.carry.is_empty() {
                 new_start = now
             }
