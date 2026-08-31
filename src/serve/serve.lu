@@ -561,15 +561,85 @@ fn serve_file(
     // BYTES, not text (wsm01, s115/#137): a static file is bytes —
     // a PNG, a gzip, a favicon — and the old `fs_read_text` 500'd on
     // the first non-UTF-8 byte (deferral D8, now retired here).
+    // ws10 (the structure audit): the body bytes live in a per-
+    // response REGION and die wholesale at its close — without it
+    // every served body is charged to the process root region for the
+    // process's whole life ([mem.region.create.3]: the ambient region
+    // is the caller's, and no caller up this tree scoped one).
     if size <= 65536 {
-        let body = fs_read_bytes(path) else |_| {
+        if conn.is_tls(cn) {
+            // TLS: the session write is a REAL potential retainer (the
+            // record layer buffers through `sess`), so the body cannot
+            // die in a per-response region — the TLS region story
+            // rides the D24 stepper refactor, named residue.
+            let body = fs_read_bytes(path) else |_| {
+                acc.status = 500
+                acc.body_bytes = err_len(500, false, token)
+                send_err(mut cn, 500, false, token)
+                return true
+            }
+            write_all(mut cn, head)?
+            write_bytes_all(mut cn, body)?
+            return !keep
+        }
+        // plaintext: the body bytes live in a per-response REGION and
+        // die wholesale at its close (the ws10 structure audit —
+        // without it every served body is charged to the process root
+        // region for the process's whole life, [mem.region.create.3]).
+        // The write goes through the bare fd: a socket write stores
+        // nothing, and the fd path is what lets the checker see that
+        // (a `mut cn` write inside the region is E1010 — the TLS arm
+        // above is the retaining case it guards against).
+        let sock = conn.fd(cn)
+        var failed = false
+        // 0 clean, 1 closed, 2 io — the write rows carried across the
+        // region boundary as a scalar (heap values must not escape it)
+        var wcode = 0
+        region resp {
+            let body = fs_read_bytes(path) else |_| {
+                failed = true
+                List[int]()
+            }
+            if !failed {
+                net_write(sock, head) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+                if wcode == 0 {
+                    net_write_bytes(sock, body) else |e| match e {
+                        closed => {
+                            wcode = 1
+                        },
+                        invalid => {
+                            wcode = 2
+                        },
+                        io => {
+                            wcode = 2
+                        },
+                    }
+                }
+            }
+            // the block's tail is a scalar on purpose: a call-tailed
+            // region block reads as "the region's value escapes" to
+            // the checker (E1010), and nothing here escapes
+            wcode = wcode
+        }
+        if failed {
             acc.status = 500
             acc.body_bytes = err_len(500, false, token)
             send_err(mut cn, 500, false, token)
             return true
         }
-        write_all(mut cn, head)?
-        write_bytes_all(mut cn, body)?
+        if wcode == 1 {
+            return closed
+        }
+        if wcode == 2 {
+            return io
+        }
         return !keep
     }
 
@@ -584,24 +654,93 @@ fn serve_file(
         return true
     }
     var streaming = true
+    if conn.is_tls(cn) {
+        // TLS: unregioned, as the small path (the session may retain;
+        // D24 residue). Byte-identical behavior to the pre-audit code.
+        while streaming {
+            var bad = false
+            let chunk = fs_read_chunk(fd, 65536) else |e| match e {
+                eof => {
+                    streaming = false
+                    List[int]()
+                },
+                io => {
+                    bad = true
+                    List[int]()
+                },
+            }
+            if bad {
+                fs_close(fd) else |_| {}
+                return true
+            }
+            if chunk.len > 0 {
+                var wcode = 0
+                write_bytes_all(mut cn, chunk) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+                if wcode != 0 {
+                    fs_close(fd) else |_| {}
+                    if wcode == 1 {
+                        return closed
+                    }
+                    return io
+                }
+            }
+        }
+        fs_close(fd) else |_| {}
+        return !keep
+    }
+    let sock = conn.fd(cn)
     while streaming {
         var bad = false
-        let chunk = fs_read_chunk(fd, 65536) else |e| match e {
-            eof => {
-                streaming = false
-                List[int]()
-            },
-            io => {
-                bad = true
-                List[int]()
-            },
+        var wcode = 0
+        // per-chunk region (ws10 audit): a 64 KiB chunk dies at each
+        // `}` instead of accumulating in the root region for the whole
+        // file length; the failed-write path also closes the fd, which
+        // the pre-audit `?` re-raise leaked.
+        region chunkr {
+            let chunk = fs_read_chunk(fd, 65536) else |e| match e {
+                eof => {
+                    streaming = false
+                    List[int]()
+                },
+                io => {
+                    bad = true
+                    List[int]()
+                },
+            }
+            if !bad && chunk.len > 0 {
+                net_write_bytes(sock, chunk) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    invalid => {
+                        wcode = 2
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+            }
+            // scalar tail on purpose — see the small-path region note
+            wcode = wcode
         }
         if bad {
             fs_close(fd) else |_| {}
             return true
         }
-        if chunk.len > 0 {
-            write_bytes_all(mut cn, chunk)?
+        if wcode == 1 {
+            fs_close(fd) else |_| {}
+            return closed
+        }
+        if wcode == 2 {
+            fs_close(fd) else |_| {}
+            return io
         }
     }
     fs_close(fd) else |_| {}
