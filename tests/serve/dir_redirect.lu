@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: serve conn tls proxy http config
+//! stage-src: serve conn tls proxy http config obs
 //!
 //! A directory with no trailing slash → 301 with an absolute Location
 //! (nginx's shape: http://<host>:<port>/<path>/ — the port appended
