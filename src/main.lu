@@ -229,7 +229,7 @@ fn bump_live(gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
 /// (checked-arithmetic spirit — a leak that made a generation immortal
 /// would be loud). Returns the rebuilt table. Total unless the
 /// invariant breaks (then it traps, by design).
-fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool) -> List[GenRow] {
+fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.gen == gen {
@@ -243,7 +243,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool) -> List[GenRow] {
                 } else {
                     nd = nd + 1
                 }
-                eprint("lobo: [notice] {shell.ev_connection_retired(gen, nlive)}")
+                ev_log(mut el, "notice", shell.ev_connection_retired(gen, nlive))
             }
             (mut out).push(GenRow {
                 conf: g.conf,
@@ -266,12 +266,12 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool) -> List[GenRow] {
 /// Retire every DRAINING generation that has reached zero connections:
 /// emit `generation-retired` with its accounting and drop it from the
 /// table. Total.
-fn retire_zero(gens: List[GenRow], now: int) -> List[GenRow] {
+fn retire_zero(gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.state == "draining" && g.live == 0 {
             let age = now - g.since_ms
-            eprint("lobo: [notice] {shell.ev_generation_retired(g.gen, g.drained, g.aborted, age)}")
+            ev_log(mut el, "notice", shell.ev_generation_retired(g.gen, g.drained, g.aborted, age))
         } else {
             (mut out).push(g)
         }
@@ -428,6 +428,159 @@ fn ssl_listen_addr(c: config.Conf) -> str {
     ""
 }
 
+// ------------------------------------------------------------------
+// the log sinks (ws09) — the entry owns the outputs: per-output
+// bounded sinks built from the frozen model, pumped once per poll
+// pass (emit never blocks; a pass does ONE bounded append per sink),
+// cycled by `reopen`, flushed on quit/stop. The rows are LOCAL
+// structs over obs values (the checked tier refuses List[<imported
+// struct>]() — the GenRow pattern), rebuilt on mutation, never
+// index-assigned.
+// ------------------------------------------------------------------
+
+/// One access-log output: the sink plus its rendering door (the
+/// compat format text + escape mode, or the native JSON line).
+struct SinkRow {
+    s: obs.Sink,
+    json: bool,
+    fmttext: str,
+    esc: str,
+}
+
+/// One finished request awaiting the pass's pump (the local-wrapper
+/// List shape).
+struct AccRow {
+    a: obs.Access,
+}
+
+/// The error-log output (`have` false = stderr only, as before ws09).
+struct ELog {
+    s: obs.Sink,
+    have: bool,
+    json: bool,
+    level: str,
+}
+
+/// A config log path against the prefix (absolute carries). Total.
+fn resolve_log_path(prefix: str, p: str) -> str {
+    if p.starts_with("/") {
+        return p
+    }
+    "{prefix}/{p}"
+}
+
+/// The access-output rows of a frozen model. Total (nothing opens
+/// until the first flush). A reload rebuilds — nginx's old workers
+/// keep old-config logs, lobo's one process logs through the CURRENT
+/// generation's outputs (named delta, docs/LOGGING.md).
+fn build_sinks(c: config.Conf, prefix: str) -> List[SinkRow] {
+    var out = List[SinkRow]()
+    var i: int = 0
+    let n = config.access_out_count(c)
+    while i < n {
+        let path = resolve_log_path(prefix, config.access_out_path(c, i))
+        (mut out).push(SinkRow {
+            s: obs.sink_new(path, config.access_out_buffer(c, i)),
+            json: config.access_out_json(c, i),
+            fmttext: config.access_out_fmt(c, i),
+            esc: config.access_out_esc(c, i),
+        })
+        i = i + 1
+    }
+    out
+}
+
+/// The error-log output of a frozen model ("" path = none). Total.
+fn build_elog(c: config.Conf, prefix: str) -> ELog {
+    let p = config.errlog_path(c)
+    if p.is_empty() {
+        return ELog { s: obs.sink_new("", 0), have: false, json: false, level: "error" }
+    }
+    ELog {
+        s: obs.sink_new(resolve_log_path(prefix, p), 0),
+        have: true,
+        json: config.errlog_json(c),
+        level: config.errlog_level(c),
+    }
+}
+
+/// The ws09 event seam: STDERR keeps every line exactly as before
+/// (the ws02 seam — the rig and the signal witness read it), and the
+/// configured error_log receives the level-gated copy in its door's
+/// shape (nginx text or JSON lines). Total (emit never blocks).
+fn ev_log(mut el: ELog, level: str, body: str) {
+    eprint("lobo: [{level}] {body}")
+    if el.have && obs.level_passes(level, el.level) {
+        let ms = time_unix_ms()
+        let line = if el.json { obs.render_error_jsonl(level, body, ms) } else {
+            obs.render_error(level, body, ms)
+        }
+        obs.sink_emit(mut el.s, line)
+    }
+}
+
+/// Pump the access sinks: render this pass's records through each
+/// output's door, one bounded flush per sink, drops reported LOUDLY
+/// through the event seam. Returns the rebuilt rows. fs tier.
+fn pump_sinks(rows: List[SinkRow], accs: List[AccRow], optin: str, mut el: ELog) -> List[SinkRow] {
+    var out = List[SinkRow]()
+    for r in rows {
+        var sk = r.s
+        if accs.len > 0 {
+            let f = obs.compile(r.fmttext)
+            for ar in accs {
+                let line = if r.json { obs.render_access_jsonl(ar.a, optin.words()) } else {
+                    obs.render_access(f, ar.a, r.esc)
+                }
+                obs.sink_emit(mut sk, line)
+            }
+        }
+        let _ = obs.sink_flush(mut sk)
+        let note = obs.sink_drop_note(mut sk)
+        if !note.is_empty() {
+            ev_log(mut el, "warn", note)
+        }
+        (mut out).push(SinkRow { s: sk, json: r.json, fmttext: r.fmttext, esc: r.esc })
+    }
+    out
+}
+
+/// Flush the error-log sink (its own drop note goes to stderr only —
+/// never recurse into the seam that overflowed). fs tier.
+fn flush_elog(el: ELog) -> ELog {
+    var sk = el.s
+    if el.have {
+        let _ = obs.sink_flush(mut sk)
+        let note = obs.sink_drop_note(mut sk)
+        if !note.is_empty() {
+            eprint("lobo: [warn] {note}")
+        }
+    }
+    ELog { s: sk, have: el.have, json: el.json, level: el.level }
+}
+
+/// Close every access output (flushing first) so the NEXT flush
+/// reopens at the configured paths — the `reopen` verb's action, and
+/// the quit path's final flush. Returns the rebuilt rows. fs tier.
+fn reopen_sinks(rows: List[SinkRow]) -> List[SinkRow] {
+    var out = List[SinkRow]()
+    for r in rows {
+        var sk = r.s
+        obs.sink_reopen(mut sk)
+        (mut out).push(SinkRow { s: sk, json: r.json, fmttext: r.fmttext, esc: r.esc })
+    }
+    out
+}
+
+/// The error-log twin of reopen_sinks. fs tier.
+fn reopen_elog(el: ELog) -> ELog {
+    var sk = el.s
+    if el.have {
+        obs.sink_reopen(mut sk)
+    }
+    ELog { s: sk, have: el.have, json: el.json, level: el.level }
+}
+
 fn serve_main(prefix: str, conf: str) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
@@ -548,6 +701,14 @@ fn serve_main(prefix: str, conf: str) -> int {
     let lim = http.default_limits()
     let shutdown_ms = shell.shutdown_timeout_ms(c0)
 
+    // ws09: the log outputs — per-output bounded sinks off the frozen
+    // model (nothing opens until the first flush), the error-log
+    // mirror (stderr keeps every line — the ws02 seam the rig reads),
+    // and the JSON door's header opt-in list.
+    var asinks = build_sinks(c0, prefix)
+    var elog = build_elog(c0, prefix)
+    var optin = config.log_headers_join(c0)
+
     // ws06: the ACME renewal daemon. When `cert auto` is on, arm the
     // challenge webroot (the http-01 route serves from it) and build
     // the issuance flow, ticked spawn-free in the poll loop below. The
@@ -584,7 +745,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     let where = if have_http { "127.0.0.1:{hport} (port {hport})" } else {
         "(no plaintext listener)"
     }
-    eprint("lobo: [notice] serving on {where}, control {ctrl_ep}, pid file {pidp}")
+    ev_log(mut elog, "notice", "serving on {where}, control {ctrl_ep}, pid file {pidp}")
 
     // signal reception (wsm01, s114 in the pin): register interest in
     // RELOAD|TERMINATE|QUIT by MEANING, plus the probe bit (UPGRADE —
@@ -598,10 +759,12 @@ fn serve_main(prefix: str, conf: str) -> int {
         sig_on = false
     }
     if sig_on {
-        eprint("lobo: [notice] signal reception armed (HUP=reload, TERM=stop, QUIT=quit)")
+        ev_log(mut elog, "notice", "signal reception armed (HUP=reload, TERM=stop, QUIT=quit)")
     } else {
-        eprint(
-            "lobo: [notice] signal reception unavailable on this platform; the control channel is the trigger",
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception unavailable on this platform; the control channel is the trigger",
         )
     }
 
@@ -619,8 +782,8 @@ fn serve_main(prefix: str, conf: str) -> int {
         aborted: 0,
         shash: h1,
     })
-    eprint("lobo: [notice] {shell.ev_generation_loaded(1, h1)}")
-    eprint("lobo: [notice] {shell.ev_generation_activated(1)}")
+    ev_log(mut elog, "notice", shell.ev_generation_loaded(1, h1))
+    ev_log(mut elog, "notice", shell.ev_generation_activated(1))
 
     // the connection table (parallel primitive lists — a List of a
     // local/primitive type constructs on every lane; rebuilt each pass)
@@ -629,6 +792,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     var ccarry = List[str]()
     var cserved = List[int]()
     var cidle = List[int]()
+    var cstart = List[int]()
 
     var running = true
     var quitting = false
@@ -675,7 +839,7 @@ fn serve_main(prefix: str, conf: str) -> int {
             }
             if m > 0 && m != sprobe {
                 verb = shell.signal_verb(m)
-                eprint("lobo: [notice] {shell.ev_signal_received(m)}")
+                ev_log(mut elog, "notice", shell.ev_signal_received(m))
             }
         }
         if cc >= 0 || !verb.is_empty() {
@@ -696,9 +860,12 @@ fn serve_main(prefix: str, conf: str) -> int {
                 quitting = true
                 let held = held_of(gens, curgen)
                 gens = mark_draining(gens, curgen, now)
-                eprint("lobo: [notice] {shell.ev_generation_draining(curgen, held)}")
-                gens = retire_zero(gens, now)
+                ev_log(mut elog, "notice", shell.ev_generation_draining(curgen, held))
+                gens = retire_zero(gens, now, mut elog)
             } else if verb == "reopen" {
+                asinks = reopen_sinks(asinks)
+                elog = reopen_elog(elog)
+                ev_log(mut elog, "notice", "reopening log files")
                 reply(cc, "reopen: log outputs cycled (generation {curgen})\n")
             } else if verb == "reload" {
                 let ci = index_of(gens, curgen)
@@ -727,10 +894,19 @@ fn serve_main(prefix: str, conf: str) -> int {
                         )
                     }
                     gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
-                    eprint("lobo: [notice] {shell.ev_generation_draining(curgen, held)}")
-                    eprint("lobo: [notice] {shell.ev_generation_loaded(ng.gen, nhash)}")
-                    eprint("lobo: [notice] {shell.ev_generation_activated(ng.gen)}")
-                    gens = retire_zero(gens, now)
+                    ev_log(mut elog, "notice", shell.ev_generation_draining(curgen, held))
+                    ev_log(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
+                    ev_log(mut elog, "notice", shell.ev_generation_activated(ng.gen))
+                    gens = retire_zero(gens, now, mut elog)
+                    // ws09: the log outputs follow the CURRENT
+                    // generation (named delta — nginx's old workers
+                    // keep old-config logs; lobo's one process logs
+                    // through the live model's outputs)
+                    asinks = reopen_sinks(asinks)
+                    asinks = build_sinks(ng.conf, prefix)
+                    elog = reopen_elog(elog)
+                    elog = build_elog(ng.conf, prefix)
+                    optin = config.log_headers_join(ng.conf)
                 }
                 reply(cc, "{ng.note}\n")
             } else {
@@ -758,6 +934,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                 (mut ccarry).push("")
                 (mut cserved).push(0)
                 (mut cidle).push(now)
+                (mut cstart).push(now)
             }
         }
 
@@ -803,7 +980,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                     var tcn = conn.tls_conn(tconn, z)
                     serve.serve_conn_cn(mut tcn, tconf, opts, lim, hport)
                 }
-                gens = on_conn_close(gens, tgen, false)
+                gens = on_conn_close(gens, tgen, false, mut elog)
             }
         }
 
@@ -816,6 +993,8 @@ fn serve_main(prefix: str, conf: str) -> int {
         var ncarry = List[str]()
         var nserved = List[int]()
         var nidle = List[int]()
+        var ncstart = List[int]()
+        var pass_accs = List[AccRow]()
         var k: int = 0
         let ktot = cfds.len
         while k < ktot {
@@ -824,12 +1003,30 @@ fn serve_main(prefix: str, conf: str) -> int {
             let car = ccarry[k]
             let sv = cserved[k]
             let idle0 = cidle[k]
+            let cs0 = cstart[k]
             let cconf = conf_for(gens, cg)
             let st = serve.conn_step(fd, cconf, opts, lim, hport, car, sv, 12)
             var close_it = st.close
             var new_idle = idle0
             if st.active {
                 new_idle = now
+            }
+            // ws09: a served request becomes an access record — the
+            // entry stamps the times serve cannot know (wall clock,
+            // and the span since this request's first byte)
+            var new_start = cs0
+            if st.logged {
+                var a2 = st.acc
+                a2.unix_ms = now
+                var span = now - cs0
+                if span < 0 {
+                    span = 0
+                }
+                a2.req_ms = span
+                (mut pass_accs).push(AccRow { a: a2 })
+                new_start = now
+            } else if !st.active && st.carry.is_empty() {
+                new_start = now
             }
             var aborted_flag = false
             if !close_it && !st.active && now - new_idle >= opts.keepalive_timeout_ms {
@@ -844,13 +1041,14 @@ fn serve_main(prefix: str, conf: str) -> int {
             }
             if close_it {
                 net_close(fd) else |_| {}
-                gens = on_conn_close(gens, cg, aborted_flag)
+                gens = on_conn_close(gens, cg, aborted_flag, mut elog)
             } else {
                 (mut nfds).push(fd)
                 (mut ngens).push(cg)
                 (mut ncarry).push(st.carry)
                 (mut nserved).push(st.served)
                 (mut nidle).push(new_idle)
+                (mut ncstart).push(new_start)
             }
             k = k + 1
         }
@@ -859,6 +1057,13 @@ fn serve_main(prefix: str, conf: str) -> int {
         ccarry = ncarry
         cserved = nserved
         cidle = nidle
+        cstart = ncstart
+
+        // ws09: pump the pass's records through every access output
+        // (ONE bounded append per sink per pass — emit never blocked
+        // the serve path) and flush the error mirror
+        asinks = pump_sinks(asinks, pass_accs, optin, mut elog)
+        elog = flush_elog(elog)
 
         // 3b. ws06: the renewal daemon tick — spawn-free, in the loop's
         // own bookkeeping (D7). Acts only when the flow's schedule is
@@ -874,29 +1079,39 @@ fn serve_main(prefix: str, conf: str) -> int {
                 let rssl = config.ssl_resolve(conf_for(gens, current_gen(gens)), prefix)
                 if config.ssl_ok(rssl) {
                     ssl0 = rssl
-                    eprint(
-                        "lobo: [notice] cert auto: issued/renewed {auto_primary}; new TLS connections serve the fresh certificate (no reload)",
+                    ev_log(
+                        mut elog,
+                        "notice",
+                        "cert auto: issued/renewed {auto_primary}; new TLS connections serve the fresh certificate (no reload)",
                     )
                 } else {
-                    eprint(
-                        "lobo: [error] cert auto: issued a certificate the server cannot load ({rssl.err}); keeping the previous certificates",
+                    ev_log(
+                        mut elog,
+                        "error",
+                        "cert auto: issued a certificate the server cannot load ({rssl.err}); keeping the previous certificates",
                     )
                 }
             } else if ev == "failed" {
-                eprint(
-                    "lobo: [error] cert auto: issuance/renewal attempt failed: {flow.err} (will retry with backoff)",
+                ev_log(
+                    mut elog,
+                    "error",
+                    "cert auto: issuance/renewal attempt failed: {flow.err} (will retry with backoff)",
                 )
             }
         }
 
         // 4. retire drained generations, 5. finish a quit once empty
-        gens = retire_zero(gens, now)
+        gens = retire_zero(gens, now, mut elog)
         if quitting && cfds.len == 0 {
             running = false
         }
     }
 
-    // shutdown: close any still-open connections, the listeners, pid
+    // shutdown: flush-and-close the log outputs FIRST (the ws09
+    // flush-on-quit rule: the last request of a quit run is in the
+    // log), then close connections, listeners, pid
+    asinks = reopen_sinks(asinks)
+    elog = reopen_elog(elog)
     for fd in cfds {
         net_close(fd) else |_| {}
     }

@@ -1,0 +1,192 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! THE COMPAT DOOR, END TO END (ws09 §2/§4): spawn the real lobo,
+//! serve real requests, and assert the ACCESS LOG — the log-assertion
+//! rig mode the contract names. Pins: the combined default (no format
+//! arg), the RAW $request (a %41 target logs percent-encoded while
+//! the decoded file serves), escape=default on an attacker header
+//! (the log-injection defence observable in the file), the error_log
+//! file carrying the ws08 vocabulary in nginx's text shape, `reopen`
+//! cycling the output (the logrotate flow), and FLUSH-ON-QUIT (the
+//! contract's writer-shutdown rule: the last request of a quit run is
+//! present). Loopback only, OS-chosen ports, scratch cleared at START.
+
+use obs
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn ask(port: int, reqtext: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn line_with(text: str, needle: str) -> str {
+    for l in text.lines() {
+        if l.contains(needle) {
+            return l
+        }
+    }
+    ""
+}
+
+fn main() -> !int {
+    let d = "ws09_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/index.html", "COMBINED-DOOR\n")?
+    fs_write_text("{d}/w/A.html", "RAW-REQ\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid ws09_e2e/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  access_log ws09_e2e/access.log;\n  error_log ws09_e2e/error.log info;\n  server {{ listen 127.0.0.1:{hp}; root ws09_e2e/w; index index.html; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // the request set: 200, 404, RAW percent-encoded target, an
+    // attacker header through escape=default
+    let r1 = ask(
+        hp,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nUser-Agent: rig-UA/1.0\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r1.starts_with("HTTP/1.1 200 OK"), "r1 served: {r1}")
+    let r2 = ask(hp, "GET /nosuch HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r2.starts_with("HTTP/1.1 404"), "r2 404")
+    let r3 = ask(hp, "GET /%41.html?q=%20sp HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r3.starts_with("HTTP/1.1 200 OK"), "r3 decoded serve: {r3}")
+    assert(r3.contains("RAW-REQ"), "r3 served the decoded file")
+    let r4 = ask(
+        hp,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nUser-Agent: a\"b\r\nReferer: http://r.example/x\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r4.starts_with("HTTP/1.1 200 OK"), "r4 served")
+
+    // reopen: rotate the file, cycle, and the next request lands fresh
+    time_sleep_ms(150)
+    fs_rename("{d}/access.log", "{d}/access.log.1") else |_| {}
+    let rr = shell.control_send(ep, "reopen") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control reopen failed")
+        ""
+    }
+    assert(rr.contains("log outputs cycled"), "reopen replies: {rr}")
+    let r5 = ask(
+        hp,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nUser-Agent: after-rotate/1\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r5.starts_with("HTTP/1.1 200 OK"), "r5 served")
+
+    // quit — the flush-on-quit rule makes r5 present afterward
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "lobo exited 0 (got {code})")
+
+    // ---- the rotated file: the pre-reopen lines, combined-shaped
+    let rot = fs_read_text("{d}/access.log.1")?
+    let l1 = line_with(rot, "GET /index.html HTTP/1.1\" 200")
+    assert(!l1.is_empty(), "the 200 line exists:\n{rot}")
+    assert(l1.starts_with("127.0.0.1 - - ["), "combined preamble: {l1}")
+    assert(l1.contains("\"GET /index.html HTTP/1.1\" 200 14 "), "status+body bytes (14): {l1}")
+    assert(l1.contains("\"rig-UA/1.0\""), "the UA field: {l1}")
+    let l2 = line_with(rot, "/nosuch")
+    assert(l2.contains("\"GET /nosuch HTTP/1.1\" 404 "), "the 404 line: {l2}")
+    assert(l2.ends_with("\"-\" \"-\""), "missing referer/UA are dashes: {l2}")
+    let l3 = line_with(rot, "%41")
+    assert(
+        l3.contains("\"GET /%41.html?q=%20sp HTTP/1.1\" 200 8 "),
+        "the RAW request line, pre-decode: {l3}",
+    )
+    let l4 = line_with(rot, "x22")
+    assert(l4.contains("\"http://r.example/x\""), "referer carried: {l4}")
+    let evil = obs.esc_default("a\"b")
+    assert(evil == "a\\x22b" && rot.contains(evil), "escape=default pinned in the FILE: {l4}")
+
+    // the timestamp is the oracle's bracket shape (UTC — named delta)
+    assert(l1.contains(" +0000] "), "the UTC bracket clock: {l1}")
+
+    // ---- the fresh file: exactly the post-reopen request (flush-on-quit)
+    let fresh = fs_read_text("{d}/access.log")?
+    assert(fresh.contains("\"after-rotate/1\""), "the post-rotate request landed fresh:\n{fresh}")
+    assert(!fresh.contains("rig-UA/1.0"), "the pre-rotate lines stayed rotated")
+
+    // ---- the error log: the ws08 vocabulary in nginx's text shape
+    let el = fs_read_text("{d}/error.log")?
+    assert(el.contains("[notice] generation-loaded gen=1 id="), "the loaded event: {el}")
+    assert(el.contains("[notice] serving on 127.0.0.1:"), "the serving notice carried")
+    assert(el.contains("[notice] generation-draining gen=1"), "the quit drain event carried")
+    assert(line_with(el, "generation-loaded").starts_with("20"), "the error-date preamble")
+
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
