@@ -1,0 +1,130 @@
+//! member: true
+//! config/limitsconf — the ws10 fence-and-budget accessors: the
+//! perimeter directives that bound INPUTS (`client_max_body_size`,
+//! `large_client_header_buffers` — nginx-named, oracle-probed
+//! diagnostics) and the lobo-native `memory_budget` (the per-request
+//! admitted-bytes budget; docs/BUDGET.md is the model). Resolution is
+//! v0's first-server-else-http, the D29 pattern logconf set — server
+//! selection is host-blind at this pin, so one effective server; a
+//! location-level `client_max_body_size` parses and is NAMED inert
+//! (lint LOBO-L009, the L005 pattern). serve/ assembles these into
+//! http.Limits (`serve.resolve_limits`) — config cannot import http
+//! (the ARCHITECTURE direction), so the accessors answer raw bytes
+//! and serve owns the Limits shape.
+
+/// The row index of directive `name` at the effective level: the
+/// first server block's own row wins, else an http-level row, else
+/// -1. Total.
+fn eff_row(c: Conf, name: str) -> int {
+    let fs = first_server(c)
+    var http_row: int = -1
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == name && c.args_n[i] >= 1 {
+            if fs >= 0 && c.parent[i] == fs {
+                return i
+            }
+            if c.ctx[i] == "http" && http_row < 0 {
+                http_row = i
+            }
+        }
+        i = i + 1
+    }
+    http_row
+}
+
+/// The effective `client_max_body_size` in bytes: 0 = unlimited
+/// (nginx's rule), -1 = no effective directive (serve falls back to
+/// the 1m default) or an invalid value (the -t half already named
+/// it; load stays tolerant). Total.
+pub fn body_max(c: Conf) -> int {
+    let r = eff_row(c, "client_max_body_size")
+    if r < 0 {
+        return -1
+    }
+    size_bytes(c.argp[c.args_at[r]])
+}
+
+/// The effective `large_client_header_buffers` pair as (count, size
+/// bytes); (-1, -1) when absent or invalid. Total.
+pub fn header_buffers(c: Conf) -> (int, int) {
+    let r = eff_row(c, "large_client_header_buffers")
+    if r < 0 || c.args_n[r] < 2 {
+        return (-1, -1)
+    }
+    let n = digits_of(c.argp[c.args_at[r]])
+    let sz = size_bytes(c.argp[c.args_at[r] + 1])
+    if n <= 0 || sz <= 0 {
+        return (-1, -1)
+    }
+    (n, sz)
+}
+
+/// The effective `memory_budget` in bytes: 0 = off (absent, `0`, or
+/// an invalid value the -t half named), else the per-request
+/// admitted-bytes budget. Total.
+pub fn mem_budget(c: Conf) -> int {
+    let r = eff_row(c, "memory_budget")
+    if r < 0 {
+        return 0
+    }
+    let v = size_bytes(c.argp[c.args_at[r]])
+    if v < 0 {
+        return 0
+    }
+    v
+}
+
+/// A strictly-decimal positive int, or -1. Total.
+fn digits_of(s: str) -> int {
+    if s.is_empty() {
+        return -1
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 || b > 57 {
+            return -1
+        }
+        n = n * 10 + b - 48
+    }
+    n
+}
+
+/// The -t half: every fence/budget directive's VALUE parses, wherever
+/// it appears (not only the effective level — a bad size anywhere is
+/// a config error, as the oracle rules). First failure wins; "" when
+/// clean. The size spellings are the oracle's own, probed 2026-08-31
+/// against the pinned nginx: `"client_max_body_size" directive
+/// invalid value in <file>:<line>` (also -5, 10x, abc; `0` VALID),
+/// `"large_client_header_buffers" directive invalid value` (0 count,
+/// 0 size, bad unit). `memory_budget` is lobo-native but keeps the
+/// oracle's diagnostic shape. Total.
+pub fn limits_check(c: Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        let name = c.names[i]
+        if name == "client_max_body_size" && c.args_n[i] >= 1 {
+            if size_bytes(c.argp[c.args_at[i]]) < 0 {
+                return "\"client_max_body_size\" directive invalid value in {c.files[i]}:{c.lines[i]}"
+            }
+        } else if name == "large_client_header_buffers" && c.args_n[i] >= 2 {
+            let n = digits_of(c.argp[c.args_at[i]])
+            let sz = size_bytes(c.argp[c.args_at[i] + 1])
+            if n <= 0 || sz <= 0 {
+                return "\"large_client_header_buffers\" directive invalid value in {c.files[i]}:{c.lines[i]}"
+            }
+        } else if name == "client_header_buffer_size" && c.args_n[i] >= 1 {
+            if size_bytes(c.argp[c.args_at[i]]) <= 0 {
+                return "\"client_header_buffer_size\" directive invalid value in {c.files[i]}:{c.lines[i]}"
+            }
+        } else if name == "memory_budget" && c.args_n[i] >= 1 {
+            if size_bytes(c.argp[c.args_at[i]]) < 0 {
+                return "\"memory_budget\" directive invalid value in {c.files[i]}:{c.lines[i]}"
+            }
+        }
+        i = i + 1
+    }
+    ""
+}
