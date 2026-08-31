@@ -1,0 +1,156 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: serve conn tls proxy http config obs
+//!
+//! The ws10 exceed-site table, in process (docs/BUDGET.md §sites):
+//! every deterministic refusal site answers 503-with-a-name over a
+//! real loopback round-trip, and the FENCE-FIRST interplay rule holds
+//! both ways (over both limits -> the fence's 413; inside the fence
+//! but over the budget -> 503). HEAD charges no file bytes. The
+//! perimeter directives move the fence statuses (414/400) exactly as
+//! nginx's would. Loopback only, dial-self, serve_conn (the same
+//! lifecycle the step loop factors).
+
+use config
+use serve
+
+fn read_reply(cli: int) -> str ! {io} {
+    net_deadline(cli, 3000) else |_| {
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 4096) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                return io
+            },
+            utf8 => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    net_close(cli) else |_| {}
+    out
+}
+
+/// One request against a fresh one-shot server under `src`'s config.
+fn round(src: str, req: str) -> str ! {io, refused, timeout, closed} {
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = serve.resolve_limits(c)
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    net_write(cli, req)?
+    let conn = net_accept(l)?
+    serve.serve_conn(conn, c, opts, lim, port)
+    let reply = read_reply(cli)?
+    net_close(l) else |_| {}
+    reply
+}
+
+fn pad(n: int) -> str {
+    var v = "p"
+    while v.len < n {
+        v = "{v}{v}"
+    }
+    v[0..n]
+}
+
+fn main() -> !int {
+    let root = "ws10_br"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all(root)?
+    // a 16 KiB file — the `file` site's body
+    var big = ""
+    while big.len < 16384 {
+        big = "{big}0123456789abcdef"
+    }
+    fs_write_text("{root}/big.html", big)?
+    fs_write_text("{root}/index.html", "<html>ok</html>\n")?
+
+    let base = "http {{\n  types {{ text/html html; }}\n  memory_budget 2k;\n  server {{ listen 8080; root ws10_br; }}\n}}\n"
+
+    // ---- site `head`: a 3 KiB head under the fences, over the budget
+    let r1 = round(
+        base,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nX-Pad: {pad(3000)}\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r1.starts_with("HTTP/1.1 503 Service Temporarily Unavailable"), "head site 503: {r1}")
+    assert(r1.contains("Connection: close"), "budget 503 closes")
+
+    // ---- under the budget: the same request without the pad serves
+    let r2 = round(base, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r2.starts_with("HTTP/1.1 200 OK"), "under budget serves: {r2}")
+
+    // ---- interplay 1: over BOTH client_max_body_size and the budget
+    // -> the fence's 413 (the more specific error wins)
+    let fenced = "http {{\n  types {{ text/html html; }}\n  client_max_body_size 100;\n  memory_budget 2k;\n  server {{ listen 8080; root ws10_br; }}\n}}\n"
+    let r3 = round(
+        fenced,
+        "POST /index.html HTTP/1.1\r\nHost: x\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r3.starts_with("HTTP/1.1 413 Request Entity Too Large"), "fence first: {r3}")
+
+    // ---- interplay 2: inside the fence, over the budget -> 503,
+    // refused PRE-ADMISSION (no body bytes were sent at all)
+    let r4 = round(
+        base,
+        "POST /index.html HTTP/1.1\r\nHost: x\r\nContent-Length: 5000\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r4.starts_with("HTTP/1.1 503 Service Temporarily Unavailable"), "body site 503: {r4}")
+
+    // ---- site `body-chunked`: the accumulating body crosses the budget
+    var chunks = ""
+    var i = 0
+    while i < 4 {
+        chunks = "{chunks}400\r\n{pad(1024)}\r\n"
+        i = i + 1
+    }
+    chunks = "{chunks}0\r\n\r\n"
+    let r5 = round(
+        base,
+        "POST /index.html HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n{chunks}",
+    )?
+    assert(r5.starts_with("HTTP/1.1 503 Service Temporarily Unavailable"), "chunked site 503: {r5}")
+
+    // ---- site `file`: a small head, a 16 KiB body the stat names ->
+    // refused before any response byte; HEAD charges nothing and serves
+    let r6 = round(base, "GET /big.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r6.starts_with("HTTP/1.1 503 Service Temporarily Unavailable"), "file site 503: {r6}")
+    let r7 = round(base, "HEAD /big.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r7.starts_with("HTTP/1.1 200 OK"), "HEAD charges no file bytes: {r7}")
+    assert(!r7.contains("0123456789abcdef"), "HEAD carries no body")
+
+    // ---- the perimeter moves the fence statuses (nginx-named knobs):
+    // a request line over the buffer size -> 414; a header line over
+    // it -> 400 with the header-too-large body
+    let buffed = "http {{\n  types {{ text/html html; }}\n  large_client_header_buffers 2 1k;\n  server {{ listen 8080; root ws10_br; }}\n}}\n"
+    let r8 = round(buffed, "GET /{pad(1500)} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r8.starts_with("HTTP/1.1 414 Request-URI Too Large"), "shrunk line fence: {r8}")
+    let r9 = round(
+        buffed,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nX-Pad: {pad(1500)}\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r9.starts_with("HTTP/1.1 400 Bad Request"), "shrunk header-line fence: {r9}")
+    assert(r9.contains("Request Header Or Cookie Too Large"), "the special 400 body: {r9}")
+
+    // ---- and with no budget armed, the big file serves whole
+    let open = "http {{\n  types {{ text/html html; }}\n  server {{ listen 8080; root ws10_br; }}\n}}\n"
+    let r10 = round(open, "GET /big.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(r10.starts_with("HTTP/1.1 200 OK"), "no budget, no refusal: {r10}")
+    assert(r10.contains("0123456789abcdef"), "the body arrived")
+
+    fs_remove_dir_all(root) else |_| {}
+    0
+}
