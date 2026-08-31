@@ -1,8 +1,43 @@
 module pkg :: obs
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 351c45cb035c5c82bac259f2fde59be9b25a439a9c995aa2eee9ef0e10d31ea9
-  pkg_hash    351c45cb035c5c82bac259f2fde59be9b25a439a9c995aa2eee9ef0e10d31ea9
+  export_hash 04d43f898336da48598b986cc9adbded4923d1e840c62d015cab1d5d1da0abdf
+  pkg_hash    04d43f898336da48598b986cc9adbded4923d1e840c62d015cab1d5d1da0abdf
   deps: (none)
   items:
-    [0] pub version — fn version() -> str
+    [0] pub access_header — fn access_header(mut a: self.Access, name: str, value: str) · regions (ρ1, -, -) -> -
+    [1] pub access_new — fn access_new() -> self.Access · regions () -> ρ_caller
+    [2] pub access_schema — fn access_schema() -> int
+    [3] pub combined — fn combined() -> str
+    [4] pub compile — fn compile(f: str) -> self.Fmt · regions (-) -> ρ_caller
+    [5] pub err_date — fn err_date(unix_ms: int) -> str
+    [6] pub esc_default — fn esc_default(v: str) -> str
+    [7] pub esc_json — fn esc_json(v: str) -> str
+    [8] pub esc_ok — fn esc_ok(esc: str) -> bool
+    [9] pub event_fields — fn event_fields(msg: str) -> str
+    [10] pub fmt_loses — fn fmt_loses(f: str) -> str
+    [11] pub fmt_problem — fn fmt_problem(f: str) -> str
+    [12] pub level_passes — fn level_passes(level: str, conf_level: str) -> bool
+    [13] pub level_rank — fn level_rank(level: str) -> int
+    [14] pub render_access — fn render_access(f: self.Fmt, a: self.Access, esc: str) -> str · regions (ρ1, ρ2, -) -> -
+    [15] pub render_access_jsonl — fn render_access_jsonl(a: self.Access, header_optin: prelude.List[str]) -> str · regions (ρ1, ρ2) -> -
+    [16] pub render_error — fn render_error(level: str, msg: str, unix_ms: int) -> str
+    [17] pub render_error_jsonl — fn render_error_jsonl(level: str, msg: str, unix_ms: int) -> str
+    [18] pub seconds3 — fn seconds3(ms: int) -> str
+    [19] pub sink_drop_note — fn sink_drop_note(mut s: self.Sink) -> str · regions (ρ1) -> -
+    [20] pub sink_emit — fn sink_emit(mut s: self.Sink, line: str) · regions (ρ1, -) -> -
+    [21] pub sink_flush — fn sink_flush(mut s: self.Sink) -> bool · regions (ρ1) -> -
+    [22] pub sink_new — fn sink_new(path: str, cap: int) -> self.Sink · regions (-, -) -> ρ_caller
+    [23] pub sink_reopen — fn sink_reopen(mut s: self.Sink) · regions (ρ1) -> -
+    [24] pub time_iso8601 — fn time_iso8601(unix_ms: int) -> str
+    [25] pub time_local — fn time_local(unix_ms: int) -> str
+    [26] pub var_note — fn var_note(name: str) -> str
+    [27] pub var_status — fn var_status(name: str) -> str
+    [28] pub var_table — fn var_table() -> prelude.List[self.VarSpec] · regions () -> ρ_caller
+    [29] pub var_value — fn var_value(name: str, a: self.Access) -> str · regions (-, ρ1) -> -
+    [30] pub vars_markdown — fn vars_markdown() -> str
+    [31] pub version — fn version() -> str
+    [32] pub Access — struct Access { remote_addr: str, unix_ms: int, request: str, status: int, body_bytes: int, req_ms: int, hnames: prelude.List[str], hvals: prelude.List[str], proxied: bool, up_addr: str, up_status: int, up_ms: int }
+    [33] pub Fmt — struct Fmt { lits: prelude.List[str], vars: prelude.List[str] }
+    [34] pub Sink — struct Sink { path: str, buf: str, cap: int, dropped: int, dropped_total: int, fd: int, is_open: bool }
+    [35] pub VarSpec — struct VarSpec { name: str, status: str, note: str }
 
