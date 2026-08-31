@@ -34,5 +34,5 @@ effective directives (the winning chain, with provenance):
   expires 30d;  # from tests/config-corpus/static-site/nginx.conf:40
   add_header Cache-Control "public, immutable";  # from tests/config-corpus/static-site/nginx.conf:41
   access_log off;  # from tests/config-corpus/static-site/nginx.conf:42
-  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `tcp_nopush`, `keepalive_timeout`, `server_tokens`, `etag`, `charset`, `gzip`, `gzip_comp_level`, `gzip_min_length`, `gzip_vary`, `gzip_proxied`, `gzip_types`, `server_name`, `expires`, `add_header`, `access_log` (statuses: docs/directives.md)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `tcp_nopush`, `keepalive_timeout`, `server_tokens`, `etag`, `charset`, `gzip`, `gzip_comp_level`, `gzip_min_length`, `gzip_vary`, `gzip_proxied`, `gzip_types`, `server_name`, `expires`, `add_header` (statuses: docs/directives.md)
 decision: would serve: /srv/www/static/assets/app.css (not checked)

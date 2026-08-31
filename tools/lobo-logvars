@@ -1,0 +1,52 @@
+#!/bin/sh
+# lobo-logvars — generate/check docs/log-variables.md from the ws09
+# variable table (src/obs/obs.lu, obs.var_table) through the built
+# lobo binary (`lobo logvars-md`) — the lobo-directives pattern
+# applied to log variables. The page is the class-C ledger for
+# log_format: which variables carry, which refuse, and why. NEVER
+# hand-edited; the gauntlet runs --check after the tiers build.
+#
+#   tools/lobo-logvars --emit    regenerate docs/log-variables.md
+#   tools/lobo-logvars --check   regenerate and diff (default)
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+BIN=target/lobo-debug
+if [ ! -x "$BIN" ]; then
+    echo "lobo-logvars: FAILED — $BIN is missing; run the gauntlet's build step first (wolf build ./src/main.lu -o $BIN)" >&2
+    exit 1
+fi
+
+mode="${1:---check}"
+tmp="target/log-variables.md.$$"
+if ! "$BIN" logvars-md > "$tmp"; then
+    echo "lobo-logvars: FAILED — \`lobo logvars-md\` did not run" >&2
+    rm -f "$tmp"
+    exit 1
+fi
+
+case "$mode" in
+--emit)
+    mv "$tmp" docs/log-variables.md
+    echo "lobo-logvars: wrote docs/log-variables.md"
+    ;;
+--check)
+    if [ ! -f docs/log-variables.md ]; then
+        echo "lobo-logvars: FAILED — docs/log-variables.md is missing; run tools/lobo-logvars --emit and commit it with the table change" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+    if ! diff -u docs/log-variables.md "$tmp"; then
+        echo "lobo-logvars: FAILED — docs/log-variables.md drifted from the table; it is GENERATED (never hand-edited): run tools/lobo-logvars --emit and commit it with the table change" >&2
+        rm -f "$tmp"
+        exit 1
+    fi
+    rm -f "$tmp"
+    echo "lobo-logvars: docs/log-variables.md matches the table"
+    ;;
+*)
+    echo "lobo-logvars: unknown mode $mode (--emit | --check)" >&2
+    rm -f "$tmp"
+    exit 2
+    ;;
+esac

@@ -1,0 +1,180 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: checked
+//! stage-src: shell config
+//!
+//! THE NATIVE DOOR, END TO END (ws09 §2/§3): spawn the real lobo with
+//! `access_log ... format=json` + `log_headers`, serve real requests,
+//! quit, then hand EVERY line the server wrote to the toolchain's own
+//! RFC 8259 reader — "logs that parse", witnessed by a parser (the
+//! checked lane is json_valid's home, which is this file's one lane).
+//! Also the OVERFLOW-DROP acceptance: a second access_log on an
+//! unwritable path drops COUNTED and LOUDLY (the warn rides the
+//! error_log file, which is level-gated to warn so the notices prove
+//! the gate too) while serving is unharmed — a dropped log line never
+//! became a stalled request. Loopback only; scratch cleared at START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn ask(port: int, reqtext: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn line_with(text: str, needle: str) -> str {
+    for l in text.lines() {
+        if l.contains(needle) {
+            return l
+        }
+    }
+    ""
+}
+
+fn main() -> !int {
+    let d = "ws09_e2ej"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/index.html", "JSON-DOOR\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid ws09_e2ej/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  access_log ws09_e2ej/access.jsonl format=json;\n  access_log ws09_e2ej/no-such-dir/dead.log;\n  error_log ws09_e2ej/error.jsonl warn format=json;\n  log_headers User-Agent X-Req-Id;\n  server {{ listen 127.0.0.1:{hp}; root ws09_e2ej/w; index index.html; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // serving is UNHARMED by the unwritable second output, pass after
+    // pass — the drop never stalls a request
+    let r1 = ask(
+        hp,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nUser-Agent: json-rig/1\r\nX-Req-Id: rid-77\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r1.starts_with("HTTP/1.1 200 OK"), "r1 served: {r1}")
+    let r2 = ask(hp, "GET /gone HTTP/1.1\r\nHost: x\r\nX-Evil: a\"b\r\nConnection: close\r\n\r\n")?
+    assert(r2.starts_with("HTTP/1.1 404"), "r2 404")
+    let r3 = ask(
+        hp,
+        "GET /index.html HTTP/1.1\r\nHost: x\r\nUser-Agent: last-before-quit/1\r\nConnection: close\r\n\r\n",
+    )?
+    assert(r3.starts_with("HTTP/1.1 200 OK"), "r3 served")
+
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "lobo exited 0 (got {code})")
+
+    // ---- every access line PARSES (the acceptance is in the name)
+    let al = fs_read_text("{d}/access.jsonl")?
+    var lines: int = 0
+    for l in al.lines() {
+        if !l.is_empty() {
+            lines = lines + 1
+            assert(json_valid(l), "an access line failed the parser: {l}")
+            assert(l.starts_with("{{\"schema\":1,"), "schema-versioned: {l}")
+        }
+    }
+    assert(lines == 3, "three requests, three lines (flush-on-quit): {lines}\n{al}")
+
+    // typed numbers, the opt-in headers object, structural escaping
+    let j1 = line_with(al, "json-rig/1")
+    assert(j1.contains("\"status\":200"), "status is a NUMBER: {j1}")
+    assert(j1.contains("\"body_bytes_sent\":10"), "bytes are a NUMBER: {j1}")
+    assert(j1.contains("\"request_time\":0."), "request_time is a DECIMAL: {j1}")
+    assert(j1.contains("\"request\":\"GET /index.html HTTP/1.1\""), "the raw line: {j1}")
+    assert(
+        j1.contains("\"headers\":{{\"user-agent\":\"json-rig/1\",\"x-req-id\":\"rid-77\"}}"),
+        "the log_headers object: {j1}",
+    )
+    let j2 = line_with(al, "/gone")
+    assert(j2.contains("\"status\":404"), "the 404 line typed: {j2}")
+    assert(!j2.contains("headers"), "no opted-in header sent, no object: {j2}")
+    let j3 = line_with(al, "last-before-quit/1")
+    assert(!j3.is_empty(), "the last request of the quit run is PRESENT")
+
+    // ---- the drop acceptance: counted, loud, level-gated, and parsed
+    let el = fs_read_text("{d}/error.jsonl")?
+    var eline = ""
+    for l in el.lines() {
+        if !l.is_empty() {
+            assert(json_valid(l), "an error line failed the parser: {l}")
+            if l.contains("dropped") {
+                eline = l
+            }
+            assert(!l.contains("\"level\":\"notice\""), "warn-gated log carries no notices: {l}")
+        }
+    }
+    assert(eline.contains("\"level\":\"warn\""), "the drop note is a warn: {el}")
+    assert(eline.contains("no-such-dir/dead.log"), "the note names the output: {eline}")
+    assert(eline.contains("dropped"), "the drop is counted out loud: {eline}")
+
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

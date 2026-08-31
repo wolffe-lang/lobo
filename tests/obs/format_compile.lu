@@ -1,0 +1,68 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: obs
+//!
+//! The log_format compiler (ws09 §1): $name and ${name} split into
+//! literal/variable pieces; a bare $ is a literal; the variable TABLE
+//! gates what a format may name (implemented / planned / named_error /
+//! no-row — the class-C posture: config-time named errors, decided
+//! through fmt_problem here and rendered by config's log_check).
+
+use obs
+
+fn main() -> !int {
+    // combined, the compiled-in default: piece count and edges
+    let c = obs.compile(obs.combined())
+    assert(c.vars.len == 8, "combined has 8 variables, got {c.vars.len}")
+    assert(c.lits.len == 9, "lits is vars+1")
+    assert(c.vars[0] == "remote_addr", "first var")
+    assert(c.vars[7] == "http_user_agent", "last var")
+    assert(c.lits[1] == " - ", "the dash literal survives")
+    assert(c.lits[2] == " [", "the bracket literal")
+
+    // braced form, adjacency, lone dollar
+    let b = obs.compile("${{status}}x$status $}}")
+    assert(b.vars.len == 2, "braced + bare both compile")
+    assert(b.vars[0] == "status", "braced name")
+    assert(b.lits[1] == "x", "adjacent literal between vars")
+    assert(b.lits[2] == " $}}", "a $ with no name is a literal")
+
+    // an unclosed brace refuses the var and keeps the text
+    let u = obs.compile("a${{status b")
+    assert(u.vars.len == 0, "unclosed brace compiles to no var")
+
+    // table statuses
+    assert(obs.var_status("request") == "implemented", "request implemented")
+    assert(obs.var_status("http_user_agent") == "implemented", "http_* family")
+    assert(obs.var_status("http_") == "", "bare http_ is no variable")
+    assert(obs.var_status("upstream_status") == "implemented", "upstream trio")
+    assert(obs.var_status("msec") == "planned(ws12)", "msec planned")
+    assert(obs.var_status("uri") == "named_error", "uri refused by name")
+    assert(obs.var_status("no_such_var") == "", "no row at all")
+
+    // fmt_problem: first offender wins, kind|name|note
+    assert(obs.fmt_problem(obs.combined()) == "", "combined is clean")
+    let p1 = obs.fmt_problem("x $no_such_var y")
+    assert(p1 == "unknown|no_such_var|", "unknown mirrors the oracle: {p1}")
+    let p2 = obs.fmt_problem("x $status $uri")
+    assert(p2.starts_with("refused|uri|"), "named_error rows refuse: {p2}")
+    let p3 = obs.fmt_problem("$msec")
+    assert(p3.starts_with("refused|msec|"), "planned rows refuse too: {p3}")
+
+    // the loses-lint's evidence half
+    assert(obs.fmt_loses(obs.combined()) == "$request_time", "combined loses request_time")
+    assert(obs.fmt_loses("$request $status $body_bytes_sent $request_time") == "", "nothing lost")
+    let l = obs.fmt_loses("$remote_addr [$time_local]")
+    assert(l == "$status $body_bytes_sent $request_time $request", "all four named: {l}")
+
+    // the generated docs page carries every row
+    let md = obs.vars_markdown()
+    assert(md.contains("| `$request` | implemented |"), "docs page carries the rows")
+    assert(md.contains("| `$uri` | named_error |"), "docs page carries the refusals")
+
+    // escape-mode ladder
+    assert(obs.esc_ok("default") && obs.esc_ok("json") && obs.esc_ok("none"), "the three modes")
+    assert(!obs.esc_ok("zzz"), "unknown escaping refused (the oracle's emerg)")
+    0
+}

@@ -1,0 +1,664 @@
+//! member: true
+//! config/logconf — the log directive family (ws09): accessors for
+//! `log_format` / `access_log` / `error_log` / `log_headers` off the
+//! frozen model, and the -t validation half (log_check), wired into
+//! config.check like ws05's sslcert and ws06's certauto. The
+//! diagnostics mirror the pinned oracle's spellings where the oracle
+//! has one (probed 2026-08-30: unknown log format, unknown variable,
+//! duplicate log_format name, invalid log level, unknown escaping,
+//! no-buffer flush) and are LOBO-NAMED where the refusal is lobo's
+//! own (an unimplemented variable — the class-C posture: refused at
+//! load, never an empty string at runtime; gzip=/if= — named rows).
+//! RESOLUTION at v0 (documented, linted): the effective access_log
+//! set is the first server block's rows when it has any, else the
+//! http-level rows — serving is host-blind at this pin, so there is
+//! one effective server. A location-level access_log parses and is
+//! NAMED INERT by lint LOBO-L005 (never silently ignored). With no
+//! access_log directive lobo writes NO access log — a named delta
+//! (nginx defaults to logs/access.log combined); the directive table
+//! carries it.
+//! The variable table itself lives in obs/ (the module that renders);
+//! config/ validates through the shared spelling rules duplicated
+//! here would be a drift bomb, so logconf carries the FORMAT-level
+//! walk only and asks obs-shaped questions through pure local twins
+//! kept BYTE-COMPATIBLE by tests/config/log_directives.lu asserting
+//! against the obs answers. (config cannot import obs: obs is called
+//! by everyone and calls nobody — ARCHITECTURE.md's direction is the
+//! other way, so the TABLE question crosses in serve/main where both
+//! are in scope; here we only need "which $vars does this format
+//! name", a pure split.)
+//! Lane note: everything here is pure over the frozen model — all
+//! three lanes.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+// ------------------------------------------------------------------
+// small parsers (sizes, times) — nginx's units
+// ------------------------------------------------------------------
+
+/// Parse an nginx size ("32768", "16k", "1m") into bytes; -1 for a
+/// shape that is not a size. Total.
+pub fn size_bytes(s: str) -> int {
+    if s.is_empty() {
+        return -1
+    }
+    var v: int = 0
+    var i: int = 0
+    let n = s.len
+    for b in s.bytes() {
+        if b >= 48 && b <= 57 {
+            v = v * 10 + (b - 48)
+            i = i + 1
+        } else {
+            if i == 0 || i != n - 1 {
+                return -1
+            }
+            if b == 107 || b == 75 {
+                return v * 1024
+            }
+            if b == 109 || b == 77 {
+                return v * 1048576
+            }
+            return -1
+        }
+    }
+    v
+}
+
+/// Parse an nginx time ("5", "500ms", "5s", "1m", "2h") into ms; a
+/// bare number is SECONDS (the nginx rule). -1 for a non-time. Total.
+pub fn time_ms(s: str) -> int {
+    if s.is_empty() {
+        return -1
+    }
+    var v: int = 0
+    var digits: int = 0
+    var i: int = 0
+    let n = s.len
+    for b in s.bytes() {
+        if b >= 48 && b <= 57 {
+            v = v * 10 + (b - 48)
+            digits = digits + 1
+            i = i + 1
+        } else {
+            if digits == 0 {
+                return -1
+            }
+            let unit = s[i..n]
+            if unit == "ms" {
+                return v
+            }
+            if unit == "s" {
+                return v * 1000
+            }
+            if unit == "m" {
+                return v * 60000
+            }
+            if unit == "h" {
+                return v * 3600000
+            }
+            return -1
+        }
+    }
+    v * 1000
+}
+
+// ------------------------------------------------------------------
+// log_format
+// ------------------------------------------------------------------
+
+/// The row index of the `log_format` directive declaring `name`, or
+/// -1 (the name "combined" is compiled in and needs no row). Total.
+pub fn logfmt_row(c: Conf, name: str) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "log_format" && c.args_n[i] >= 1 && c.argp[c.args_at[i]] == name {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The escape mode a log_format row declares ("default" when the
+/// escape= parameter is absent). Total.
+pub fn logfmt_esc(c: Conf, row: int) -> str {
+    let at = c.args_at[row]
+    let nn = c.args_n[row]
+    var j: int = 1
+    while j < nn {
+        let a = c.argp[at + j]
+        if a.starts_with("escape=") {
+            return a[7..a.len]
+        }
+        j = j + 1
+    }
+    "default"
+}
+
+/// The format TEXT of a log_format row: every argument after the
+/// name except escape=, concatenated (the nginx multi-string rule).
+/// Total.
+pub fn logfmt_text(c: Conf, row: int) -> str {
+    let at = c.args_at[row]
+    let nn = c.args_n[row]
+    var out = ""
+    var j: int = 1
+    while j < nn {
+        let a = c.argp[at + j]
+        if !a.starts_with("escape=") {
+            out = "{out}{a}"
+        }
+        j = j + 1
+    }
+    out
+}
+
+/// The `combined` format string — the compiled-in default, identical
+/// to obs.combined (held identical by tests/config/log_directives.lu;
+/// config cannot import obs). Total.
+pub fn combined_text() -> str {
+    "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\""
+}
+
+// ------------------------------------------------------------------
+// the format walk (the pure split logconf needs for validation; the
+// authoritative table + renderer live in obs, asked in serve/main)
+// ------------------------------------------------------------------
+
+/// Whether byte `b` may appear in a $variable name. Total.
+fn is_var_byte(b: int) -> bool {
+    if b >= 97 && b <= 122 {
+        return true
+    }
+    if b >= 65 && b <= 90 {
+        return true
+    }
+    if b >= 48 && b <= 57 {
+        return true
+    }
+    b == 95
+}
+
+/// The space-joined variable names a format text names ($name and
+/// ${name} both; duplicates kept). Total.
+pub fn fmt_vars(f: str) -> str {
+    var out = ""
+    let bs = f.bytes()
+    let n = bs.len
+    var i: int = 0
+    while i < n {
+        if bs[i] == 36 {
+            var j = i + 1
+            var braced = false
+            if j < n && bs[j] == 123 {
+                braced = true
+                j = j + 1
+            }
+            var k = j
+            while k < n && is_var_byte(bs[k]) {
+                k = k + 1
+            }
+            var vend = k
+            var consumed = k
+            if braced {
+                if k < n && bs[k] == 125 {
+                    consumed = k + 1
+                } else {
+                    vend = j
+                    consumed = j
+                }
+            }
+            if vend > j {
+                let v = f[j..vend]
+                if out.is_empty() {
+                    out = v
+                } else {
+                    out = "{out} {v}"
+                }
+                i = consumed
+                continue
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// access_log resolution — the effective output set
+// ------------------------------------------------------------------
+
+/// The row index of the first `server` block, or -1. Total.
+fn first_server(c: Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "server" && c.kinds[i] == "b" && c.ctx[i] == "http" {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The effective access_log rows (v0 resolution: the first server
+/// block's rows when it has any, else the http-level rows), as a
+/// List of row indices. `access_log off` rows are INCLUDED (an off
+/// at the effective level silences that level, as nginx). Total.
+fn effective_rows(c: Conf) -> List[int] {
+    var srv_rows = List[int]()
+    var http_rows = List[int]()
+    let fs = first_server(c)
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "access_log" {
+            if c.ctx[i] == "server" && c.parent[i] == fs {
+                (mut srv_rows).push(i)
+            } else if c.ctx[i] == "http" {
+                (mut http_rows).push(i)
+            }
+        }
+        i = i + 1
+    }
+    if srv_rows.len > 0 {
+        return srv_rows
+    }
+    http_rows
+}
+
+/// Whether an access_log row is `off`. Total.
+fn row_is_off(c: Conf, row: int) -> bool {
+    c.args_n[row] >= 1 && c.argp[c.args_at[row]] == "off"
+}
+
+/// The number of effective access OUTPUTS (off rows excluded — an
+/// effective level that is only `off` has zero outputs). Total.
+pub fn access_out_count(c: Conf) -> int {
+    var n: int = 0
+    for r in effective_rows(c) {
+        if !row_is_off(c, r) {
+            n = n + 1
+        }
+    }
+    n
+}
+
+/// The row index of effective output `i` (-1 out of range). Total.
+fn out_row(c: Conf, i: int) -> int {
+    var n: int = 0
+    for r in effective_rows(c) {
+        if !row_is_off(c, r) {
+            if n == i {
+                return r
+            }
+            n = n + 1
+        }
+    }
+    -1
+}
+
+/// Output `i`'s path ("" out of range). Relative paths are the
+/// caller's to resolve against the prefix (as every config path).
+/// Total.
+pub fn access_out_path(c: Conf, i: int) -> str {
+    let r = out_row(c, i)
+    if r < 0 {
+        return ""
+    }
+    c.argp[c.args_at[r]]
+}
+
+/// Output `i`'s positional format argument: the second arg when it
+/// is not a k=v parameter ("" when absent — the combined default).
+/// `format=json` answers "" here; ask access_out_json. Total.
+fn out_fmt_name(c: Conf, i: int) -> str {
+    let r = out_row(c, i)
+    if r < 0 {
+        return ""
+    }
+    if c.args_n[r] >= 2 {
+        let a = c.argp[c.args_at[r] + 1]
+        if !a.contains("=") {
+            return a
+        }
+    }
+    ""
+}
+
+/// Whether output `i` is the NATIVE JSON door
+/// (`access_log <path> format=json` — wws-native, linted). Total.
+pub fn access_out_json(c: Conf, i: int) -> bool {
+    let r = out_row(c, i)
+    if r < 0 {
+        return false
+    }
+    let at = c.args_at[r]
+    let nn = c.args_n[r]
+    var j: int = 1
+    while j < nn {
+        if c.argp[at + j] == "format=json" {
+            return true
+        }
+        j = j + 1
+    }
+    false
+}
+
+/// Output `i`'s format TEXT (the declared log_format's, or combined;
+/// "" for a JSON-door output). Total.
+pub fn access_out_fmt(c: Conf, i: int) -> str {
+    if access_out_json(c, i) {
+        return ""
+    }
+    let name = out_fmt_name(c, i)
+    if name.is_empty() || name == "combined" {
+        return combined_text()
+    }
+    let row = logfmt_row(c, name)
+    if row < 0 {
+        return combined_text()
+    }
+    logfmt_text(c, row)
+}
+
+/// Output `i`'s escape mode ("default" for combined and the JSON
+/// door — the door ignores it). Total.
+pub fn access_out_esc(c: Conf, i: int) -> str {
+    let name = out_fmt_name(c, i)
+    if name.is_empty() || name == "combined" {
+        return "default"
+    }
+    let row = logfmt_row(c, name)
+    if row < 0 {
+        return "default"
+    }
+    logfmt_esc(c, row)
+}
+
+/// Output `i`'s buffer= size in bytes (0 when absent — the sink's
+/// default cap; the serve loop flushes every pass either way, which
+/// is MORE often than any nginx flush=, so flush= is accepted and
+/// subsumed — docs/LOGGING.md states the mapping). Total.
+pub fn access_out_buffer(c: Conf, i: int) -> int {
+    let r = out_row(c, i)
+    if r < 0 {
+        return 0
+    }
+    let at = c.args_at[r]
+    let nn = c.args_n[r]
+    var j: int = 1
+    while j < nn {
+        let a = c.argp[at + j]
+        if a.starts_with("buffer=") {
+            let v = size_bytes(a[7..a.len])
+            if v > 0 {
+                return v
+            }
+        }
+        j = j + 1
+    }
+    0
+}
+
+// ------------------------------------------------------------------
+// error_log and log_headers
+// ------------------------------------------------------------------
+
+/// The row of the first main/http-level error_log, or -1. Total.
+fn errlog_row(c: Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "error_log" && (c.ctx[i] == "main" || c.ctx[i] == "http") {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The error_log path ("" when the directive is absent — stderr
+/// stays the only error stream, as today). Total.
+pub fn errlog_path(c: Conf) -> str {
+    let r = errlog_row(c)
+    if r < 0 {
+        return ""
+    }
+    c.argp[c.args_at[r]]
+}
+
+/// The error_log level ("error" when unstated — the nginx default).
+/// Total.
+pub fn errlog_level(c: Conf) -> str {
+    let r = errlog_row(c)
+    if r < 0 {
+        return "error"
+    }
+    let at = c.args_at[r]
+    let nn = c.args_n[r]
+    var j: int = 1
+    while j < nn {
+        let a = c.argp[at + j]
+        if a != "format=json" {
+            return a
+        }
+        j = j + 1
+    }
+    "error"
+}
+
+/// Whether the error_log took the NATIVE JSON door (wws-native,
+/// linted). Total.
+pub fn errlog_json(c: Conf) -> bool {
+    let r = errlog_row(c)
+    if r < 0 {
+        return false
+    }
+    let at = c.args_at[r]
+    let nn = c.args_n[r]
+    var j: int = 1
+    while j < nn {
+        if c.argp[at + j] == "format=json" {
+            return true
+        }
+        j = j + 1
+    }
+    false
+}
+
+/// The space-joined `log_headers` opt-in list (http/server level,
+/// all rows concatenated; "" when none — the JSON door then carries
+/// no headers object). wws-native, linted. Total.
+pub fn log_headers_join(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "log_headers" && (c.ctx[i] == "http" || c.ctx[i] == "server") {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 0
+            while j < nn {
+                if out.is_empty() {
+                    out = c.argp[at + j]
+                } else {
+                    out = "{out} {c.argp[at + j]}"
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// the -t half — log_check, first failure wins (the certauto shape).
+// The caller (config.check) prints `lobo: [emerg] {msg}`.
+// ------------------------------------------------------------------
+
+/// The level ladder (config's own copy of the ranks; obs renders,
+/// config validates — held identical by the directive test). Total.
+fn level_known(l: str) -> bool {
+    l == "debug" ||
+        l == "info" ||
+        l == "notice" ||
+        l == "warn" ||
+        l == "error" ||
+        l == "crit" ||
+        l == "alert" ||
+        l == "emerg"
+}
+
+/// The variable-table verdict logconf can give WITHOUT obs: "" ok.
+/// The implemented set and the refused rows are obs.var_table's;
+/// this twin is held byte-compatible by the directive test (config
+/// cannot import obs — the direction runs the other way). Total.
+fn var_verdict(v: str) -> str {
+    if v.starts_with("http_") && v.len > 5 {
+        return ""
+    }
+    let implemented = "remote_addr remote_user time_local time_iso8601 request status body_bytes_sent request_time upstream_addr upstream_status upstream_response_time"
+    for w in implemented.words() {
+        if v == w {
+            return ""
+        }
+    }
+    let planned = "msec bytes_sent request_length connection connection_requests host server_name server_port server_protocol scheme remote_port"
+    for w in planned.words() {
+        if v == w {
+            return "log format variable \"${v}\" is not implemented in lobo (planned(ws12) — the class-C posture refuses it at load rather than logging an empty value)"
+        }
+    }
+    if v.starts_with("sent_http_") && v.len > 10 {
+        return "log format variable \"${v}\" is not implemented in lobo (planned(ws12) — the class-C posture refuses it at load rather than logging an empty value)"
+    }
+    let refused = "uri document_uri args query_string"
+    for w in refused.words() {
+        if v == w {
+            return "log format variable \"${v}\" is refused in lobo (named_error: the raw line is $request, structure is format=json — docs/log-variables.md)"
+        }
+    }
+    "unknown \"{v}\" variable"
+}
+
+/// Validate the whole log directive family. Returns "" or the first
+/// [emerg] message (oracle-shaped where the oracle has one). Pure.
+pub fn log_check(c: Conf) -> str {
+    // log_format declarations: duplicates (combined included),
+    // escape= ladder, variable table
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "log_format" {
+            let name = c.argp[c.args_at[i]]
+            if name == "combined" {
+                return "duplicate \"log_format\" name \"combined\" in {c.files[i]}:{c.lines[i]}"
+            }
+            var k: int = 0
+            while k < i {
+                if c.names[k] == "log_format" && c.argp[c.args_at[k]] == name {
+                    return "duplicate \"log_format\" name \"{name}\" in {c.files[i]}:{c.lines[i]}"
+                }
+                k = k + 1
+            }
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 1
+            while j < nn {
+                let a = c.argp[at + j]
+                if a.starts_with("escape=") {
+                    let mode = a[7..a.len]
+                    if mode != "default" && mode != "json" && mode != "none" {
+                        return "unknown log format escaping \"{mode}\" in {c.files[i]}:{c.lines[i]}"
+                    }
+                }
+                j = j + 1
+            }
+            let vars = fmt_vars(logfmt_text(c, i))
+            for v in vars.words() {
+                let verdict = var_verdict(v)
+                if !verdict.is_empty() {
+                    return verdict
+                }
+            }
+        }
+        i = i + 1
+    }
+
+    // access_log rows (EVERY row, effective or not — a config that
+    // names a missing format is broken wherever the row sits)
+    i = 0
+    while i < total {
+        if c.names[i] == "access_log" {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            let path = c.argp[at]
+            if path == "off" {
+                if nn > 1 {
+                    return "invalid parameter \"{c.argp[at + 1]}\" in {c.files[i]}:{c.lines[i]}"
+                }
+                i = i + 1
+                continue
+            }
+            var have_buffer = false
+            var have_flush = false
+            var j: int = 1
+            while j < nn {
+                let a = c.argp[at + j]
+                if a.starts_with("buffer=") {
+                    if size_bytes(a[7..a.len]) <= 0 {
+                        return "invalid parameter \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                    }
+                    have_buffer = true
+                } else if a.starts_with("flush=") {
+                    if time_ms(a[6..a.len]) < 0 {
+                        return "invalid parameter \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                    }
+                    have_flush = true
+                } else if a.starts_with("gzip") {
+                    return "access_log gzip is not implemented in lobo (named post-v1 row) in {c.files[i]}:{c.lines[i]}"
+                } else if a.starts_with("if=") {
+                    return "access_log if= is not implemented in lobo (named post-v1 row; conditions need the variable tier) in {c.files[i]}:{c.lines[i]}"
+                } else if a.starts_with("format=") {
+                    if a != "format=json" {
+                        return "unknown access_log format \"{a[7..a.len]}\" (the lobo-native format= parameter takes json) in {c.files[i]}:{c.lines[i]}"
+                    }
+                } else if j == 1 {
+                    if a != "combined" && logfmt_row(c, a) < 0 {
+                        return "unknown log format \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                    }
+                } else {
+                    return "invalid parameter \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                }
+                j = j + 1
+            }
+            if have_flush && !have_buffer {
+                return "no buffer is defined for access_log \"{path}\" in {c.files[i]}:{c.lines[i]}"
+            }
+        }
+        i = i + 1
+    }
+
+    // error_log rows: level ladder (the native format=json arg aside)
+    i = 0
+    while i < total {
+        if c.names[i] == "error_log" {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 1
+            while j < nn {
+                let a = c.argp[at + j]
+                if a != "format=json" && !level_known(a) {
+                    return "invalid log level \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    ""
+}

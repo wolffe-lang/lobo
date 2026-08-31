@@ -19,6 +19,7 @@
 use config
 use conn
 use http
+use obs
 use proxy
 
 /// This module's interface version. Total; never traps.
@@ -304,6 +305,47 @@ pub fn error_response(code: int, special_header_body: bool, date: str, token: st
 }
 
 // ------------------------------------------------------------------
+// access-record helpers (ws09) — what one request looked like, for
+// the entry's sinks. serve fills the record; the entry stamps times
+// and renders (serve never opens a log file).
+// ------------------------------------------------------------------
+
+/// The RAW request line off an unparsed head: everything before the
+/// first CR or LF (the oracle logs a garbage line cut at the CR —
+/// probed). Total.
+pub fn raw_line(head: str) -> str {
+    var i: int = 0
+    for b in head.bytes() {
+        if b == 13 || b == 10 {
+            return head[0..i]
+        }
+        i = i + 1
+    }
+    head
+}
+
+/// The body length of the default error page for `code` (`special`
+/// selects the header-too-large shape) — what $body_bytes_sent is
+/// for an error response. Total.
+fn err_len(code: int, special: bool, token: str) -> int {
+    if special {
+        return header_too_large_body(token).len
+    }
+    error_body(code, token).len
+}
+
+/// Copy the parsed request's line and headers into the access record
+/// (names arrive lowercased from the parser). Total.
+fn fill_req_acc(mut acc: obs.Access, req: http.Request) {
+    acc.request = "{req.method} {req.target} {req.version}"
+    var i: int = 0
+    for h in req.hnames {
+        obs.access_header(mut acc, h, req.hvals[i])
+        i = i + 1
+    }
+}
+
+// ------------------------------------------------------------------
 // the reader — bytes off the socket, under a deadline, size-bounded
 // ------------------------------------------------------------------
 
@@ -450,17 +492,24 @@ fn serve_file(
     keep: bool,
     is_head: bool,
     local_port: int,
+    mut acc: obs.Access,
 ) -> bool ! {closed, io} {
     let size = fs_size(path) else |e| match e {
         not_found => {
+            acc.status = 404
+            acc.body_bytes = err_len(404, false, token)
             send_err(mut cn, 404, false, token)
             return true
         },
         denied => {
+            acc.status = 403
+            acc.body_bytes = err_len(403, false, token)
             send_err(mut cn, 403, false, token)
             return true
         },
         io => {
+            acc.status = 500
+            acc.body_bytes = err_len(500, false, token)
             send_err(mut cn, 500, false, token)
             return true
         },
@@ -476,6 +525,8 @@ fn serve_file(
     // conditional GET: a matching If-Modified-Since → 304, no body
     let ims = http.header(req, "if-modified-since") else ""
     if !ims.is_empty() && ims == lm {
+        acc.status = 304
+        acc.body_bytes = 0
         var h304 = "HTTP/1.1 304 Not Modified\r\n"
         h304 = "{h304}{hline("Server", token)}"
         h304 = "{h304}{hline("Date", now_date())}"
@@ -487,6 +538,8 @@ fn serve_file(
         return !keep
     }
 
+    acc.status = 200
+    acc.body_bytes = if is_head { 0 } else { size }
     var head = "HTTP/1.1 200 OK\r\n"
     head = "{head}{hline("Server", token)}"
     head = "{head}{hline("Date", now_date())}"
@@ -510,6 +563,8 @@ fn serve_file(
     // the first non-UTF-8 byte (deferral D8, now retired here).
     if size <= 65536 {
         let body = fs_read_bytes(path) else |_| {
+            acc.status = 500
+            acc.body_bytes = err_len(500, false, token)
             send_err(mut cn, 500, false, token)
             return true
         }
@@ -573,11 +628,14 @@ fn handle_request(
     keep: bool,
     local_port: int,
     challenge_dir: str,
+    mut acc: obs.Access,
 ) -> bool ! {closed, io} {
     // method: GET and HEAD serve; anything else is 405 (the CVE
     // corpus's POSTs are already rejected at parse when they smuggle)
     let is_head = req.method == "HEAD"
     if req.method != "GET" && !is_head {
+        acc.status = 405
+        acc.body_bytes = err_len(405, false, token)
         send_err(mut cn, 405, false, token)
         return true
     }
@@ -594,13 +652,19 @@ fn handle_request(
         if norm_path.starts_with(cprefix) {
             let tok = norm_path[cprefix.len..norm_path.len]
             if tok.is_empty() || tok.contains("/") || tok.contains("..") {
+                acc.status = 404
+                acc.body_bytes = err_len(404, false, token)
                 send_err(mut cn, 404, false, token)
                 return true
             }
             let body = fs_read_text("{challenge_dir}/{tok}") else |_| {
+                acc.status = 404
+                acc.body_bytes = err_len(404, false, token)
                 send_err(mut cn, 404, false, token)
                 return true
             }
+            acc.status = 200
+            acc.body_bytes = if is_head { 0 } else { body.len }
             var h = "HTTP/1.1 200 OK\r\n"
             h = "{h}{hline("Server", token)}"
             h = "{h}{hline("Date", now_date())}"
@@ -618,6 +682,8 @@ fn handle_request(
 
     let d = http.route(c, norm_path)
     if d.fs_path.is_empty() {
+        acc.status = 404
+        acc.body_bytes = err_len(404, false, token)
         send_err(mut cn, 404, false, token)
         return true
     }
@@ -627,6 +693,8 @@ fn handle_request(
             // 301 to the trailing-slash form (nginx's dir redirect)
             let loc = "http://{hostport(req.host, local_port)}{norm_path}/"
             let body = error_body(301, token)
+            acc.status = 301
+            acc.body_bytes = if is_head { 0 } else { body.len }
             var h = "HTTP/1.1 301 Moved Permanently\r\n"
             h = "{h}{hline("Server", token)}"
             h = "{h}{hline("Date", now_date())}"
@@ -646,18 +714,22 @@ fn handle_request(
         for name in idxs {
             let cand = join_fs(d.fs_path, name)
             if fs_is_file(cand) {
-                return serve_file(mut cn, c, req, cand, token, keep, is_head, local_port)
+                return serve_file(mut cn, c, req, cand, token, keep, is_head, local_port, mut acc)
             }
         }
         // no index, autoindex off → 403 (nginx)
+        acc.status = 403
+        acc.body_bytes = err_len(403, false, token)
         send_err(mut cn, 403, false, token)
         return true
     }
 
     if fs_is_file(d.fs_path) {
-        return serve_file(mut cn, c, req, d.fs_path, token, keep, is_head, local_port)
+        return serve_file(mut cn, c, req, d.fs_path, token, keep, is_head, local_port, mut acc)
     }
 
+    acc.status = 404
+    acc.body_bytes = err_len(404, false, token)
     send_err(mut cn, 404, false, token)
     true
 }
@@ -890,12 +962,25 @@ pub fn serve_conn_cn(
                 conn.conn_close(mut cn)
                 return
             }
+            var pacc0 = proxy.run_acc()
             should_close = proxy.
-                run(conn.fd(cn), c, req, body, pplan, "127.0.0.1", opts.token, now_date(), keep) else |_| {
+                run(
+                conn.fd(cn),
+                c,
+                req,
+                body,
+                pplan,
+                "127.0.0.1",
+                opts.token,
+                now_date(),
+                keep,
+                mut pacc0,
+            ) else |_| {
                 conn.conn_close(mut cn)
                 return
             }
         } else {
+            var acc0 = obs.access_new()
             should_close = handle_request(
                 mut cn,
                 c,
@@ -905,6 +990,7 @@ pub fn serve_conn_cn(
                 keep,
                 local_port,
                 opts.challenge_dir,
+                mut acc0,
             ) else |_| {
                 conn.conn_close(mut cn)
                 return
@@ -932,11 +1018,16 @@ pub fn serve_conn_cn(
 // ------------------------------------------------------------------
 
 /// The drain loop's per-request outcome: whether the connection should
-/// close after this request, and the bytes to carry into the next
-/// request on a kept-alive connection.
+/// close after this request, the bytes to carry into the next request
+/// on a kept-alive connection, and the ACCESS RECORD (ws09): `logged`
+/// says a request was actually served (a record exists to log); `acc`
+/// is what serve knew — the entry stamps times and renders it through
+/// the configured sinks.
 pub struct ReqOut {
     close: bool,
     carry: str,
+    logged: bool,
+    acc: obs.Access,
 }
 
 /// Serve ONE already-framed request — its header block `head` read,
@@ -960,77 +1051,113 @@ pub fn serve_request(
     served: int,
 ) -> ReqOut {
     var cn = conn_mod_plain(conn)
+    var acc = obs.access_new()
+    acc.request = raw_line(head)
     let req = http.parse_request(head, limits) else |e| match e {
         malformed => {
+            acc.status = 400
+            acc.body_bytes = err_len(400, false, opts.token)
             send_err(mut cn, 400, false, opts.token)
-            return ReqOut { close: true, carry: "" }
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         },
         uri_too_long => {
+            acc.status = 414
+            acc.body_bytes = err_len(414, false, opts.token)
             send_err(mut cn, 414, false, opts.token)
-            return ReqOut { close: true, carry: "" }
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         },
         too_large => {
+            acc.status = 400
+            acc.body_bytes = err_len(400, true, opts.token)
             send_err(mut cn, 400, true, opts.token)
-            return ReqOut { close: true, carry: "" }
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         },
         unimplemented => {
+            acc.status = 501
+            acc.body_bytes = err_len(501, false, opts.token)
             send_err(mut cn, 501, false, opts.token)
-            return ReqOut { close: true, carry: "" }
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         },
     }
+    fill_req_acc(mut acc, req)
 
     var rest = rest0
     var body = ""
     if req.body_mode == "length" {
         if req.content_length > limits.max_body {
+            acc.status = 413
+            acc.body_bytes = err_len(413, false, opts.token)
             send_err(mut cn, 413, false, opts.token)
             half_close_drain(mut cn)
-            return ReqOut { close: true, carry: "" }
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         }
         let taken = take_length(mut cn, rest, req.content_length) else |_| {
-            return ReqOut { close: true, carry: "" }
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         }
         body = taken.0
         rest = taken.1
     } else if req.body_mode == "chunked" {
         rest = read_chunked(mut cn, rest, limits) else |e| match e {
             bad => {
+                acc.status = 400
+                acc.body_bytes = err_len(400, false, opts.token)
                 send_err(mut cn, 400, false, opts.token)
-                return ReqOut { close: true, carry: "" }
+                return ReqOut { close: true, carry: "", logged: true, acc: acc }
             },
             big => {
+                acc.status = 413
+                acc.body_bytes = err_len(413, false, opts.token)
                 send_err(mut cn, 413, false, opts.token)
                 half_close_drain(mut cn)
-                return ReqOut { close: true, carry: "" }
+                return ReqOut { close: true, carry: "", logged: true, acc: acc }
             },
             io => {
-                return ReqOut { close: true, carry: "" }
+                return ReqOut { close: true, carry: "", logged: true, acc: acc }
             },
         }
     }
 
     let decoded = http.percent_decode(req.path) else |_| {
+        acc.status = 400
+        acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return ReqOut { close: true, carry: "" }
+        return ReqOut { close: true, carry: "", logged: true, acc: acc }
     }
     if http.has_control(decoded) {
+        acc.status = 400
+        acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return ReqOut { close: true, carry: "" }
+        return ReqOut { close: true, carry: "", logged: true, acc: acc }
     }
     let norm = http.normalize_path(decoded) else {
+        acc.status = 400
+        acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return ReqOut { close: true, carry: "" }
+        return ReqOut { close: true, carry: "", logged: true, acc: acc }
     }
 
     let keep = req.keepalive && served + 1 < opts.keepalive_requests
     var should_close = false
     let pplan = proxy.plan(c, norm)
     if pplan.is_proxy {
+        var pacc = proxy.run_acc()
+        var raised = false
         should_close = proxy.
-            run(conn, c, req, body, pplan, "127.0.0.1", opts.token, now_date(), keep) else |_| {
-            return ReqOut { close: true, carry: "" }
+            run(conn, c, req, body, pplan, "127.0.0.1", opts.token, now_date(), keep, mut pacc) else |_| {
+            raised = true
+            true
+        }
+        acc.proxied = true
+        acc.up_addr = pacc.addr
+        acc.up_status = pacc.status
+        acc.up_ms = pacc.up_ms
+        acc.status = pacc.status
+        acc.body_bytes = pacc.body_bytes
+        if raised {
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         }
     } else {
+        var raised = false
         should_close = handle_request(
             mut cn,
             c,
@@ -1040,14 +1167,19 @@ pub fn serve_request(
             keep,
             local_port,
             opts.challenge_dir,
+            mut acc,
         ) else |_| {
-            return ReqOut { close: true, carry: "" }
+            raised = true
+            true
+        }
+        if raised {
+            return ReqOut { close: true, carry: "", logged: true, acc: acc }
         }
     }
     if should_close || !keep {
-        return ReqOut { close: true, carry: "" }
+        return ReqOut { close: true, carry: "", logged: true, acc: acc }
     }
-    ReqOut { close: false, carry: rest }
+    ReqOut { close: false, carry: rest, logged: true, acc: acc }
 }
 
 /// A header-block boundary search: `ready` when `buf` holds a full
@@ -1083,6 +1215,8 @@ pub struct ConnStep {
     close: bool,
     carry: str,
     served: int,
+    logged: bool,
+    acc: obs.Access,
 }
 
 /// A full head is present in `buf` at `cut`: split it, arm the
@@ -1103,9 +1237,23 @@ fn step_serve(
     let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served)
     let ns = served + 1
     if ro.close {
-        return ConnStep { active: true, close: true, carry: "", served: ns }
+        return ConnStep {
+            active: true,
+            close: true,
+            carry: "",
+            served: ns,
+            logged: ro.logged,
+            acc: ro.acc,
+        }
     }
-    ConnStep { active: true, close: false, carry: ro.carry, served: ns }
+    ConnStep {
+        active: true,
+        close: false,
+        carry: ro.carry,
+        served: ns,
+        logged: ro.logged,
+        acc: ro.acc,
+    }
 }
 
 /// One poll step on a connection for the drain-aware accept loop: arm a
@@ -1135,35 +1283,99 @@ pub fn conn_step(
     }
     if buf.len > limits.max_header_total {
         send_err(mut cn, 400, true, opts.token)
-        return ConnStep { active: true, close: true, carry: "", served: served }
+        var acc4 = obs.access_new()
+        acc4.request = raw_line(buf)
+        acc4.status = 400
+        acc4.body_bytes = err_len(400, true, opts.token)
+        return ConnStep {
+            active: true,
+            close: true,
+            carry: "",
+            served: served,
+            logged: true,
+            acc: acc4,
+        }
     }
     net_deadline(conn, poll_ms) else |_| {
-        return ConnStep { active: false, close: true, carry: buf, served: served }
+        return ConnStep {
+            active: false,
+            close: true,
+            carry: buf,
+            served: served,
+            logged: false,
+            acc: obs.access_new(),
+        }
     }
     let piece = net_read(conn, 4096) else |e| match e {
         closed => {
-            return ConnStep { active: false, close: true, carry: buf, served: served }
+            return ConnStep {
+                active: false,
+                close: true,
+                carry: buf,
+                served: served,
+                logged: false,
+                acc: obs.access_new(),
+            }
         },
         timeout => {
-            return ConnStep { active: false, close: false, carry: buf, served: served }
+            return ConnStep {
+                active: false,
+                close: false,
+                carry: buf,
+                served: served,
+                logged: false,
+                acc: obs.access_new(),
+            }
         },
         utf8 => {
             send_err(mut cn, 400, false, opts.token)
-            return ConnStep { active: true, close: true, carry: "", served: served }
+            var acc5 = obs.access_new()
+            acc5.request = raw_line(buf)
+            acc5.status = 400
+            acc5.body_bytes = err_len(400, false, opts.token)
+            return ConnStep {
+                active: true,
+                close: true,
+                carry: "",
+                served: served,
+                logged: true,
+                acc: acc5,
+            }
         },
         io => {
-            return ConnStep { active: false, close: true, carry: buf, served: served }
+            return ConnStep {
+                active: false,
+                close: true,
+                carry: buf,
+                served: served,
+                logged: false,
+                acc: obs.access_new(),
+            }
         },
     }
     if piece.is_empty() {
-        return ConnStep { active: false, close: true, carry: buf, served: served }
+        return ConnStep {
+            active: false,
+            close: true,
+            carry: buf,
+            served: served,
+            logged: false,
+            acc: obs.access_new(),
+        }
     }
     buf = "{buf}{piece}"
     let cut = head_cut(buf)
     if cut.ready {
         return step_serve(conn, c, opts, limits, local_port, buf, cut, served)
     }
-    ConnStep { active: true, close: false, carry: buf, served: served }
+    ConnStep {
+        active: true,
+        close: false,
+        carry: buf,
+        served: served,
+        logged: false,
+        acc: obs.access_new(),
+    }
 }
 
 // ------------------------------------------------------------------

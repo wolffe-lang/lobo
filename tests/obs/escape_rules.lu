@@ -1,0 +1,58 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: obs
+//!
+//! THE ESCAPE RULES, PINNED (ws09 §1). escape=default and escape=json
+//! semantics probed against the pinned nginx/1.30.4 byte-for-byte
+//! (2026-08-30, the ws09 probe set; tools/lobo-logdiff holds them
+//! against the live oracle continuously). The folklore, now facts:
+//! default hex-escapes `"` `\` and every byte outside 0x20..0x7E as
+//! \xHH UPPERCASE; json writes the seven short escapes, \u00HH
+//! (uppercase) for other C0 bytes, and leaves 0x7F and >= 0x80 RAW.
+//! Control bytes are built through str_from_utf8 — a raw ESC in a
+//! source literal would be its own footgun.
+
+use obs
+
+fn byte_str(b: int) -> str {
+    var v = List[int]()
+    (mut v).push(b)
+    str_from_utf8(v) else ""
+}
+
+fn main() -> !int {
+    // default: the probed classes, byte for byte
+    assert(obs.esc_default("plain-Text_1.0/ok") == "plain-Text_1.0/ok", "safe run untouched")
+    assert(obs.esc_default("q\"b") == "q\\x22b", "quote is \\x22")
+    assert(obs.esc_default("a\\b") == "a\\x5Cb", "backslash is \\x5C uppercase")
+    assert(obs.esc_default("a{byte_str(27)}b") == "a\\x1Bb", "ESC is \\x1B")
+    assert(obs.esc_default("a{byte_str(9)}b") == "a\\x09b", "TAB is \\x09")
+    assert(obs.esc_default("a{byte_str(8)}b") == "a\\x08b", "BS is \\x08")
+    assert(obs.esc_default("a{byte_str(12)}b") == "a\\x0Cb", "FF is \\x0C")
+    assert(obs.esc_default("a{byte_str(10)}b") == "a\\x0Ab", "LF is \\x0A")
+    assert(obs.esc_default("a{byte_str(13)}b") == "a\\x0Db", "CR is \\x0D")
+    assert(obs.esc_default("a{byte_str(127)}b") == "a\\x7Fb", "DEL is \\x7F")
+    assert(obs.esc_default("é") == "\\xC3\\xA9", "high bytes each \\xHH (é)")
+    assert(obs.esc_default("") == "", "empty stays empty (the dash is the renderer's)")
+
+    // json: the probed classes
+    assert(obs.esc_json("plain") == "plain", "safe run untouched")
+    assert(obs.esc_json("q\"b") == "q\\\"b", "quote is backslash-quote")
+    assert(obs.esc_json("a\\b") == "a\\\\b", "backslash doubles")
+    assert(obs.esc_json("a{byte_str(8)}b") == "a\\bb", "BS is \\b")
+    assert(obs.esc_json("a{byte_str(12)}b") == "a\\fb", "FF is \\f")
+    assert(obs.esc_json("a{byte_str(10)}b") == "a\\nb", "LF is \\n")
+    assert(obs.esc_json("a{byte_str(13)}b") == "a\\rb", "CR is \\r")
+    assert(obs.esc_json("a{byte_str(9)}b") == "a\\tb", "TAB is \\t")
+    assert(obs.esc_json("a{byte_str(27)}b") == "a\\u001Bb", "ESC is \\u001B uppercase")
+    assert(obs.esc_json("a{byte_str(1)}b") == "a\\u0001b", "SOH is \\u0001")
+    assert(obs.esc_json("a{byte_str(127)}b") == "a{byte_str(127)}b", "DEL stays RAW (probed)")
+    assert(obs.esc_json("é") == "é", "multi-byte text stays RAW (probed)")
+
+    // the log-injection pitfall (contract): CRLF through both doors
+    let inj = "x{byte_str(13)}{byte_str(10)}fake=line"
+    assert(obs.esc_default(inj) == "x\\x0D\\x0Afake=line", "CRLF cannot split a default line")
+    assert(obs.esc_json(inj) == "x\\r\\nfake=line", "CRLF cannot split a json line")
+    0
+}

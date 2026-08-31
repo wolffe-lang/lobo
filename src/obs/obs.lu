@@ -1,12 +1,1045 @@
 //! member: true
-//! obs — logging and metrics. wsc03's territory; a stub at ws00 so the `.wolfi`
-//! interface machinery has a real surface to freeze. Do not grow this
-//! module outside its sprint contract.
+//! obs — structured logging (ws09, wsc03's first real surface). Three
+//! layers, all pure except the sink's flush:
+//!   1. the FORMAT tier — the nginx `log_format` compiler (the $var
+//!      splitter), the variable table (implemented / planned /
+//!      named_error, the class-C posture: an unimplemented variable is
+//!      a CONFIG-TIME named error, never an empty string at runtime),
+//!      and the three escapers, each pinned byte-for-byte against the
+//!      pinned oracle (the ws09 probe set; tools/lobo-logdiff holds
+//!      them continuously);
+//!   2. the RECORD tier — the Access record serve/ fills per request,
+//!      rendered either through a compiled format (the nginx-compat
+//!      door) or as the schema-versioned JSON line (lobo's own door:
+//!      one object per line, numbers as numbers), plus the error-log
+//!      renderers over the ws08 event vocabulary and the nginx level
+//!      ladder;
+//!   3. the SINK tier — the bounded per-output buffer the serve loop
+//!      emits into. Emit NEVER blocks: over the cap the line is
+//!      DROPPED AND COUNTED (a dropped log line must never become a
+//!      stalled request — D7's one poll loop has no writer task to
+//!      hand the write to; the flush is one bounded append per loop
+//!      pass, docs/LOGGING.md states the tradeoff). `reopen` (ws04)
+//!      closes the fd between flushes; the next flush reopens —
+//!      the external-logrotate contract, as nginx.
+//! Direction (ARCHITECTURE.md): obs is called by everyone and calls
+//! nobody — no config/, no http/; callers hand it strings and scalars.
+//! Lane note: everything except sink_flush/sink_reopen is pure and
+//! runs on all three lanes; the flush is the fs append tier
+//! (native + checked; probed at this pin).
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
 
-/// This module's interface version. Frozen by the ws00 `.wolfi`
-/// snapshot beside this file; wsc03 bumps it with its first real
-/// surface. Total; never traps.
-#[allow(w0314)]
+/// This module's interface version. 0.1.0 is wsc03's first real
+/// surface (the ws00 stub was 0.0.1). Total; never traps.
 pub fn version() -> str {
-    "0.0.1"
+    "0.1.0"
+}
+
+// ------------------------------------------------------------------
+// small pure helpers (dates, hex, padding)
+// ------------------------------------------------------------------
+
+/// Zero-pad a non-negative int to two digits. Total.
+fn pad2(n: int) -> str {
+    if n < 10 {
+        return "0{n}"
+    }
+    "{n}"
+}
+
+/// Zero-pad a non-negative int to three digits. Total.
+fn pad3(n: int) -> str {
+    if n < 10 {
+        return "00{n}"
+    }
+    if n < 100 {
+        return "0{n}"
+    }
+    "{n}"
+}
+
+/// Two uppercase hex digits for a byte 0..255 (the escape tier's
+/// spelling — the oracle writes \x5C, : UPPERCASE, probed).
+/// Total for 0..255.
+fn hex2(b: int) -> str {
+    let digits = "0123456789ABCDEF"
+    let hi = b / 16
+    let lo = b % 16
+    "{digits[hi..hi + 1]}{digits[lo..lo + 1]}"
+}
+
+/// Month abbreviation, 1=Jan..12=Dec (the $time_local spelling).
+/// Total for 1..12.
+fn month_abbr(i: int) -> str {
+    let names = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec"
+    let at = (i - 1) * 4
+    names[at..at + 3]
+}
+
+/// Calendar fields from a Unix millisecond time (UTC): packed as
+/// (y * 10000 + mo * 100 + d, h * 10000 + mi * 100 + s) via Howard
+/// Hinnant's civil-from-days. Total for non-negative ms.
+fn civil_utc(unix_ms: int) -> (int, int) {
+    let secs = unix_ms / 1000
+    let days = secs / 86400
+    let tod = secs - days * 86400
+    let hh = tod / 3600
+    let mm = (tod - hh * 3600) / 60
+    let ss = tod - hh * 3600 - mm * 60
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    var y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    var mo = mp + 3
+    if mp >= 10 {
+        mo = mp - 9
+    }
+    if mo <= 2 {
+        y = y + 1
+    }
+    (y * 10000 + mo * 100 + d, hh * 10000 + mm * 100 + ss)
+}
+
+/// `$time_local` for a Unix ms time — nginx's common-log clock
+/// spelling, e.g. `30/Aug/2026:22:51:21 +0000`. LOBO DELTA (named):
+/// always UTC with a +0000 offset — wolf has no timezone surface, and
+/// a log that never depends on the host's zone is the better door
+/// anyway; the differential normalizes timestamps. Total.
+pub fn time_local(unix_ms: int) -> str {
+    let cv = civil_utc(unix_ms)
+    let ymd = cv.0
+    let hms = cv.1
+    let y = ymd / 10000
+    let mo = ymd / 100 % 100
+    let d = ymd % 100
+    let hh = hms / 10000
+    let mi = hms / 100 % 100
+    let ss = hms % 100
+    "{pad2(d)}/{month_abbr(mo)}/{y}:{pad2(hh)}:{pad2(mi)}:{pad2(ss)} +0000"
+}
+
+/// `$time_iso8601` for a Unix ms time, e.g. `2026-08-30T22:51:21+00:00`.
+/// Always UTC (the same named delta as time_local). Total.
+pub fn time_iso8601(unix_ms: int) -> str {
+    let cv = civil_utc(unix_ms)
+    let ymd = cv.0
+    let hms = cv.1
+    let y = ymd / 10000
+    let mo = ymd / 100 % 100
+    let d = ymd % 100
+    let hh = hms / 10000
+    let mi = hms / 100 % 100
+    let ss = hms % 100
+    "{y}-{pad2(mo)}-{pad2(d)}T{pad2(hh)}:{pad2(mi)}:{pad2(ss)}+00:00"
+}
+
+/// The error-log clock spelling, e.g. `2026/08/30 22:51:21` (nginx's
+/// error-log date, UTC — the same named delta). Total.
+pub fn err_date(unix_ms: int) -> str {
+    let cv = civil_utc(unix_ms)
+    let ymd = cv.0
+    let hms = cv.1
+    let y = ymd / 10000
+    let mo = ymd / 100 % 100
+    let d = ymd % 100
+    let hh = hms / 10000
+    let mi = hms / 100 % 100
+    let ss = hms % 100
+    "{y}/{pad2(mo)}/{pad2(d)} {pad2(hh)}:{pad2(mi)}:{pad2(ss)}"
+}
+
+/// A millisecond span in nginx's `$request_time` spelling: seconds
+/// with exactly three decimals (`0.003`) — the ms precision wolf's
+/// clock has IS the precision nginx prints (the contract's #96 note).
+/// Negative spans clamp to 0.000 (a clock that stepped backward must
+/// not trap the logger). Total.
+pub fn seconds3(ms: int) -> str {
+    var v = ms
+    if v < 0 {
+        v = 0
+    }
+    "{v / 1000}.{pad3(v % 1000)}"
+}
+
+// ------------------------------------------------------------------
+// the escapers — each byte class pinned against the oracle (ws09
+// probes; the pinned bytes are held by tests/obs/escape_rules.lu and
+// continuously by tools/lobo-logdiff)
+// ------------------------------------------------------------------
+
+/// nginx `escape=default`: `"` and `\` and every byte outside
+/// 0x20..0x7E become `\xHH` (uppercase hex — probed: \x22, \x5C,
+/// \x08, \x1B, \x7F, \xC3\xA9 for é). Output is pure ASCII. Total.
+pub fn esc_default(v: str) -> str {
+    var out = ""
+    var start: int = 0
+    var i: int = 0
+    for b in v.bytes() {
+        let unsafe_b = b < 32 || b == 34 || b == 92 || b >= 127
+        if unsafe_b {
+            if i > start {
+                out = "{out}{v[start..i]}"
+            }
+            out = "{out}\\x{hex2(b)}"
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if i > start {
+        out = "{out}{v[start..i]}"
+    }
+    out
+}
+
+/// nginx `escape=json`: `\"` `\\` `\b` `\f` `\n` `\r` `\t`, any other
+/// byte below 0x20 as `\u00HH` (uppercase hex — probed: );
+/// 0x7F and everything >= 0x80 stay RAW (probed — the oracle does not
+/// escape them, and neither do we: the compat door does what the
+/// oracle does). Total.
+pub fn esc_json(v: str) -> str {
+    var out = ""
+    var start: int = 0
+    var i: int = 0
+    for b in v.bytes() {
+        let unsafe_b = b < 32 || b == 34 || b == 92
+        if unsafe_b {
+            if i > start {
+                out = "{out}{v[start..i]}"
+            }
+            if b == 34 {
+                out = "{out}\\\""
+            } else if b == 92 {
+                out = "{out}\\\\"
+            } else if b == 8 {
+                out = "{out}\\b"
+            } else if b == 12 {
+                out = "{out}\\f"
+            } else if b == 10 {
+                out = "{out}\\n"
+            } else if b == 13 {
+                out = "{out}\\r"
+            } else if b == 9 {
+                out = "{out}\\t"
+            } else {
+                out = "{out}\\u00{hex2(b)}"
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if i > start {
+        out = "{out}{v[start..i]}"
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// the variable table — declared like ws01's directive tables: every
+// variable the compiler accepts has a row; a $var with NO row is the
+// oracle's own `unknown "x" variable` error; a row that is not
+// implemented is a LOBO-NAMED config-time error (class-C: never an
+// empty string at runtime). docs/log-variables.md is GENERATED from
+// this table (tools/lobo-logvars), never hand-edited.
+// ------------------------------------------------------------------
+
+/// One variable row: `status` is `implemented`, `planned(<when>)`, or
+/// `named_error`; `note` is the one line the docs page and the -t
+/// diagnostic show.
+pub struct VarSpec {
+    name: str,
+    status: str,
+    note: str,
+}
+
+/// The ws09 variable table. The implemented set is exactly what the
+/// serving tree can know at this pin (contract §1); `http_*` and the
+/// `upstream_*` trio are family rows. Total.
+pub fn var_table() -> List[VarSpec] {
+    var t = List[VarSpec]()
+    (mut t).push(VarSpec {
+        name: "remote_addr",
+        status: "implemented",
+        note: "client address; 127.0.0.1 at this pin (loopback-only law; no peer-address builtin — named delta)",
+    })
+    (mut t).push(VarSpec {
+        name: "remote_user",
+        status: "implemented",
+        note: "basic-auth user; lobo has no auth yet, so always the missing value (- / empty)",
+    })
+    (mut t).push(VarSpec {
+        name: "time_local",
+        status: "implemented",
+        note: "common-log clock; lobo logs UTC +0000 (no timezone surface — named delta)",
+    })
+    (mut t).push(VarSpec {
+        name: "time_iso8601",
+        status: "implemented",
+        note: "ISO 8601 clock; lobo logs UTC +00:00 (same named delta)",
+    })
+    (mut t).push(VarSpec {
+        name: "request",
+        status: "implemented",
+        note: "the RAW request line, pre-decode (probed: the oracle logs %XX verbatim and cuts a garbage line at the first CR)",
+    })
+    (mut t).push(VarSpec {
+        name: "status",
+        status: "implemented",
+        note: "the response status lobo wrote",
+    })
+    (mut t).push(VarSpec {
+        name: "body_bytes_sent",
+        status: "implemented",
+        note: "response BODY bytes (headers excluded; probed)",
+    })
+    (mut t).push(VarSpec {
+        name: "request_time",
+        status: "implemented",
+        note: "seconds with 3 decimals; wolf's clock is ms, which is exactly the printed precision",
+    })
+    (mut t).push(VarSpec {
+        name: "http_*",
+        status: "implemented",
+        note: "any REQUEST header ($http_user_agent -> user-agent); missing is - / empty per escape mode (probed)",
+    })
+    (mut t).push(VarSpec {
+        name: "upstream_addr",
+        status: "implemented",
+        note: "the upstream peer host:port the proxy leg used ('' when the request was not proxied)",
+    })
+    (mut t).push(VarSpec {
+        name: "upstream_status",
+        status: "implemented",
+        note: "the upstream response status ('' when not proxied)",
+    })
+    (mut t).push(VarSpec {
+        name: "upstream_response_time",
+        status: "implemented",
+        note: "upstream leg time, seconds with 3 decimals ('' when not proxied)",
+    })
+    (mut t).push(VarSpec {
+        name: "msec",
+        status: "planned(ws12)",
+        note: "epoch seconds with ms decimals; lands with the metrics clock (ws12)",
+    })
+    (mut t).push(VarSpec {
+        name: "bytes_sent",
+        status: "planned(ws12)",
+        note: "full response bytes including headers; needs the writer to count what it wrote",
+    })
+    (mut t).push(VarSpec {
+        name: "request_length",
+        status: "planned(ws12)",
+        note: "request bytes including head and body; needs the reader to count",
+    })
+    (mut t).push(VarSpec {
+        name: "connection",
+        status: "planned(ws12)",
+        note: "connection serial; joins the ws12 counters",
+    })
+    (mut t).push(VarSpec {
+        name: "connection_requests",
+        status: "planned(ws12)",
+        note: "requests on this connection; the keepalive budget counter surfaces at ws12",
+    })
+    (mut t).push(VarSpec {
+        name: "host",
+        status: "planned(ws12)",
+        note: "effective Host; $http_host carries the header today",
+    })
+    (mut t).push(VarSpec {
+        name: "server_name",
+        status: "planned(ws12)",
+        note: "matched server_name; server selection is host-blind at this pin",
+    })
+    (mut t).push(VarSpec {
+        name: "server_port",
+        status: "planned(ws12)",
+        note: "listening port; joins when the record carries the listener",
+    })
+    (mut t).push(VarSpec {
+        name: "server_protocol",
+        status: "planned(ws12)",
+        note: "request HTTP version; $request carries it raw today",
+    })
+    (mut t).push(VarSpec {
+        name: "scheme",
+        status: "planned(ws12)",
+        note: "http/https; joins when the TLS path joins the step loop (D24 rider)",
+    })
+    (mut t).push(VarSpec {
+        name: "remote_port",
+        status: "planned(ws12)",
+        note: "client port; no peer-address builtin at this pin",
+    })
+    (mut t).push(VarSpec {
+        name: "sent_http_*",
+        status: "planned(ws12)",
+        note: "response headers; needs the writer to record what it sent",
+    })
+    (mut t).push(VarSpec {
+        name: "uri",
+        status: "named_error",
+        note: "the DECODED, normalized path — logging the decoded form leaks the parse and diverges from the oracle line-for-line (contract pitfall); $request carries the raw line, format=json carries structure",
+    })
+    (mut t).push(VarSpec {
+        name: "document_uri",
+        status: "named_error",
+        note: "alias of $uri — same refusal",
+    })
+    (mut t).push(VarSpec {
+        name: "args",
+        status: "named_error",
+        note: "the query string re-assembled from the parse; $request carries it raw",
+    })
+    (mut t).push(VarSpec {
+        name: "query_string",
+        status: "named_error",
+        note: "alias of $args — same refusal",
+    })
+    t
+}
+
+/// The table row status for a variable name: `implemented`,
+/// `planned(...)`, `named_error`, or "" for a name with NO row (the
+/// oracle's own unknown-variable error). `http_<anything>` matches
+/// the family row; so does `sent_http_*`. Total.
+pub fn var_status(name: str) -> str {
+    if name.starts_with("http_") && name.len > 5 {
+        return "implemented"
+    }
+    if name.starts_with("sent_http_") && name.len > 10 {
+        return "planned(ws12)"
+    }
+    for s in var_table() {
+        if s.name == name {
+            return s.status
+        }
+    }
+    ""
+}
+
+/// The table row note for a variable name ("" when no row). Total.
+pub fn var_note(name: str) -> str {
+    for s in var_table() {
+        if s.name == name {
+            return s.note
+        }
+    }
+    ""
+}
+
+/// The generated variable-table page (docs/log-variables.md), the
+/// ws01-directive-table pattern applied to log variables:
+/// tools/lobo-logvars runs `lobo logvars-md` and diffs. Total.
+pub fn vars_markdown() -> str {
+    var out = "# Access-log variables (generated)\n\n"
+    out = "{out}Generated from `src/obs/obs.lu` (`obs.var_table`) by\n"
+    out = "{out}`tools/lobo-logvars` — NEVER hand-edited. The class-C posture\n"
+    out = "{out}(report 11): a `log_format` naming a variable whose row is not\n"
+    out = "{out}`implemented` is a CONFIG-TIME named error, never an empty\n"
+    out = "{out}string at runtime; a variable with no row at all is the\n"
+    out = "{out}oracle's own `unknown \"x\" variable` error, mirrored.\n\n"
+    out = "{out}| variable | status | note |\n"
+    out = "{out}|----------|--------|------|\n"
+    for s in var_table() {
+        out = "{out}| `${s.name}` | {s.status} | {s.note} |\n"
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// the log_format compiler — a format string into literal/variable
+// pieces. `lits` always has one more element than `vars`:
+// lit0 $var0 lit1 $var1 ... litN.
+// ------------------------------------------------------------------
+
+/// A compiled format: alternating literals and variable names (names
+/// carry no `$`). Immutable once compiled; the config freeze carries
+/// it per generation.
+pub struct Fmt {
+    lits: List[str],
+    vars: List[str],
+}
+
+/// Whether byte `b` may appear in a variable name (nginx's set:
+/// a-z, A-Z, 0-9, `_`). Total.
+fn is_var_byte(b: int) -> bool {
+    if b >= 97 && b <= 122 {
+        return true
+    }
+    if b >= 65 && b <= 90 {
+        return true
+    }
+    if b >= 48 && b <= 57 {
+        return true
+    }
+    b == 95
+}
+
+/// Compile a log_format string into pieces. `$name` and `${name}`
+/// both spell a variable; a `$` followed by nothing nameable is a
+/// literal `$`. Validation is separate (`fmt_problem`) so the config
+/// pass can name its error before anything renders. Total.
+pub fn compile(f: str) -> Fmt {
+    var lits = List[str]()
+    var vars = List[str]()
+    var lit_start: int = 0
+    var i: int = 0
+    let bs = f.bytes()
+    let n = bs.len
+    while i < n {
+        if bs[i] == 36 {
+            var j = i + 1
+            var braced = false
+            if j < n && bs[j] == 123 {
+                braced = true
+                j = j + 1
+            }
+            var k = j
+            while k < n && is_var_byte(bs[k]) {
+                k = k + 1
+            }
+            var vend = k
+            var consumed = k
+            if braced {
+                if k < n && bs[k] == 125 {
+                    consumed = k + 1
+                } else {
+                    vend = j
+                    consumed = j
+                }
+            }
+            if vend > j {
+                (mut lits).push(f[lit_start..i])
+                (mut vars).push(f[j..vend])
+                i = consumed
+                lit_start = i
+                continue
+            }
+        }
+        i = i + 1
+    }
+    (mut lits).push(f[lit_start..n])
+    Fmt { lits: lits, vars: vars }
+}
+
+/// The first PROBLEM variable in a format string, as
+/// `kind|name|note`: kind `unknown` (no table row — mirror the
+/// oracle's diagnostic) or `refused` (a row that is not implemented —
+/// the lobo-named class-C error, note carried). "" when every
+/// variable is implemented. Total.
+pub fn fmt_problem(f: str) -> str {
+    let c = compile(f)
+    for v in c.vars {
+        let st = var_status(v)
+        if st.is_empty() {
+            return "unknown|{v}|"
+        }
+        if st != "implemented" {
+            return "refused|{v}|{var_note(v)} [{st}]"
+        }
+    }
+    ""
+}
+
+/// The variables a format LOSES against the structured door: the
+/// implemented, machine-valuable facts (`status`, `body_bytes_sent`,
+/// `request_time`, `request`) the format never names, space-joined
+/// ("" when it names them all) — the linter's evidence half. Total.
+pub fn fmt_loses(f: str) -> str {
+    let c = compile(f)
+    var out = ""
+    var probe = "status body_bytes_sent request_time request"
+    for want in probe.words() {
+        var found = false
+        for v in c.vars {
+            if v == want {
+                found = true
+            }
+        }
+        if !found {
+            if out.is_empty() {
+                out = "${want}"
+            } else {
+                out = "{out} ${want}"
+            }
+        }
+    }
+    out
+}
+
+/// The `combined` format string — nginx's compiled-in default,
+/// declared here byte-for-byte as probed from the oracle. Total.
+pub fn combined() -> str {
+    "$remote_addr - $remote_user [$time_local] \"$request\" $status $body_bytes_sent \"$http_referer\" \"$http_user_agent\""
+}
+
+// ------------------------------------------------------------------
+// the escape-mode and level ladders
+// ------------------------------------------------------------------
+
+/// Whether `esc` is a log_format escape mode the oracle knows
+/// (default | json | none). Total.
+pub fn esc_ok(esc: str) -> bool {
+    esc == "default" || esc == "json" || esc == "none"
+}
+
+/// The nginx error-log level ladder as a rank: debug=0, info=1,
+/// notice=2, warn=3, error=4, crit=5, alert=6, emerg=7; -1 for a
+/// name outside the ladder (the oracle's `invalid log level`). Total.
+pub fn level_rank(level: str) -> int {
+    if level == "debug" {
+        return 0
+    }
+    if level == "info" {
+        return 1
+    }
+    if level == "notice" {
+        return 2
+    }
+    if level == "warn" {
+        return 3
+    }
+    if level == "error" {
+        return 4
+    }
+    if level == "crit" {
+        return 5
+    }
+    if level == "alert" {
+        return 6
+    }
+    if level == "emerg" {
+        return 7
+    }
+    -1
+}
+
+// ------------------------------------------------------------------
+// the Access record — what serve/ knows about one finished request.
+// Constructed HERE (access_new) so importers never build a List-
+// bearing struct literal cross-module; fields are then written
+// directly (structs cross the boundary whole).
+// ------------------------------------------------------------------
+
+/// One finished request, as the serving tree knew it. `request` is
+/// the RAW request line (pre-decode, cut at the first CR/LF);
+/// `req_ms` the request wall time in ms; `hnames`/`hvals` the
+/// request headers (lowercased names, index-parallel);
+/// `up_addr`/`up_status`/`up_ms` the upstream leg when `proxied`.
+pub struct Access {
+    remote_addr: str,
+    unix_ms: int,
+    request: str,
+    status: int,
+    body_bytes: int,
+    req_ms: int,
+    hnames: List[str],
+    hvals: List[str],
+    proxied: bool,
+    up_addr: str,
+    up_status: int,
+    up_ms: int,
+}
+
+/// A fresh, empty Access record (the importer's constructor — fields
+/// are written directly afterward). Total.
+pub fn access_new() -> Access {
+    Access {
+        remote_addr: "127.0.0.1",
+        unix_ms: 0,
+        request: "",
+        status: 0,
+        body_bytes: 0,
+        req_ms: 0,
+        hnames: List[str](),
+        hvals: List[str](),
+        proxied: false,
+        up_addr: "",
+        up_status: 0,
+        up_ms: 0,
+    }
+}
+
+/// Append one request header to the record (lowercased name). Total.
+pub fn access_header(mut a: Access, name: str, value: str) {
+    (mut a.hnames).push(name.lower())
+    (mut a.hvals).push(value)
+}
+
+/// The header value for lowercased `name` ("" when absent — the
+/// renderer applies the per-mode missing spelling). Total.
+fn header_of(a: Access, name: str) -> str {
+    var i: int = 0
+    for h in a.hnames {
+        if h == name {
+            return a.hvals[i]
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// `$http_foo_bar` -> the `foo-bar` header name (underscores to
+/// hyphens, the nginx mapping). Total.
+fn http_var_header(v: str) -> str {
+    var out = ""
+    var start: int = 0
+    var i: int = 0
+    for b in v.bytes() {
+        if b == 95 {
+            out = "{out}{v[start..i]}-"
+            start = i + 1
+        }
+        i = i + 1
+    }
+    "{out}{v[start..i]}"
+}
+
+/// The raw value of variable `name` under record `a` ("" when the
+/// fact is absent — missing and empty are one case, as the oracle
+/// treats them). Only implemented variables reach here (the config
+/// pass refused the rest); an unexpected name answers "" rather than
+/// trapping (the config pass is the guard, this is the belt). Total.
+pub fn var_value(name: str, a: Access) -> str {
+    if name == "remote_addr" {
+        return a.remote_addr
+    }
+    if name == "remote_user" {
+        return ""
+    }
+    if name == "time_local" {
+        return time_local(a.unix_ms)
+    }
+    if name == "time_iso8601" {
+        return time_iso8601(a.unix_ms)
+    }
+    if name == "request" {
+        return a.request
+    }
+    if name == "status" {
+        if a.status == 0 {
+            return ""
+        }
+        return "{a.status}"
+    }
+    if name == "body_bytes_sent" {
+        return "{a.body_bytes}"
+    }
+    if name == "request_time" {
+        return seconds3(a.req_ms)
+    }
+    if name == "upstream_addr" {
+        return a.up_addr
+    }
+    if name == "upstream_status" {
+        if !a.proxied || a.up_status == 0 {
+            return ""
+        }
+        return "{a.up_status}"
+    }
+    if name == "upstream_response_time" {
+        if !a.proxied {
+            return ""
+        }
+        return seconds3(a.up_ms)
+    }
+    if name.starts_with("http_") {
+        return header_of(a, http_var_header(name[5..name.len]))
+    }
+    ""
+}
+
+/// Render one access line through a compiled format under escape mode
+/// `esc` (default | json | none), WITHOUT the trailing newline. The
+/// missing-value spellings are the oracle's, probed: default -> `-`,
+/// json -> empty, none -> empty. Total.
+pub fn render_access(f: Fmt, a: Access, esc: str) -> str {
+    var out = ""
+    var i: int = 0
+    let nv = f.vars.len
+    while i < nv {
+        let v = var_value(f.vars[i], a)
+        var rendered = v
+        if esc == "json" {
+            rendered = esc_json(v)
+        } else if esc == "none" {
+            rendered = v
+        } else if v.is_empty() {
+            rendered = "-"
+        } else {
+            rendered = esc_default(v)
+        }
+        out = "{out}{f.lits[i]}{rendered}"
+        i = i + 1
+    }
+    "{out}{f.lits[nv]}"
+}
+
+// ------------------------------------------------------------------
+// the native JSON door — one object per line, fixed schema, numbers
+// as numbers (the whole point). Schema 1; the version bumps only on
+// a breaking shape change (the ws07/ws08 convention).
+// ------------------------------------------------------------------
+
+/// The access-log JSON schema version. Total.
+pub fn access_schema() -> int {
+    1
+}
+
+/// One request as a single JSON line (no trailing newline): schema,
+/// time_iso8601, remote_addr, request, status, body_bytes_sent,
+/// request_time — the variable names without the `$`, values TYPED
+/// (status/body_bytes_sent are numbers, request_time a decimal
+/// number). The upstream trio joins only when the request was
+/// proxied; `headers` (the log_headers opt-in list, lowercased
+/// names) joins only when requested and non-empty. Structural
+/// escaping (esc_json) on every string — log injection cannot break
+/// the line. Total.
+pub fn render_access_jsonl(a: Access, header_optin: List[str]) -> str {
+    var out = "{{\"schema\":{access_schema()}"
+    out = "{out},\"time_iso8601\":\"{time_iso8601(a.unix_ms)}\""
+    out = "{out},\"remote_addr\":\"{esc_json(a.remote_addr)}\""
+    out = "{out},\"request\":\"{esc_json(a.request)}\""
+    out = "{out},\"status\":{a.status}"
+    out = "{out},\"body_bytes_sent\":{a.body_bytes}"
+    out = "{out},\"request_time\":{seconds3(a.req_ms)}"
+    if a.proxied {
+        out = "{out},\"upstream_addr\":\"{esc_json(a.up_addr)}\""
+        out = "{out},\"upstream_status\":{a.up_status}"
+        out = "{out},\"upstream_response_time\":{seconds3(a.up_ms)}"
+    }
+    var hout = ""
+    var first = true
+    for want in header_optin {
+        let v = header_of(a, want.lower())
+        if !v.is_empty() {
+            let sep = if first { "" } else { "," }
+            first = false
+            hout = "{hout}{sep}\"{esc_json(want.lower())}\":\"{esc_json(v)}\""
+        }
+    }
+    if !hout.is_empty() {
+        out = "{out},\"headers\":{{{hout}}}"
+    }
+    "{out}}}"
+}
+
+// ------------------------------------------------------------------
+// the error-log renderers — the nginx text shape and the JSON door,
+// over the ws08 event vocabulary (names and field keys are FROZEN in
+// docs/DRAIN.md; ws09 renders, never renames).
+// ------------------------------------------------------------------
+
+/// One error-log line in the oracle's text shape, without the
+/// trailing newline: `2026/08/30 22:51:21 [notice] message`. LOBO
+/// DELTA (named): no `pid#tid:` — wolf has no getpid surface (the
+/// ws04/wsm01 residue), and a fake pid would be worse than none.
+/// Total.
+pub fn render_error(level: str, msg: str, unix_ms: int) -> str {
+    "{err_date(unix_ms)} [{level}] {msg}"
+}
+
+/// Whether an event at `level` passes an error_log configured at
+/// `conf_level` (the nginx ladder: log at conf level and above; an
+/// unknown level name passes everything rather than silencing —
+/// the config pass refused it already). Total.
+pub fn level_passes(level: str, conf_level: str) -> bool {
+    let r = level_rank(level)
+    let c = level_rank(conf_level)
+    if r < 0 || c < 0 {
+        return true
+    }
+    r >= c
+}
+
+/// One error-log line as a single JSON line (no trailing newline):
+/// schema, time_iso8601, level, then the EVENT DECODED — a message
+/// whose first word is a ws08 vocabulary name followed by k=v fields
+/// becomes `"event":"<name>"` plus one key per field (all-digit
+/// values typed as numbers, keys verbatim — the FROZEN field keys);
+/// anything else rides whole as `"msg"`. Total.
+pub fn render_error_jsonl(level: str, msg: str, unix_ms: int) -> str {
+    var out = "{{\"schema\":{access_schema()}"
+    out = "{out},\"time_iso8601\":\"{time_iso8601(unix_ms)}\""
+    out = "{out},\"level\":\"{esc_json(level)}\""
+    let ev = event_fields(msg)
+    if ev.is_empty() {
+        out = "{out},\"msg\":\"{esc_json(msg)}\""
+    } else {
+        out = "{out}{ev}"
+    }
+    "{out}}}"
+}
+
+/// Whether every byte of `s` is an ASCII digit (and `s` non-empty).
+/// Total.
+fn all_digits(s: str) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for b in s.bytes() {
+        if b < 48 || b > 57 {
+            return false
+        }
+    }
+    true
+}
+
+/// Decode `name k=v k=v ...` into JSON members (`,"event":"name",
+/// "k":v,...`), or "" when `msg` is not that shape (then it rides as
+/// a plain "msg"). Every k must contain no `=` of its own; digit
+/// values are typed as numbers. Total.
+pub fn event_fields(msg: str) -> str {
+    var name = ""
+    var rest_ok = true
+    var out = ""
+    var first = true
+    for w in msg.words() {
+        if first {
+            first = false
+            name = w
+            if name.contains("=") || name.contains("\"") || name.is_empty() {
+                return ""
+            }
+            continue
+        }
+        let eq = w.find("=") else -1
+        if eq <= 0 {
+            rest_ok = false
+            continue
+        }
+        let k = w[0..eq]
+        let v = w[eq + 1..w.len]
+        if all_digits(v) {
+            out = "{out},\"{esc_json(k)}\":{v}"
+        } else {
+            out = "{out},\"{esc_json(k)}\":\"{esc_json(v)}\""
+        }
+    }
+    if name.is_empty() || !rest_ok || out.is_empty() {
+        return ""
+    }
+    ",\"event\":\"{esc_json(name)}\"{out}"
+}
+
+// ------------------------------------------------------------------
+// the sink — a bounded per-output buffer. Emit never blocks (over
+// the cap is a COUNTED drop); flush is one bounded append per call,
+// on the fs append tier; reopen closes the fd so external logrotate
+// works exactly as it does against nginx (ws04's `reopen` verb).
+// ------------------------------------------------------------------
+
+/// One log output. `buf` holds rendered lines awaiting the next
+/// flush, bounded by `cap` bytes; `dropped` counts lines lost since
+/// the last drop report (`dropped_total` forever); `fd`/`is_open`
+/// the append handle between flushes.
+pub struct Sink {
+    path: str,
+    buf: str,
+    cap: int,
+    dropped: int,
+    dropped_total: int,
+    fd: int,
+    is_open: bool,
+}
+
+/// A fresh sink for `path` with buffer cap `cap` bytes (<= 0 means
+/// the 64 KiB default). Pure — nothing opens until the first flush.
+/// Total.
+pub fn sink_new(path: str, cap: int) -> Sink {
+    var c = cap
+    if c <= 0 {
+        c = 65536
+    }
+    Sink { path: path, buf: "", cap: c, dropped: 0, dropped_total: 0, fd: 0, is_open: false }
+}
+
+/// Queue one rendered line (newline appended here). NEVER blocks and
+/// never touches the fs: over the cap the line is dropped and
+/// counted — a dropped log line must never become a stalled request
+/// (the contract's writer rule, D7-shaped). Total.
+pub fn sink_emit(mut s: Sink, line: str) {
+    if s.buf.len + line.len + 1 > s.cap {
+        s.dropped = s.dropped + 1
+        s.dropped_total = s.dropped_total + 1
+        return
+    }
+    s.buf = "{s.buf}{line}\n"
+}
+
+/// Flush the buffer to the output with ONE bounded append (opening
+/// the fd lazily — after a `reopen`, this reopening is what makes
+/// external logrotate work). On an unwritable path or a failed
+/// write the buffered LINES are dropped and counted (bounded memory:
+/// the buffer never grows past its cap waiting for a disk that may
+/// never come back) and the flush answers false — the caller
+/// reports drops through `sink_drop_note`. True when nothing needed
+/// writing or everything was written. fs tier: native + checked.
+pub fn sink_flush(mut s: Sink) -> bool {
+    if s.buf.is_empty() {
+        return true
+    }
+    if !s.is_open {
+        var bad = false
+        let fd = fs_open_mode(s.path, 2) else |_| {
+            bad = true
+            0
+        }
+        if bad {
+            drop_buffer(mut s)
+            return false
+        }
+        s.fd = fd
+        s.is_open = true
+    }
+    var ok = true
+    fs_write_chunk(s.fd, s.buf.bytes()) else |_| {
+        ok = false
+    }
+    if !ok {
+        drop_buffer(mut s)
+        fs_close(s.fd) else |_| {}
+        s.is_open = false
+        return false
+    }
+    s.buf = ""
+    true
+}
+
+/// Count the buffered lines as dropped and clear the buffer. Total.
+fn drop_buffer(mut s: Sink) {
+    let n = s.buf.count("\n")
+    s.dropped = s.dropped + n
+    s.dropped_total = s.dropped_total + n
+    s.buf = ""
+}
+
+/// Close the append fd (flushing first) so the NEXT flush reopens —
+/// the `reopen` verb's per-output action: logrotate moved the file,
+/// the reopen re-creates it at the configured path. fs tier.
+pub fn sink_reopen(mut s: Sink) {
+    let _ = sink_flush(mut s)
+    if s.is_open {
+        fs_close(s.fd) else |_| {}
+        s.is_open = false
+    }
+}
+
+/// The drop report for the last window, and RESET the window counter
+/// ("" when nothing was dropped since the last call). The caller
+/// prints it through the error stream — a drop is LOUD, never
+/// silent. Total.
+pub fn sink_drop_note(mut s: Sink) -> str {
+    if s.dropped == 0 {
+        return ""
+    }
+    let n = s.dropped
+    s.dropped = 0
+    "access log \"{s.path}\": dropped {n} line(s) (buffer overflow or unwritable path; {s.dropped_total} total)"
 }

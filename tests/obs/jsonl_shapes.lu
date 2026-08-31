@@ -1,0 +1,96 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: checked
+//! stage-src: obs
+//!
+//! THE PARSE-PROOF for the native door (ws09 §2, "logs that parse"):
+//! every JSON line the renderers produce is fed to the toolchain's
+//! OWN RFC 8259 reader (json_valid — the checked lane is its home,
+//! which is this file's one lane) and the typed fields are pinned as
+//! bare numbers. The schema is versioned (1) and documented in
+//! docs/LOGGING.md; a shape change here is a schema bump there.
+
+use obs
+
+fn byte_str(b: int) -> str {
+    var v = List[int]()
+    (mut v).push(b)
+    str_from_utf8(v) else ""
+}
+
+fn main() -> !int {
+    var a = obs.access_new()
+    a.unix_ms = 1767225600000
+    a.request = "GET /%41\"x HTTP/1.1"
+    a.status = 200
+    a.body_bytes = 79
+    a.req_ms = 3
+    obs.access_header(mut a, "user-agent", "probe-UA/1.0")
+    obs.access_header(mut a, "x-evil", "a{byte_str(13)}{byte_str(10)}b")
+
+    // plain: no headers requested, not proxied
+    let noh = List[str]()
+    let l1 = obs.render_access_jsonl(a, noh)
+    assert(json_valid(l1), "access line parses: {l1}")
+    assert(l1.starts_with("{{\"schema\":1,"), "schema first")
+    assert(l1.contains("\"status\":200"), "status is a NUMBER")
+    assert(l1.contains("\"body_bytes_sent\":79"), "bytes are a NUMBER")
+    assert(l1.contains("\"request_time\":0.003"), "request_time is a DECIMAL NUMBER")
+    assert(l1.contains("\\\"x"), "the raw request's quote is escaped structurally")
+    assert(!l1.contains("upstream"), "no upstream keys when not proxied")
+    assert(!l1.contains("headers"), "no headers object unless opted in")
+
+    // opt-in headers: injection cannot break the line
+    var optin = List[str]()
+    (mut optin).push("User-Agent")
+    (mut optin).push("X-Evil")
+    (mut optin).push("X-Absent")
+    let l2 = obs.render_access_jsonl(a, optin)
+    assert(json_valid(l2), "header line parses: {l2}")
+    assert(l2.contains("\"headers\":{{\"user-agent\":\"probe-UA/1.0\""), "opt-in header present")
+    assert(l2.contains("\"x-evil\":\"a\\r\\nb\""), "CRLF escaped inside the object")
+    assert(!l2.contains("x-absent"), "absent opt-in header omitted")
+
+    // proxied: the upstream trio joins, typed
+    a.proxied = true
+    a.up_addr = "127.0.0.1:8181"
+    a.up_status = 502
+    a.up_ms = 12
+    let l3 = obs.render_access_jsonl(a, noh)
+    assert(json_valid(l3), "proxied line parses")
+    assert(l3.contains("\"upstream_status\":502"), "upstream status is a NUMBER")
+    assert(l3.contains("\"upstream_response_time\":0.012"), "upstream time is a NUMBER")
+
+    // the error door: a ws08 vocabulary event decodes into typed keys
+    let e1 = obs.
+        render_error_jsonl(
+        "notice",
+        "generation-retired gen=1 drained=2 aborted=0 age-ms=1840",
+        1767225600000,
+    )
+    assert(json_valid(e1), "event line parses: {e1}")
+    assert(e1.contains("\"event\":\"generation-retired\""), "event name")
+    assert(e1.contains("\"gen\":1"), "field typed")
+    assert(e1.contains("\"age-ms\":1840"), "the FROZEN field key, verbatim")
+    assert(e1.contains("\"level\":\"notice\""), "level carried")
+
+    // prose (the ACME lines) rides whole as msg
+    let e2 = obs.
+        render_error_jsonl(
+        "error",
+        "cert auto: issuance/renewal attempt failed: CA down (will retry with backoff)",
+        1767225600000,
+    )
+    assert(json_valid(e2), "prose line parses")
+    assert(e2.contains("\"msg\":\"cert auto:"), "prose is msg, not a fake event")
+
+    // an id field with hex stays a string
+    let e3 = obs.render_error_jsonl("notice", "generation-loaded gen=2 id=0f96da4e7e7c072a", 0)
+    assert(json_valid(e3), "loaded event parses")
+    assert(e3.contains("\"id\":\"0f96da4e7e7c072a\""), "hex id stays a string")
+
+    // the nginx-shaped text twin
+    let t = obs.render_error("notice", "generation-activated gen=2", 1767225600000)
+    assert(t == "2026/01/01 00:00:00 [notice] generation-activated gen=2", "text shape: {t}")
+    0
+}

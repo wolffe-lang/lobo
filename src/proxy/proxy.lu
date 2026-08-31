@@ -1131,6 +1131,53 @@ fn gw_body(code: int, token: str) -> str {
     "<html>\r\n<head><title>{code} {phrase}</title></head>\r\n<body>\r\n<center><h1>{code} {phrase}</h1></center>\r\n<hr><center>{token}</center>\r\n</body>\r\n</html>\r\n"
 }
 
+/// What one proxied exchange looked like, for the access log (ws09):
+/// `addr` is the comma-joined list of peers TRIED (nginx's
+/// $upstream_addr shape; the LAST one answered), `status` the status
+/// relayed to the client (upstream's on success, the gateway error
+/// otherwise), `body_bytes` the response body length, `up_ms` the
+/// upstream leg's wall time in ms. Filled by `run`; a caller that
+/// does not log passes a fresh one and ignores it.
+pub struct RunAcc {
+    addr: str,
+    status: int,
+    body_bytes: int,
+    up_ms: int,
+}
+
+/// A fresh, empty RunAcc (the caller's constructor). Total.
+pub fn run_acc() -> RunAcc {
+    RunAcc { addr: "", status: 0, body_bytes: 0, up_ms: 0 }
+}
+
+/// The status code of an upstream status line ("HTTP/1.1 200 OK" ->
+/// 200; 0 for a line with no parsable code — the caller treats that
+/// upstream as broken). Total.
+pub fn status_code_of(status_line: str) -> int {
+    let sp = status_line.find(" ") else -1
+    if sp < 0 {
+        return 0
+    }
+    var v: int = 0
+    var seen = false
+    let rest = status_line[sp + 1..status_line.len]
+    for b in rest.bytes() {
+        if b >= 48 && b <= 57 {
+            v = v * 10 + (b - 48)
+            seen = true
+        } else {
+            if seen {
+                return v
+            }
+            return 0
+        }
+    }
+    if seen {
+        return v
+    }
+    0
+}
+
 /// A single upstream attempt against `phost:pport`: connect (str-only,
 /// blocking — F-0049 means connect has no armed deadline, so on
 /// loopback a refused peer is immediate → 502, and only the READ leg
@@ -1150,6 +1197,7 @@ fn attempt(
     token: str,
     date: str,
     keep: bool,
+    mut pacc: RunAcc,
 ) -> int ! {closed, io} {
     let up = net_connect("{phost}:{pport}") else |e| match e {
         refused => { return 502 },
@@ -1210,6 +1258,8 @@ fn attempt(
         }
     }
     net_close(up) else |_| {}
+    pacc.status = status_code_of(parsed.status_line)
+    pacc.body_bytes = body.len
     let out = relay_response(parsed, body, token, date, keep)
     net_write(client, out)?
     0
@@ -1280,8 +1330,11 @@ pub fn run(
     token: str,
     date: str,
     keep: bool,
+    mut acc: RunAcc,
 ) -> bool ! {closed, io} {
     if !pl.pt.err.is_empty() {
+        acc.status = 502
+        acc.body_bytes = gw_body(502, token).len
         send_gateway_error(client, 502, date, token)
         return true
     }
@@ -1291,6 +1344,8 @@ pub fn run(
     if pl.pt.is_pool {
         let pool = pool_named(c, pl.pt.authority)
         if peer_count(pool) == 0 {
+            acc.status = 502
+            acc.body_bytes = gw_body(502, token).len
             send_gateway_error(client, 502, date, token)
             return true
         }
@@ -1311,7 +1366,12 @@ pub fn run(
         let phost = hosts[idx]
         let pport = ports[idx]
         let upreq = build_upstream(c, req, pl, phost, pport, remote_addr, body)
-        let st = attempt(client, upreq, phost, pport, pl.read_ms, token, date, keep)?
+        acc.addr = if acc.addr.is_empty() { "{phost}:{pport}" } else {
+            "{acc.addr}, {phost}:{pport}"
+        }
+        let t0 = time_unix_ms()
+        let st = attempt(client, upreq, phost, pport, pl.read_ms, token, date, keep, mut acc)?
+        acc.up_ms = acc.up_ms + (time_unix_ms() - t0)
         if st == 0 {
             return !keep
         }
@@ -1324,6 +1384,8 @@ pub fn run(
         // st == 502: connect failed — try the next peer
         idx = idx + 1
     }
+    acc.status = last_status
+    acc.body_bytes = gw_body(last_status, token).len
     send_gateway_error(client, last_status, date, token)
     true
 }

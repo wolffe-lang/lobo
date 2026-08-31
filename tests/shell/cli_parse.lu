@@ -57,6 +57,7 @@ fn main() -> int {
     assert(shell.parse_cli(one("help")).mode == "help", "help word")
     assert(shell.parse_cli(one("serve")).mode == "serve", "serve verb")
     assert(shell.parse_cli(one("directives-md")).mode == "docs", "docs verb")
+    assert(shell.parse_cli(one("logvars-md")).mode == "logvars", "logvars verb (ws09)")
 
     // ws08: the status verb and its --format modifier
     assert(shell.parse_cli(one("status")).mode == "status", "status verb")

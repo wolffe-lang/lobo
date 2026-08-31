@@ -47,11 +47,14 @@ fn main() -> !int {
     let rd = net_accept(l)?
 
     let date = "Thu, 01 Jan 2026 00:00:00 GMT"
-    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false) else |_| {
+    var pacc = proxy.run_acc()
+    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false, mut pacc) else |_| {
         assert(false, "proxy.run should not raise on a read timeout")
         return 1
     }
     assert(close, "a 504 always closes the connection")
+    assert(pacc.status == 504, "the access record carries the gateway status (ws09): {pacc.status}")
+    assert(!pacc.addr.is_empty(), "the tried peer is recorded (ws09)")
     net_close(cli)?
 
     net_deadline(rd, 3000)?

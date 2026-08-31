@@ -1,0 +1,75 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: obs
+//!
+//! The sink discipline (ws09 §3): emit never blocks and never touches
+//! the fs; over the cap is a COUNTED drop; flush is one bounded append
+//! (lazy open — reopen's whole mechanism); an unwritable path drops
+//! and counts instead of stalling or growing; reopen closes the fd so
+//! external logrotate works (the ws04 verb's per-output action).
+//! fs tier -> native + checked. Scratch cleared at the START (sc12
+//! idempotency).
+
+use obs
+
+fn main() -> !int {
+    let d = "ws09_sink"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all(d)?
+
+    // emit + flush + append across flushes
+    var s = obs.sink_new("{d}/a.log", 0)
+    assert(s.cap == 65536, "default cap")
+    obs.sink_emit(mut s, "one")
+    obs.sink_emit(mut s, "two")
+    assert(obs.sink_flush(mut s), "first flush writes")
+    obs.sink_emit(mut s, "three")
+    assert(obs.sink_flush(mut s), "second flush appends")
+    assert(obs.sink_flush(mut s), "empty flush is a no-op")
+    let t1 = fs_read_text("{d}/a.log")?
+    assert(t1 == "one\ntwo\nthree\n", "lines in order, newline-terminated: {t1}")
+
+    // overflow: the cap counts drops, the note reports and resets
+    var o = obs.sink_new("{d}/b.log", 8)
+    obs.sink_emit(mut o, "1234567")
+    obs.sink_emit(mut o, "x")
+    obs.sink_emit(mut o, "y")
+    assert(o.dropped == 2, "two lines dropped over the cap")
+    let note = obs.sink_drop_note(mut o)
+    assert(note.contains("dropped 2 line(s)"), "the drop is LOUD: {note}")
+    assert(note.contains("{d}/b.log"), "the note names the output")
+    assert(obs.sink_drop_note(mut o).is_empty(), "the window resets")
+    assert(o.dropped_total == 2, "the forever counter keeps it")
+    assert(obs.sink_flush(mut o), "the surviving line flushes")
+    let t2 = fs_read_text("{d}/b.log")?
+    assert(t2 == "1234567\n", "only the accepted line landed")
+
+    // unwritable path: flush fails, buffered lines counted, memory bounded
+    var u = obs.sink_new("{d}/no-such-dir/x.log", 0)
+    obs.sink_emit(mut u, "lost-1")
+    obs.sink_emit(mut u, "lost-2")
+    assert(!obs.sink_flush(mut u), "unwritable path fails the flush")
+    assert(u.dropped == 2, "the buffered lines are counted, not kept")
+    assert(u.buf.is_empty(), "the buffer does not grow toward a dead disk")
+    let un = obs.sink_drop_note(mut u)
+    assert(un.contains("dropped 2 line(s)"), "unwritable drops are loud too")
+
+    // reopen: the fd closes; the next flush recreates at the path
+    var r = obs.sink_new("{d}/c.log", 0)
+    obs.sink_emit(mut r, "before")
+    assert(obs.sink_flush(mut r), "first write")
+    assert(r.is_open, "fd held between flushes")
+    fs_rename("{d}/c.log", "{d}/c.log.1") else |_| {}
+    obs.sink_reopen(mut r)
+    assert(!r.is_open, "reopen closes the fd")
+    obs.sink_emit(mut r, "after")
+    assert(obs.sink_flush(mut r), "post-reopen flush recreates")
+    let rot = fs_read_text("{d}/c.log.1")?
+    assert(rot == "before\n", "the rotated file kept the old lines")
+    let fresh = fs_read_text("{d}/c.log")?
+    assert(fresh == "after\n", "the fresh file holds the new lines: {fresh}")
+
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

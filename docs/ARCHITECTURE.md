@@ -24,7 +24,9 @@ src/
   proxy/     upstream pools, proxy_pass  [stub; ws03]
   shell/     CLI verbs, signals, reload (split on the upstream
              signal-reception ask)       [stub; ws04]
-  obs/       logging, metrics            [stub; wsc03]
+  obs/       logging (ws09: format compiler, variable table,
+             oracle-pinned escapers, JSON doors, bounded sinks);
+             metrics land ws12            [real; wsc03]
 ```
 
 Intended call direction once real (locked by the sprint contracts,

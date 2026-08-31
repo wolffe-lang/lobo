@@ -212,9 +212,9 @@ pub fn table() -> Table {
         "main http server location",
         "",
         1,
-        2,
-        "planned(ws02)",
-        "error log path and level",
+        3,
+        "implemented",
+        "error log path + nginx level ladder (ws09); lobo-native format=json third arg (linted); main/http level applies at v0",
     )
     row(
         mut t,
@@ -223,10 +223,29 @@ pub fn table() -> Table {
         "",
         1,
         -1,
-        "planned(ws02)",
-        "access log path and format",
+        "implemented",
+        "access log path [format] [buffer=] [flush=] | off (ws09); format=json is the lobo-native structured door (linted); no directive means NO log (delta: nginx defaults to logs/access.log); gzip=/if= named post-v1; location-level rows are named-inert at v0 (L005)",
     )
-    row(mut t, "log_format", "http", "", 2, -1, "planned(ws02)", "named log format")
+    row(
+        mut t,
+        "log_format",
+        "http",
+        "",
+        2,
+        -1,
+        "implemented",
+        "named format, escape=default|json|none pinned to the oracle byte-for-byte (ws09); variables per docs/log-variables.md (class-C: an unimplemented variable refuses at load)",
+    )
+    row(
+        mut t,
+        "log_headers",
+        "http server",
+        "",
+        1,
+        -1,
+        "implemented",
+        "lobo-native (ws09, linted): request headers the JSON door nests under \"headers\"",
+    )
     row(mut t, "sendfile", "http server location", "", 1, 1, "planned(ws02)", "kernel file send")
     row(
         mut t,
