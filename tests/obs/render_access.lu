@@ -1,0 +1,92 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: obs
+//!
+//! The access renderer over a fixture record (ws09 §1/§2): the three
+//! escape modes with the oracle's missing-value spellings (default ->
+//! `-`, json/none -> empty, probed), the clock spellings (UTC — the
+//! named delta), $http_* header mapping, and the upstream trio's
+//! not-proxied gating. 2026-01-01T00:00:00Z is 1767225600s.
+
+use obs
+
+fn fixture() -> obs.Access {
+    var a = obs.access_new()
+    a.unix_ms = 1767225600000
+    a.request = "GET /%41 HTTP/1.1"
+    a.status = 200
+    a.body_bytes = 79
+    a.req_ms = 3
+    obs.access_header(mut a, "User-Agent", "probe-UA/1.0")
+    obs.access_header(mut a, "referer", "http://r.example/x")
+    a
+}
+
+fn main() -> !int {
+    // clocks (the UTC named delta, exact)
+    assert(obs.time_local(1767225600000) == "01/Jan/2026:00:00:00 +0000", "time_local")
+    assert(obs.time_iso8601(1767225600000) == "2026-01-01T00:00:00+00:00", "time_iso8601")
+    assert(obs.err_date(1767225600000) == "2026/01/01 00:00:00", "err_date")
+    let later = obs.time_local(1767225600000 + 86399000)
+    assert(later == "01/Jan/2026:23:59:59 +0000", "end of day: {later}")
+
+    // $request_time spelling
+    assert(obs.seconds3(0) == "0.000", "zero")
+    assert(obs.seconds3(3) == "0.003", "three ms")
+    assert(obs.seconds3(12345) == "12.345", "seconds carry")
+    assert(obs.seconds3(-5) == "0.000", "negative clamps")
+
+    let a = fixture()
+
+    // the combined line, end to end (the differential's shape)
+    let line = obs.render_access(obs.compile(obs.combined()), a, "default")
+    let want = "127.0.0.1 - - [01/Jan/2026:00:00:00 +0000] \"GET /%41 HTTP/1.1\" 200 79 \"http://r.example/x\" \"probe-UA/1.0\""
+    assert(line == want, "combined renders the probe shape:\n{line}\n{want}")
+
+    // missing values per mode (probed: - / empty / empty)
+    let mf = obs.compile("[$http_x_missing]")
+    assert(obs.render_access(mf, a, "default") == "[-]", "default missing is -")
+    assert(obs.render_access(mf, a, "json") == "[]", "json missing is empty")
+    assert(obs.render_access(mf, a, "none") == "[]", "none missing is empty")
+
+    // $http_* underscore-to-hyphen mapping, case-blind header names
+    let ua = obs.render_access(obs.compile("$http_user_agent"), a, "default")
+    assert(ua == "probe-UA/1.0", "http_user_agent maps to user-agent: {ua}")
+
+    // escaping applies to VALUES, not the literals
+    var esc = obs.access_new()
+    esc.unix_ms = 1767225600000
+    esc.request = "GET /\"x HTTP/1.1"
+    esc.status = 400
+    let dl = obs.render_access(obs.compile("\"$request\""), esc, "default")
+    assert(dl == "\"GET /\\x22x HTTP/1.1\"", "value escaped, literal quotes kept: {dl}")
+    let jl = obs.render_access(obs.compile("\"$request\""), esc, "json")
+    assert(jl == "\"GET /\\\"x HTTP/1.1\"", "json value escaped: {jl}")
+
+    // upstream trio: gated on proxied
+    let uf = obs.compile("$upstream_addr|$upstream_status|$upstream_response_time")
+    assert(obs.render_access(uf, a, "default") == "-|-|-", "not proxied: dashes")
+    var p = fixture()
+    p.proxied = true
+    p.up_addr = "127.0.0.1:8181"
+    p.up_status = 502
+    p.up_ms = 12
+    assert(
+        obs.render_access(uf, p, "default") == "127.0.0.1:8181|502|0.012",
+        "proxied trio renders",
+    )
+
+    // a zero status is a fact we do not have — dash, never 0
+    var z = obs.access_new()
+    z.unix_ms = 1767225600000
+    assert(obs.render_access(obs.compile("$status"), z, "default") == "-", "no status is -")
+
+    // the level ladder
+    assert(obs.level_rank("debug") == 0 && obs.level_rank("emerg") == 7, "ladder ends")
+    assert(obs.level_rank("frobnicate") == -1, "unknown level refused")
+    assert(obs.level_passes("error", "warn"), "error passes a warn log")
+    assert(!obs.level_passes("info", "warn"), "info is below warn")
+    assert(obs.level_passes("notice", "notice"), "at-level passes")
+    0
+}
