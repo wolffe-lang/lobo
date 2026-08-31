@@ -1,0 +1,141 @@
+#!/bin/sh
+# lobo-membudget — the ws10 STRUCTURE AUDIT witness (target 1, the
+# sprint's soul): budgets over a structure that secretly accumulates
+# per-request memory would be theater, so this pins what the audit
+# proved and NAMES what upstream still owes.
+#
+# THE METHOD (a deliverable of the audit; the full story is
+# docs/BUDGET.md §audit): wolf exposes no in-language region
+# accounting at this pin (the runtime's ledger — wolf_rt
+# region_bytes()/live_region_bytes() — reaches no lane; the ask is
+# FILED as wolf-lang#187), so the audit observes from OUTSIDE: the
+# server's RSS via ps(1) around keepalive drives over ONE connection
+# (tests/rig/memdrive.lu; a close before the count is a named
+# failure — the keepalive half of the witness).
+#
+# WHAT GATES TODAY — the per-response REGION claim (the audit's fix):
+# response-body bytes die with their response. Witnessed
+# DIFFERENTIALLY: the same drive against a 16-byte body and against a
+# 16 KiB body must cost the same memory — before the ws10 region fix
+# the 16 KiB round leaked its ~6.4 MB of bodies (measured ~290 KB/req
+# all-in); after it both rounds cost the same few KB/req. A coarse
+# per-request ratchet also gates (a catastrophic regression trips it).
+#
+# WHAT IS NAMED-GATED — full O(1): str materializations never join
+# regions at this pin (the native tier's root-arena realization —
+# wolf-lang#191, filed from this audit), so every request still
+# retains its head/parse/response STRING work (~24 KB/req under this
+# padded shape). The absolute assertion prints its numbers and stays
+# a loud skip until the [wolf] pin carries the #191 fix; then it
+# flips to a hard gate.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+case "$(uname -s)" in
+Linux | Darwin) ;;
+*)
+    echo "lobo-membudget: SKIPPED — the RSS oracle is ps(1) on Linux/macOS; other hosts join when a portable memory probe exists (named platform gap)"
+    exit 0
+    ;;
+esac
+
+LOBO="$(pwd)/target/lobo-release"
+if [ ! -x "$LOBO" ]; then
+    echo "lobo-membudget: FAILED — $LOBO missing; the gauntlet's build step makes it" >&2
+    exit 1
+fi
+
+scratch="target/lobo-membudget"
+rm -rf "$scratch"
+mkdir -p "$scratch/w"
+# small.html: 16 bytes. big.html: 16 KiB — the differential's body.
+printf 'SMALL-BODY-16BB\n' > "$scratch/w/small.html"
+i=0
+while [ $i -lt 512 ]; do
+    printf 'AUDIT-BODY-%05d-abcdefghijklmnopqr\n' "$i"
+    i=$((i + 1))
+done > "$scratch/w/big.html"
+
+red=0
+total=0
+say() { echo "lobo-membudget: $1"; }
+check() { # check <desc> <ok(0/1)>
+    total=$((total + 1))
+    if [ "$2" = 0 ]; then
+        say "ok — $1"
+    else
+        say "FAILED — $1" >&2
+        red=$((red + 1))
+    fi
+}
+
+hp=$("$WOLF" run ./tests/rig/freeport.lu)
+printf 'pid %s/lobo.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
+    "$scratch" "$hp" "$scratch" > "$scratch/lobo.conf"
+
+"$LOBO" serve -p . -c "$scratch/lobo.conf" 2> "$scratch/lobo.log" &
+pid=$!
+
+i=0
+while [ $i -lt 80 ]; do
+    if grep -q "generation-activated gen=1" "$scratch/lobo.log" 2>/dev/null; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+
+rss_kb() { ps -o rss= -p "$pid" | tr -d ' '; }
+drive() { # drive <count> <path> <desc>
+    if out=$("$WOLF" run ./tests/rig/memdrive.lu "$hp" "$1" "$2" 2> "$scratch/drive.err"); then
+        check "$3 ($out)" 0
+    else
+        check "$3 (stderr: $(tail -c 120 "$scratch/drive.err"))" 1
+    fi
+}
+
+# warmup — allocator pools, lazy init, first-touch costs land here
+drive 100 /small.html "warmup: 100 keepalive requests on one connection"
+r0=$(rss_kb)
+
+# round A: 400 small-body requests over ONE connection
+drive 400 /small.html "round A: 400 keepalive requests, 16 B body, one connection"
+r1=$(rss_kb)
+
+# round B: 400 big-body requests over ONE connection — same head
+# shape, bodies 1000x larger; the region claim says SAME memory cost
+drive 400 /big.html "round B: 400 keepalive requests, 16 KiB body, one connection"
+r2=$(rss_kb)
+
+kill "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+
+if [ -z "$r0" ] || [ -z "$r1" ] || [ -z "$r2" ]; then
+    check "RSS sampled at all checkpoints (r0='$r0' r1='$r1' r2='$r2')" 1
+else
+    ga=$((r1 - r0))
+    gb=$((r2 - r1))
+    diff=$((gb - ga))
+    say "growth: round A ${ga} KB, round B ${gb} KB, body-attributable difference ${diff} KB (a leaked 16 KiB body x 400 would be ~6400 KB)"
+    if [ "$diff" -lt 3200 ]; then
+        check "response bodies die with their response (B-A ${diff} KB < 3200 KB): the per-response region is load-bearing" 0
+    else
+        check "response bodies die with their response (B-A ${diff} KB < 3200 KB)" 1
+    fi
+    perreq=$((gb / 400))
+    if [ "$perreq" -lt 64 ]; then
+        check "per-request retention ratchet (${perreq} KB/req < 64 KB/req)" 0
+    else
+        check "per-request retention ratchet (${perreq} KB/req < 64 KB/req)" 1
+    fi
+    if [ "$gb" -lt 4096 ]; then
+        say "note — full O(1) already holds (round B grew ${gb} KB); if the [wolf] pin now carries the wolf-lang#191 fix, FLIP the gate below to hard"
+    else
+        say "NAMED GATE (loud skip, not a pass): full O(1) growth is upstream-gated — str materializations never join regions at this pin (wolf-lang#191, filed by this audit); round B retained ${gb} KB of string work. This line becomes a hard gate at the pin that carries the fix."
+    fi
+fi
+
+if [ "$red" != 0 ]; then
+    echo "lobo-membudget: RED — $red of $total checks failed (logs under $scratch/)" >&2
+    exit 1
+fi
+echo "lobo-membudget: $total/$total checks green (bodies O(1) per response; the str half is wolf-lang#191's, named above)"
