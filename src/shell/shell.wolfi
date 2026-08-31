@@ -1,7 +1,7 @@
 module pkg :: shell
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 7210946e779b1183126ce5ccc8e49d160108d3cb80b47b88df22a20da332a627
-  pkg_hash    7210946e779b1183126ce5ccc8e49d160108d3cb80b47b88df22a20da332a627
+  export_hash 4880c06c5fe571ae1d5abccfdaa4d20c6e335933feaac6fdf012041f25bbccfe
+  pkg_hash    4880c06c5fe571ae1d5abccfdaa4d20c6e335933feaac6fdf012041f25bbccfe
   deps:
     config  3be5cc730087c09fcede1c102a4e4aa2a9d78554a8a3d82e96ce8d70b0be5321
   items:
@@ -10,44 +10,45 @@ module pkg :: shell
     [2] pub control_alive — fn control_alive(addr: str) -> bool
     [3] pub control_fetch — fn control_fetch(addr: str, line: str) -> str ! {io, refused}
     [4] pub control_send — fn control_send(addr: str, line: str) -> str ! {io, refused}
-    [5] pub ev_connection_retired — fn ev_connection_retired(gen: int, remaining: int) -> str
-    [6] pub ev_generation_activated — fn ev_generation_activated(gen: int) -> str
-    [7] pub ev_generation_draining — fn ev_generation_draining(gen: int, held: int) -> str
-    [8] pub ev_generation_loaded — fn ev_generation_loaded(gen: int, hash: str) -> str
-    [9] pub ev_generation_retired — fn ev_generation_retired(gen: int, drained: int, aborted: int, age_ms: int) -> str
-    [10] pub ev_signal_received — fn ev_signal_received(m: int) -> str
-    [11] pub gen_new — fn gen_new(c: config.Conf) -> self.Gen · regions (ρ1) -> ρ_caller
-    [12] pub listen_added — fn listen_added(old: prelude.List[str], new: prelude.List[str]) -> prelude.List[str] · regions (ρ1, ρ2) -> ρ_caller
-    [13] pub listen_addrs — fn listen_addrs(c: config.Conf) -> prelude.List[str] · regions (ρ1) -> ρ_caller
-    [14] pub listen_removed — fn listen_removed(old: prelude.List[str], new: prelude.List[str]) -> prelude.List[str] · regions (ρ1, ρ2) -> ρ_caller
-    [15] pub listen_reused — fn listen_reused(old: prelude.List[str], new: prelude.List[str]) -> prelude.List[str] · regions (ρ1, ρ2) -> ρ_caller
-    [16] pub parse_cli — fn parse_cli(args: prelude.List[str]) -> self.Cli · regions (ρ1) -> ρ_caller
-    [17] pub pid_path — fn pid_path(c: config.Conf, prefix: str) -> str · regions (ρ1, -) -> -
-    [18] pub pid_read — fn pid_read(path: str) -> str ! {io, none}
-    [19] pub pid_remove — fn pid_remove(path: str) -> () ! {io}
-    [20] pub pid_write — fn pid_write(path: str, endpoint: str) -> () ! {io}
-    [21] pub reload — fn reload(prefix: str, conf_rel: str, prev: self.Gen) -> self.Gen · regions (-, -, ρ1) -> ρ_caller
-    [22] pub shutdown_timeout_ms — fn shutdown_timeout_ms(c: config.Conf) -> int · regions (ρ1) -> -
-    [23] pub sig_mask — fn sig_mask() -> int
-    [24] pub sig_probe — fn sig_probe() -> int
-    [25] pub sig_quit — fn sig_quit() -> int
-    [26] pub sig_reload — fn sig_reload() -> int
-    [27] pub sig_terminate — fn sig_terminate() -> int
-    [28] pub signal_name — fn signal_name(m: int) -> str
-    [29] pub signal_ok — fn signal_ok(name: str) -> bool
-    [30] pub signal_unix — fn signal_unix(name: str) -> str
-    [31] pub signal_verb — fn signal_verb(m: int) -> str
-    [32] pub status_head_text — fn status_head_text(current: int, quitting: bool) -> str
-    [33] pub status_json_close — fn status_json_close() -> str
-    [34] pub status_json_obj — fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int) -> str
-    [35] pub status_json_open — fn status_json_open(current: int, quitting: bool) -> str
-    [36] pub status_line_text — fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int) -> str
-    [37] pub status_schema — fn status_schema() -> int
-    [38] pub usage_text — fn usage_text() -> str
-    [39] pub version — fn version() -> str
-    [40] pub version_report — fn version_report() -> str
-    [41] pub version_token — fn version_token() -> str
-    [42] pub version_verbose — fn version_verbose() -> str
-    [43] pub Cli — struct Cli { mode: str, signal: str, prefix: str, conf: str, errlog: str, globals: str, quiet: bool, err_msg: str, exit_code: int, format: str, requests: prelude.List[str], sni: str, client: str, stat: bool }
-    [44] pub Gen — struct Gen { conf: config.Conf, gen: int, ok: bool, note: str }
+    [5] pub ev_budget_exceeded — fn ev_budget_exceeded(gen: int, site: str, budget: int, would: int) -> str
+    [6] pub ev_connection_retired — fn ev_connection_retired(gen: int, remaining: int) -> str
+    [7] pub ev_generation_activated — fn ev_generation_activated(gen: int) -> str
+    [8] pub ev_generation_draining — fn ev_generation_draining(gen: int, held: int) -> str
+    [9] pub ev_generation_loaded — fn ev_generation_loaded(gen: int, hash: str) -> str
+    [10] pub ev_generation_retired — fn ev_generation_retired(gen: int, drained: int, aborted: int, age_ms: int) -> str
+    [11] pub ev_signal_received — fn ev_signal_received(m: int) -> str
+    [12] pub gen_new — fn gen_new(c: config.Conf) -> self.Gen · regions (ρ1) -> ρ_caller
+    [13] pub listen_added — fn listen_added(old: prelude.List[str], new: prelude.List[str]) -> prelude.List[str] · regions (ρ1, ρ2) -> ρ_caller
+    [14] pub listen_addrs — fn listen_addrs(c: config.Conf) -> prelude.List[str] · regions (ρ1) -> ρ_caller
+    [15] pub listen_removed — fn listen_removed(old: prelude.List[str], new: prelude.List[str]) -> prelude.List[str] · regions (ρ1, ρ2) -> ρ_caller
+    [16] pub listen_reused — fn listen_reused(old: prelude.List[str], new: prelude.List[str]) -> prelude.List[str] · regions (ρ1, ρ2) -> ρ_caller
+    [17] pub parse_cli — fn parse_cli(args: prelude.List[str]) -> self.Cli · regions (ρ1) -> ρ_caller
+    [18] pub pid_path — fn pid_path(c: config.Conf, prefix: str) -> str · regions (ρ1, -) -> -
+    [19] pub pid_read — fn pid_read(path: str) -> str ! {io, none}
+    [20] pub pid_remove — fn pid_remove(path: str) -> () ! {io}
+    [21] pub pid_write — fn pid_write(path: str, endpoint: str) -> () ! {io}
+    [22] pub reload — fn reload(prefix: str, conf_rel: str, prev: self.Gen) -> self.Gen · regions (-, -, ρ1) -> ρ_caller
+    [23] pub shutdown_timeout_ms — fn shutdown_timeout_ms(c: config.Conf) -> int · regions (ρ1) -> -
+    [24] pub sig_mask — fn sig_mask() -> int
+    [25] pub sig_probe — fn sig_probe() -> int
+    [26] pub sig_quit — fn sig_quit() -> int
+    [27] pub sig_reload — fn sig_reload() -> int
+    [28] pub sig_terminate — fn sig_terminate() -> int
+    [29] pub signal_name — fn signal_name(m: int) -> str
+    [30] pub signal_ok — fn signal_ok(name: str) -> bool
+    [31] pub signal_unix — fn signal_unix(name: str) -> str
+    [32] pub signal_verb — fn signal_verb(m: int) -> str
+    [33] pub status_head_text — fn status_head_text(current: int, quitting: bool) -> str
+    [34] pub status_json_close — fn status_json_close() -> str
+    [35] pub status_json_obj — fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int) -> str
+    [36] pub status_json_open — fn status_json_open(current: int, quitting: bool) -> str
+    [37] pub status_line_text — fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int) -> str
+    [38] pub status_schema — fn status_schema() -> int
+    [39] pub usage_text — fn usage_text() -> str
+    [40] pub version — fn version() -> str
+    [41] pub version_report — fn version_report() -> str
+    [42] pub version_token — fn version_token() -> str
+    [43] pub version_verbose — fn version_verbose() -> str
+    [44] pub Cli — struct Cli { mode: str, signal: str, prefix: str, conf: str, errlog: str, globals: str, quiet: bool, err_msg: str, exit_code: int, format: str, requests: prelude.List[str], sni: str, client: str, stat: bool }
+    [45] pub Gen — struct Gen { conf: config.Conf, gen: int, ok: bool, note: str }
 

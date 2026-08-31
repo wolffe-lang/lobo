@@ -1,7 +1,7 @@
 module pkg :: http
   wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 2cd179914734ad3fed42bde5fb7ebc8e79261337b89b7fd8a20abbd2be76834c
-  pkg_hash    2cd179914734ad3fed42bde5fb7ebc8e79261337b89b7fd8a20abbd2be76834c
+  export_hash 1b0868c2e5bf8f0b5ffe20716632586d71cfff80cac13800469d6f31ebadb165
+  pkg_hash    1b0868c2e5bf8f0b5ffe20716632586d71cfff80cac13800469d6f31ebadb165
   deps:
     config  3be5cc730087c09fcede1c102a4e4aa2a9d78554a8a3d82e96ce8d70b0be5321
   items:
@@ -22,7 +22,7 @@ module pkg :: http
     [14] pub trace_new — fn trace_new() -> self.RouteTrace · regions () -> ρ_caller
     [15] pub version — fn version() -> str
     [16] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str }
-    [17] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int }
+    [17] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int, memory_budget: int }
     [18] pub Request — struct Request { method: str, target: str, version: str, host: str, path: str, query: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int, keepalive: bool }
     [19] pub RouteTrace — struct RouteTrace { kinds: prelude.List[str], rows: prelude.List[int], mods: prelude.List[str], prefixes: prelude.List[str], outcomes: prelude.List[str], whys: prelude.List[str], details: prelude.List[str] }
 
