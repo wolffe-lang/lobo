@@ -26,7 +26,7 @@
 /// frozen model; -t renders these as `[warn]` lines (they never
 /// change the exit code).
 pub fn lint(c: Conf) -> str {
-    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}"
+    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}{lint_log_inert(c)}{lint_log_native(c)}{lint_log_loses(c)}"
 }
 
 /// LOBO-L001: `if` inside a `location` block.
@@ -150,6 +150,103 @@ fn lint_cert_native(c: Conf) -> str {
         if c.names[i] == "cert" {
             out = "{out}LOBO-L004|{c.files[i]}:{c.lines[i]}|\"cert\" is lobo-native (WWS-L-native class): nginx -t rejects this directive, so adopting \"cert auto\" is a ONE-WAY DOOR out of nginx-carryable configs — deliberate and documented (the ws06 charter clause). The certbot flow keeps working: delete the cert* lines and restore ssl_certificate/ssl_certificate_key to walk back.\n"
             return out
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L005 (ws09): an access_log below the v0 resolution levels
+/// (location/if) PARSES but does not yet apply — named, never
+/// silently inert (the class-C posture applied to lobo's own gap;
+/// the row lifts when per-location resolution lands).
+fn lint_log_inert(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "access_log" && c.ctx[i] != "http" && c.ctx[i] != "server" {
+            out = "{out}LOBO-L005|{c.files[i]}:{c.lines[i]}|\"access_log\" at {c.ctx[i]} level parses but does not APPLY at this pin: lobo resolves the effective output set at http/server level only (ws09 v0). Move the directive up a level, or wait for the per-location resolution row.\n"
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L006 (ws09): the structured-log doors are lobo-NATIVE (the
+/// WWS-L-native class, ws06's L004 pattern): `log_headers`, and the
+/// `format=json` parameter on access_log/error_log. nginx -t rejects
+/// each, so adopting them is the one-way door out of nginx-carryable
+/// configs — deliberate; the nginx-compat door (log_format +
+/// escape=json) stays open beside them, and walking back is deleting
+/// the native lines.
+fn lint_log_native(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "log_headers" {
+            out = "{out}LOBO-L006|{c.files[i]}:{c.lines[i]}|\"log_headers\" is lobo-native (WWS-L-native class): nginx -t rejects it. It only feeds the format=json door's \"headers\" object; the nginx-compat spelling of the same fact is $http_<name> in a log_format.\n"
+        }
+        if c.names[i] == "access_log" || c.names[i] == "error_log" {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 1
+            while j < nn {
+                if c.argp[at + j] == "format=json" {
+                    out = "{out}LOBO-L006|{c.files[i]}:{c.lines[i]}|\"{c.names[i]} ... format=json\" is lobo-native (WWS-L-native class): nginx -t rejects the parameter. The nginx-compat twin is a log_format with escape=json; the native door adds TYPED numbers and a versioned schema (docs/LOGGING.md).\n"
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L007 (ws09): what a used log_format LOSES against the
+/// structured door — the charter-tension linter: the compat format
+/// carries, and the linter names the machine-valuable facts it never
+/// records plus the escape mode's parseability cost. Fires once per
+/// access_log row naming a declared format.
+fn lint_log_loses(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "access_log" && c.args_n[i] >= 2 {
+            let name = c.argp[c.args_at[i] + 1]
+            if !name.contains("=") && name != "combined" {
+                let row = logfmt_row(c, name)
+                if row >= 0 {
+                    let vars = fmt_vars(logfmt_text(c, row))
+                    var lost = ""
+                    let probe = "status body_bytes_sent request_time request"
+                    for want in probe.words() {
+                        var found = false
+                        for v in vars.words() {
+                            if v == want {
+                                found = true
+                            }
+                        }
+                        if !found {
+                            lost = if lost.is_empty() { "${want}" } else { "{lost} ${want}" }
+                        }
+                    }
+                    let esc = logfmt_esc(c, row)
+                    var note = ""
+                    if !lost.is_empty() {
+                        note = "never records {lost}"
+                    }
+                    if esc == "default" {
+                        let extra = "escape=default hex-escapes bytes a parser must undo (and - conflates missing with literal dash)"
+                        note = if note.is_empty() { extra } else { "{note}; {extra}" }
+                    } else if esc == "none" {
+                        let extra = "escape=none lets attacker-controlled header bytes forge log lines (no escaping at all)"
+                        note = if note.is_empty() { extra } else { "{note}; {extra}" }
+                    }
+                    if !note.is_empty() {
+                        out = "{out}LOBO-L007|{c.files[i]}:{c.lines[i]}|log_format \"{name}\" loses against the structured door: {note}. \"access_log <path> format=json\" is the typed, schema-versioned line (docs/LOGGING.md); the format still carries as configured — this is a note, not a refusal.\n"
+                    }
+                }
+            }
         }
         i = i + 1
     }

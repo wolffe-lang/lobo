@@ -77,6 +77,17 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws09: the log half of -t — log_format names/escapes/variables,
+    // access_log parameters, the error_log level ladder. One named
+    // [emerg], first failure wins (oracle-shaped where the oracle has
+    // a spelling; lobo-named for the class-C variable refusals).
+    if verdict == 0 {
+        let lerr = log_check(c)
+        if !lerr.is_empty() {
+            eprint("lobo: [emerg] {lerr}")
+            verdict = 1
+        }
+    }
     let findings = lint(c)
     if !findings.is_empty() {
         for line in findings.lines() {

@@ -1,0 +1,137 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config obs
+//!
+//! The log directive family (ws09 §1): accessors off the frozen
+//! model, the -t half's oracle-shaped diagnostics (probed 2026-08-30
+//! against nginx/1.30.4 — unknown format / unknown variable /
+//! duplicate name / invalid level / unknown escaping / no-buffer
+//! flush), the v0 effective-output resolution, and the config/obs
+//! TWINS held byte-compatible (config cannot import obs — the
+//! ARCHITECTURE direction — so combined_text and the variable
+//! verdicts are duplicated and THIS test is what keeps them one).
+
+use config
+use obs
+
+fn conf_of(body: str) -> config.Conf {
+    config.parse_str("http {{\n{body}\n  server {{ listen 8080; }}\n}}\n", "t.conf")
+}
+
+fn check_of(body: str) -> str {
+    config.log_check(conf_of(body))
+}
+
+fn main() -> !int {
+    // the twins: one combined, one variable table
+    assert(config.combined_text() == obs.combined(), "combined_text twins obs.combined")
+    let ok_vars = "remote_addr remote_user time_local time_iso8601 request status body_bytes_sent request_time upstream_addr upstream_status upstream_response_time http_x_any"
+    for v in ok_vars.words() {
+        assert(obs.var_status(v) == "implemented", "obs implements ${v}")
+        assert(check_of("  log_format t \"${{{v}}}\";").is_empty(), "config passes ${v}")
+    }
+    let bad_vars = "msec uri no_such_var sent_http_etag"
+    for v in bad_vars.words() {
+        assert(obs.var_status(v) != "implemented", "obs refuses ${v}")
+        assert(!check_of("  log_format t \"${{{v}}}\";").is_empty(), "config refuses ${v}")
+    }
+
+    // oracle-shaped diagnostics, first failure wins
+    let m1 = check_of("  access_log a.log nosuchfmt;")
+    assert(m1 == "unknown log format \"nosuchfmt\" in t.conf:2", "unknown format: {m1}")
+    let m2 = check_of("  log_format bad \"x $no_such_var y\";")
+    assert(m2 == "unknown \"no_such_var\" variable", "unknown variable (no span): {m2}")
+    let m3 = check_of("  log_format combined \"x\";")
+    assert(
+        m3 == "duplicate \"log_format\" name \"combined\" in t.conf:2",
+        "combined redeclare: {m3}",
+    )
+    let m4 = check_of("  log_format a \"x\";\n  log_format a \"y\";")
+    assert(m4.starts_with("duplicate \"log_format\" name \"a\""), "duplicate name: {m4}")
+    let m5 = check_of("  error_log e.log frobnicate;")
+    assert(m5 == "invalid log level \"frobnicate\" in t.conf:2", "invalid level: {m5}")
+    let m6 = check_of("  log_format b escape=zzz \"x\";")
+    assert(m6 == "unknown log format escaping \"zzz\" in t.conf:2", "unknown escaping: {m6}")
+    let m7 = check_of("  log_format pd \"x\";\n  access_log a.log pd flush=1s;")
+    assert(
+        m7 == "no buffer is defined for access_log \"a.log\" in t.conf:3",
+        "flush sans buffer: {m7}",
+    )
+    let m8 = check_of("  access_log a.log gzip=4;")
+    assert(m8.contains("gzip is not implemented"), "gzip named row: {m8}")
+    let m9 = check_of("  log_format r \"$uri\";")
+    assert(m9.contains("refused in lobo (named_error"), "class-C refusal is LOBO-NAMED: {m9}")
+    let m10 = check_of("  access_log a.log format=yaml;")
+    assert(m10.contains("unknown access_log format \"yaml\""), "format= takes json: {m10}")
+
+    // clean shapes parse clean
+    assert(check_of("  access_log off;").is_empty(), "off is clean")
+    assert(check_of("  access_log a.log;").is_empty(), "bare path is clean (combined)")
+    assert(
+        check_of(
+            "  log_format j escape=json \"$request\";\n  access_log a.log j buffer=16k flush=5s;",
+        ).
+            is_empty(),
+        "buffered json format is clean",
+    )
+    assert(
+        check_of("  access_log a.log format=json;\n  log_headers Host User-Agent;").is_empty(),
+        "the native door is clean",
+    )
+
+    // escape + text accessors (multi-string concatenation, braced)
+    let c1 = conf_of("  log_format m escape=json \"a $status\" \"-$request\";")
+    let r1 = config.logfmt_row(c1, "m")
+    assert(r1 >= 0, "row found")
+    assert(config.logfmt_esc(c1, r1) == "json", "escape= read")
+    assert(config.logfmt_text(c1, r1) == "a $status-$request", "args concatenate")
+    assert(config.fmt_vars("x $a ${{b}}c $ d") == "a b", "fmt_vars walks both spellings")
+
+    // effective resolution: server rows replace http rows; off silences
+    let c2 = conf_of("  access_log h1.log;\n  access_log h2.log;")
+    assert(config.access_out_count(c2) == 2, "both http rows apply")
+    assert(config.access_out_path(c2, 0) == "h1.log", "first path")
+    assert(config.access_out_esc(c2, 0) == "default", "combined default esc")
+    assert(config.access_out_fmt(c2, 0) == obs.combined(), "combined default text")
+    let c3 = config.
+        parse_str(
+        "http {{\n  access_log h.log;\n  server {{ listen 8080; access_log s.log format=json; }}\n}}\n",
+        "t.conf",
+    )
+    assert(config.access_out_count(c3) == 1, "server level replaces http level")
+    assert(config.access_out_path(c3, 0) == "s.log", "the server row")
+    assert(config.access_out_json(c3, 0), "the native door detected")
+    let c4 = config.
+        parse_str(
+        "http {{\n  access_log h.log;\n  server {{ listen 8080; access_log off; }}\n}}\n",
+        "t.conf",
+    )
+    assert(config.access_out_count(c4) == 0, "an effective off silences")
+
+    // buffer= maps to the sink cap
+    let c5 = conf_of("  access_log a.log combined buffer=16k;")
+    assert(config.access_out_buffer(c5, 0) == 16384, "buffer=16k in bytes")
+    assert(config.size_bytes("1m") == 1048576 && config.size_bytes("zz") == -1, "size parser")
+    assert(
+        config.time_ms("500ms") == 500 &&
+            config.time_ms("5s") == 5000 &&
+            config.time_ms("2") == 2000,
+        "time parser",
+    )
+
+    // error_log accessors and the default level
+    let c6 = conf_of("  error_log e.log warn;")
+    assert(config.errlog_path(c6) == "e.log", "error path")
+    assert(config.errlog_level(c6) == "warn", "error level")
+    assert(!config.errlog_json(c6), "text by default")
+    let c7 = conf_of("  error_log e.log;")
+    assert(config.errlog_level(c7) == "error", "the nginx default level")
+    let c8 = conf_of("  error_log e.log notice format=json;")
+    assert(config.errlog_json(c8) && config.errlog_level(c8) == "notice", "the native error door")
+
+    // log_headers joins
+    let c9 = conf_of("  log_headers Host User-Agent;\n  log_headers X-Req-Id;")
+    assert(config.log_headers_join(c9) == "Host User-Agent X-Req-Id", "opt-in list joins")
+    0
+}
