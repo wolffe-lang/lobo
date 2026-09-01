@@ -20,7 +20,14 @@
 //! other half). Fault injection knobs (argv) drive the pitfall cases:
 //! a forced badNonce on the Nth POST, and a validation that FAILS.
 //! Argv: <cacert-out> <challenge-portfile> [leaf-validity-s]
-//!   [--bad-nonce-at N] [--fail-validation] [--max-issue M]
+//!   [--bad-nonce-at N] [--fail-validation] [--max-issue M] [--tls]
+//! --tls (wsm04, the D25 retirement's fixture half): the CA serves
+//! its WHOLE directory over TLS 1.3 through lobo's OWN server half —
+//! tls.accept behind the conn seam — with a leaf it mints for
+//! "localhost" signed by its root; the harness points lobo at
+//! https://localhost:<port>/dir with cert_ca_root = the CA cert this
+//! fixture already writes out. The two sides of the differential
+//! share one encoder AND one TLS library, halves facing each other.
 //! It binds an ephemeral loopback port, prints it (the harness reads
 //! it and renders lobo's cert_ca), writes its CA cert PEM to
 //! <cacert-out>, then serves until <max-issue> certificates have been
@@ -30,8 +37,11 @@
 //! dotted call in this repo; `wolf fmt` splits the call at the dot.
 
 use acme
+use config
+use conn
 use std.base64
 use std.x.jose
+use tls
 
 // ------------------------------------------------------------------
 // tiny HTTP/1.1 request reader (loopback, one exchange per conn)
@@ -59,7 +69,7 @@ fn content_length(head: str) -> int {
     0
 }
 
-fn read_req(conn: int) -> Req ! {io} {
+fn read_req(mut cn: conn.Conn) -> Req ! {io} {
     var buf = ""
     loop {
         let m = buf.find("\r\n\r\n") else -1
@@ -68,7 +78,7 @@ fn read_req(conn: int) -> Req ! {io} {
             let want = content_length(head)
             let bstart = m + 4
             while buf.len < bstart + want {
-                let piece = net_read(conn, 4096) else |_| {
+                let piece = conn.conn_read(mut cn, 4096) else |_| {
                     return parse_head(head, buf[bstart..buf.len])
                 }
                 buf = "{buf}{piece}"
@@ -78,7 +88,7 @@ fn read_req(conn: int) -> Req ! {io} {
         if buf.len > 65536 {
             return io
         }
-        let piece = net_read(conn, 4096) else |_| {
+        let piece = conn.conn_read(mut cn, 4096) else |_| {
             return io
         }
         buf = "{buf}{piece}"
@@ -110,9 +120,9 @@ fn resp(status: int, phrase: str, extra: str, body: str) -> str {
     "HTTP/1.1 {status} {phrase}\r\n{extra}Content-Length: {body.len}\r\nConnection: close\r\n\r\n{body}"
 }
 
-fn send(conn: int, s: str) {
-    net_write(conn, s) else |_| {}
-    net_close(conn) else |_| {}
+fn send(mut cn: conn.Conn, s: str) {
+    conn.conn_write(mut cn, s) else |_| {}
+    conn.conn_close(mut cn)
 }
 
 // ------------------------------------------------------------------
@@ -331,6 +341,7 @@ fn main() -> !int {
     var validity_s = 7776000
     var bad_nonce_at = -1
     var fail_validation = false
+    var tls_mode = false
     var max_issue = 1
     var want = ""
     var i = 0
@@ -346,6 +357,8 @@ fn main() -> !int {
             want = "bad"
         } else if a == "--fail-validation" {
             fail_validation = true
+        } else if a == "--tls" {
+            tls_mode = true
         } else if a == "--max-issue" {
             want = "max"
         } else if i == 0 {
@@ -383,12 +396,70 @@ fn main() -> !int {
     )
     fs_write_text(cacert_out, acme.pem_wrap("CERTIFICATE", ca_cert))?
 
+    // --tls: the CA's OWN https leaf — minted for "localhost" (the
+    // name the harness dials and the client verifies), signed by the
+    // same root written out above; served through lobo's server half
+    // behind the conn seam.
+    var sc = config.ssl_none()
+    if tls_mode {
+        let tls_seed = acme.keygen()
+        let tls_leaf = acme.
+            cert_mint(
+            ca_seed,
+            "Lobo Test CA",
+            acme.pub_of(tls_seed),
+            "localhost",
+            999,
+            now_s - 3600,
+            now_s + 315360000,
+            false,
+        )
+        var chain = List[int]()
+        for b in tls_leaf {
+            (mut chain).push(b)
+        }
+        for b in ca_cert {
+            (mut chain).push(b)
+        }
+        var der_at = List[int]()
+        (mut der_at).push(0)
+        var der_n = List[int]()
+        (mut der_n).push(chain.len)
+        var leaf_n = List[int]()
+        (mut leaf_n).push(tls_leaf.len)
+        var names = List[str]()
+        (mut names).push("localhost")
+        var cpaths = List[str]()
+        (mut cpaths).push("")
+        var kpaths = List[str]()
+        (mut kpaths).push("")
+        sc = config.SslConf {
+            on: true,
+            err: "",
+            err_file: "",
+            err_line: 0,
+            warns: "",
+            names: names,
+            der: chain,
+            der_at: der_at,
+            der_n: der_n,
+            leaf_n: leaf_n,
+            seed: tls_seed,
+            cert_path: cpaths,
+            key_path: kpaths,
+            default_at: 0,
+        }
+    }
+
     let l = net_listen("127.0.0.1:0")?
     let port = net_port(l)?
     print("{port}")
 
     // conversation state (one order at a time — the rig issues one)
     var base = "http://127.0.0.1:{port}"
+    if tls_mode {
+        base = "https://localhost:{port}"
+    }
     var nonce_ctr = 1000
     var post_ctr = 0
     var acct_pub = List[int]()
@@ -399,11 +470,24 @@ fn main() -> !int {
     var issued = 0
 
     while issued < max_issue {
-        let conn = net_accept(l) else |_| {
+        let fd = net_accept(l) else |_| {
             continue
         }
-        let req = read_req(conn) else |_| {
-            net_close(conn) else |_| {}
+        var cn = conn.plain(fd)
+        if tls_mode {
+            var hs_ok = true
+            let sess = tls.accept(fd, sc, 5000) else |_| {
+                hs_ok = false
+                tls.no_sess()
+            }
+            if !hs_ok {
+                net_close(fd) else |_| {}
+                continue
+            }
+            cn = conn.tls_conn(fd, sess)
+        }
+        let req = read_req(mut cn) else |_| {
+            conn.conn_close(mut cn)
             Req { method: "", path: "", body: "" }
         }
         if req.method.is_empty() {
@@ -415,16 +499,16 @@ fn main() -> !int {
 
         if req.path == "/dir" {
             let body = "{{\"newNonce\":\"{base}/nonce\",\"newAccount\":\"{base}/new-account\",\"newOrder\":\"{base}/new-order\"}}"
-            send(conn, resp(200, "OK", nh, body))
+            send(mut cn, resp(200, "OK", nh, body))
         } else if req.path == "/nonce" {
-            send(conn, resp(200, "OK", nh, ""))
+            send(mut cn, resp(200, "OK", nh, ""))
         } else if req.path == "/new-account" {
             post_ctr = post_ctr + 1
             let jws = parse_jws(req.body)
             acct_pub = jws.jwk_x
             if !jws_verify(req.body, acct_pub) {
                 send(
-                    conn,
+                    mut cn,
                     resp(
                         400,
                         "Bad Request",
@@ -434,13 +518,13 @@ fn main() -> !int {
                 )
             } else {
                 let loc = "Location: {base}/acct/1\r\n"
-                send(conn, resp(201, "Created", "{nh}{loc}", "{{\"status\":\"valid\"}}"))
+                send(mut cn, resp(201, "Created", "{nh}{loc}", "{{\"status\":\"valid\"}}"))
             }
         } else if req.path == "/new-order" {
             post_ctr = post_ctr + 1
             if bad_nonce_at == post_ctr {
                 send(
-                    conn,
+                    mut cn,
                     resp(
                         400,
                         "Bad Request",
@@ -454,12 +538,12 @@ fn main() -> !int {
                 order_status = "pending"
                 let loc = "Location: {base}/order/1\r\n"
                 let body = "{{\"status\":\"pending\",\"authorizations\":[\"{base}/authz/1\"],\"finalize\":\"{base}/finalize/1\"}}"
-                send(conn, resp(201, "Created", "{nh}{loc}", body))
+                send(mut cn, resp(201, "Created", "{nh}{loc}", body))
             }
         } else if req.path == "/authz/1" {
             post_ctr = post_ctr + 1
             let body = "{{\"status\":\"{order_status}\",\"identifier\":{{\"type\":\"dns\",\"value\":\"{first_word(order_names)}\"}},\"challenges\":[{{\"type\":\"http-01\",\"url\":\"{base}/chall/1\",\"token\":\"tok-{first_word(order_names)}\"}}]}}"
-            send(conn, resp(200, "OK", nh, body))
+            send(mut cn, resp(200, "OK", nh, body))
         } else if req.path == "/chall/1" {
             post_ctr = post_ctr + 1
             chall_token = "tok-{first_word(order_names)}"
@@ -472,7 +556,7 @@ fn main() -> !int {
             // shape that does not deadlock a single-threaded client.
             // The recorded status is what the next authz poll reports.
             send(
-                conn,
+                mut cn,
                 resp(
                     200,
                     "OK",
@@ -511,7 +595,7 @@ fn main() -> !int {
             order_status = "valid"
             let loc = "Location: {base}/order/1\r\n"
             send(
-                conn,
+                mut cn,
                 resp(
                     200,
                     "OK",
@@ -522,7 +606,7 @@ fn main() -> !int {
         } else if req.path == "/order/1" {
             post_ctr = post_ctr + 1
             send(
-                conn,
+                mut cn,
                 resp(
                     200,
                     "OK",
@@ -535,12 +619,12 @@ fn main() -> !int {
             var chain = acme.pem_wrap("CERTIFICATE", issued_der)
             chain = "{chain}{acme.pem_wrap("CERTIFICATE", ca_cert)}"
             send(
-                conn,
+                mut cn,
                 resp(200, "OK", "Content-Type: application/pem-certificate-chain\r\n", chain),
             )
             issued = issued + 1
         } else {
-            send(conn, resp(404, "Not Found", nh, ""))
+            send(mut cn, resp(404, "Not Found", nh, ""))
         }
     }
     net_close(l) else |_| {}

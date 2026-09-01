@@ -53,13 +53,18 @@ mkdir -p "$scratch"
 
 count_issued() { grep -c "issued/renewed" "$1" 2>/dev/null || true; }
 
-# Build the CA binary ONCE. It `use`s the `acme` module, so it must be
-# staged with src/acme beside it (the loader's package root is the
-# entry file's directory — the corpus stage-src rule, done by hand for
-# a rig binary). Built once, run many times.
+# Build the CA binary ONCE. It `use`s the `acme` module — and, since
+# wsm04's --tls mode serves the directory through lobo's own TLS
+# server half, the `tls`, `conn` and `config` modules too — so all
+# four are staged beside it (the loader's package root is the entry
+# file's directory — the corpus stage-src rule, done by hand for a
+# rig binary). Built once, run many times.
 castage="$scratch/castage"
-mkdir -p "$castage/acme"
+mkdir -p "$castage/acme" "$castage/config" "$castage/conn" "$castage/tls"
 cp src/acme/*.lu "$castage/acme/"
+cp src/config/*.lu "$castage/config/"
+cp src/conn/*.lu "$castage/conn/"
+cp src/tls/*.lu "$castage/tls/"
 cp "$CA_SRC" "$castage/acmeca.lu"
 ACMECA="$scratch/acmeca"
 if ! "$WOLF" build "$castage/acmeca.lu" -o "$ACMECA" 2>"$scratch/ca-build.err"; then
@@ -114,7 +119,12 @@ start_ca() { # <dir> <validity-s> <extra-args...>
 d="$scratch/cold"
 mkdir -p "$d/www"
 printf '<h1>cold</h1>\n' > "$d/www/index.html"
-ca_pid=$(start_ca "$d" 90000 --max-issue 3)
+# wsm04 (D25 retired): the cold-issuance CA is HTTPS — lobo's ACME
+# client dials the directory through std.x.tls.client, verified
+# against the CA's own root (cert_ca_root), while the CA serves TLS
+# through lobo's server half. The whole RFC 8555 flow, both halves of
+# one library facing each other.
+ca_pid=$(start_ca "$d" 90000 --max-issue 3 --tls)
 caport=$(wait_port "$d/ca.port") || { fail "cold: CA never announced a port"; cat "$d/ca.err" >&2; }
 cat > "$d/lobo.conf" <<EOF
 pid $d/lobo.pid;
@@ -126,7 +136,8 @@ http {
         listen 127.0.0.1:0 ssl;
         server_name localhost;
         cert auto;
-        cert_ca http://127.0.0.1:$caport/dir;
+        cert_ca https://localhost:$caport/dir;
+        cert_ca_root $d/ca.crt;
         cert_store $d/certs;
         cert_check_interval 1s;
         root $d/www;
@@ -180,7 +191,9 @@ printf '<h1>renew</h1>\n' > "$d/www/index.html"
 # check interval — a fast, deterministic renewal proof (a production
 # renew_before is always well under the validity; this inverts it to
 # fire on demand). max-issue caps the CA so it does not spin forever.
-ca_pid=$(start_ca "$d" 120 --max-issue 6)
+# renewal ALSO rides the https directory (every dial of the daemon's
+# life is TLS: directory, nonce, order, poll, finalize, download)
+ca_pid=$(start_ca "$d" 120 --max-issue 6 --tls)
 caport=$(wait_port "$d/ca.port") || fail "renew: CA never announced a port"
 cat > "$d/lobo.conf" <<EOF
 pid $d/lobo.pid;
@@ -192,7 +205,8 @@ http {
         listen 127.0.0.1:0 ssl;
         server_name localhost;
         cert auto;
-        cert_ca http://127.0.0.1:$caport/dir;
+        cert_ca https://localhost:$caport/dir;
+        cert_ca_root $d/ca.crt;
         cert_store $d/certs;
         cert_renew_before 1h;
         cert_check_interval 1s;
@@ -382,13 +396,64 @@ http {
 }
 EOF
 if "$LOBO" -p "$d" -c "$d/remote.conf" -t >"$d/t.out" 2>&1; then
-    fail "loopback law: -t accepted an https:// CA"
+    fail "loopback law: -t accepted a NON-LOOPBACK https:// CA"
 else
-    if grep -q "no TLS client at this pin" "$d/t.out"; then
-        pass "loopback law: an https:// cert_ca is refused at -t, citing the client-TLS gate"
+    if grep -q "loopback law" "$d/t.out"; then
+        pass "loopback law: a non-loopback cert_ca is refused at -t (the https transport gate retired at wsm04; the HOST law is forever)"
     else
         fail "loopback law: refused, but not with the named reason"; cat "$d/t.out" >&2
     fi
+fi
+
+# wsm04: an https LOOPBACK cert_ca without cert_ca_root is refused BY
+# NAME (the client verifies always); with a root it passes -t.
+cat > "$d/noroot.conf" <<EOF
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost;
+        cert auto;
+        cert_ca https://localhost:59999/dir;
+        cert_store $d/certs;
+    }
+    server {
+        listen 127.0.0.1:0;
+    }
+}
+EOF
+if "$LOBO" -p "$d" -c "$d/noroot.conf" -t >"$d/t2.out" 2>&1; then
+    fail "https cert_ca with no cert_ca_root passed -t"
+else
+    if grep -q "cert_ca_root" "$d/t2.out"; then
+        pass "https cert_ca without cert_ca_root is refused at -t by name (verify-always)"
+    else
+        fail "https-no-root refused, but not with the named reason"; cat "$d/t2.out" >&2
+    fi
+fi
+cp tests/tls/fixtures/ca.crt "$d/root.pem"
+cat > "$d/withroot.conf" <<EOF
+events {
+}
+http {
+    server {
+        listen 127.0.0.1:0 ssl;
+        server_name localhost;
+        cert auto;
+        cert_ca https://localhost:59999/dir;
+        cert_ca_root $d/root.pem;
+        cert_store $d/certs;
+    }
+    server {
+        listen 127.0.0.1:0;
+    }
+}
+EOF
+if "$LOBO" -p "$d" -c "$d/withroot.conf" -t >"$d/t3.out" 2>&1; then
+    pass "https loopback cert_ca + cert_ca_root passes -t (the D25 flip)"
+else
+    fail "https loopback cert_ca + cert_ca_root failed -t"; cat "$d/t3.out" >&2
 fi
 
 echo "acme: cases run, $red red"
