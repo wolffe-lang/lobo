@@ -1,5 +1,82 @@
 # Changelog
 
+## ws12 — 2026-09-01 — the numbers speak
+
+lobo stops guessing at its own memory and starts reporting it, and
+the counters an operator pages on land in core with no recompile and
+no module.
+
+Pins advance first, gauntlet green at the trio before a line changed
+(suite counts IDENTICAL to the old pin, deltas classed): wolf
+**e6cf24e** — trunk, D57 dev-stamped `0.2.1+dev.e6cf24e`, because the
+number this sprint came for landed in s131 AFTER the v0.2.1 tag —
+lupin **v0.1.20** (wsm04's named fallback retires; lobo, wolf-std and
+the driver's own pairing line name the same interpreter for the first
+time) and wolf-std **a62a5d4** for sc31. #146 re-probed at the new
+pin, FIFTH measurement, ICE unchanged, `WOLF_MIDEND=0` stays; #192's
+misleading W1001 is GONE (r04 fixed it). The interface re-record moves
+every header and export-hash with ZERO item motion in eleven modules.
+
+**The measured half.** `region_bytes(r)` / `live_region_bytes()`
+([mem.region.account.1/.2]) reach lobo: `serve` reads the ledger
+inside the per-response and per-chunk regions the ws10 audit put
+there, and the entry high-waters it per generation BESIDE ws10's
+metered figure — two numbers answering two questions, published
+together and never subtracted from each other (`mem-rt-hw` and
+`live-region-bytes:` in status text, `mem_rt_high_water` and
+`live_region_bytes` in the JSON; additive, schema stays 1). ws10 could
+only argue the streaming path was O(1) in file size from RSS noise;
+the runtime now states it as an EQUALITY — 128 KiB and 256 KiB stream
+to the same high water, pinned in `tests/serve/region_measured.lu`.
+The same measurement found what BUDGET.md now teaches: a 64 KiB chunk
+charges its region **1,048,560 bytes**, 16× the payload — 8× because a
+byte buffer is a `List[int]` and 2× because the ledger is cumulative
+by contract. Not a lobo bug, not absorbed: **wolf-lang#203** filed
+with the numbers, and #187 commented because the gap bears on the cap
+half's units. The cap arm itself: s132 had not merged at Act-2 start,
+so the contract's **named-gate defer** was taken — the meter ships
+query-only and honest, #187 owns the adoption.
+
+**`/metrics`, in core.** A new `metrics` module holds ONE registry —
+name, type, label shape and help for every family — and `sample`
+asserts the labels it was handed are exactly the ones declared, so a
+per-URI or per-client series is not discouraged or linted but
+UNWRITEABLE. `tools/lobo-metrics` (a gauntlet step) measures the
+consequence on a live server: four more distinct URIs add exactly zero
+series. Twenty-one families cover every landed sibling — connections,
+requests by status class, a fixed 5ms..10s duration histogram, the
+proxy leg, TLS handshake failures by reason, generation info as the
+Prometheus info-metric idiom, ws09's dropped lines, ws11's event
+count, and ws10+ws12's two memory high waters. The counters live as
+plain ints in the poll loop's own frame, which is the MEASURED
+hot-path answer for a spawn-free server: one mutator needs neither
+shards nor atomics, an increment is one checked add, and the module
+header names the day that stops being true. The endpoint is two
+phase — `serve` recognises the path, `main` renders it — because
+rendering per pass would leak megabytes an hour into #191's root arena
+to answer a scrape a minute. `/status.json` serves ws08's object on
+the same listener, proving its design-once note. The scrape is an
+ORDINARY request: it counts itself one behind, it logs, and under a
+tiny `memory_budget` it 503s (site `admin`, the fifth) — which is
+correct, and a rig case. `metrics on|off` is lobo-native, `-t`
+validated in nginx's own flag wording, and linted twice: L010 for the
+one-way door, L011 when the endpoint sits on a routable listen —
+because at v0 the bind address IS the access posture, and the docs say
+so in four lines. `docs/metrics.md` is generated from the registry
+(`tools/lobo-metricsdoc`, a gauntlet step), so a Grafana panel and a
+live scrape cannot disagree; the exposition is checked clause by
+clause against the vendored Prometheus text format spec.
+
+**The row gets a name.** wolf-std#3's `named`/`row_name` are adopted
+at both TLS-client error sites: forty arms re-listing a twenty-one-row
+vocabulary lobo does not own become two `named(...) else |Row(name)|`
+handlers plus a per-site hint table keyed by the row's stable NAME.
+Messages byte-identical, `timeout` still 504 (the live
+`https_gateway` case runs that arm), and a future std row now reads as
+a bare name instead of breaking the build.
+
+Corpus 203 → 213. wsc03 closes here; the closeout declares W5.
+
 ## ws11 — 2026-09-01 — replay the race
 
 A scheduling bug becomes an artifact. The rig gains the seeded
