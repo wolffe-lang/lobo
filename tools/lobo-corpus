@@ -25,6 +25,19 @@
 #                                              src/ modules beside the
 #                                              test and run the staged
 #                                              copy)
+#   //! explore: N                            (ws11: lupin lane only —
+#                                              the file's WHOLE schedule
+#                                              space, explored)
+# An explore-marked file runs `lupin conform-run --explore=N` after its
+# lanes: every reachable interleaving must agree AND the frontier must
+# CLOSE — an open frontier is red even on agreement (a verdict
+# conditional on its budget is not a verdict), and a schedule-dependent
+# outcome is red with the explorer's replay seed + decision stream
+# printed (the two-command repro; docs/REPLAY.md is the workflow).
+#
+# LOBO_SEED=<n> seeds every lupin-lane run (`--seed=$LOBO_SEED`) — the
+# ws11 replay knob: rerun the suite under the seed a bug report names.
+# Unset, the lupin lane is the strict-FIFO default as ever.
 # The loader's package root is the ENTRY FILE's directory, so a test
 # under tests/ cannot `use` a src/ module in place. A committed
 # symlink would work on the dev host and be a unixism in the tree, so
@@ -42,6 +55,10 @@ cd "$(dirname "$0")/.." || exit 2
 roots="${*:-tests}"
 total=0
 red=0
+lobo_seed="${LOBO_SEED:-}"
+if [ -n "$lobo_seed" ]; then
+    echo "corpus: lupin lane runs SEEDED (--seed=$lobo_seed — the ws11 replay knob; unset LOBO_SEED for the FIFO default)"
+fi
 
 expected_stdout() { # unescape \n \" \\ from the directive's stdout=
     printf '%s' "$1" | awk '{
@@ -68,7 +85,7 @@ run_lane() { # run_lane <lane> <file> — emits the observation record
     case "$1" in
     native) timeout 60 "$WOLF" conform-run --native "$2" 2>/dev/null ;;
     checked) timeout 60 "$WOLF" conform-run --checked "$2" 2>/dev/null ;;
-    lupin) timeout 60 "$LUPIN" conform-run --json "$2" 2>/dev/null ;;
+    lupin) timeout 60 "$LUPIN" conform-run --json ${lobo_seed:+--seed="$lobo_seed"} "$2" 2>/dev/null ;;
     esac
 }
 
@@ -135,6 +152,9 @@ for f in $(find $roots -name '*.lu' | sort); do
         fi
         if [ "$verdict" != "exit($want_exit)" ]; then
             echo "corpus: FAILED — $f [$lane]: verdict \`$verdict\`, directive wants \`exit($want_exit)\`" >&2
+            if [ "$lane" = lupin ]; then
+                echo "corpus:   replay: $LUPIN run $entry${lobo_seed:+ --seed=$lobo_seed} (deterministic — strict FIFO when unseeded)" >&2
+            fi
             red=$((red + 1))
             continue
         fi
@@ -148,12 +168,45 @@ for f in $(find $roots -name '*.lu' | sort); do
                 echo "corpus: FAILED — $f [$lane]: stdout mismatch" >&2
                 printf 'corpus:   want: %s\n' "$(printf '%s' "$want" | head -c 200)" >&2
                 printf 'corpus:   got:  %s\n' "$(printf '%s' "$got" | head -c 200)" >&2
+                if [ "$lane" = lupin ]; then
+                    echo "corpus:   replay: $LUPIN run $entry${lobo_seed:+ --seed=$lobo_seed} (deterministic — strict FIFO when unseeded)" >&2
+                fi
                 red=$((red + 1))
                 continue
             fi
         fi
         echo "corpus: ok — $f [$lane] $verdict"
     done
+
+    # ws11: the explore directive — search the file's whole schedule
+    # space on the lupin lane. Agreement with a CLOSED frontier is the
+    # only green; a dependent outcome is a finding printed WITH its
+    # replay seed + decision stream (the explorer's own report lines).
+    explore=$(grep -m1 '^//! explore: ' "$f" | sed 's|^//! explore: ||')
+    if [ -n "$explore" ]; then
+        total=$((total + 1))
+        case " $lanes " in
+        *" lupin "*)
+            xrep=$(timeout 120 "$LUPIN" conform-run "$entry" --explore="$explore" 2>&1)
+            xrc=$?
+            if [ "$xrc" = 0 ] && printf '%s\n' "$xrep" | grep -q 'frontier closed'; then
+                echo "corpus: ok — $f [explore=$explore] $(printf '%s\n' "$xrep" | sed -n '1s|^[^:]*: ||p')"
+            elif [ "$xrc" = 0 ]; then
+                echo "corpus: FAILED — $f [explore=$explore]: agreement but the frontier is OPEN — the verdict was conditional on the budget; raise \`explore:\` or shrink the model:" >&2
+                printf '%s\n' "$xrep" | sed 's|^|corpus:   |' >&2
+                red=$((red + 1))
+            else
+                echo "corpus: FAILED — $f [explore=$explore]: schedule-dependent (or the explorer refused). The report below carries each outcome's replay — \`$LUPIN run <entry> --seed=S\` (or --schedule=ev:…):" >&2
+                printf '%s\n' "$xrep" | sed 's|^|corpus:   |' >&2
+                red=$((red + 1))
+            fi
+            ;;
+        *)
+            echo "corpus: FAILED — $f: \`//! explore:\` needs the lupin lane declared (the schedule space is the deterministic interpreter's)" >&2
+            red=$((red + 1))
+            ;;
+        esac
+    fi
 done
 
 echo "corpus: $((total - red))/$total lane-runs green"
