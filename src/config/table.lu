@@ -330,6 +330,16 @@ pub fn table() -> Table {
     )
     row(
         mut t,
+        "metrics",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (ws12, linted L010/L011): on|off publishes the Prometheus exposition at /metrics and the ws08 status object at /status.json on this server's listener. v0 posture: plaintext step path only, no auth beyond bind-address discipline (ws14 revisits); the endpoint's own admin listen waits on multi-listener support (docs/directives.md)",
+    )
+    row(
+        mut t,
         "server_tokens",
         "http server location",
         "",
