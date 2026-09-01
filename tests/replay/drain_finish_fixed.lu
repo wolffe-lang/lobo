@@ -1,0 +1,74 @@
+//! check: run(exit=0, stdout="lobo: [notice] generation-draining gen=1 held=2 seq=1\nlobo: [notice] connection-retired gen=1 remaining=1 seq=2\nlobo: [notice] connection-retired gen=1 remaining=0 seq=3\nlobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=0 seq=4")
+//! phase: run
+//! lanes: lupin
+//! explore: 64
+//! stage-src: shell config
+//!
+//! THE FIX, held green forever (ws11). drain_finish_race.lu with the
+//! ws08 hazard removed the way the REAL serve loop removes it:
+//! retirement is a STATE CHECK — a draining generation retires when
+//! its live count reaches zero — and the timeout message only MARKS
+//! (the real loop consults the clock against the generation's state;
+//! it never lets a message race decide the accounting). The `select`
+//! still multiplexes both message kinds, the tasks still land in
+//! every order the explorer can produce, and the outcome no longer
+//! depends on any of it: every schedule prints the same four
+//! seq-stamped vocabulary lines. The `//! explore: 64` directive is
+//! the ws11 rig surface doing its job — the corpus explores this
+//! file's whole schedule frontier on every gauntlet run and goes RED
+//! if ANY reachable interleaving ever disagrees (an open frontier is
+//! also red: a verdict conditional on its budget is not a verdict).
+//! `tools/lobo-replay` walks the bug-to-fix story across the pair.
+
+use shell
+
+/// One held connection's clean close, as a message (see the race
+/// twin — the close order is the schedule).
+fn client(closes: channel[int]) {
+    closes.send(1)
+}
+
+/// The worker_shutdown_timeout expiring. In this shape its arrival
+/// order is DATA the collector notes, never the decision.
+fn timer(deadline: channel[int]) {
+    deadline.send(1)
+}
+
+fn main() -> !int {
+    let closes = channel[int](4)
+    let deadline = channel[int](1)
+    var live = 2
+    var drained = 0
+    var seq = 0
+    seq = seq + 1
+    print("lobo: [notice] {shell.ev_seq(shell.ev_generation_draining(1, live), seq)}")
+    scope pool {
+        pool.spawn(fn() { client(closes) })
+        pool.spawn(fn() { client(closes) })
+        pool.spawn(fn() { timer(deadline) })
+        while live > 0 {
+            select {
+                _ from closes => {
+                    live = live - 1
+                    drained = drained + 1
+                    seq = seq + 1
+                    print(
+                        "lobo: [notice] {shell.ev_seq(shell.ev_connection_retired(1, live), seq)}",
+                    )
+                },
+                _ from deadline => {
+                    // consumed and NOTED, never the decision: with no
+                    // clock in the model this is the `0`-timeout
+                    // posture (drain fully) — the real loop only
+                    // aborts after consulting the clock against the
+                    // generation's state
+                },
+            }
+        }
+    }
+    // the state check: live reached zero, so the retirement carries
+    // the full accounting whatever order the messages arrived in
+    seq = seq + 1
+    print("lobo: [notice] {shell.ev_seq(shell.ev_generation_retired(1, drained, 0, 0), seq)}")
+    0
+}

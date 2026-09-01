@@ -846,6 +846,20 @@ pub fn ev_budget_exceeded(gen: int, site: str, budget: int, would: int) -> str {
     "budget-exceeded gen={gen} site={site} budget={budget} would={would}"
 }
 
+/// The ws11 sequence stamp: every vocabulary event the server emits
+/// carries a trailing `seq=N` — the event's ordinal in the ONE poll
+/// loop's emission order (1-based, monotone, never reset while the
+/// process lives). Appended by the EMISSION SEAM, not the builders, so
+/// every builder shape above is unchanged (the extension discipline:
+/// appended, nothing renamed; every existing `contains`/grep pin still
+/// matches its prefix). The stamp is what makes an attached log a
+/// SCHEDULE: the stream's order is the loop's own decision order, and
+/// a gap in `seq` is a visible hole (a level-gated mirror or a counted
+/// drop), never a silent one — docs/REPLAY.md is the workflow. Total.
+pub fn ev_seq(body: str, seq: int) -> str {
+    "{body} seq={seq}"
+}
+
 // ---- the status surface --------------------------------------------
 // SCALAR builders, not List-of-struct: the checked tier refuses a
 // `List[<imported struct>]()` construction (generic data across a
@@ -862,14 +876,19 @@ pub fn status_schema() -> int {
 }
 
 /// The human status stanza's header (`lobo status`): the identity line,
-/// the current generation, and the quit posture — one fact per line,
-/// nginx's shape. The entry appends one `status_line_text` per
+/// the current generation, the quit posture, and (ws11, appended —
+/// every earlier fact keeps its place) `events:` — the count of
+/// vocabulary events emitted so far, i.e. the highest `seq` stamped.
+/// The completeness anchor for a bug report's attached log: a stream
+/// whose top seq matches `events` has no trailing hole. One fact per
+/// line, nginx's shape. The entry appends one `status_line_text` per
 /// generation. Read over the control channel to the peer's close (the
 /// stanza is multi-line), so `control_fetch` reads it. Total.
-pub fn status_head_text(current: int, quitting: bool) -> str {
+pub fn status_head_text(current: int, quitting: bool, events: int) -> str {
     var s = "lobo status\n"
     s = "{s}current generation: {current}\n"
     s = "{s}quitting: {bool_word(quitting)}\n"
+    s = "{s}events: {events}\n"
     s
 }
 
@@ -899,11 +918,14 @@ pub fn status_line_text(
 }
 
 /// The JSON status stanza's open: `{"schema":1,"current":N,
-/// "quitting":b,"generations":[` (no newlines). The entry appends
-/// comma-separated `status_json_obj`s then `status_json_close`. ws12's
-/// metrics endpoint serves this same object. Total.
-pub fn status_json_open(current: int, quitting: bool) -> str {
-    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"generations\":["
+/// "quitting":b,"events":N,"generations":[` (no newlines). `events`
+/// is ws11's ADDITIVE member (the vocabulary-event count — the highest
+/// `seq` emitted; schema stays 1, nothing renamed or moved, the ws07
+/// convention for a widening). The entry appends comma-separated
+/// `status_json_obj`s then `status_json_close`. ws12's metrics
+/// endpoint serves this same object. Total.
+pub fn status_json_open(current: int, quitting: bool, events: int) -> str {
+    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"generations\":["
 }
 
 /// One generation as a JSON object (no leading comma, no newline) — the

@@ -89,6 +89,14 @@ fn main() -> !int {
     assert(json_valid(e3), "loaded event parses")
     assert(e3.contains("\"id\":\"0f96da4e7e7c072a\""), "hex id stays a string")
 
+    // the ws11 seq stamp rides the door as one more typed member —
+    // the generic k=v decode needs no new code for it (that is the
+    // point of stamping at the seam, appended, nothing renamed)
+    let e4 = obs.
+        render_error_jsonl("notice", "connection-retired gen=1 remaining=2 seq=41", 1767225600000)
+    assert(json_valid(e4), "stamped event parses: {e4}")
+    assert(e4.contains("\"seq\":41"), "seq is a NUMBER member")
+
     // the nginx-shaped text twin
     let t = obs.render_error("notice", "generation-activated gen=2", 1767225600000)
     assert(t == "2026/01/01 00:00:00 [notice] generation-activated gen=2", "text shape: {t}")

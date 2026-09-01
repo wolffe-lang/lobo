@@ -59,12 +59,27 @@ fn main() -> !int {
         "budget-exceeded shape (ws10, the seventh event — appended)",
     )
 
+    // ---- the ws11 seq stamp: the emission seam appends `seq=N` to
+    // every vocabulary event (the builders above stay byte-identical —
+    // appended, nothing renamed; every prefix pin keeps matching)
+    assert(
+        shell.ev_seq(shell.ev_connection_retired(1, 2), 7) ==
+            "connection-retired gen=1 remaining=2 seq=7",
+        "the seq stamp appends, never reshapes",
+    )
+    assert(
+        shell.ev_seq(shell.ev_generation_retired(1, 5, 2, 1234), 12) ==
+            "generation-retired gen=1 drained=5 aborted=2 age-ms=1234 seq=12",
+        "generation-retired carries its stamp last",
+    )
+
     // ---- the status stanza (human text)
     assert(shell.status_schema() == 1, "schema version 1")
-    let head = shell.status_head_text(2, false)
+    let head = shell.status_head_text(2, false, 9)
     assert(head.contains("lobo status\n"), "text header identity line")
     assert(head.contains("current generation: 2\n"), "text names the current generation")
     assert(head.contains("quitting: false\n"), "text carries the quit posture")
+    assert(head.contains("events: 9\n"), "text carries the event count (ws11, appended)")
     let cur_line = shell.status_line_text(2, 0, "current", 100, "abcd", -1, 0, 0)
     assert(
         cur_line == "generation 2: current live=0 age-ms=100 id=abcd mem-hw=0 budget-503s=0\n",
@@ -78,10 +93,10 @@ fn main() -> !int {
     )
 
     // ---- the status stanza (versioned JSON, single line)
-    let jopen = shell.status_json_open(2, true)
+    let jopen = shell.status_json_open(2, true, 9)
     assert(
-        jopen == "{{\"schema\":1,\"current\":2,\"quitting\":true,\"generations\":[",
-        "json open with schema + quitting: {jopen}",
+        jopen == "{{\"schema\":1,\"current\":2,\"quitting\":true,\"events\":9,\"generations\":[",
+        "json open with schema + quitting + events (ws11 additive, schema stays 1): {jopen}",
     )
     let jobj = shell.status_json_obj(1, "draining", 2, 800, "beef", 29200, 5120, 3)
     assert(

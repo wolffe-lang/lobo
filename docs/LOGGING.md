@@ -85,9 +85,12 @@ Error line (`error_log ... <level> format=json`): `schema`,
 whose first word is a ws08 vocabulary name and whose `k=v` fields
 become typed members (`{"schema":1,...,"level":"notice",
 "event":"generation-retired","gen":1,"drained":2,"aborted":0,
-"age-ms":1840}` — the FROZEN field keys, verbatim) — or the whole
-message as `"msg"` (the ACME prose lines ride that way). `schema`
-bumps only on a breaking shape change.
+"age-ms":1840,"seq":8}` — the FROZEN field keys, verbatim) — or the
+whole message as `"msg"` (the ACME prose lines ride that way).
+`seq` (ws11) is the vocabulary event's emission ordinal, stamped at
+the seam and typed by the same generic decode — docs/DRAIN.md's
+vocabulary section owns its story. `schema` bumps only on a breaking
+shape change.
 
 ## The writer discipline (D7-shaped; the contract's delta)
 

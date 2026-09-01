@@ -1,0 +1,159 @@
+#!/bin/sh
+# lobo-replay — the ws11 replay witness (a gauntlet step): a race you
+# can replay FROM A BUG REPORT, demonstrated end to end against lobo's
+# own drain vocabulary. Make-free POSIX sh + jq.
+#
+# The story it proves, every run:
+#   1. THE HUNT — tests/replay/drain_finish_race.lu (the PLANTED ws08
+#      drain-finish hazard, FIFO-clean so an unseeded run never sees
+#      it) explored under `lupin conform-run --explore`: the explorer
+#      must FIND it (exit 1, SCHEDULE-DEPENDENT, frontier CLOSED — a
+#      finding conditional on its budget would not be a finding).
+#   2. THE ARTIFACT — the failing outcome's replay seed, decision
+#      stream, stdout and sha are written to
+#      target/replay/drain-finish-race.loborace (versioned schema
+#      below): the file a bug report attaches.
+#   3. THE REPLAY — read back FROM THE ARTIFACT (never from shell
+#      state): twice by seed, once by the decision stream, each run's
+#      bytes compared against the artifact's. "Usually the same" is
+#      worse than none; three byte-identical replays or red.
+#   4. THE FIX — drain_finish_fixed.lu (the real loop's shape:
+#      retirement is a state check, never a message race) explores to
+#      ONE outcome, frontier closed, exit 0.
+#
+# The .loborace schema (version 1):
+#   { "schema": 1,
+#     "case":   "tests/replay/drain_finish_race.lu",  repo-relative
+#     "seed":   "<lupin --seed value>",               string: 19-digit
+#     "schedule": "ev:...",                           the decision stream
+#     "verdict": "exit(0)",
+#     "stdout_sha256": "<record sha>",
+#     "stdout": "<the log excerpt the schedule produces>",
+#     "lupin":  "<lupin --version line 1>" }
+# The seed and the stream are BOTH carried: the seed is the number you
+# hand somebody, the stream is the schedule you can read and diff
+# (the book's ch17 teaches the split). The two-command workflow this
+# rig serves is documented in docs/REPLAY.md.
+#
+# Budget (bench discipline): the race explores its whole frontier in
+# 16 executions and the fix in 24 (budgets 500/64 are ceilings, both
+# frontiers CLOSE); the whole witness is five lupin invocations plus
+# the explores — ~2s wall on the dev rig. Cheap enough for every
+# gauntlet run, which is the point: the gauntlet holds the accounting
+# schedule-independent forever, not just on the day ws11 landed.
+#
+# Pinch ledger (upstream, filed from ws11): the --json exploration
+# report omits the per-outcome DECISION STREAM (human report only —
+# scraped below), and a seeded observation record says "seeded":true
+# without carrying the seed VALUE; both filed on wolf-interp.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+race=tests/replay/drain_finish_race.lu
+fixed=tests/replay/drain_finish_fixed.lu
+out=target/replay
+stage="$out/stage"
+
+fail() {
+    echo "lobo-replay: FAILED — $1" >&2
+    exit 1
+}
+
+# stage the models beside lobo's real shell/config (the corpus
+# runner's stage-src convention: the loader's package root is the
+# entry's directory)
+rm -rf "$stage"
+mkdir -p "$stage/race" "$stage/fixed"
+cp "$race" "$stage/race/"
+cp "$fixed" "$stage/fixed/"
+for m in shell config; do
+    cp -R "src/$m" "$stage/race/$m"
+    cp -R "src/$m" "$stage/fixed/$m"
+done
+rentry="$stage/race/$(basename "$race")"
+fentry="$stage/fixed/$(basename "$fixed")"
+
+# ---- 1. the hunt -----------------------------------------------------
+xtext=$("$LUPIN" conform-run "$rentry" --explore=500 2>&1)
+xrc=$?
+[ "$xrc" = 1 ] || fail "the planted race explored to exit $xrc, want 1 (the finding): $xtext"
+printf '%s\n' "$xtext" | grep -q 'SCHEDULE-DEPENDENT' || fail "no SCHEDULE-DEPENDENT verdict:
+$xtext"
+printf '%s\n' "$xtext" | grep -q 'frontier closed' || fail "the frontier did not close at budget 500 — the finding would be conditional:
+$xtext"
+xjson=$("$LUPIN" conform-run "$rentry" --explore=500 --json 2>/dev/null)
+[ -n "$xjson" ] || fail "no --json exploration report"
+echo "lobo-replay: hunt — $(printf '%s' "$xjson" | jq -r '"\(.schedules) schedules, \(.outcomes | length) distinct outcomes"'), SCHEDULE-DEPENDENT, frontier closed"
+
+# ---- 2. the artifact -------------------------------------------------
+# FIFO baseline: the outcome an unseeded run (a developer's laptop,
+# the corpus lane) always sees
+baserec=$("$LUPIN" conform-run --json "$rentry" --seed=0 2>/dev/null)
+base_sha=$(printf '%s' "$baserec" | jq -r .stdout_sha256)
+[ -n "$base_sha" ] || fail "no FIFO baseline record"
+
+# the failing outcome: the first whose stdout differs from FIFO's.
+# The comparison happens INSIDE jq (a shell $(…) would strip the
+# trailing newline and match nothing).
+pick_seed=$(printf '%s' "$xjson" | jq -r --argjson baserec "$baserec" \
+    '[.outcomes[] | select(.stdout != $baserec.stdout_inline)][0].replay | sub("^--seed="; "")')
+[ -n "$pick_seed" ] && [ "$pick_seed" != null ] || fail "no divergent outcome in the report"
+
+# its decision stream: the human report carries it two lines under the
+# replay seed (the --json report omits streams — the filed pinch)
+pick_stream=$(printf '%s\n' "$xtext" | awk -v seed="--seed=$pick_seed" '
+    index($0, seed) { armed = 1; next }
+    armed && /decision stream:/ { print $3; exit }
+    armed { armed = 0 }
+')
+case "$pick_stream" in
+ev:*) ;;
+*) fail "no decision stream for seed $pick_seed in the human report" ;;
+esac
+
+# the failing run's own record seals the artifact
+prec=$("$LUPIN" conform-run --json "$rentry" --seed="$pick_seed" 2>/dev/null)
+pick_sha=$(printf '%s' "$prec" | jq -r .stdout_sha256)
+[ "$pick_sha" != "$base_sha" ] || fail "the picked seed replays the FIFO outcome — not the bug"
+
+art="$out/drain-finish-race.loborace"
+printf '%s' "$prec" | jq --arg case "$race" --arg seed "$pick_seed" --arg schedule "$pick_stream" \
+    --arg lupin "$("$LUPIN" --version | head -1)" \
+    '{schema: 1, case: $case, seed: $seed, schedule: $schedule,
+      verdict: .verdict, stdout_sha256: .stdout_sha256,
+      stdout: .stdout_inline, lupin: $lupin}' >"$art" || fail "artifact write"
+echo "lobo-replay: artifact — $art (seed=$pick_seed schedule=$pick_stream)"
+
+# ---- 3. the replay, FROM the artifact --------------------------------
+aseed=$(jq -r .seed "$art")
+astream=$(jq -r .schedule "$art")
+asha=$(jq -r .stdout_sha256 "$art")
+astdout=$(jq -r .stdout "$art")
+i=1
+while [ "$i" -le 2 ]; do
+    rsha=$("$LUPIN" conform-run --json "$rentry" --seed="$aseed" 2>/dev/null | jq -r .stdout_sha256)
+    [ "$rsha" = "$asha" ] || fail "seed replay $i drifted: $rsha vs artifact $asha"
+    echo "lobo-replay: replay $i/2 by seed — byte-identical (sha $rsha)"
+    i=$((i + 1))
+done
+srec=$("$LUPIN" conform-run --json "$rentry" --schedule="$astream" 2>/dev/null)
+ssha=$(printf '%s' "$srec" | jq -r .stdout_sha256)
+[ "$ssha" = "$asha" ] || fail "decision-stream replay drifted: $ssha vs artifact $asha"
+sout=$(printf '%s' "$srec" | jq -r .stdout_inline)
+[ "$sout" = "$astdout" ] || fail "decision-stream replay bytes differ from the artifact's stdout"
+echo "lobo-replay: replay by decision stream — byte-identical; the failing log excerpt:"
+printf '%s\n' "$astdout" | sed 's|^|lobo-replay:   |'
+
+# ---- 4. the fix ------------------------------------------------------
+ftext=$("$LUPIN" conform-run "$fentry" --explore=64 2>&1)
+frc=$?
+[ "$frc" = 0 ] || fail "the FIXED model explored to exit $frc, want 0:
+$ftext"
+printf '%s\n' "$ftext" | grep -q 'observably deterministic' || fail "the fix is not observably deterministic:
+$ftext"
+printf '%s\n' "$ftext" | grep -q 'frontier closed' || fail "the fix's frontier did not close:
+$ftext"
+echo "lobo-replay: fix — $(printf '%s\n' "$ftext" | sed -n '1s|^[^:]*: ||p'), observably deterministic"
+
+echo "lobo-replay: ok — the race is a finding with an artifact, the artifact replays byte-stable (2x seed + 1x stream), the fix closes its frontier on one outcome"

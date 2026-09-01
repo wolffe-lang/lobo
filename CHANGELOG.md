@@ -1,5 +1,35 @@
 # Changelog
 
+## ws11 — 2026-09-01 — replay the race
+
+A scheduling bug becomes an artifact. The rig gains the seeded
+half of lupin's determinism surface (pin HELD at 0.1.19 — v0.1.20
+is match-arms, no explore change; probed day one): the corpus
+runner takes `//! explore: N` (the file's whole schedule space,
+every gauntlet run, green only on agreement WITH a closed frontier
+— an open one is red, tense discipline) and `LOBO_SEED` (every
+lupin-lane run under a bug report's seed, failures printing the
+replay command). The witness pair keeps the ws08 drain-finish
+hazard alive as a specimen: `drain_finish_race.lu` decides
+retirement by racing the timeout message against the closes in one
+select — FIFO-clean (a laptop never sees it), 3 distinct outcomes
+across 16 schedules under explore — while `drain_finish_fixed.lu`
+is the real loop's shape (retirement is a STATE check) and closes a
+24-schedule frontier on one outcome, held by `explore: 64` forever.
+`tools/lobo-replay` (a gauntlet step) walks the whole story every
+run: the finding, the `.loborace` artifact (schema 1: seed +
+decision stream + pinned bytes + lupin identity), three
+byte-identical replays FROM the artifact (2× seed, 1× stream), the
+fix's closed frontier. The server side stays honest: lobo is
+spawn-free, so it never prints a seed — instead every vocabulary
+event now carries `seq=` (stamped at the emission seam; builders
+and prefix pins untouched) and status carries `events:` (additive,
+schema stays 1), making an attached log an ordered, GAP-VISIBLE
+event stream with a completeness anchor. docs/REPLAY.md states the
+boundary exactly (values, real time, the membrane; no production
+flight recorder — Tier 2 deferred, asks filed). Corpus 200 → 203
+(the specimen pair's lupin lanes plus the fixed twin's explore run).
+
 ## wsm04 — 2026-08-31 — the doors open inward
 
 Lobo consumes its own library's TLS client. Pins advance to wolf
