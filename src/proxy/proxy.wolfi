@@ -1,10 +1,13 @@
 module pkg :: proxy
-  wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 3cb3f606d0ffdbb04a69d2fc0bf4f09efbbe71bfca90c5641e158cbb1b11f58c
-  pkg_hash    3cb3f606d0ffdbb04a69d2fc0bf4f09efbbe71bfca90c5641e158cbb1b11f58c
+  wolfi v0 · toolchain 0.2.0 · edition v1
+  export_hash def690ff64fc7edb3d3bc09c15a3fbc02525a70a1ef00e3d1c0078d16f919987
+  pkg_hash    def690ff64fc7edb3d3bc09c15a3fbc02525a70a1ef00e3d1c0078d16f919987
   deps:
-    config  3be5cc730087c09fcede1c102a4e4aa2a9d78554a8a3d82e96ce8d70b0be5321
-    http  1b0868c2e5bf8f0b5ffe20716632586d71cfff80cac13800469d6f31ebadb165
+    config  05fa389d384471aeaf3e9597692b9fc9cc5bf3d8c160cc31991c33ee86185e95
+    http  757b4fe5402e1ad162ae6903d52a31921a49edebd14f2b79872b164db2fc27de
+    std.net  cb2d7259c1f637a4d2c6fb9509f6386d052b5b51bf904aec83719f92cdb1eafb
+    std.x.tls.cert  3fe950eea668027b4873aba4519a623def60df3cfee04b0691e5ab02a73622c3
+    std.x.tls.client  4f17326ab09ec26a7c250a4878f3a6ab54f317c5ffbc3af40432f8feeb4c565e
   items:
     [0] pub build_upstream — fn build_upstream(c: config.Conf, req: http.Request, pl: self.Plan, phost: str, pport: int, remote_addr: str, body: str) -> str · regions (ρ1, ρ2, ρ3, -, -, -, -) -> -
     [1] pub expand_var — fn expand_var(v: str, host: str, remote_addr: str, proxy_host: str, inbound_xff: str) -> str
@@ -26,7 +29,7 @@ module pkg :: proxy
     [17] pub swrr_pick — fn swrr_pick(mut s: self.Swrr, weights: prelude.List[int], up: prelude.List[bool]) -> int · regions (ρ1, ρ2, ρ3) -> -
     [18] pub version — fn version() -> str
     [19] pub PassTarget — struct PassTarget { scheme: str, authority: str, is_pool: bool, has_uri: bool, uri: str, err: str }
-    [20] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int }
+    [20] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int, trust_path: str, ssl_name: str }
     [21] pub RunAcc — struct RunAcc { addr: str, status: int, body_bytes: int, up_ms: int }
     [22] pub Swrr — struct Swrr { current: prelude.List[int] }
     [23] pub UpPool — struct UpPool { name: str, hosts: prelude.List[str], ports: prelude.List[int], weights: prelude.List[int], max_fails: prelude.List[int], fail_ms: prelude.List[int], backup: prelude.List[bool] }

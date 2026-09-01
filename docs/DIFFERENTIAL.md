@@ -21,7 +21,11 @@ wolf toolchain into `.wolf-bin/`:
 curl -LO https://nginx.org/download/nginx-1.30.4.tar.gz
 sha256sum -c <(echo "4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b  nginx-1.30.4.tar.gz")
 tar xzf nginx-1.30.4.tar.gz && cd nginx-1.30.4
-./configure --without-http_rewrite_module --without-http_gzip_module
+./configure --without-http_rewrite_module --without-http_gzip_module --with-http_ssl_module
+# macOS: clang finds no OpenSSL headers by default — point the build
+# at Homebrew's openssl@3 (host-specific flags, NOT part of the pin):
+#   ./configure ... --with-cc-opt="-I$(brew --prefix openssl@3)/include" \
+#                   --with-ld-opt="-L$(brew --prefix openssl@3)/lib"
 make -j"$(nproc)"
 cp objs/nginx <repo>/tests/differential/bin/nginx
 # delete the scratch dir; the repo carries the pin, not the source
@@ -42,7 +46,11 @@ green gauntlet always means the differential actually ran.
 The configure line drops rewrite (PCRE) and gzip (zlib) so the
 oracle builds from a bare toolchain everywhere; neither module
 affects the static-file corpus this harness serves, and a future
-case that needs one changes the PIN, not the harness.
+case that needs one changes the PIN, not the harness. wsm04 exercised
+exactly that route: `--with-http_ssl_module` joined the line so the
+oracle can serve the https UPSTREAM of the proxy differential's
+https case and dial `proxy_pass https://` itself (OpenSSL headers are
+a build-time need; the recipe above notes the macOS spelling).
 
 ## The case format
 

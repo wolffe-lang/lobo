@@ -1,5 +1,32 @@
 # Changelog
 
+## wsm04 — 2026-08-31 — the doors open inward
+
+Lobo consumes its own library's TLS client. Pins advance to wolf
+b80d239 (D57 dev-stamped; no v0.2.1 tag existed at acquisition), the
+lupin v0.1.19 tag, and wolf-std 26f0588 — the bump that carries
+sc29's `std.x.tls.client` — with the full gauntlet green at the trio
+before a line changed (corpus 195/195; #146 re-probed byte-identical,
+the midend stays off). Then the last two named refusals in the config
+surface retire: **`proxy_pass https://`** (D21's upstream leg) dials
+through the std client — trust anchors via `proxy_ssl_trusted_
+certificate` (REQUIRED: lobo has no unverified mode, nginx's
+verify-off default is a named delta), SNI always, chain+hostname+
+CertificateVerify before a request byte leaves, TLS failures mapped
+to 502 (504 for a mid-handshake deadline) with the row named in the
+error log — and the differential grows an https case where nginx and
+lobo both proxy a VERIFIED fixture-cert upstream, client legs
+byte-equal (8/8). **https `cert_ca`** (D25) follows: the ACME client
+dials an https directory verified against `cert_ca_root`, the
+harness CA serves its whole RFC 8555 directory through lobo's own
+TLS server half behind the conn seam (`--tls`), and cold issuance +
+renewal run over TLS end to end. The loopback law is UNCHANGED and
+forever: only the https *transport* gate retired; a non-loopback CA
+is still a named -t refusal. Measured honestly: the std client's
+handshake costs ~3.6s on this rig (native tier, WOLF_MIDEND=0 —
+#146's residue), stated where it moves deadlines, asserted nowhere
+tighter. Corpus 195 → 200.
+
 ## ws10 — 2026-08-31 — the budget is real
 
 Per-vhost memory budgets, enforced: `memory_budget <size>;` refuses a

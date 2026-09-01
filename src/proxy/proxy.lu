@@ -24,6 +24,9 @@
 
 use config
 use http
+use std.net
+use std.x.tls.cert
+use std.x.tls.client as tlsc
 
 /// This module's interface version. Bumped from the ws00 stub as
 /// ws03's first real surface lands. Total; never traps.
@@ -312,13 +315,14 @@ pub fn peer_down(fails: int, last_fail_ms: int, max_fails: int, fail_ms: int, no
 // proxy_pass parse + the rewrite table (probed from the oracle first)
 // ------------------------------------------------------------------
 
-/// A parsed proxy_pass target. `scheme` is "http" (https is wsc02's
-/// integration sprint — a named table row). `is_pool` true means
-/// `authority` is an upstream pool name; false means a direct
-/// host:port. `has_uri` says a path component followed the authority
-/// (the slash-arithmetic switch); `uri` is that path (leading slash
-/// kept). `err` names a config-time rejection (a variable in
-/// proxy_pass — report-11 Class-C honest refusal; `named_error` v0).
+/// A parsed proxy_pass target. `scheme` is "http" or "https" (wsm04,
+/// the D21 retirement: the https leg rides std.x.tls.client).
+/// `is_pool` true means `authority` is an upstream pool name; false
+/// means a direct host:port. `has_uri` says a path component followed
+/// the authority (the slash-arithmetic switch); `uri` is that path
+/// (leading slash kept). `err` names a config-time rejection (a
+/// variable in proxy_pass — report-11 Class-C honest refusal;
+/// `named_error` v0).
 pub struct PassTarget {
     scheme: str,
     authority: str,
@@ -332,7 +336,9 @@ pub struct PassTarget {
 /// `http://host:port/`, each probed. A `$` anywhere is the variable
 /// form: nginx changes resolution mode entirely, so lobo refuses it by
 /// name (`err` set) rather than half-emulating (report-11 Class-C).
-/// `https://` is refused by name (wsc02 owns TLS upstream legs).
+/// `https://` parses like http:// with `scheme` "https" (wsm04 — the
+/// D21 named refusal RETIRED; the io leg dials through
+/// std.x.tls.client and -t demands proxy_ssl_trusted_certificate).
 /// Whether the authority is a pool is decided by the config model (an
 /// `upstream` block of that name). PURE.
 pub fn parse_pass(c: config.Conf, arg: str) -> PassTarget {
@@ -353,10 +359,9 @@ pub fn parse_pass(c: config.Conf, arg: str) -> PassTarget {
         rest = arg[7..arg.len]
     } else if arg.starts_with("https://") {
         t.scheme = "https"
-        t.err = "proxy_pass https:// (TLS upstream leg) is planned(wsc02) — refused by name at v0"
-        return t
+        rest = arg[8..arg.len]
     } else {
-        t.err = "proxy_pass scheme must be http:// at v0"
+        t.err = "proxy_pass scheme must be http:// or https:// at v0"
         return t
     }
     let slash = rest.find("/") else -1
@@ -655,7 +660,12 @@ pub fn status_code(status_line: str) -> int {
 /// prefix, the parsed proxy_pass target, and the resolved leg
 /// deadlines (proxy_connect_timeout / proxy_read_timeout, innermost
 /// level wins; nginx defaults 60s). `is_proxy` false means fall back
-/// to static serving. Built PURE from the model.
+/// to static serving. wsm04 adds the https-leg material: `trust_path`
+/// is the resolved proxy_ssl_trusted_certificate ("" when unset — a
+/// -t failure for an https target, a run-time named 502 if reached),
+/// `ssl_name` the proxy_ssl_name override for SNI/verification (""
+/// defaults to the selected peer's host, a named delta from nginx's
+/// authority default). Built PURE from the model.
 pub struct Plan {
     is_proxy: bool,
     loc: int,
@@ -665,6 +675,8 @@ pub struct Plan {
     pt: PassTarget,
     connect_ms: int,
     read_ms: int,
+    trust_path: str,
+    ssl_name: str,
 }
 
 /// The index of the first `http` block, or -1. Total.
@@ -760,6 +772,8 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         },
         connect_ms: 60000,
         read_ms: 60000,
+        trust_path: "",
+        ssl_name: "",
     }
     let srv = first_server(c)
     if srv < 0 {
@@ -820,7 +834,24 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     pl.pt = parse_pass(c, pp)
     pl.connect_ms = timeout_ms(c, loc, srv, pl.http_blk, "proxy_connect_timeout", 60000)
     pl.read_ms = timeout_ms(c, loc, srv, pl.http_blk, "proxy_read_timeout", 60000)
+    pl.trust_path = str_setting(c, loc, srv, pl.http_blk, "proxy_ssl_trusted_certificate")
+    pl.ssl_name = str_setting(c, loc, srv, pl.http_blk, "proxy_ssl_name")
     pl
+}
+
+/// A single-arg directive value from the innermost level (loc, else
+/// srv, else http) that sets it, else "" (the timeout_ms shape,
+/// without the time parse). Total.
+fn str_setting(c: config.Conf, loc: int, srv: int, http_blk: int, name: str) -> str {
+    let l = child_arg1(c, loc, name) else ""
+    if !l.is_empty() {
+        return l
+    }
+    let s = child_arg1(c, srv, name) else ""
+    if !s.is_empty() {
+        return s
+    }
+    child_arg1(c, http_blk, name) else ""
 }
 
 // ------------------------------------------------------------------
@@ -1093,6 +1124,358 @@ fn read_up_close(conn: int, carry: str, cap: int) -> str ! {io} {
     }
 }
 
+// ------------------------------------------------------------------
+// the https upstream leg (wsm04, the D21 retirement) — the dial goes
+// through std.x.tls.client: caller-owned socket, caller-supplied
+// trust anchors, SNI from the peer host (or proxy_ssl_name), the
+// chain + CertificateVerify + Finished all verified before a byte of
+// the request leaves. The per-fd deadline armed before `begin`
+// bounds the WHOLE handshake (the client's own contract), so a
+// stalled TLS peer is `timeout` → 504, never a hang.
+// ------------------------------------------------------------------
+
+/// Civil breakdown of the wall clock into std.x.tls.cert's compact
+/// validation timestamp (Howard Hinnant's civil-from-days; acme/
+/// carries the same derivation for the renewal clock — the module
+/// dependency law keeps proxy off acme, so the ~15 lines live here
+/// too). The clock std.x.tls.client judges the upstream chain at.
+/// Total.
+fn now_packed() -> int {
+    let secs = time_unix_ms() / 1000
+    let days = secs / 86400
+    let tod = secs - days * 86400
+    let hh = tod / 3600
+    let mi = (tod - hh * 3600) / 60
+    let ss = tod - hh * 3600 - mi * 60
+    let z = days + 719468
+    let era = z / 146097
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    var y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    var mo = mp + 3
+    if mp >= 10 {
+        mo = mp - 9
+    }
+    if mo <= 2 {
+        y = y + 1
+    }
+    cert.timestamp(y, mo, d, hh, mi, ss)
+}
+
+/// A dead Client for refusal arms that must still yield the type (the
+/// std client's structs are forgeable by design — "a forged Client
+/// misbehaves as rows, never traps" — and this one is closed, never
+/// used). Total.
+fn cli_dead() -> tlsc.Client {
+    tlsc.Client {
+        fd: -1,
+        write_key: List[int](),
+        write_iv: List[int](),
+        write_seq: 0,
+        read_key: List[int](),
+        read_iv: List[int](),
+        read_seq: 0,
+    }
+}
+
+/// One decrypted application read as str. The record-layer rows
+/// (`bad_record_mac`, `decode_error`, `unexpected_message`) fold to
+/// `io` — each is a broken upstream to the relay (the caller's 502);
+/// a code point split across a record boundary is the same `utf8`→io
+/// fold the plaintext leg carries (D8/D16's str posture).
+fn tls_read_str(mut cli: tlsc.Client) -> str ! {timeout, closed, io} {
+    let b = tlsc.read(mut cli) else |e| match e {
+        closed => { return closed },
+        timeout => { return timeout },
+        bad_record_mac => { return io },
+        decode_error => { return io },
+        unexpected_message => { return io },
+        io => { return io },
+    }
+    str_from_utf8(b) else |_| {
+        return io
+    }
+}
+
+/// The upstream response head off the TLS session (read_up_head's
+/// twin over decrypted records). Rows: `timeout` (→504), `closed`
+/// (→502), `io`.
+fn tls_read_head(mut cli: tlsc.Client) -> (str, str) ! {timeout, closed, io} {
+    var buf = ""
+    loop {
+        let m = buf.find("\r\n\r\n") else -1
+        if m >= 0 {
+            return (buf[0..m], buf[m + 4..buf.len])
+        }
+        if buf.len > 65536 {
+            return io
+        }
+        let piece = tls_read_str(mut cli)?
+        buf = "{buf}{piece}"
+    }
+}
+
+/// Exactly `want` body bytes beyond `carry` (read_up_length's twin).
+/// Row: io.
+fn tls_read_len(mut cli: tlsc.Client, carry: str, want: int) -> str ! {io} {
+    var buf = carry
+    while buf.len < want {
+        let piece = tls_read_str(mut cli) else |_| {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+    buf[0..want]
+}
+
+/// Body to end-of-stream, bounded (read_up_close's twin — a TLS
+/// close_notify or clean EOF ends it; a deadline expiry on a
+/// close-delimited body ends it too, the plaintext leg's own
+/// posture). Row: io.
+fn tls_read_close(mut cli: tlsc.Client, carry: str, cap: int) -> str ! {io} {
+    var buf = carry
+    loop {
+        if buf.len > cap {
+            return io
+        }
+        let piece = tls_read_str(mut cli) else |e| match e {
+            closed => { return buf },
+            timeout => { return buf },
+            io => { return io },
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// A single https upstream attempt (attempt's twin over
+/// std.x.tls.client): connect, arm the deadline (it bounds handshake
+/// AND reads — the client's per-fd contract), two-phase handshake
+/// with `sni_host` verified against `anchors`, send the built
+/// request under the session keys, read and relay the response.
+/// Every handshake failure is a NAMED [error] line (the ws09 prose
+/// ladder; the access log's 502 row is the event) and maps to 502 —
+/// except `timeout`, which is the gateway's 504. Same status
+/// contract as `attempt`: 0 relayed, 502 retry-safe, 504 terminal,
+/// 599 broken post-header. Rows: the client-facing net
+/// `closed`/`io`.
+fn attempt_tls(
+    client: int,
+    upreq: str,
+    phost: str,
+    pport: int,
+    sni_host: str,
+    anchors: List[int],
+    read_ms: int,
+    token: str,
+    date: str,
+    keep: bool,
+    mut pacc: RunAcc,
+) -> int ! {closed, io} {
+    let up = net_connect("{phost}:{pport}") else |e| match e {
+        refused => { return 502 },
+        timeout => { return 504 },
+        io => { return 502 },
+    }
+    net_deadline(up, read_ms) else |_| {
+        net_close(up) else |_| {}
+        return 502
+    }
+    let pend = tlsc.
+        begin(
+        take net.Socket { fd: up },
+        sni_host,
+        anchors,
+        now_packed(),
+        os_random(32),
+        os_random(32),
+    ) else |_| {
+        eprint(
+            "lobo: [error] upstream TLS to {phost}:{pport}: ClientHello write failed; answering 502",
+        )
+        net_close(up) else |_| {}
+        return 502
+    }
+    var gw: int = 0
+    var why = ""
+    var cli = tlsc.complete(take pend) else |e| match e {
+        closed => {
+            gw = 502
+            why = "closed"
+            cli_dead()
+        },
+        timeout => {
+            gw = 504
+            why = "timeout (deadline expired mid-handshake)"
+            cli_dead()
+        },
+        io => {
+            gw = 502
+            why = "io"
+            cli_dead()
+        },
+        decode_error => {
+            gw = 502
+            why = "decode_error (malformed flight — is the upstream speaking TLS?)"
+            cli_dead()
+        },
+        bad_record_mac => {
+            gw = 502
+            why = "bad_record_mac"
+            cli_dead()
+        },
+        unexpected_message => {
+            gw = 502
+            why = "unexpected_message"
+            cli_dead()
+        },
+        illegal_parameter => {
+            gw = 502
+            why = "illegal_parameter"
+            cli_dead()
+        },
+        downgrade => {
+            gw = 502
+            why = "downgrade (the upstream answered below TLS 1.3)"
+            cli_dead()
+        },
+        handshake_failure => {
+            gw = 502
+            why = "handshake_failure (suite/alert — the profile is TLS 1.3 ChaCha20-Poly1305 X25519)"
+            cli_dead()
+        },
+        decrypt_error => {
+            gw = 502
+            why = "decrypt_error (the server Finished did not verify)"
+            cli_dead()
+        },
+        zero => {
+            gw = 502
+            why = "zero (all-zero shared secret)"
+            cli_dead()
+        },
+        der => {
+            gw = 502
+            why = "der (unparseable certificate)"
+            cli_dead()
+        },
+        unsupported_alg => {
+            gw = 502
+            why = "unsupported_alg (the chain or CertificateVerify uses an algorithm outside the ladder — RSA upstreams need an Ed25519/P-256 chain)"
+            cli_dead()
+        },
+        bad_signature => {
+            gw = 502
+            why = "bad_signature"
+            cli_dead()
+        },
+        expired => {
+            gw = 502
+            why = "expired (upstream certificate)"
+            cli_dead()
+        },
+        not_yet_valid => {
+            gw = 502
+            why = "not_yet_valid (upstream certificate)"
+            cli_dead()
+        },
+        name_mismatch => {
+            gw = 502
+            why = "name_mismatch (the chain does not certify \"{sni_host}\" — set proxy_ssl_name)"
+            cli_dead()
+        },
+        not_ca => {
+            gw = 502
+            why = "not_ca (chain issuer is not a CA)"
+            cli_dead()
+        },
+        issuer_mismatch => {
+            gw = 502
+            why = "issuer_mismatch (chain does not reach the trusted roots)"
+            cli_dead()
+        },
+        unknown_critical => {
+            gw = 502
+            why = "unknown_critical (certificate extension)"
+            cli_dead()
+        },
+    }
+    if gw != 0 {
+        eprint(
+            "lobo: [error] upstream TLS handshake with {phost}:{pport} failed: {why}; answering {gw}",
+        )
+        net_close(up) else |_| {}
+        return gw
+    }
+
+    tlsc.write(mut cli, upreq.bytes()) else |_| {
+        eprint("lobo: [error] upstream TLS to {phost}:{pport}: request write failed; answering 502")
+        tlsc.close(take cli) else |_| {}
+        return 502
+    }
+    var hgw: int = 0
+    let hr = tls_read_head(mut cli) else |e| match e {
+        timeout => {
+            hgw = 504
+            ("", "")
+        },
+        closed => {
+            hgw = 502
+            ("", "")
+        },
+        io => {
+            hgw = 502
+            ("", "")
+        },
+    }
+    if hgw != 0 {
+        tlsc.close(take cli) else |_| {}
+        return hgw
+    }
+    let uphead = hr.0
+    let rest = hr.1
+    let parsed = parse_response(uphead)
+    if parsed.status_line.is_empty() {
+        tlsc.close(take cli) else |_| {}
+        return 502
+    }
+    var bgw: int = 0
+    var body = ""
+    if parsed.body_mode == "length" {
+        body = tls_read_len(mut cli, rest, parsed.content_length) else |_| {
+            bgw = 599
+            ""
+        }
+    } else if parsed.body_mode == "chunked" {
+        let whole = tls_read_close(mut cli, rest, 8388608) else |_| {
+            bgw = 599
+            ""
+        }
+        if bgw == 0 {
+            body = http.decode_chunked(whole, http.default_limits()) else |_| {
+                bgw = 599
+                ""
+            }
+        }
+    } else {
+        body = tls_read_close(mut cli, rest, 8388608) else |_| {
+            bgw = 599
+            ""
+        }
+    }
+    tlsc.close(take cli) else |_| {}
+    if bgw != 0 {
+        return bgw
+    }
+    pacc.status = status_code_of(parsed.status_line)
+    pacc.body_bytes = body.len
+    let out = relay_response(parsed, body, token, date, keep)
+    net_write(client, out)?
+    0
+}
+
 /// Send an error response to the client and swallow the write outcome
 /// (the connection is closing). Reuses the serve writer's exact error
 /// shape by building the same bytes here. Total.
@@ -1312,8 +1695,13 @@ fn selection_order(p: UpPool, mut s: Swrr) -> (List[str], List[int]) {
 /// builds the upstream request (rewrite + header discipline), tries
 /// peers in selection order on a connect-time failure (the retry-
 /// safety rule: only while NO response byte has reached the client),
-/// and relays the reply. A config error in the proxy_pass (a variable,
-/// https) is a clean 502 at v0 (it should already be a `-t` failure).
+/// and relays the reply. An https target (wsm04) dials through
+/// std.x.tls.client — the trust anchors load per exchange from
+/// `pl.trust_path` (read-what-exists: a rotated root applies on the
+/// next request), SNI/verification is proxy_ssl_name else the peer
+/// host, and a missing/unreadable anchor file is a NAMED [error] +
+/// 502 (it should already be a `-t` failure). A config error in the
+/// proxy_pass (a variable) is a clean 502 at v0 (same posture).
 /// Returns should_close. Rows: the client-facing net `closed`/`io`.
 /// `remote_addr` is the client address (loopback: 127.0.0.1 until a
 /// peer-address builtin lands). `body` is the buffered request body.
@@ -1338,6 +1726,40 @@ pub fn run(
         send_gateway_error(client, 502, date, token)
         return true
     }
+    // the https leg's trust anchors (wsm04): loaded per exchange,
+    // refused loudly when the -t contract was somehow skipped
+    var anchors = List[int]()
+    if pl.pt.scheme == "https" {
+        if pl.trust_path.is_empty() {
+            eprint(
+                "lobo: [error] proxy_pass https:// with no proxy_ssl_trusted_certificate — the std client verifies always; answering 502",
+            )
+            acc.status = 502
+            acc.body_bytes = gw_body(502, token).len
+            send_gateway_error(client, 502, date, token)
+            return true
+        }
+        var aok = true
+        let pem = fs_read_text(pl.trust_path) else |_| {
+            aok = false
+            ""
+        }
+        if aok {
+            anchors = config.pem_certs(pem) else |_| {
+                aok = false
+                List[int]()
+            }
+        }
+        if !aok || anchors.len == 0 {
+            eprint(
+                "lobo: [error] proxy_ssl_trusted_certificate \"{pl.trust_path}\" did not load as PEM CERTIFICATE blocks; answering 502",
+            )
+            acc.status = 502
+            acc.body_bytes = gw_body(502, token).len
+            send_gateway_error(client, 502, date, token)
+            return true
+        }
+    }
     // resolve the peer set
     var hosts = List[str]()
     var ports = List[int]()
@@ -1356,7 +1778,12 @@ pub fn run(
     } else {
         let hp = split_hostport(pl.pt.authority)
         (mut hosts).push(hp.0)
-        (mut ports).push(hp.1)
+        var dport = hp.1
+        if pl.pt.scheme == "https" && !pl.pt.authority.contains(":") {
+            // split_hostport's no-colon default is 80; https defaults 443
+            dport = 443
+        }
+        (mut ports).push(dport)
     }
 
     var last_status: int = 502
@@ -1370,7 +1797,28 @@ pub fn run(
             "{acc.addr}, {phost}:{pport}"
         }
         let t0 = time_unix_ms()
-        let st = attempt(client, upreq, phost, pport, pl.read_ms, token, date, keep, mut acc)?
+        var st: int = 0
+        if pl.pt.scheme == "https" {
+            var sni = pl.ssl_name
+            if sni.is_empty() {
+                sni = phost
+            }
+            st = attempt_tls(
+                client,
+                upreq,
+                phost,
+                pport,
+                sni,
+                copy anchors,
+                pl.read_ms,
+                token,
+                date,
+                keep,
+                mut acc,
+            )?
+        } else {
+            st = attempt(client, upreq, phost, pport, pl.read_ms, token, date, keep, mut acc)?
+        }
         acc.up_ms = acc.up_ms + (time_unix_ms() - t0)
         if st == 0 {
             return !keep

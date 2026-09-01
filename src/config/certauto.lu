@@ -5,12 +5,14 @@
 //! the HTTP-01 challenge, a writable store, a CA the pin can actually
 //! dial). Lives in config/ because -t owns config-time validation —
 //! the ws05 sslcert precedent, verbatim.
-//! Scope, honest (the aged-contract deltas, routed to the wsc02
-//! closeout): the std.x.tls ladder has no CLIENT handshake at this
-//! pin, so the ACME conversation is plain http over LOOPBACK only —
-//! an https:// or non-loopback cert_ca is a NAMED -t refusal citing
-//! the gate (this is also the contract's loopback-law unit-refusal:
-//! no harness config can reach a non-loopback CA, by construction).
+//! Scope, honest: the ACME conversation is LOOPBACK ONLY, forever —
+//! a non-loopback cert_ca is a NAMED -t refusal (the loopback-law
+//! unit refusal: no harness config can reach a remote CA, by
+//! construction). The TRANSPORT may be http:// or, as of wsm04 (the
+//! D25 retirement), https:// — the dial rides std.x.tls.client and
+//! VERIFIES the directory's chain against `cert_ca_root` (required
+//! for an https cert_ca; the harness CA writes its root out for
+//! exactly this).
 //! "Resolvable" server_name is name-shape validation at this pin (no
 //! DNS lookup exists, and the loopback law would forbid it in every
 //! test); wildcards are refused by name (DNS-01 is the wildcard path,
@@ -103,14 +105,23 @@ pub fn auto_challenge_dir(c: Conf, prefix: str) -> str {
     "{auto_store(c, prefix)}/challenge"
 }
 
-/// The ACME directory URL. The DEFAULT is deliberately empty at this
-/// pin: with no client TLS rung there is no CA lobo could reach whose
-/// URL would be a safe default, and defaulting to the production
-/// Let's Encrypt directory would make every misconfigured test one
-/// typo from a real CA — the loopback law says no. auto_check demands
-/// an explicit loopback http:// URL. Total.
+/// The ACME directory URL. The DEFAULT is deliberately empty:
+/// defaulting to the production Let's Encrypt directory would make
+/// every misconfigured test one typo from a real CA — the loopback
+/// law says no. auto_check demands an explicit loopback http:// or
+/// https:// URL (the https transport is wsm04's D25 retirement).
+/// Total.
 pub fn auto_ca(c: Conf) -> str {
     auto_arg(c, "cert_ca", "")
+}
+
+/// The trust-anchor PEM path for an https cert_ca ("" when unset —
+/// a -t refusal when the directory is https://). The file is read
+/// per dial by the flow (read-what-exists: a rotated harness root
+/// applies on the next attempt); path used as written, the
+/// proxy_ssl_trusted_certificate posture. Total.
+pub fn auto_ca_root(c: Conf) -> str {
+    auto_arg(c, "cert_ca_root", "")
 }
 
 /// The ACME account contact ("" when absent; sent as mailto: at
@@ -190,13 +201,20 @@ fn name_usable(name: str) -> bool {
     true
 }
 
-/// Whether `url` is a loopback plain-http directory URL — the only
-/// CA shape this pin can dial (see the file header). Total.
+/// Whether `url` is a loopback directory URL (http OR https — the
+/// transport is free since wsm04; the HOST is loopback forever).
+/// Total.
 fn ca_loopback(url: str) -> bool {
     if url.starts_with("http://127.0.0.1:") || url.starts_with("http://127.0.0.1/") {
         return true
     }
     if url.starts_with("http://localhost:") || url.starts_with("http://localhost/") {
+        return true
+    }
+    if url.starts_with("https://127.0.0.1:") || url.starts_with("https://127.0.0.1/") {
+        return true
+    }
+    if url.starts_with("https://localhost:") || url.starts_with("https://localhost/") {
         return true
     }
     false
@@ -286,16 +304,17 @@ pub fn auto_check(c: Conf) -> str {
         return "\"cert auto\" needs a plaintext http listener to answer the HTTP-01 challenge and this config has none — add a block like: server {{ listen 80; }} (the challenge route is served from it automatically) in {cfile}:{cline}"
     }
 
-    // the CA this pin can dial (the loopback-law unit refusal)
+    // the CA lobo can dial (the loopback-law unit refusal — the HOST
+    // rule; the https transport gate retired at wsm04/D25)
     let ca = auto_ca(c)
     if ca.is_empty() {
-        return "\"cert auto\" requires \"cert_ca\" naming the ACME directory URL — at this pin a loopback http:// directory (the std.x.tls ladder has no client handshake yet, so a real CA is unreachable; the flip rides that rung) in {cfile}:{cline}"
-    }
-    if ca.starts_with("https://") {
-        return "\"cert_ca\" is https:// — lobo has no TLS client at this pin (std.x.tls ships the server handshake only; the client rung is a NAMED roadmap row, ws05 D21/D25) and will not pretend: use the loopback harness directory until that rung lands in {cfile}:{cline}"
+        return "\"cert auto\" requires \"cert_ca\" naming the ACME directory URL — a loopback http:// or https:// directory (LOOPBACK ONLY, forever: the harness CA; the https dial rides std.x.tls.client as of wsm04) in {cfile}:{cline}"
     }
     if !ca_loopback(ca) {
-        return "\"cert_ca\" is not a loopback URL — at this pin the ACME dialer speaks plain http to 127.0.0.1 ONLY (the loopback law; a plaintext conversation with a remote CA would be dishonest) in {cfile}:{cline}"
+        return "\"cert_ca\" is not a loopback URL — the ACME dialer speaks to 127.0.0.1/localhost ONLY (the loopback law, unchanged by the wsm04 https transport: every reachable CA is the harness CA) in {cfile}:{cline}"
+    }
+    if ca.starts_with("https://") && auto_ca_root(c).is_empty() {
+        return "\"cert_ca\" is https:// and no \"cert_ca_root\" names its trust anchor — the ACME client (std.x.tls.client, wsm04) VERIFIES the directory chain always: add \"cert_ca_root <ca.pem>;\" (the harness CA writes its root out for exactly this) in {cfile}:{cline}"
     }
 
     ""
@@ -318,5 +337,27 @@ pub fn auto_store_probe(c: Conf, prefix: str) -> str {
         return "\"cert auto\": certificate store \"{store}\" is not writable (probe write failed — the store holds private keys and must be writable by the server user)"
     }
     fs_remove(probe) else |_| {}
+    // wsm04: an https cert_ca's trust anchor must read and parse (the
+    // proxy_tls_probe posture — nginx -t reads its cert files too)
+    if auto_ca(c).starts_with("https://") {
+        let root = auto_ca_root(c)
+        if !root.is_empty() {
+            var rok = true
+            let pem = fs_read_text(root) else |_| {
+                rok = false
+                ""
+            }
+            var anchors = List[int]()
+            if rok {
+                anchors = pem_certs(pem) else |_| {
+                    rok = false
+                    List[int]()
+                }
+            }
+            if !rok || anchors.len == 0 {
+                return "\"cert_ca_root\" file \"{root}\" holds no readable CERTIFICATE block (the https ACME dial verifies against it; path used as written)"
+            }
+        }
+    }
     ""
 }

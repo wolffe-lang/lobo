@@ -1,0 +1,27 @@
+# nginx.upstream-https.conf.in — the https UPSTREAM of the proxy
+# differential's https case (wsm04, the D21 retirement): the PINNED
+# oracle itself serving TLS 1.3 with the static fixture certificates
+# (tests/tls/fixtures: Ed25519, CN/SAN localhost — the exact profile
+# lobo's std.x.tls.client speaks). Rendered per case (@UPORT@ the
+# upstream port, @CERT@/@KEY@ the fixture pair, @ROOT@ the scratch
+# dir). Loopback only, always.
+daemon off;
+pid nginx.pid;
+error_log error.log;
+
+events {
+}
+
+http {
+    access_log off;
+    types {
+        text/html html;
+    }
+    server {
+        listen 127.0.0.1:@UPORT@ ssl;
+        ssl_certificate @CERT@;
+        ssl_certificate_key @KEY@;
+        ssl_protocols TLSv1.3;
+        root @ROOT@/www;
+    }
+}

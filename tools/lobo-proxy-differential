@@ -207,6 +207,105 @@ for case in "$DIFF_DIR"/proxy-cases/*.case; do
     fi
 done
 
+# ==================================================================
+# the https cases (wsm04, D21 retired): the UPSTREAM is the pinned
+# oracle itself serving TLS 1.3 with the static fixture certificates
+# (tests/tls/fixtures — Ed25519, SAN localhost: the exact profile
+# lobo's std.x.tls.client speaks), and BOTH fronts proxy_pass
+# https:// to it with verification ON against the fixture CA. The
+# CLIENT leg byte-compares (Server/Date normalized); there is no
+# backend-record leg here — the upstream is the oracle, not the
+# recording rig backend (the request-building discipline is pinned by
+# the plaintext cases; what an https case adds is the VERIFIED TLS
+# dial). Case sections: request, body (the upstream's index.html,
+# mtime pinned like the static corpus), expect-client. Requires the
+# ssl-enabled oracle (the wsm04 NGINX-PIN).
+# ==================================================================
+
+FIX="$(pwd)/tests/tls/fixtures"
+
+# wait until a TCP port accepts — the https upstream's readiness gate
+# (the send() retry only covers the FRONT's not-ready window; a front
+# that dials a half-up upstream would answer a real 502)
+wait_tcp() { # <port>
+    for _ in $(seq 1 50); do
+        if nc -z 127.0.0.1 "$1" 2>/dev/null; then return 0; fi
+        sleep 0.1
+    done
+    return 1
+}
+
+for case in "$DIFF_DIR"/proxy-https-cases/*.case; do
+    [ -f "$case" ] || continue
+    cases=$((cases + 1))
+    name=$(basename "$case" .case)
+    scratch="target/proxy-differential/$name"
+    rm -rf "$scratch"; mkdir -p "$scratch/www" "$scratch/up"
+    section request "$case" >"$scratch/request.raw"
+    section body "$case" >"$scratch/www/index.html"
+    section expect-client "$case" >"$scratch/expect-client.raw"
+    normalize <"$scratch/expect-client.raw" >"$scratch/expect-client.norm"
+    # deterministic Last-Modified/ETag through the proxy: pinned mtime
+    find "$scratch/www" -type f -exec touch -d '2026-01-01T00:00:00Z' {} +
+
+    ok=1
+    for side in ng lobo; do
+        side_ok=0
+        for attempt in 1 2 3; do
+            uport=$(free_port) || continue
+            sed -e "s|@UPORT@|$uport|" -e "s|@CERT@|$FIX/fullchain.pem|" \
+                -e "s|@KEY@|$FIX/leaf.key|" -e "s|@ROOT@|$(pwd)/$scratch|" \
+                "$DIFF_DIR/nginx.upstream-https.conf.in" >"$scratch/up/nginx.conf"
+            "$BIN" -p "$(pwd)/$scratch/up" -c nginx.conf -e error.log &
+            uppid=$!
+            if ! wait_tcp "$uport"; then
+                kill "$uppid" 2>/dev/null; wait "$uppid" 2>/dev/null; continue
+            fi
+            fport=$(free_port) || { kill "$uppid" 2>/dev/null; wait "$uppid" 2>/dev/null; continue; }
+            if [ "$side" = ng ]; then
+                sed -e "s|@PORT@|$fport|" -e "s|@UPSTREAM@|localhost:$uport|" \
+                    -e "s|@CA@|$FIX/ca.crt|" \
+                    "$DIFF_DIR/nginx.proxy-https.conf.in" >"$scratch/nginx.conf"
+                "$BIN" -p "$(pwd)/$scratch" -c nginx.conf -e error.log &
+            else
+                sed -e "s|@PORT@|$fport|" -e "s|@UPSTREAM@|localhost:$uport|" \
+                    -e "s|@CA@|$FIX/ca.crt|" \
+                    "$DIFF_DIR/lobo.proxy-https.conf.in" >"$scratch/lobo.conf"
+                "$LOBO" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/lobo.conf" 2>"$scratch/lobo.err" &
+            fi
+            proxypid=$!
+            if send "$fport" "$scratch/request.raw" "$scratch/$side.client"; then side_ok=1; fi
+            kill "$proxypid" 2>/dev/null; wait "$proxypid" 2>/dev/null
+            kill "$uppid" 2>/dev/null; wait "$uppid" 2>/dev/null
+            [ "$side_ok" = 1 ] && break
+        done
+        if [ "$side_ok" != 1 ]; then
+            echo "proxy-differential: FAILED — $name: $side never answered over the https leg" >&2
+            [ "$side" = lobo ] && tail -4 "$scratch/lobo.err" >&2
+            ok=0
+        fi
+    done
+
+    if [ "$ok" = 1 ]; then
+        normalize <"$scratch/ng.client" >"$scratch/ng.client.norm"
+        normalize <"$scratch/lobo.client" >"$scratch/lobo.client.norm"
+        if ! diff -u "$scratch/expect-client.norm" "$scratch/ng.client.norm" >"$scratch/d1" 2>&1; then
+            echo "proxy-differential: FAILED — $name: ORACLE https client leg diverged from expect (pin stale?):" >&2
+            cat "$scratch/d1" >&2; ok=0
+        fi
+        if ! diff -u "$scratch/expect-client.norm" "$scratch/lobo.client.norm" >"$scratch/d2" 2>&1; then
+            echo "proxy-differential: FAILED — $name: LOBO https client leg diverged from expect:" >&2
+            cat "$scratch/d2" >&2; ok=0
+        fi
+    fi
+
+    if [ "$ok" = 1 ]; then
+        echo "proxy-differential: ok — $name (nginx + lobo agree through a VERIFIED https upstream, on loopback)"
+    else
+        failures=$((failures + 1))
+    fi
+done
+
 if [ "$cases" = 0 ]; then
     echo "proxy-differential: FAILED — no case files under $DIFF_DIR/proxy-cases/" >&2
     exit 1

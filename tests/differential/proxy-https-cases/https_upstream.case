@@ -1,0 +1,22 @@
+// proxy_pass https://: both fronts dial the fixture-cert TLS upstream (Ed25519/SAN localhost,
+// the std.x.tls.client profile), chain+hostname VERIFIED against the fixture CA, SNI on;
+// client legs byte-equal modulo Server/Date. wsm04 — the D21 retirement witness.
+--- request
+GET /https/ HTTP/1.1
+Host: front.example
+Connection: close
+
+--- body
+<h1>served through TLS</h1>
+--- expect-client
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: 28
+Connection: close
+Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
+ETag: "6955b900-1c"
+Accept-Ranges: bytes
+
+<h1>served through TLS</h1>

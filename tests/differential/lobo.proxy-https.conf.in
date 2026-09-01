@@ -1,0 +1,17 @@
+# lobo.proxy-https.conf.in — the lobo front of the https proxy
+# differential (wsm04). Mirrors nginx.proxy-https.conf.in exactly:
+# same location, same proxy_pass, same proxy_ssl_* spellings —
+# the drop-in claim under TLS upstreams. The dial rides
+# std.x.tls.client: chain + hostname verified against @CA@, SNI from
+# the upstream host, the whole handshake under the read deadline.
+http {
+    server {
+        listen 127.0.0.1:@PORT@;
+        location /https/ {
+            proxy_pass https://@UPSTREAM@/;
+            proxy_ssl_trusted_certificate @CA@;
+            proxy_ssl_verify on;
+            proxy_ssl_server_name on;
+        }
+    }
+}

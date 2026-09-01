@@ -288,7 +288,7 @@ pub fn decide(c: config.Conf, p: Probe, plain_addr: str, ssl_addr: str, mut tr: 
             return v
         }
         let out_target = proxy.rewrite_target(pl.matched, pl.pt.has_uri, pl.pt.uri, p.path, p.query)
-        v.upstream = "http://{pl.pt.authority}{out_target}"
+        v.upstream = "{pl.pt.scheme}://{pl.pt.authority}{out_target}"
         if pl.pt.is_pool {
             v.pool = pl.pt.authority
             let pool = proxy.pool_named(c, pl.pt.authority)

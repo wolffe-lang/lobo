@@ -1,0 +1,129 @@
+//! check: run(exit=0, stdout="https gateway ok\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: proxy http config obs serve conn tls
+//!
+//! wsm04, the D21 retirement's FAILURE half, live: an https upstream
+//! that never speaks TLS must become a bounded, NAMED gateway error —
+//! never a hang and never a plaintext fallback.
+//!   1. mid-handshake deadline: proxy_pass https:// to a SILENT
+//!      backlog peer (dial succeeds, no ServerHello ever comes) with
+//!      proxy_read_timeout 500ms → the per-fd deadline the std client
+//!      documents fires INSIDE `complete` → 504 Gateway Time-out to
+//!      the client (the knife-edge rule: the assertion is the status,
+//!      not the elapsed time).
+//!   2. missing trust anchors at run time: an https plan whose
+//!      proxy_ssl_trusted_certificate does not read → named [error] +
+//!      502 (the -t probe owns the config-time half; this pins the
+//!      defense-in-depth).
+//! The full VERIFIED handshake is the harness's to prove (the https
+//! proxy differential dials a real TLS upstream); a single-threaded
+//! corpus test cannot run both halves of a live handshake at once
+//! (the std client's own witness plays the server between its two
+//! phases — a proxied exchange has no such seam).
+
+use config
+use http
+use proxy
+
+fn status_line(reply: str) -> str {
+    let eol = reply.find("\r\n") else reply.len
+    reply[0..eol]
+}
+
+fn read_reply(rd: int) -> str {
+    var out = ""
+    var reading = true
+    while reading {
+        let piece = net_read(rd, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            out = "{out}{piece}"
+        }
+    }
+    out
+}
+
+fn main() -> !int {
+    // a trust-anchor file the plan can name (content is never reached
+    // in case 1 — the peer answers no flight; the PEM must still LOAD,
+    // which the fixture CA cert provides when staged... a minimal
+    // self-contained anchor: write one from the checked-in fixture is
+    // rig territory, so this test writes a syntactically valid PEM
+    // whose DER is one tiny SEQUENCE — enough for pem_certs to answer
+    // bytes; the chain never gets far enough to judge it).
+    let tiny_pem = "-----BEGIN CERTIFICATE-----\nMAA=\n-----END CERTIFICATE-----\n"
+    fs_write_text("target/https-gw-ca.pem", tiny_pem)?
+
+    // ---- case 1: silent backlog peer → 504, bounded ----
+    let l = net_listen("127.0.0.1:0")?
+    let sp = net_port(l)?
+    // never accept: the proxy's dial lands in the backlog and no
+    // ServerHello ever arrives (gateway_504's silent-peer shape)
+    let src = "http {{ server {{ listen 127.0.0.1:8080; location / {{ proxy_pass https://127.0.0.1:{sp}/; proxy_ssl_trusted_certificate target/https-gw-ca.pem; proxy_read_timeout 500ms; }} }} }}"
+    let c = config.parse_str(src, "hs.conf")
+    let lim = http.default_limits()
+    let req = http.parse_request("GET /x HTTP/1.1\r\nHost: front", lim) else |_| {
+        assert(false, "req parse")
+        return 1
+    }
+    let pl = proxy.plan(c, "/x")
+    assert(pl.is_proxy, "proxy location")
+    assert(pl.pt.scheme == "https", "https plan")
+    assert(pl.read_ms == 500, "read deadline resolved")
+
+    let cl = net_listen("127.0.0.1:0")?
+    let clport = net_port(cl)?
+    let cli = net_connect("127.0.0.1:{clport}")?
+    let rd = net_accept(cl)?
+    let date = "Thu, 01 Jan 2026 00:00:00 GMT"
+    var pacc = proxy.run_acc()
+    let closed = proxy.run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false, mut pacc) else |_| {
+        assert(false, "client-facing write must not raise here")
+        return 1
+    }
+    assert(closed, "gateway errors close")
+    net_close(cli) else |_| {}
+    let reply = read_reply(rd)
+    assert(
+        status_line(reply) == "HTTP/1.1 504 Gateway Time-out",
+        "silent TLS peer -> 504, got: {status_line(reply)}",
+    )
+    assert(pacc.status == 504, "acc records 504")
+    net_close(rd) else |_| {}
+    net_close(l) else |_| {}
+
+    // ---- case 2: unreadable trust anchors → named 502 ----
+    let src2 = "http {{ server {{ listen 127.0.0.1:8080; location / {{ proxy_pass https://127.0.0.1:1/; proxy_ssl_trusted_certificate target/https-gw-absent.pem; }} }} }}"
+    let c2 = config.parse_str(src2, "hs2.conf")
+    let pl2 = proxy.plan(c2, "/x")
+    let cl2 = net_listen("127.0.0.1:0")?
+    let cl2port = net_port(cl2)?
+    let cli2 = net_connect("127.0.0.1:{cl2port}")?
+    let rd2 = net_accept(cl2)?
+    var pacc2 = proxy.run_acc()
+    let closed2 = proxy.
+        run(cli2, c2, req, "", pl2, "127.0.0.1", "lobo/0.1.0", date, false, mut pacc2) else |_| {
+        assert(false, "client-facing write must not raise here")
+        return 1
+    }
+    assert(closed2, "502 closes")
+    net_close(cli2) else |_| {}
+    let reply2 = read_reply(rd2)
+    assert(
+        status_line(reply2) == "HTTP/1.1 502 Bad Gateway",
+        "missing anchors -> 502, got: {status_line(reply2)}",
+    )
+    assert(pacc2.status == 502, "acc records 502")
+    net_close(rd2) else |_| {}
+    net_close(cl2) else |_| {}
+    fs_remove("target/https-gw-ca.pem") else |_| {}
+
+    print("https gateway ok")
+    0
+}

@@ -1,12 +1,14 @@
 module pkg :: acme
-  wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash b7693c6356ca4048a6b324a25ec7868d6e8ce48c6837d677d45625d99bf4c888
-  pkg_hash    b7693c6356ca4048a6b324a25ec7868d6e8ce48c6837d677d45625d99bf4c888
+  wolfi v0 · toolchain 0.2.0 · edition v1
+  export_hash f11089e0d7c16b4ec7d27ae0da0fa50f06cfe328d8ad38cca0d4503cd3f507d6
+  pkg_hash    f11089e0d7c16b4ec7d27ae0da0fa50f06cfe328d8ad38cca0d4503cd3f507d6
   deps:
-    std.base64  fd7ecc755f5ac5a3daa22c95fdb0b078bd4746e4b32c09e3db1962262c2d93c7
-    std.x.crypto.curve25519  5ade65db4f1ebf167305462ee17e25e9884c74fce252ac70eed0140cf32936cd
-    std.x.jose  827ee62f9140f7cc882e0bfdf16d703b3bea6d2ab079729af48ff7c9cf9ae8e3
-    std.x.tls.cert  7280767063e09f66de85f22596c16fac77055410edacc4b8c51468c8886aed20
+    std.base64  12a5b79b33e8e0430578735d8186accde61a8e0be47f2d093c6799580db53ae6
+    std.net  cb2d7259c1f637a4d2c6fb9509f6386d052b5b51bf904aec83719f92cdb1eafb
+    std.x.crypto.curve25519  5872c956ec30f9da74fe13d30c1bedbb861d7e987137f0e7ff4ee01f066be50d
+    std.x.jose  fa8b5d3f714585916f9ca1f8a55fa63bb4f16bbf2fad2a72570c831d0bcd6cdb
+    std.x.tls.cert  3fe950eea668027b4873aba4519a623def60df3cfee04b0691e5ab02a73622c3
+    std.x.tls.client  4f17326ab09ec26a7c250a4878f3a6ab54f317c5ffbc3af40432f8feeb4c565e
   items:
     [0] pub account_key — fn account_key(store: str) -> prelude.List[int] ! {io} · regions (-) -> ρ_caller
     [1] pub account_key_path — fn account_key_path(store: str) -> str
@@ -31,7 +33,7 @@ module pkg :: acme
     [20] pub der_utctime — fn der_utctime(secs: int) -> prelude.List[int] · regions (-) -> ρ_caller
     [21] pub der_utf8 — fn der_utf8(s: str) -> prelude.List[int] · regions (-) -> ρ_caller
     [22] pub der_wrap — fn der_wrap(tag: int, body: prelude.List[int]) -> prelude.List[int] · regions (-, ρ1) -> ρ_caller
-    [23] pub flow_new — fn flow_new(store: str, names: str, contact: str, ca_url: str, renew_before_s: int, check_interval_s: int) -> self.Flow · regions (-, -, -, -, -, -) -> ρ_caller
+    [23] pub flow_new — fn flow_new(store: str, names: str, contact: str, ca_url: str, ca_root: str, renew_before_s: int, check_interval_s: int) -> self.Flow · regions (-, -, -, -, -, -, -) -> ρ_caller
     [24] pub install — fn install(store: str, primary: str, key_pem: str, chain_pem: str) -> () ! {io}
     [25] pub js_arr_first — fn js_arr_first(body: str, key: str) -> str
     [26] pub js_http01 — fn js_http01(body: str) -> (str, str) · regions (-) -> ρ_caller
@@ -57,6 +59,6 @@ module pkg :: acme
     [46] pub url_split — fn url_split(url: str) -> (str, str) · regions (-) -> ρ_caller
     [47] pub verify_of — fn verify_of(pubkey: prelude.List[int], msg: prelude.List[int], sig: prelude.List[int]) -> bool · regions (ρ1, ρ2, ρ3) -> -
     [48] pub version — fn version() -> str
-    [49] pub Flow — struct Flow { state: str, store: str, names: str, primary: str, contact: str, ca_url: str, renew_before_s: int, check_interval_s: int, url_nonce: str, url_account: str, url_order: str, nonce: str, kid: str, order_url: str, authz_url: str, finalize_url: str, chall_token: str, acct_seed: prelude.List[int], cert_seed: prelude.List[int], next_ms: int, backoff_s: int, retry_after_s: int, attempts: int, err: str }
+    [49] pub Flow — struct Flow { state: str, store: str, names: str, primary: str, contact: str, ca_url: str, ca_root: str, renew_before_s: int, check_interval_s: int, url_nonce: str, url_account: str, url_order: str, nonce: str, kid: str, order_url: str, authz_url: str, finalize_url: str, chall_token: str, acct_seed: prelude.List[int], cert_seed: prelude.List[int], next_ms: int, backoff_s: int, retry_after_s: int, attempts: int, err: str }
     [50] pub Resp — struct Resp { status: int, nonce: str, location: str, retry_after: int, body: str }
 
