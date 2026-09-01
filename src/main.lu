@@ -311,7 +311,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
                 } else {
                     nd = nd + 1
                 }
-                ev_log(mut el, "notice", shell.ev_connection_retired(gen, nlive))
+                ev_event(mut el, "notice", shell.ev_connection_retired(gen, nlive))
             }
             (mut out).push(GenRow {
                 conf: g.conf,
@@ -342,7 +342,11 @@ fn retire_zero(gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
     for g in gens {
         if g.state == "draining" && g.live == 0 {
             let age = now - g.since_ms
-            ev_log(mut el, "notice", shell.ev_generation_retired(g.gen, g.drained, g.aborted, age))
+            ev_event(
+                mut el,
+                "notice",
+                shell.ev_generation_retired(g.gen, g.drained, g.aborted, age),
+            )
         } else {
             (mut out).push(g)
         }
@@ -435,11 +439,11 @@ fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
 /// design — a torn read across generations is acceptable and each
 /// count is monotone-correct per generation (documented in docs/). The
 /// snapshot is one pass over the table reference. Total.
-fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: bool) -> str {
+fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: bool, events: int) -> str {
     let now = time_unix_ms()
     let cur = current_gen(gens)
     if json {
-        var s = shell.status_json_open(cur, quitting)
+        var s = shell.status_json_open(cur, quitting, events)
         var first = true
         for g in gens {
             let sep = if first { "" } else { "," }
@@ -459,7 +463,7 @@ fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: boo
         }
         return "{s}{shell.status_json_close()}"
     }
-    var s = shell.status_head_text(cur, quitting)
+    var s = shell.status_head_text(cur, quitting, events)
     for g in gens {
         s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now), g.mem_hw, g.bud_hits)}"
     }
@@ -537,11 +541,16 @@ struct AccRow {
 }
 
 /// The error-log output (`have` false = stderr only, as before ws09).
+/// `seq` (ws11) is the vocabulary-event counter: the ordinal stamped
+/// onto every frozen-vocabulary event by `ev_event` — 1-based,
+/// monotone for the life of the process. It rides HERE (not the sink)
+/// so a reload's rebuilt outputs never reset it.
 struct ELog {
     s: obs.Sink,
     have: bool,
     json: bool,
     level: str,
+    seq: int,
 }
 
 /// A config log path against the prefix (absolute carries). Total.
@@ -573,17 +582,21 @@ fn build_sinks(c: config.Conf, prefix: str) -> List[SinkRow] {
     out
 }
 
-/// The error-log output of a frozen model ("" path = none). Total.
-fn build_elog(c: config.Conf, prefix: str) -> ELog {
+/// The error-log output of a frozen model ("" path = none). `seq`
+/// carries the caller's running event count across a rebuild (0 at
+/// start; a reload passes the live counter — the stamp never resets).
+/// Total.
+fn build_elog(c: config.Conf, prefix: str, seq: int) -> ELog {
     let p = config.errlog_path(c)
     if p.is_empty() {
-        return ELog { s: obs.sink_new("", 0), have: false, json: false, level: "error" }
+        return ELog { s: obs.sink_new("", 0), have: false, json: false, level: "error", seq: seq }
     }
     ELog {
         s: obs.sink_new(resolve_log_path(prefix, p), 0),
         have: true,
         json: config.errlog_json(c),
         level: config.errlog_level(c),
+        seq: seq,
     }
 }
 
@@ -600,6 +613,17 @@ fn ev_log(mut el: ELog, level: str, body: str) {
         }
         obs.sink_emit(mut el.s, line)
     }
+}
+
+/// The ws11 vocabulary seam: a FROZEN-vocabulary event goes through
+/// here, which stamps the next `seq` ordinal (shell.ev_seq — appended,
+/// nothing renamed) and emits through `ev_log` as ever. Prose notices
+/// keep calling `ev_log` directly and are never stamped: the seq
+/// stream is the vocabulary stream, the loop's own event order made
+/// quotable in a bug report (docs/REPLAY.md). Total.
+fn ev_event(mut el: ELog, level: str, body: str) {
+    el.seq = el.seq + 1
+    ev_log(mut el, level, shell.ev_seq(body, el.seq))
 }
 
 /// Pump the access sinks: render this pass's records through each
@@ -639,7 +663,7 @@ fn flush_elog(el: ELog) -> ELog {
             eprint("lobo: [warn] {note}")
         }
     }
-    ELog { s: sk, have: el.have, json: el.json, level: el.level }
+    ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq }
 }
 
 /// Close every access output (flushing first) so the NEXT flush
@@ -661,7 +685,7 @@ fn reopen_elog(el: ELog) -> ELog {
     if el.have {
         obs.sink_reopen(mut sk)
     }
-    ELog { s: sk, have: el.have, json: el.json, level: el.level }
+    ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq }
 }
 
 fn serve_main(prefix: str, conf: str) -> int {
@@ -794,7 +818,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     // mirror (stderr keeps every line — the ws02 seam the rig reads),
     // and the JSON door's header opt-in list.
     var asinks = build_sinks(c0, prefix)
-    var elog = build_elog(c0, prefix)
+    var elog = build_elog(c0, prefix, 0)
     var optin = config.log_headers_join(c0)
 
     // ws06: the ACME renewal daemon. When `cert auto` is on, arm the
@@ -874,8 +898,8 @@ fn serve_main(prefix: str, conf: str) -> int {
         mem_hw: 0,
         bud_hits: 0,
     })
-    ev_log(mut elog, "notice", shell.ev_generation_loaded(1, h1))
-    ev_log(mut elog, "notice", shell.ev_generation_activated(1))
+    ev_event(mut elog, "notice", shell.ev_generation_loaded(1, h1))
+    ev_event(mut elog, "notice", shell.ev_generation_activated(1))
 
     // the connection table (parallel primitive lists — a List of a
     // local/primitive type constructs on every lane; rebuilt each pass)
@@ -931,7 +955,7 @@ fn serve_main(prefix: str, conf: str) -> int {
             }
             if m > 0 && m != sprobe {
                 verb = shell.signal_verb(m)
-                ev_log(mut elog, "notice", shell.ev_signal_received(m))
+                ev_event(mut elog, "notice", shell.ev_signal_received(m))
             }
         }
         if cc >= 0 || !verb.is_empty() {
@@ -939,10 +963,10 @@ fn serve_main(prefix: str, conf: str) -> int {
             if verb == "ping" {
                 reply(cc, "pong\n")
             } else if verb == "status" {
-                let body = status_stanza(gens, shutdown_ms, quitting, false)
+                let body = status_stanza(gens, shutdown_ms, quitting, false, elog.seq)
                 reply(cc, "{body}\n")
             } else if verb == "status json" {
-                let body = status_stanza(gens, shutdown_ms, quitting, true)
+                let body = status_stanza(gens, shutdown_ms, quitting, true, elog.seq)
                 reply(cc, "{body}\n")
             } else if verb == "stop" {
                 reply(cc, "stop: shutting down (generation {curgen})\n")
@@ -952,7 +976,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                 quitting = true
                 let held = held_of(gens, curgen)
                 gens = mark_draining(gens, curgen, now)
-                ev_log(mut elog, "notice", shell.ev_generation_draining(curgen, held))
+                ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
                 gens = retire_zero(gens, now, mut elog)
             } else if verb == "reopen" {
                 asinks = reopen_sinks(asinks)
@@ -986,9 +1010,9 @@ fn serve_main(prefix: str, conf: str) -> int {
                         )
                     }
                     gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
-                    ev_log(mut elog, "notice", shell.ev_generation_draining(curgen, held))
-                    ev_log(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
-                    ev_log(mut elog, "notice", shell.ev_generation_activated(ng.gen))
+                    ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
+                    ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
+                    ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
                     gens = retire_zero(gens, now, mut elog)
                     // ws09: the log outputs follow the CURRENT
                     // generation (named delta — nginx's old workers
@@ -997,7 +1021,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                     asinks = reopen_sinks(asinks)
                     asinks = build_sinks(ng.conf, prefix)
                     elog = reopen_elog(elog)
-                    elog = build_elog(ng.conf, prefix)
+                    elog = build_elog(ng.conf, prefix, elog.seq)
                     optin = config.log_headers_join(ng.conf)
                 }
                 reply(cc, "{ng.note}\n")
@@ -1123,7 +1147,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                 // high-water aggregate
                 let hit = !st.bud_site.is_empty()
                 if hit {
-                    ev_log(
+                    ev_event(
                         mut elog,
                         "error",
                         shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would),

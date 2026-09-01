@@ -67,6 +67,7 @@ number (seconds) all parse; absent or `0` means no forced timeout.
 lobo status
 current generation: 3
 quitting: false
+events: 9
 generation 1: draining live=2 age-ms=1840 id=0f96da4e7e7c072a mem-hw=4213 budget-503s=1 shutdown-in-ms=28160
 generation 3: current live=5 age-ms=1840 id=623a301150e5f3a3 mem-hw=812 budget-503s=0
 ```
@@ -82,11 +83,16 @@ generation 3: current live=5 age-ms=1840 id=623a301150e5f3a3 mem-hw=812 budget-5
   configured `worker_shutdown_timeout` (the remaining budget, clamped at
   0); it is omitted for the current generation and when no timeout is
   set.
+- `events` (ws11, appended — every earlier fact keeps its place): the
+  count of vocabulary events emitted so far, which is the highest
+  `seq=` stamped (see the vocabulary section). The completeness anchor
+  for a bug report's attached log: a stream whose top seq matches
+  `events` has no trailing hole (docs/REPLAY.md is the workflow).
 
 ### `lobo status --format json` (single line, schema-versioned)
 
 ```json
-{"schema":1,"current":3,"quitting":false,"generations":[
+{"schema":1,"current":3,"quitting":false,"events":9,"generations":[
   {"gen":1,"state":"draining","live":2,"age_ms":1840,"id":"0f96da4e7e7c072a","mem_high_water":4213,"budget_503s":1,"shutdown_remaining_ms":28160},
   {"gen":3,"state":"current","live":5,"age_ms":1840,"id":"623a301150e5f3a3","mem_high_water":812,"budget_503s":0,"shutdown_remaining_ms":-1}
 ]}
@@ -94,8 +100,9 @@ generation 3: current live=5 age-ms=1840 id=623a301150e5f3a3 mem-hw=812 budget-5
 
 The wire is ONE line (rendered here with breaks for reading). `schema` is
 the version — currently **1**; it bumps only on a breaking shape change
-(`mem_high_water`/`budget_503s` are ws10's ADDITIVE members — nothing
-renamed or moved, so the version holds; docs/BUDGET.md).
+(`mem_high_water`/`budget_503s` are ws10's ADDITIVE members, `events`
+is ws11's — nothing renamed or moved, so the version holds;
+docs/BUDGET.md is the model).
 `shutdown_remaining_ms` is `-1` when none applies. ws12's metrics
 endpoint serves this same object.
 
@@ -136,6 +143,21 @@ wws mapping is documented per event, not vibes):
 | `signal-received` | notice | `sig`, `verb` | a real OS signal arrived and was mapped to an operator verb (wsm01): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb — the line that tells a signal-driven reload from a control-channel one |
 | `budget-exceeded` | error | `gen`, `site`, `budget`, `would` | a request was refused by its `memory_budget` (ws10): `site` the deterministic exceed-site (`head`\|`body`\|`body-chunked`\|`file`), `budget` the configured bytes, `would` what admitting it would have charged; the request also writes an ordinary 503 access line (docs/BUDGET.md) |
 
+**The seq stamp (ws11, appended — nothing renamed).** Every vocabulary
+event above carries one more trailing field, `seq=N`: the event's
+ordinal in the one poll loop's emission order (1-based, monotone for
+the life of the process — a reload never resets it). The stamp is
+applied by the EMISSION SEAM, not the builders, so every shape in the
+table is unchanged ahead of it and every prefix pin keeps matching;
+the JSON door types it as a number member (`"seq":41`) through the
+same generic k=v decode. What it buys: an attached log excerpt is an
+ORDERED, GAP-VISIBLE event stream — the loop's own decision order,
+quotable in a bug report, with any hole (a level-gated mirror, a
+counted drop) visible as a seq gap instead of a silent absence. The
+status stanza's `events` fact is the same counter read back. Prose
+notices are never stamped: the seq stream IS the vocabulary stream.
+docs/REPLAY.md teaches the bug-report workflow this feeds.
+
 Beside the vocabulary, the prose notices ride the same seam with
 their own levels: serving-on / signal-arming / reopen / ACME issuance
 at `notice`; sink-drop reports at `warn`; ACME failures and
@@ -146,10 +168,10 @@ Example lifecycle of one reloaded-away generation holding two
 connections, both closing cleanly:
 
 ```
-lobo: [notice] generation-draining gen=1 held=2
-lobo: [notice] connection-retired gen=1 remaining=1
-lobo: [notice] connection-retired gen=1 remaining=0
-lobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840
+lobo: [notice] generation-draining gen=1 held=2 seq=5
+lobo: [notice] connection-retired gen=1 remaining=1 seq=6
+lobo: [notice] connection-retired gen=1 remaining=0 seq=7
+lobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840 seq=8
 ```
 
 ## Trigger disposition (control channel AND signals — the wsm01 flip)
