@@ -139,6 +139,12 @@ if ! tools/lobo-replay; then
     exit 1
 fi
 
+step "metrics (ws12: the exposition checked clause by clause against the vendored spec, exact counts, cardinality held)"
+if ! tools/lobo-metrics; then
+    echo "lobo-gauntlet: FAILED at metrics" >&2
+    exit 1
+fi
+
 step "membudget (ws10 structure audit: keepalive drives, bodies die per-response; the str half is named wolf-lang#191)"
 if ! tools/lobo-membudget; then
     echo "lobo-gauntlet: FAILED at membudget — the structure-audit witness (ws10)" >&2

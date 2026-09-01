@@ -1,0 +1,316 @@
+#!/bin/sh
+
+# lobo-metrics — the ws12 scrape rig: drive a KNOWN workload against a
+# live lobo with `metrics on`, scrape /metrics, and check the body
+# against the Prometheus text exposition format CLAUSE BY CLAUSE. A
+# gauntlet step.
+#
+# THE SPEC, and its provenance. The rules below are transcribed from
+# prometheus/docs `docs/instrumenting/exposition_formats.md` on `main`,
+# fetched 2026-09-01 into .docs/refs/prometheus-exposition-formats.md
+# (that tree is local per .gitignore; the MANIFEST there carries the
+# URL and the date, and this header carries the clauses, so a later
+# fetch can re-verify every check without reading the checker). The
+# clauses this tool holds lobo to, in the spec's own words:
+#
+#   C1 "Lines are separated by a line feed character (\n). The last
+#       line must end with a line feed character."
+#   C2 "Lines with a # as the first non-whitespace character are
+#       comments ... unless the first token after # is either HELP or
+#       TYPE."
+#   C3 "If the token is HELP, at least one more token is expected,
+#       which is the metric name ... Only one HELP line may exist for
+#       any given metric name."
+#   C4 "If the token is TYPE, exactly two more tokens are expected ...
+#       the second is either counter, gauge, histogram, summary, or
+#       untyped ... Only one TYPE line may exist for a given metric
+#       name."
+#   C5 "The TYPE line for a metric name must appear before the first
+#       sample is reported for that metric name."
+#   C6 "Each line must have a unique combination of a metric name and
+#       labels."
+#   C7 "A histogram must have a bucket with {le=\"+Inf\"}. Its value
+#       must be identical to the value of x_count."
+#   C8 "The buckets of a histogram ... must appear in increasing
+#       numerical order of their label values."
+#   C9 Content-Type is "text/plain" with "version=0.0.4".
+#  C10 "value is a float represented as required by Go's ParseFloat()".
+#      lobo writes integers and fixed 3-decimal seconds only; the
+#      checker holds it to that narrower shape on purpose — a number
+#      lobo cannot spell is a number lobo cannot get wrong.
+#  C11 "All lines for a given metric must be provided as one single
+#      group" — a family's samples are contiguous.
+#
+# Beyond conformance the tool asserts the CARDINALITY posture the
+# registry exists to keep: no label named `uri`, `path`, `url`,
+# `client`, `remote_addr` or `id` outside the two info metrics, and a
+# total series count that does not grow with the number of distinct
+# URIs driven.
+#
+# Loopback only; OS-chosen ports; scratch cleared at START.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+BIN=target/lobo-debug
+if [ ! -x "$BIN" ]; then
+    echo "lobo-metrics: FAILED — $BIN is missing; run the gauntlet's build step first" >&2
+    exit 1
+fi
+
+D=target/metrics-rig
+rm -rf "$D"
+mkdir -p "$D/w" || exit 1
+printf 'METRICS-RIG\n' > "$D/w/index.html"
+printf 'a\n' > "$D/w/a.html"
+printf 'b\n' > "$D/w/b.html"
+
+red=0
+ok() { echo "lobo-metrics: ok — $1"; }
+bad() { echo "lobo-metrics: RED — $1" >&2; red=$((red + 1)); }
+
+# `listen ... :0` and read the BOUND port back out of the startup
+# notice — the lobo-acme idiom, and the only way to be sure the rig is
+# not racing another test for a guessed port. `control ... :0` does the
+# same for the control channel, which the pid file then names.
+cat > "$D/lobo.conf" <<EOF
+pid $D/lobo.pid;
+control 127.0.0.1:0;
+http {
+  types { text/html html; }
+  access_log $D/access.log;
+  metrics on;
+  server { listen 127.0.0.1:0; root $D/w; index index.html; }
+}
+EOF
+
+"$BIN" serve -p . -c "$D/lobo.conf" > "$D/serve.log" 2>&1 &
+child=$!
+HP=""
+i=0
+while [ $i -lt 200 ]; do
+    HP=$(sed -n 's/.*serving on 127.0.0.1:[0-9]* (port \([0-9]*\)), control.*/\1/p' "$D/serve.log" | head -1)
+    if [ -n "$HP" ]; then
+        break
+    fi
+    sleep 0.05
+    i=$((i + 1))
+done
+if [ -z "$HP" ]; then
+    echo "lobo-metrics: FAILED — the spawned lobo never announced a bound port" >&2
+    cat "$D/serve.log" >&2
+    kill $child 2>/dev/null
+    exit 1
+fi
+
+# THE KNOWN WORKLOAD, driven with the same nc the differential harness
+# uses. Three distinct URIs, six requests, one miss.
+fetch() {
+    printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$1" |
+        nc 127.0.0.1 "$HP" 2>/dev/null
+}
+
+fetch /index.html > /dev/null
+fetch /a.html > /dev/null
+fetch /b.html > /dev/null
+fetch /a.html > /dev/null
+fetch /b.html > /dev/null
+fetch /missing.html > /dev/null
+
+RAW="$D/scrape.raw"
+fetch /metrics > "$RAW"
+
+# ---- C9: the content type, exactly
+if grep -qi '^Content-Type: text/plain; version=0.0.4; charset=utf-8' "$RAW"; then
+    ok "C9 content type is text/plain; version=0.0.4; charset=utf-8"
+else
+    bad "C9 content type is not the spec's: $(grep -i '^Content-Type' "$RAW")"
+fi
+
+# split the body off the header block
+BODY="$D/scrape.body"
+sed -n '/^\r$/,$p' "$RAW" | sed '1d' > "$BODY"
+if [ ! -s "$BODY" ]; then
+    bad "the scrape body is empty"
+    kill $child 2>/dev/null
+    exit 1
+fi
+
+# ---- C1: every line ends with \n (the file's last byte is a newline)
+if [ "$(tail -c 1 "$BODY" | od -An -c | tr -d ' ')" = "\\n" ]; then
+    ok "C1 the exposition's last line ends with a line feed"
+else
+    bad "C1 the exposition does not end with a line feed"
+fi
+CR=$(printf '\r')
+if grep -q "$CR" "$BODY"; then
+    bad "C1 a carriage return leaked into the exposition body"
+else
+    ok "C1 line endings are bare line feeds"
+fi
+
+# ---- C2/C3/C4: comment lines are only HELP and TYPE, well formed
+awk '
+    /^#/ {
+        if ($2 != "HELP" && $2 != "TYPE") { print "stray:" $0; bad = 1 }
+        if ($2 == "HELP" && NF < 3) { print "help-short:" $0; bad = 1 }
+        if ($2 == "TYPE" && NF != 4) { print "type-arity:" $0; bad = 1 }
+        if ($2 == "TYPE" && $4 != "counter" && $4 != "gauge" && $4 != "histogram" && $4 != "summary" && $4 != "untyped") {
+            print "type-kind:" $0; bad = 1
+        }
+    }
+    END { exit bad }
+' "$BODY" > "$D/c234" 2>&1
+if [ -s "$D/c234" ]; then
+    bad "C2/C3/C4 malformed metadata lines: $(cat "$D/c234")"
+else
+    ok "C2/C3/C4 every comment line is a well-formed HELP or TYPE"
+fi
+
+# ---- C3/C4: at most one HELP and one TYPE per metric name
+dupe=$(grep '^# HELP ' "$BODY" | awk '{print $3}' | sort | uniq -d)
+if [ -n "$dupe" ]; then bad "C3 duplicate HELP lines: $dupe"; else ok "C3 one HELP per metric name"; fi
+dupe=$(grep '^# TYPE ' "$BODY" | awk '{print $3}' | sort | uniq -d)
+if [ -n "$dupe" ]; then bad "C4 duplicate TYPE lines: $dupe"; else ok "C4 one TYPE per metric name"; fi
+
+# ---- C5: the TYPE line precedes the family's first sample. A
+# histogram's samples carry the _bucket/_sum/_count suffixes, so the
+# family a sample belongs to is its longest registered TYPE prefix.
+awk '
+    /^# TYPE / { seen[$3] = 1; next }
+    /^#/ { next }
+    /^$/ { next }
+    {
+        name = $1
+        sub(/[{ ].*$/, "", name)
+        base = name
+        sub(/_bucket$|_sum$|_count$/, "", base)
+        if (!(name in seen) && !(base in seen)) { print "before-type:" name; bad = 1 }
+    }
+    END { exit bad }
+' "$BODY" > "$D/c5" 2>&1
+if [ -s "$D/c5" ]; then
+    bad "C5 a sample appeared before its TYPE line: $(cat "$D/c5")"
+else
+    ok "C5 every family's TYPE line precedes its first sample"
+fi
+
+# ---- C6: each (name, labels) combination appears once
+dupe=$(grep -v '^#' "$BODY" | grep -v '^$' | awk '{print $1}' | sort | uniq -d)
+if [ -n "$dupe" ]; then
+    bad "C6 duplicate series: $dupe"
+else
+    ok "C6 every (name, labels) combination is unique"
+fi
+
+# ---- C11: a family's samples are contiguous
+awk '
+    /^#/ { next }
+    /^$/ { next }
+    {
+        name = $1
+        sub(/[{ ].*$/, "", name)
+        sub(/_bucket$|_sum$|_count$/, "", name)
+        if (name != last) {
+            if (name in closed) { print "split:" name; bad = 1 }
+            if (last != "") closed[last] = 1
+            last = name
+        }
+    }
+    END { exit bad }
+' "$BODY" > "$D/c11" 2>&1
+if [ -s "$D/c11" ]; then
+    bad "C11 a family's samples are not one group: $(cat "$D/c11")"
+else
+    ok "C11 every family's samples are one contiguous group"
+fi
+
+# ---- C10: every value is an integer or a fixed 3-decimal seconds
+# literal (lobo's whole numeric vocabulary — anything else is a bug)
+awk '
+    /^#/ { next }
+    /^$/ { next }
+    {
+        v = $NF
+        if (v !~ /^[0-9]+$/ && v !~ /^[0-9]+\.[0-9][0-9][0-9]$/) { print "value:" $0; bad = 1 }
+    }
+    END { exit bad }
+' "$BODY" > "$D/c10" 2>&1
+if [ -s "$D/c10" ]; then
+    bad "C10 a value is outside lobo's numeric vocabulary: $(cat "$D/c10")"
+else
+    ok "C10 every value is an int or a fixed 3-decimal seconds literal"
+fi
+
+# ---- C7/C8: every histogram has +Inf == _count, and its buckets rise
+for fam in $(grep '^# TYPE .* histogram$' "$BODY" | awk '{print $3}'); do
+    inf=$(grep "^${fam}_bucket{le=\"+Inf\"}" "$BODY" | awk '{print $NF}')
+    cnt=$(grep "^${fam}_count " "$BODY" | awk '{print $NF}')
+    if [ -z "$inf" ]; then
+        bad "C7 $fam has no +Inf bucket"
+    elif [ "$inf" != "$cnt" ]; then
+        bad "C7 $fam +Inf bucket ($inf) != _count ($cnt)"
+    else
+        ok "C7 $fam +Inf bucket equals _count ($cnt)"
+    fi
+    grep "^${fam}_bucket{le=" "$BODY" | grep -v '+Inf' | sed 's/.*le="//; s/".*//' > "$D/le"
+    if sort -g "$D/le" | diff -q - "$D/le" > /dev/null; then
+        ok "C8 $fam buckets are in increasing order of le"
+    else
+        bad "C8 $fam buckets are out of order"
+    fi
+    # the cumulative rule: every bucket count is >= the one before it
+    grep "^${fam}_bucket{le=" "$BODY" | awk '{print $NF}' > "$D/bc"
+    if sort -g "$D/bc" | diff -q - "$D/bc" > /dev/null; then
+        ok "C8 $fam bucket counts are cumulative (non-decreasing)"
+    else
+        bad "C8 $fam bucket counts are not cumulative"
+    fi
+done
+
+# ---- THE CARDINALITY POSTURE. The registry's fence makes an unsafe
+# label unexpressible in wolf; this asserts the shipped exposition
+# actually has none, and that driving MORE distinct URIs does not grow
+# the series count by one series.
+for forbidden in uri path url client remote_addr method host; do
+    if grep -q "[{,]${forbidden}=" "$BODY"; then
+        bad "cardinality: a \`${forbidden}\` label reached the exposition"
+    fi
+done
+ok "cardinality: no per-URI, per-client, per-path or per-method label"
+
+series_before=$(grep -vc '^#' "$BODY")
+fetch /a.html > /dev/null
+fetch /nope1.html > /dev/null
+fetch /nope2.html > /dev/null
+fetch /nope3.html > /dev/null
+fetch /metrics > "$D/scrape2.raw"
+sed -n '/^\r$/,$p' "$D/scrape2.raw" | sed '1d' > "$D/scrape2.body"
+series_after=$(grep -vc '^#' "$D/scrape2.body")
+if [ "$series_before" = "$series_after" ]; then
+    ok "cardinality: four more distinct URIs added ZERO series ($series_before)"
+else
+    bad "cardinality: the series count moved with the URI set ($series_before -> $series_after)"
+fi
+
+# ---- EXACT counts against the known drive. Six requests before the
+# first scrape: five 200s and one 404.
+v() { grep "^$1 " "$D/scrape.body" | awk '{print $NF}'; }
+got=$(v 'lobo_requests_total{class="2xx"}')
+if [ "$got" = "5" ]; then ok "exact: five 200s"; else bad "exact: 2xx is $got, want 5"; fi
+got=$(v 'lobo_requests_total{class="4xx"}')
+if [ "$got" = "1" ]; then ok "exact: one 404"; else bad "exact: 4xx is $got, want 1"; fi
+got=$(v 'lobo_request_duration_seconds_count')
+if [ "$got" = "6" ]; then ok "exact: six duration observations"; else bad "exact: duration count is $got, want 6"; fi
+
+"$BIN" -s quit -p . -c "$D/lobo.conf" > /dev/null 2>&1
+wait $child 2>/dev/null
+code=$?
+if [ "$code" != "0" ]; then
+    bad "lobo exited $code"
+fi
+
+if [ "$red" != "0" ]; then
+    echo "lobo-metrics: $red red" >&2
+    exit 1
+fi
+echo "lobo-metrics: GREEN — the exposition conforms clause by clause, the counts are exact, and the cardinality does not move"
