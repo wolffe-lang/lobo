@@ -1,0 +1,129 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config obs
+//!
+//! The ws12 `metrics` directive (docs/directives.md): the accessor off
+//! the frozen model (first-server-else-http resolution, the D29
+//! pattern), the -t half's flag diagnostic in the oracle's own wording,
+//! the loopback classifier the exposure lint reads, and both lints —
+//! L010 (lobo-native, the WWS-L-native one-way door) and L011 (the
+//! endpoint published on a routable listen). Pure: all three lanes.
+
+use config
+
+fn conf_of(body: str) -> config.Conf {
+    config.parse_str("http {{\n{body}\n  server {{ listen 8080; }}\n}}\n", "t.conf")
+}
+
+fn has_code(findings: str, code: str) -> bool {
+    for l in findings.lines() {
+        if l.starts_with("{code}|") {
+            return true
+        }
+    }
+    false
+}
+
+fn main() -> !int {
+    // ---- the switch is OFF unless something says on
+    let c0 = conf_of("")
+    assert(config.ok(c0), "empty http config parses")
+    assert(!config.metrics_on(c0), "absent -> off (the endpoint is opt-in)")
+    assert(!config.metrics_on(conf_of("  metrics off;")), "off -> off")
+    assert(config.metrics_on(conf_of("  metrics on;")), "http-level on -> on")
+
+    // ---- resolution: the first server's own row beats the http row
+    let cs = config.
+        parse_str(
+        "http {{\n  metrics off;\n  server {{ listen 8080; metrics on; }}\n}}\n",
+        "t.conf",
+    )
+    assert(config.metrics_on(cs), "the server's own row wins over http's (D29)")
+    let cs2 = config.
+        parse_str(
+        "http {{\n  metrics on;\n  server {{ listen 8080; metrics off; }}\n}}\n",
+        "t.conf",
+    )
+    assert(!config.metrics_on(cs2), "and it wins in the other direction too")
+
+    // ---- the -t half: a flag is on or off, in the oracle's wording
+    assert(config.metrics_check(conf_of("")).is_empty(), "absent is clean")
+    assert(config.metrics_check(conf_of("  metrics on;")).is_empty(), "on is clean")
+    assert(config.metrics_check(conf_of("  metrics off;")).is_empty(), "off is clean")
+    let bad = config.metrics_check(conf_of("  metrics yes;"))
+    assert(
+        bad.
+            starts_with(
+            "invalid value \"yes\" in \"metrics\" directive, it must be \"on\" or \"off\"",
+        ),
+        "the flag diagnostic keeps nginx's own wording: {bad}",
+    )
+    assert(bad.contains("t.conf:"), "and names the span: {bad}")
+    // a bad value ANYWHERE is a config error, not only at the
+    // effective level — the oracle's rule
+    let deep = config.
+        parse_str(
+        "http {{\n  server {{ listen 8080; metrics on; }}\n  server {{ listen 8081; metrics maybe; }}\n}}\n",
+        "t.conf",
+    )
+    assert(
+        !config.metrics_check(deep).is_empty(),
+        "a bad value in a non-effective server is still an error",
+    )
+
+    // ---- the loopback classifier the exposure lint reads
+    assert(config.listen_is_loopback("127.0.0.1:9113"), "127.0.0.1 is loopback")
+    assert(config.listen_is_loopback("127.1.2.3:80"), "the whole 127/8 is loopback")
+    assert(config.listen_is_loopback("localhost:9113"), "localhost is loopback")
+    assert(config.listen_is_loopback("[::1]:9113"), "the v6 loopback is loopback")
+    assert(!config.listen_is_loopback("0.0.0.0:80"), "the wildcard is NOT loopback")
+    assert(!config.listen_is_loopback("10.0.0.5:80"), "a private address is not loopback either")
+    assert(!config.listen_is_loopback("8080"), "a bare port binds everywhere: not loopback")
+    assert(!config.listen_is_loopback("*:80"), "the wildcard spelling is not loopback")
+
+    // ---- LOBO-L010: the directive is lobo-native, always named
+    let f_on = config.lint(conf_of("  metrics on;"))
+    assert(has_code(f_on, "LOBO-L010"), "the native one-way door is named: {f_on}")
+    let f_off = config.lint(conf_of("  metrics off;"))
+    assert(has_code(f_off, "LOBO-L010"), "even `off` is a directive nginx -t rejects: {f_off}")
+    assert(!has_code(config.lint(conf_of("")), "LOBO-L010"), "no directive, no finding")
+
+    // ---- LOBO-L011: the endpoint on a routable listen
+    let pub_c = config.
+        parse_str("http {{\n  server {{ listen 0.0.0.0:80; metrics on; }}\n}}\n", "t.conf")
+    let f_pub = config.lint(pub_c)
+    assert(has_code(f_pub, "LOBO-L011"), "a wildcard bind with the endpoint on is warned: {f_pub}")
+    let loop_c = config.
+        parse_str("http {{\n  server {{ listen 127.0.0.1:9113; metrics on; }}\n}}\n", "t.conf")
+    assert(
+        !has_code(config.lint(loop_c), "LOBO-L011"),
+        "a loopback bind is the recommended posture and says nothing",
+    )
+    let off_c = config.
+        parse_str("http {{\n  server {{ listen 0.0.0.0:80; metrics off; }}\n}}\n", "t.conf")
+    assert(
+        !has_code(config.lint(off_c), "LOBO-L011"),
+        "an OFF endpoint publishes nothing, wherever it is bound",
+    )
+
+    // ---- the directive table knows it (so -T and the docs page do)
+    let t = config.table()
+    var found = false
+    var j: int = 0
+    let n = config.spec_count(t)
+    while j < n {
+        let spec = config.spec_at(t, j)
+        if spec.name == "metrics" {
+            found = true
+            assert(spec.status == "implemented", "the row is implemented: {spec.status}")
+            assert(spec.min_args == 1 && spec.max_args == 1, "exactly one argument")
+            assert(spec.contexts.contains("http"), "http context: {spec.contexts}")
+            assert(spec.contexts.contains("server"), "server context: {spec.contexts}")
+        }
+        j = j + 1
+    }
+    assert(found, "the directive table carries a `metrics` row")
+
+    0
+}
