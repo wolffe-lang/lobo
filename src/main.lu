@@ -52,6 +52,7 @@ use config
 use conn
 use dryrun
 use http
+use metrics
 use obs
 use proxy
 use serve
@@ -453,6 +454,252 @@ fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
 /// design — a torn read across generations is acceptable and each
 /// count is monotone-correct per generation (documented in docs/). The
 /// snapshot is one pass over the table reference. Total.
+// ------------------------------------------------------------------
+// the counters (ws12) — the numbers the exposition serves
+//
+// They live HERE, as plain ints in the poll loop's frame, and
+// src/metrics/metrics.lu's header carries the argument for why that is
+// the measured hot-path answer rather than a shortcut: lobo is
+// spawn-free (D7), so there is exactly one mutator, and an increment
+// is `n = n + 1` on a local — zero allocation, zero synchronisation,
+// checked arithmetic. Per-task shards would aggregate one shard; an
+// atomic would take a fence no other thread can observe. When the D24
+// stepper gives lobo a second serving task, this struct is what moves.
+// The per-GENERATION numbers are not here: they live in GenRow, where
+// the drain accounting already keeps them, and the renderer reads them
+// out. That is deliberate — a generation's counters must die with the
+// generation, and a flat process counter cannot do that.
+// ------------------------------------------------------------------
+
+/// The process-wide counter block. Rebuilt only by `note_served`, and
+/// only by whole-struct replacement, which is how a `var` of this
+/// shape stays a set of scalar writes.
+struct Counters {
+    accepted: int,
+    req_2xx: int,
+    req_3xx: int,
+    req_4xx: int,
+    req_5xx: int,
+    req_bytes: int,
+    resp_bytes: int,
+    up_2xx: int,
+    up_3xx: int,
+    up_4xx: int,
+    up_5xx: int,
+    up_err: int,
+    tls_ok: int,
+    tls_refused: int,
+    tls_timeout: int,
+    tls_io: int,
+    dropped: int,
+    rdur: metrics.Hist,
+    udur: metrics.Hist,
+}
+
+/// A zeroed counter block, built ONCE at start (the histograms
+/// allocate their slot lists here and never again). Total.
+fn counters_new() -> Counters {
+    Counters {
+        accepted: 0,
+        req_2xx: 0,
+        req_3xx: 0,
+        req_4xx: 0,
+        req_5xx: 0,
+        req_bytes: 0,
+        resp_bytes: 0,
+        up_2xx: 0,
+        up_3xx: 0,
+        up_4xx: 0,
+        up_5xx: 0,
+        up_err: 0,
+        tls_ok: 0,
+        tls_refused: 0,
+        tls_timeout: 0,
+        tls_io: 0,
+        dropped: 0,
+        rdur: metrics.hist_new(),
+        udur: metrics.hist_new(),
+    }
+}
+
+/// The Prometheus status class of a code: 2xx/3xx/4xx/5xx. A code
+/// outside those ranges (there are none lobo writes) reads as "5xx" —
+/// the class an operator would want an unknown to page as. Total.
+fn status_class(code: int) -> str {
+    if code >= 500 {
+        return "5xx"
+    }
+    if code >= 400 {
+        return "4xx"
+    }
+    if code >= 300 {
+        return "3xx"
+    }
+    if code >= 200 {
+        return "2xx"
+    }
+    "5xx"
+}
+
+/// Fold one finished access record into the counters: the status
+/// class, the byte totals, the duration observation, and — when the
+/// request was proxied — the upstream leg's class and time. Every
+/// write is a scalar add on a local. Total (the histogram's own
+/// checked arithmetic traps on an impossible overflow, by design).
+fn note_served(mut ct: Counters, a: obs.Access, admitted: int) {
+    let cls = status_class(a.status)
+    if cls == "2xx" {
+        ct.req_2xx = ct.req_2xx + 1
+    } else if cls == "3xx" {
+        ct.req_3xx = ct.req_3xx + 1
+    } else if cls == "4xx" {
+        ct.req_4xx = ct.req_4xx + 1
+    } else {
+        ct.req_5xx = ct.req_5xx + 1
+    }
+    ct.req_bytes = ct.req_bytes + admitted
+    ct.resp_bytes = ct.resp_bytes + a.body_bytes
+    metrics.hist_observe(mut ct.rdur, a.req_ms)
+    if a.proxied {
+        if a.up_status <= 0 {
+            ct.up_err = ct.up_err + 1
+        } else {
+            let ucls = status_class(a.up_status)
+            if ucls == "2xx" {
+                ct.up_2xx = ct.up_2xx + 1
+            } else if ucls == "3xx" {
+                ct.up_3xx = ct.up_3xx + 1
+            } else if ucls == "4xx" {
+                ct.up_4xx = ct.up_4xx + 1
+            } else {
+                ct.up_5xx = ct.up_5xx + 1
+            }
+        }
+        var ums = a.up_ms
+        if ums < 0 {
+            ums = 0
+        }
+        metrics.hist_observe(mut ct.udur, ums)
+    }
+}
+
+/// THE EXPOSITION. Every line comes from `metrics`' builders, which
+/// read the registry — so a family that is not registered cannot be
+/// written, a label this call site invented traps in-process, and the
+/// `# HELP` text is the same string `docs/metrics.md` carries. The
+/// scrape is an ordinary request: it appears in these counters and in
+/// the access log on its NEXT scrape, one behind, which is the correct
+/// and only honest ordering for a counter that includes itself.
+fn render_metrics(ct: Counters, gens: List[GenRow], shutdown_ms: int, events: int) -> str {
+    let now = time_unix_ms()
+    var out = metrics.header("lobo_build_info")
+    out = "{out}{metrics.sample1("lobo_build_info", "version", shell.version_token(), 1)}"
+
+    out = "{out}{metrics.header("lobo_config_generation_current")}"
+    out = "{out}{metrics.sample0("lobo_config_generation_current", current_gen(gens))}"
+
+    var n_current: int = 0
+    var n_draining: int = 0
+    for g in gens {
+        if g.state == "current" {
+            n_current = n_current + 1
+        } else {
+            n_draining = n_draining + 1
+        }
+    }
+    out = "{out}{metrics.header("lobo_config_generations")}"
+    out = "{out}{metrics.sample1("lobo_config_generations", "state", "current", n_current)}"
+    out = "{out}{metrics.sample1("lobo_config_generations", "state", "draining", n_draining)}"
+
+    out = "{out}{metrics.header("lobo_config_generation_info")}"
+    for g in gens {
+        var ks = List[str]()
+        (mut ks).push("gen")
+        (mut ks).push("id")
+        (mut ks).push("state")
+        var vs = List[str]()
+        (mut vs).push("{g.gen}")
+        (mut vs).push(g.shash)
+        (mut vs).push(g.state)
+        out = "{out}{metrics.sample("lobo_config_generation_info", ks, vs, 1)}"
+    }
+
+    out = "{out}{metrics.header("lobo_connections_accepted_total")}"
+    out = "{out}{metrics.sample0("lobo_connections_accepted_total", ct.accepted)}"
+    out = "{out}{metrics.header("lobo_connections_active")}"
+    for g in gens {
+        out = "{out}{metrics.sample1("lobo_connections_active", "gen", "{g.gen}", g.live)}"
+    }
+    out = "{out}{metrics.header("lobo_connections_retired_total")}"
+    for g in gens {
+        out = "{out}{retired_row(g, "drained", g.drained)}"
+        out = "{out}{retired_row(g, "aborted", g.aborted)}"
+    }
+
+    out = "{out}{metrics.header("lobo_requests_total")}"
+    out = "{out}{metrics.sample1("lobo_requests_total", "class", "2xx", ct.req_2xx)}"
+    out = "{out}{metrics.sample1("lobo_requests_total", "class", "3xx", ct.req_3xx)}"
+    out = "{out}{metrics.sample1("lobo_requests_total", "class", "4xx", ct.req_4xx)}"
+    out = "{out}{metrics.sample1("lobo_requests_total", "class", "5xx", ct.req_5xx)}"
+    out = "{out}{metrics.header("lobo_request_bytes_total")}"
+    out = "{out}{metrics.sample0("lobo_request_bytes_total", ct.req_bytes)}"
+    out = "{out}{metrics.header("lobo_response_bytes_total")}"
+    out = "{out}{metrics.sample0("lobo_response_bytes_total", ct.resp_bytes)}"
+    out = "{out}{metrics.render_hist("lobo_request_duration_seconds", ct.rdur)}"
+
+    out = "{out}{metrics.header("lobo_upstream_requests_total")}"
+    out = "{out}{metrics.sample1("lobo_upstream_requests_total", "class", "2xx", ct.up_2xx)}"
+    out = "{out}{metrics.sample1("lobo_upstream_requests_total", "class", "3xx", ct.up_3xx)}"
+    out = "{out}{metrics.sample1("lobo_upstream_requests_total", "class", "4xx", ct.up_4xx)}"
+    out = "{out}{metrics.sample1("lobo_upstream_requests_total", "class", "5xx", ct.up_5xx)}"
+    out = "{out}{metrics.sample1("lobo_upstream_requests_total", "class", "error", ct.up_err)}"
+    out = "{out}{metrics.render_hist("lobo_upstream_duration_seconds", ct.udur)}"
+
+    out = "{out}{metrics.header("lobo_tls_handshakes_total")}"
+    out = "{out}{metrics.sample0("lobo_tls_handshakes_total", ct.tls_ok)}"
+    out = "{out}{metrics.header("lobo_tls_handshake_failures_total")}"
+    out = "{out}{metrics.sample1("lobo_tls_handshake_failures_total", "reason", "refused", ct.tls_refused)}"
+    out = "{out}{metrics.sample1("lobo_tls_handshake_failures_total", "reason", "timeout", ct.tls_timeout)}"
+    out = "{out}{metrics.sample1("lobo_tls_handshake_failures_total", "reason", "io", ct.tls_io)}"
+
+    out = "{out}{metrics.header("lobo_budget_refusals_total")}"
+    for g in gens {
+        out = "{out}{metrics.sample1("lobo_budget_refusals_total", "gen", "{g.gen}", g.bud_hits)}"
+    }
+    out = "{out}{metrics.header("lobo_request_admitted_bytes_high_water")}"
+    for g in gens {
+        out = "{out}{metrics.sample1("lobo_request_admitted_bytes_high_water", "gen", "{g.gen}", g.mem_hw)}"
+    }
+    out = "{out}{metrics.header("lobo_request_region_bytes_high_water")}"
+    for g in gens {
+        out = "{out}{metrics.sample1("lobo_request_region_bytes_high_water", "gen", "{g.gen}", g.mem_rt_hw)}"
+    }
+    out = "{out}{metrics.header("lobo_live_region_bytes")}"
+    out = "{out}{metrics.sample0("lobo_live_region_bytes", live_region_bytes())}"
+
+    out = "{out}{metrics.header("lobo_log_lines_dropped_total")}"
+    out = "{out}{metrics.sample0("lobo_log_lines_dropped_total", ct.dropped)}"
+    out = "{out}{metrics.header("lobo_events_total")}"
+    out = "{out}{metrics.sample0("lobo_events_total", events)}"
+    // `now` and `shutdown_ms` are read by the status object beside
+    // this one; the exposition deliberately publishes no wall clock
+    // (a scraper stamps its own).
+    let _unused = now + shutdown_ms
+    out
+}
+
+/// One `lobo_connections_retired_total` series. Factored so the
+/// two-label ceremony appears once. Total.
+fn retired_row(g: GenRow, outcome: str, value: int) -> str {
+    var ks = List[str]()
+    (mut ks).push("gen")
+    (mut ks).push("outcome")
+    var vs = List[str]()
+    (mut vs).push("{g.gen}")
+    (mut vs).push(outcome)
+    metrics.sample("lobo_connections_retired_total", ks, vs, value)
+}
+
 fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: bool, events: int) -> str {
     let now = time_unix_ms()
     let cur = current_gen(gens)
@@ -824,7 +1071,25 @@ fn serve_main(prefix: str, conf: str) -> int {
         return 1
     }
 
-    var opts = serve.default_opts()
+    // ws12: the metrics switch, resolved once at start with every
+    // other ServerOpts knob. HONEST LIMIT, named rather than implied:
+    // ServerOpts is process-wide, not per-generation — `token`,
+    // `keepalive_*`, `challenge_dir` and now `metrics_on` are all
+    // start-time, so a reload that FLIPS the endpoint on or off does
+    // not take effect until a restart. Only `lim` (ws10) and the
+    // config model itself freeze per generation. Making the whole of
+    // ServerOpts a per-generation freeze is one rework of its own and
+    // is routed as such in the wsc03 closeout; nothing here pretends
+    // otherwise.
+    let d0 = serve.default_opts()
+    var opts = serve.ServerOpts {
+        token: d0.token,
+        keepalive_timeout_ms: d0.keepalive_timeout_ms,
+        keepalive_requests: d0.keepalive_requests,
+        read_timeout_ms: d0.read_timeout_ms,
+        challenge_dir: d0.challenge_dir,
+        metrics_on: config.metrics_on(c0),
+    }
     // ws10: the effective Limits (fence + budget) freeze PER
     // GENERATION beside the model — resolved here for gen 1, by
     // start_reload for successors, and read back per connection
@@ -839,6 +1104,10 @@ fn serve_main(prefix: str, conf: str) -> int {
     // and the JSON door's header opt-in list.
     var asinks = build_sinks(c0, prefix)
     var elog = build_elog(c0, prefix, 0)
+    // ws12: the counter block, allocated ONCE (the histograms' slot
+    // lists are built here and never again — an observation is an
+    // index write, never an allocation)
+    var counters = counters_new()
     var optin = config.log_headers_join(c0)
 
     // ws06: the ACME renewal daemon. When `cert auto` is on, arm the
@@ -858,6 +1127,7 @@ fn serve_main(prefix: str, conf: str) -> int {
             keepalive_requests: opts.keepalive_requests,
             read_timeout_ms: opts.read_timeout_ms,
             challenge_dir: chall_dir,
+            metrics_on: opts.metrics_on,
         }
     }
     let auto_primary = config.auto_primary(c0)
@@ -1065,6 +1335,7 @@ fn serve_main(prefix: str, conf: str) -> int {
             }
             if got_conn {
                 let curgen = current_gen(gens)
+                counters.accepted = counters.accepted + 1
                 gens = bump_live(gens, curgen, 1)
                 (mut cfds).push(conn)
                 (mut cgens).push(curgen)
@@ -1097,23 +1368,28 @@ fn serve_main(prefix: str, conf: str) -> int {
                 gens = bump_live(gens, tgen, 1)
                 let tconf = conf_for(gens, tgen)
                 var aborted_t = false
+                counters.accepted = counters.accepted + 1
                 var z = tls.accept(tconn, ssl0, opts.read_timeout_ms) else |e| match e {
                     refused => {
                         aborted_t = true
+                        counters.tls_refused = counters.tls_refused + 1
                         tls.no_sess()
                     },
                     timeout => {
                         aborted_t = true
+                        counters.tls_timeout = counters.tls_timeout + 1
                         tls.no_sess()
                     },
                     io => {
                         aborted_t = true
+                        counters.tls_io = counters.tls_io + 1
                         tls.no_sess()
                     },
                 }
                 if aborted_t {
                     net_close(tconn) else |_| {}
                 } else {
+                    counters.tls_ok = counters.tls_ok + 1
                     var tcn = conn.tls_conn(tconn, z)
                     serve.serve_conn_cn(mut tcn, tconf, opts, lim_for(gens, tgen), hport)
                 }
@@ -1148,33 +1424,100 @@ fn serve_main(prefix: str, conf: str) -> int {
             if st.active {
                 new_idle = now
             }
+            // ws12: the admin endpoint's SECOND PHASE. serve
+            // recognised /metrics or /status.json and handed the
+            // request back unanswered because the numbers live here;
+            // this is where the body is rendered and written. Every
+            // fence and every ws10 budget site already ran inside
+            // serve, and the generated body takes the `file` site's
+            // rule — a scrape whose exposition would blow the budget
+            // is a 503 with a name, which is the CORRECT answer and a
+            // rig case. The `admin` site name joins head|body|
+            // body-chunked|file as an additive value in a frozen field
+            // (docs/BUDGET.md carries it).
+            var st_acc = st.acc
+            var adm_hit = false
+            var adm_would = 0
+            if !st.admin.is_empty() {
+                let alim = lim_for(gens, cg).memory_budget
+                let body = if st.admin == "metrics" {
+                    render_metrics(counters, gens, shutdown_ms, elog.seq)
+                } else {
+                    status_stanza(gens, shutdown_ms, quitting, true, elog.seq)
+                }
+                let would = st.mem_hw + body.len
+                if alim > 0 && would > alim {
+                    serve.write_admin_503(fd, opts.token)
+                    st_acc.status = 503
+                    st_acc.body_bytes = serve.admin_err_len(opts.token)
+                    adm_hit = true
+                    adm_would = would
+                    close_it = true
+                } else {
+                    let ctype = if st.admin == "metrics" {
+                        metrics.content_type()
+                    } else {
+                        "application/json"
+                    }
+                    var wrote = 0
+                    var wfail = false
+                    wrote = serve.write_admin(fd, body, ctype, opts.token, !st.close) else |_| {
+                        wfail = true
+                        0
+                    }
+                    st_acc.status = 200
+                    st_acc.body_bytes = wrote
+                    if wfail {
+                        close_it = true
+                    }
+                }
+            }
             // ws09: a served request becomes an access record — the
             // entry stamps the times serve cannot know (wall clock,
             // and the span since this request's first byte)
             var new_start = cs0
             if st.logged {
-                var a2 = st.acc
+                var a2 = st_acc
                 a2.unix_ms = now
                 var span = now - cs0
                 if span < 0 {
                     span = 0
                 }
                 a2.req_ms = span
-                (mut pass_accs).push(AccRow { a: a2 })
+                (mut pass_accs).push(AccRow { a: copy a2 })
                 new_start = now
                 // ws10: the budget observability — a refusal is a LOUD
                 // error event (the ws09 seam) and the generation's
                 // counters move; every served request feeds the
                 // high-water aggregate
-                let hit = !st.bud_site.is_empty()
-                if hit {
+                let hit = !st.bud_site.is_empty() || adm_hit
+                if !st.bud_site.is_empty() {
                     ev_event(
                         mut elog,
                         "error",
                         shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would),
                     )
+                } else if adm_hit {
+                    ev_event(
+                        mut elog,
+                        "error",
+                        shell.
+                            ev_budget_exceeded(
+                            cg,
+                            "admin",
+                            lim_for(gens, cg).memory_budget,
+                            adm_would,
+                        ),
+                    )
                 }
-                gens = note_request(gens, cg, st.mem_hw, st.mem_rt, hit)
+                var admitted = st.mem_hw
+                if adm_hit {
+                    admitted = adm_would
+                }
+                gens = note_request(gens, cg, admitted, st.mem_rt, hit)
+                // ws12: the same record that becomes an access line
+                // becomes counter movement — one fold, no second pass
+                note_served(mut counters, a2, admitted)
             } else if !st.active && st.carry.is_empty() {
                 new_start = now
             }
@@ -1578,6 +1921,10 @@ fn main() -> int {
     }
     if cli.mode == "logvars" {
         print_raw(obs.vars_markdown())
+        return 0
+    }
+    if cli.mode == "metricsdocs" {
+        print_raw(metrics.docs_markdown())
         return 0
     }
     if cli.mode == "signal" {
