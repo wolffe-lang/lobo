@@ -1,9 +1,9 @@
 module pkg :: shell
-  wolfi v0 · toolchain 0.1.0 · edition v1
-  export_hash 4880c06c5fe571ae1d5abccfdaa4d20c6e335933feaac6fdf012041f25bbccfe
-  pkg_hash    4880c06c5fe571ae1d5abccfdaa4d20c6e335933feaac6fdf012041f25bbccfe
+  wolfi v0 · toolchain 0.2.0 · edition v1
+  export_hash 25373cc66f0322f05114ccb2f063a5c6a5ed97afeea51d873974a116e75abe57
+  pkg_hash    25373cc66f0322f05114ccb2f063a5c6a5ed97afeea51d873974a116e75abe57
   deps:
-    config  3be5cc730087c09fcede1c102a4e4aa2a9d78554a8a3d82e96ce8d70b0be5321
+    config  7a5f005ab9f8550b75f175da4d238bdc42f7f7264e189a0009b63b5b5ea5eead
   items:
     [0] pub conf_hash — fn conf_hash(c: config.Conf) -> str · regions (ρ1) -> -
     [1] pub control_addr — fn control_addr(c: config.Conf) -> str · regions (ρ1) -> -
