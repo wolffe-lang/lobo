@@ -128,7 +128,10 @@ fn read_command(conn: int) -> str {
 /// once at freeze, exactly like the model — a draining generation
 /// keeps serving under ITS numbers); `mem_hw` the high-water admitted
 /// bytes of any single request it served; `bud_hits` its budget-503
-/// count.
+/// count. ws12 adds `mem_rt_hw` — the high-water MEASURED region bytes
+/// of any single request it served ([mem.region.account.1], the
+/// runtime's own ledger). Two high waters, deliberately: one is the
+/// meter's estimate, one is the machine's answer.
 struct GenRow {
     conf: config.Conf,
     gen: int,
@@ -141,6 +144,7 @@ struct GenRow {
     shash: str,
     lim: http.Limits,
     mem_hw: int,
+    mem_rt_hw: int,
     bud_hits: int,
 }
 
@@ -224,6 +228,7 @@ fn bump_live(gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
                 shash: g.shash,
                 lim: g.lim,
                 mem_hw: g.mem_hw,
+                mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
             })
         } else {
@@ -250,12 +255,12 @@ fn lim_for(gens: List[GenRow], gen: int) -> http.Limits {
 /// aggregates: raise the high-water mark, count a refusal. Rebuilds
 /// only when something changed (the per-request hot path pays a
 /// comparison, not a rebuild). Total.
-fn note_request(gens: List[GenRow], gen: int, hw: int, hit: bool) -> List[GenRow] {
+fn note_request(gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> List[GenRow] {
     let i = index_of(gens, gen)
     if i < 0 {
         return gens
     }
-    if !hit && hw <= gens[i].mem_hw {
+    if !hit && hw <= gens[i].mem_hw && rt <= gens[i].mem_rt_hw {
         return gens
     }
     var out = List[GenRow]()
@@ -264,6 +269,10 @@ fn note_request(gens: List[GenRow], gen: int, hw: int, hit: bool) -> List[GenRow
             var nhw = g.mem_hw
             if hw > nhw {
                 nhw = hw
+            }
+            var nrt = g.mem_rt_hw
+            if rt > nrt {
+                nrt = rt
             }
             var nhits = g.bud_hits
             if hit {
@@ -281,6 +290,7 @@ fn note_request(gens: List[GenRow], gen: int, hw: int, hit: bool) -> List[GenRow
                 shash: g.shash,
                 lim: g.lim,
                 mem_hw: nhw,
+                mem_rt_hw: nrt,
                 bud_hits: nhits,
             })
         } else {
@@ -325,6 +335,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
                 shash: g.shash,
                 lim: g.lim,
                 mem_hw: g.mem_hw,
+                mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
             })
         } else {
@@ -380,6 +391,7 @@ fn start_reload(
                 shash: g.shash,
                 lim: g.lim,
                 mem_hw: g.mem_hw,
+                mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
             })
         } else {
@@ -399,6 +411,7 @@ fn start_reload(
         shash: newhash,
         lim: nlim,
         mem_hw: 0,
+        mem_rt_hw: 0,
         bud_hits: 0,
     })
     out
@@ -422,6 +435,7 @@ fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
                 shash: g.shash,
                 lim: g.lim,
                 mem_hw: g.mem_hw,
+                mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
             })
         } else {
@@ -442,8 +456,13 @@ fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
 fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: bool, events: int) -> str {
     let now = time_unix_ms()
     let cur = current_gen(gens)
+    // ws12: the process-wide live-region total, read HERE — once per
+    // stanza, on the control path, never on the serve path
+    // ([mem.region.account.2]). Its value is the runtime's, not an
+    // estimate of lobo's.
+    let live_bytes = live_region_bytes()
     if json {
-        var s = shell.status_json_open(cur, quitting, events)
+        var s = shell.status_json_open(cur, quitting, events, live_bytes)
         var first = true
         for g in gens {
             let sep = if first { "" } else { "," }
@@ -458,14 +477,15 @@ fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: boo
                 gen_remaining(g, shutdown_ms, now),
                 g.mem_hw,
                 g.bud_hits,
+                g.mem_rt_hw,
             )
             s = "{s}{sep}{obj}"
         }
         return "{s}{shell.status_json_close()}"
     }
-    var s = shell.status_head_text(cur, quitting, events)
+    var s = shell.status_head_text(cur, quitting, events, live_bytes)
     for g in gens {
-        s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now), g.mem_hw, g.bud_hits)}"
+        s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now), g.mem_hw, g.bud_hits, g.mem_rt_hw)}"
     }
     s
 }
@@ -896,6 +916,7 @@ fn serve_main(prefix: str, conf: str) -> int {
         shash: h1,
         lim: lim1,
         mem_hw: 0,
+        mem_rt_hw: 0,
         bud_hits: 0,
     })
     ev_event(mut elog, "notice", shell.ev_generation_loaded(1, h1))
@@ -1153,7 +1174,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                         shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would),
                     )
                 }
-                gens = note_request(gens, cg, st.mem_hw, hit)
+                gens = note_request(gens, cg, st.mem_hw, st.mem_rt, hit)
             } else if !st.active && st.carry.is_empty() {
                 new_start = now
             }

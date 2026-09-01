@@ -285,15 +285,29 @@ pub fn resolve_limits(c: config.Conf) -> http.Limits {
 /// refused at that site (`limit`/`would` are the event's numbers);
 /// `used` is the admitted-bytes total either way — the high-water
 /// the status surface aggregates.
+/// One request's memory accounting. `used`/`limit`/`would`/`site` are
+/// ws10's ADMISSION meter — bytes lobo decided to let in, counted by
+/// lobo, above the runtime. `rt` is ws12's MEASURED half: the largest
+/// `region_bytes` reading taken inside a per-response region while
+/// serving this request ([mem.region.account.1], wolf-lang s131) —
+/// the runtime's own ledger, not lobo's estimate. The two are
+/// different numbers on purpose and the docs say so: `used` is what
+/// the budget rules on (it is knowable BEFORE the bytes are admitted,
+/// which is what makes a pre-admission 503 possible); `rt` is what
+/// the machine actually charged (knowable only after). `rt` is 0 for
+/// a request that materialized no regioned body — a HEAD, a 304, an
+/// error response, or the TLS path, whose body cannot be regioned at
+/// this pin (the D24 residue).
 struct Charge {
     used: int,
     site: str,
     limit: int,
     would: int,
+    rt: int,
 }
 
 fn charge_new(budget: int) -> Charge {
-    Charge { used: 0, site: "", limit: budget, would: 0 }
+    Charge { used: 0, site: "", limit: budget, would: 0, rt: 0 }
 }
 
 // ------------------------------------------------------------------
@@ -673,6 +687,15 @@ fn serve_file(
                 failed = true
                 List[int]()
             }
+            // ws12: the runtime's OWN number for this response's body.
+            // Read after the read that charges it and before the block
+            // closes — an int, so it crosses the boundary like `wcode`.
+            // Monotone and stable between allocations by
+            // [mem.region.account.1]; its UNITS are the native arena's
+            // (alignment-rounded container storage), which is why the
+            // docs quote it as measured-per-tier and never compare it
+            // to `chg.used`.
+            chg.rt = region_bytes(resp)
             if !failed {
                 net_write(sock, head) else |e| match e {
                     closed => {
@@ -799,6 +822,16 @@ fn serve_file(
                         wcode = 2
                     },
                 }
+            }
+            // ws12: the HIGH WATER of the per-chunk regions, not their
+            // sum — each dies at this `}`, so what a streamed file
+            // costs the machine at once is the largest single chunk
+            // region, and that is the number the budget's `file` site
+            // charges 64 KiB for. Summing would report a file size and
+            // call it memory.
+            let chunk_rt = region_bytes(chunkr)
+            if chunk_rt > chg.rt {
+                chg.rt = chunk_rt
             }
             // scalar tail on purpose — see the small-path region note
             wcode = wcode
@@ -1302,7 +1335,11 @@ pub fn serve_conn_cn(
 /// non-empty when the memory budget refused (head|body|body-chunked|
 /// file — the entry emits `budget-exceeded` and counts it),
 /// `bud_limit`/`bud_would` its numbers, and `mem_hw` the request's
-/// admitted-bytes total (the per-generation high-water's feed).
+/// admitted-bytes total (the per-generation high-water's feed). ws12
+/// adds `mem_rt`: the MEASURED region bytes this request's response
+/// body cost the runtime ([mem.region.account.1]) — 0 where no
+/// regioned body was materialized. `mem_hw` is the meter, `mem_rt` is
+/// the machine; the entry high-waters both, separately.
 pub struct ReqOut {
     close: bool,
     carry: str,
@@ -1312,6 +1349,7 @@ pub struct ReqOut {
     bud_limit: int,
     bud_would: int,
     mem_hw: int,
+    mem_rt: int,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -1327,6 +1365,7 @@ fn req_out(close: bool, carry: str, acc: obs.Access, chg: Charge) -> ReqOut {
         bud_limit: chg.limit,
         bud_would: chg.would,
         mem_hw: chg.used,
+        mem_rt: chg.rt,
     }
 }
 
@@ -1566,6 +1605,7 @@ pub struct ConnStep {
     bud_limit: int,
     bud_would: int,
     mem_hw: int,
+    mem_rt: int,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -1583,6 +1623,7 @@ fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, ac
         bud_limit: 0,
         bud_would: 0,
         mem_hw: 0,
+        mem_rt: 0,
     }
 }
 
@@ -1614,6 +1655,7 @@ fn step_serve(
         bud_limit: ro.bud_limit,
         bud_would: ro.bud_would,
         mem_hw: ro.mem_hw,
+        mem_rt: ro.mem_rt,
     }
 }
 

@@ -75,34 +75,40 @@ fn main() -> !int {
 
     // ---- the status stanza (human text)
     assert(shell.status_schema() == 1, "schema version 1")
-    let head = shell.status_head_text(2, false, 9)
+    let head = shell.status_head_text(2, false, 9, 4096)
     assert(head.contains("lobo status\n"), "text header identity line")
     assert(head.contains("current generation: 2\n"), "text names the current generation")
     assert(head.contains("quitting: false\n"), "text carries the quit posture")
     assert(head.contains("events: 9\n"), "text carries the event count (ws11, appended)")
-    let cur_line = shell.status_line_text(2, 0, "current", 100, "abcd", -1, 0, 0)
     assert(
-        cur_line == "generation 2: current live=0 age-ms=100 id=abcd mem-hw=0 budget-503s=0\n",
-        "current line omits the shutdown remaining, budget facts always printed: {cur_line}",
+        head.contains("live-region-bytes: 4096\n"),
+        "text carries the measured live-region total (ws12, appended)",
     )
-    let dr_line = shell.status_line_text(1, 2, "draining", 800, "beef", 29200, 5120, 3)
+    let cur_line = shell.status_line_text(2, 0, "current", 100, "abcd", -1, 0, 0, 0)
+    assert(
+        cur_line ==
+            "generation 2: current live=0 age-ms=100 id=abcd mem-hw=0 budget-503s=0 mem-rt-hw=0\n",
+        "current line omits the shutdown remaining, memory facts always printed: {cur_line}",
+    )
+    let dr_line = shell.status_line_text(1, 2, "draining", 800, "beef", 29200, 5120, 3, 24576)
     assert(
         dr_line ==
-            "generation 1: draining live=2 age-ms=800 id=beef mem-hw=5120 budget-503s=3 shutdown-in-ms=29200\n",
-        "draining line carries budget aggregates then the shutdown remaining: {dr_line}",
+            "generation 1: draining live=2 age-ms=800 id=beef mem-hw=5120 budget-503s=3 mem-rt-hw=24576 shutdown-in-ms=29200\n",
+        "draining line carries both memory high waters then the shutdown remaining: {dr_line}",
     )
 
     // ---- the status stanza (versioned JSON, single line)
-    let jopen = shell.status_json_open(2, true, 9)
+    let jopen = shell.status_json_open(2, true, 9, 4096)
     assert(
-        jopen == "{{\"schema\":1,\"current\":2,\"quitting\":true,\"events\":9,\"generations\":[",
-        "json open with schema + quitting + events (ws11 additive, schema stays 1): {jopen}",
+        jopen ==
+            "{{\"schema\":1,\"current\":2,\"quitting\":true,\"events\":9,\"live_region_bytes\":4096,\"generations\":[",
+        "json open with schema + quitting + events + live bytes (ws12 additive, schema stays 1): {jopen}",
     )
-    let jobj = shell.status_json_obj(1, "draining", 2, 800, "beef", 29200, 5120, 3)
+    let jobj = shell.status_json_obj(1, "draining", 2, 800, "beef", 29200, 5120, 3, 24576)
     assert(
         jobj ==
-            "{{\"gen\":1,\"state\":\"draining\",\"live\":2,\"age_ms\":800,\"id\":\"beef\",\"mem_high_water\":5120,\"budget_503s\":3,\"shutdown_remaining_ms\":29200}}",
-        "json object shape (ws10 additive members, schema stays 1): {jobj}",
+            "{{\"gen\":1,\"state\":\"draining\",\"live\":2,\"age_ms\":800,\"id\":\"beef\",\"mem_high_water\":5120,\"budget_503s\":3,\"mem_rt_high_water\":24576,\"shutdown_remaining_ms\":29200}}",
+        "json object shape (ws10 + ws12 additive members, schema stays 1): {jobj}",
     )
     assert(shell.status_json_close() == "]}}", "json close")
     // assemble a full object and check it has no stray newline

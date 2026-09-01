@@ -880,15 +880,22 @@ pub fn status_schema() -> int {
 /// every earlier fact keeps its place) `events:` — the count of
 /// vocabulary events emitted so far, i.e. the highest `seq` stamped.
 /// The completeness anchor for a bug report's attached log: a stream
-/// whose top seq matches `events` has no trailing hole. One fact per
-/// line, nginx's shape. The entry appends one `status_line_text` per
-/// generation. Read over the control channel to the peer's close (the
-/// stanza is multi-line), so `control_fetch` reads it. Total.
-pub fn status_head_text(current: int, quitting: bool, events: int) -> str {
+/// whose top seq matches `events` has no trailing hole. ws12 appends
+/// `live-region-bytes:` — `live_region_bytes()` at the moment the
+/// stanza was built ([mem.region.account.2], wolf-lang s131): the
+/// process-wide total the RUNTIME holds for live regions. It is not
+/// an RSS figure and must not be read as one — the process-root arena
+/// (where every str materialization still lands, wolf-lang#191) is
+/// never counted. One fact per line, nginx's shape. The entry appends
+/// one `status_line_text` per generation. Read over the control
+/// channel to the peer's close (the stanza is multi-line), so
+/// `control_fetch` reads it. Total.
+pub fn status_head_text(current: int, quitting: bool, events: int, live_bytes: int) -> str {
     var s = "lobo status\n"
     s = "{s}current generation: {current}\n"
     s = "{s}quitting: {bool_word(quitting)}\n"
     s = "{s}events: {events}\n"
+    s = "{s}live-region-bytes: {live_bytes}\n"
     s
 }
 
@@ -899,7 +906,13 @@ pub fn status_head_text(current: int, quitting: bool, events: int) -> str {
 /// its place): `mem-hw` is the high-water admitted bytes of any single
 /// request served under the generation, `budget-503s` its refusal
 /// count (0 0 when no budget is armed — the facts stay printed so a
-/// parser never branches). Includes the trailing newline. Total.
+/// parser never branches). ws12 appends `mem-rt-hw` — the high-water
+/// MEASURED region bytes of any single request the generation served
+/// ([mem.region.account.1]). `mem-hw` is what lobo's admission meter
+/// counted; `mem-rt-hw` is what the runtime charged. They are
+/// different units answering different questions and the docs refuse
+/// to subtract one from the other. Includes the trailing newline.
+/// Total.
 pub fn status_line_text(
     gen: int,
     live: int,
@@ -909,8 +922,9 @@ pub fn status_line_text(
     remaining_ms: int,
     mem_hw: int,
     budget_503s: int,
+    mem_rt_hw: int,
 ) -> str {
-    var line = "generation {gen}: {state} live={live} age-ms={age_ms} id={hash} mem-hw={mem_hw} budget-503s={budget_503s}"
+    var line = "generation {gen}: {state} live={live} age-ms={age_ms} id={hash} mem-hw={mem_hw} budget-503s={budget_503s} mem-rt-hw={mem_rt_hw}"
     if remaining_ms >= 0 {
         line = "{line} shutdown-in-ms={remaining_ms}"
     }
@@ -923,15 +937,17 @@ pub fn status_line_text(
 /// `seq` emitted; schema stays 1, nothing renamed or moved, the ws07
 /// convention for a widening). The entry appends comma-separated
 /// `status_json_obj`s then `status_json_close`. ws12's metrics
-/// endpoint serves this same object. Total.
-pub fn status_json_open(current: int, quitting: bool, events: int) -> str {
-    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"generations\":["
+/// endpoint serves this same object at `/status.json` and adds
+/// `live_region_bytes` (additive; schema stays 1). Total.
+pub fn status_json_open(current: int, quitting: bool, events: int, live_bytes: int) -> str {
+    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"live_region_bytes\":{live_bytes},\"generations\":["
 }
 
 /// One generation as a JSON object (no leading comma, no newline) — the
 /// entry joins these with commas. ws10 adds `mem_high_water` and
-/// `budget_503s` (additive members; schema stays 1 — nothing renamed
-/// or moved, the ws07 convention for a widening). Total.
+/// `budget_503s`; ws12 adds `mem_rt_high_water`, the measured region
+/// figure (additive members; schema stays 1 — nothing renamed or
+/// moved, the ws07 convention for a widening). Total.
 pub fn status_json_obj(
     gen: int,
     state: str,
@@ -941,8 +957,9 @@ pub fn status_json_obj(
     remaining_ms: int,
     mem_hw: int,
     budget_503s: int,
+    mem_rt_hw: int,
 ) -> str {
-    "{{\"gen\":{gen},\"state\":\"{state}\",\"live\":{live},\"age_ms\":{age_ms},\"id\":\"{hash}\",\"mem_high_water\":{mem_hw},\"budget_503s\":{budget_503s},\"shutdown_remaining_ms\":{remaining_ms}}}"
+    "{{\"gen\":{gen},\"state\":\"{state}\",\"live\":{live},\"age_ms\":{age_ms},\"id\":\"{hash}\",\"mem_high_water\":{mem_hw},\"budget_503s\":{budget_503s},\"mem_rt_high_water\":{mem_rt_hw},\"shutdown_remaining_ms\":{remaining_ms}}}"
 }
 
 /// The JSON status stanza's close: `]}`. Total.
