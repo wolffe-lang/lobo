@@ -19,6 +19,7 @@
 use config
 use conn
 use http
+use metrics
 use obs
 use proxy
 
@@ -893,20 +894,6 @@ fn keep_token(keep: bool) -> str {
 // address and nothing else (ws14 revisits); LOBO-L011 says so at load.
 // ------------------------------------------------------------------
 
-/// The exposition path. One constant, read by serve, the entry, the
-/// rig and the docs. Total.
-pub fn metrics_path() -> str {
-    "/metrics"
-}
-
-/// The status-object path — the SAME object `lobo status --format
-/// json` serves over the control channel, on the HTTP listener (ws08's
-/// design-once note, which this sprint proves: one data shape, two
-/// formats, one builder set in `shell`). Total.
-pub fn status_path() -> str {
-    "/status.json"
-}
-
 /// Which admin surface `path` names, or "" for an ordinary request.
 /// Answers "" when the endpoint is off — the switch is the whole
 /// access gate at v0, so an off endpoint's paths must route to the
@@ -915,10 +902,10 @@ pub fn admin_kind(on: bool, path: str) -> str {
     if !on {
         return ""
     }
-    if path == metrics_path() {
+    if path == metrics.metrics_path() {
         return "metrics"
     }
-    if path == status_path() {
+    if path == metrics.status_path() {
         return "status"
     }
     ""

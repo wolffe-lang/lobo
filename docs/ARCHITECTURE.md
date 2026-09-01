@@ -25,16 +25,31 @@ src/
   shell/     CLI verbs, signals, reload (split on the upstream
              signal-reception ask)       [stub; ws04]
   obs/       logging (ws09: format compiler, variable table,
-             oracle-pinned escapers, JSON doors, bounded sinks);
-             metrics land ws12            [real; wsc03]
+             oracle-pinned escapers, JSON doors, bounded sinks)
+                                          [real; wsc03]
+  metrics/   the counter registry and the Prometheus text exposition
+             (ws12: names/types/help/label shapes in ONE table, the
+             cardinality fence in `sample`, the fixed histogram
+             ladder). PURE — the counters themselves live in main's
+             poll loop, because lobo is spawn-free and one mutator
+             needs neither shards nor atomics
+                                          [real; wsc03]
 ```
 
 Intended call direction once real (locked by the sprint contracts,
 not by this page): `main → shell → {config, serve}`;
 `serve → {http, proxy, obs}`; `proxy → {http, obs}`; `config` and
 `http` call nobody above the builtin tiers. `obs` is called by
-everyone and calls nobody. A dependency arrow not in this list is a
-contract change — say so in the sprint file, not just the code.
+everyone and calls nobody. `metrics` (ws12) is the second leaf beside
+`obs`: it calls nobody. `main` calls it for the exposition; `serve`
+calls it only for the two endpoint PATH constants, never for a number
+— the exposition must not be able to reach into a serving module, and
+a serving module must not be able to render one. That is why the
+`/metrics` endpoint is TWO PHASE (`serve` recognises the request,
+`main` renders it); `src/metrics/metrics.lu`'s header and the seam in
+`serve` both carry the argument. A dependency arrow not in
+this list is a contract change — say so in the sprint file, not just
+the code.
 
 ## Test infrastructure (not part of the server)
 

@@ -295,6 +295,23 @@ pub fn esc_label(v: str) -> str {
 // the exposition — HELP/TYPE headers and sample lines
 // ------------------------------------------------------------------
 
+/// The exposition path. One constant — `serve` matches on it, the
+/// generated page prints it, the rig scrapes it. Total.
+pub fn metrics_path() -> str {
+    "/metrics"
+}
+
+/// The status-object path beside it: the SAME schema-1 object `lobo
+/// status --format json` serves over the control channel, on the HTTP
+/// listener (ws08's design-once note, which ws12 proves — one data
+/// shape, two transports, one builder set in `shell`). It lives here
+/// rather than in `shell` because it is a property of the ADMIN
+/// ENDPOINT, which is this module's surface; `shell` still owns the
+/// object itself. Total.
+pub fn status_path() -> str {
+    "/status.json"
+}
+
 /// The exact Content-Type the Prometheus text exposition format
 /// requires. Total.
 pub fn content_type() -> str {
@@ -515,10 +532,8 @@ pub fn docs_markdown() -> str {
     out = "{out}below is the same string the `# HELP` line carries at\n"
     out = "{out}`/metrics`, so a Grafana panel built from this page and a live\n"
     out = "{out}scrape can never disagree.\n\n"
-    out = "{out}The endpoint, the recommended bind posture, the v0 authentication\n"
-    out = "{out}stance and the cardinality fence are in `docs/directives.md`\n"
-    out = "{out}under `metrics`; the memory rows are explained in\n"
-    out = "{out}`docs/BUDGET.md`.\n\n"
+    out = "{out}The memory rows are explained in `docs/BUDGET.md`; the endpoint\n"
+    out = "{out}itself is below.\n\n"
     out = "{out}| metric | type | labels | help |\n"
     out = "{out}|--------|------|--------|------|\n"
     for s in registry() {
@@ -529,6 +544,56 @@ pub fn docs_markdown() -> str {
         }
         out = "{out}| `{s.name}` | {s.kind} | {lab} | {s.help} |\n"
     }
+    out = "{out}\n"
+    out = "{out}## The endpoint\n\n"
+    out = "{out}```\n"
+    out = "{out}http {{{{\n"
+    out = "{out}  server {{{{\n"
+    out = "{out}    listen 127.0.0.1:9113;   # see the posture below\n"
+    out = "{out}    metrics on;              # lobo-native; nginx -t rejects it (L010)\n"
+    out = "{out}  }}}}\n"
+    out = "{out}}}}}\n"
+    out = "{out}```\n\n"
+    out = "{out}`metrics on` publishes two paths on that server's listener:\n\n"
+    out = "{out}| path | content type | body |\n"
+    out = "{out}|------|--------------|------|\n"
+    out = "{out}| `{metrics_path()}` | `{content_type()}` | the exposition above |\n"
+    out = "{out}| `{status_path()}` | `application/json` | the SAME schema-1 object `lobo status --format json` serves over the control channel (ws08 designed it once; ws12 serves it twice) |\n\n"
+    out = "{out}**The v0 access posture, plainly.** There is no authentication\n"
+    out = "{out}on the endpoint beyond WHERE IT IS BOUND. The exposition names\n"
+    out = "{out}your generations, your upstream error rates and your memory\n"
+    out = "{out}high waters; bind the server to loopback or an admin network.\n"
+    out = "{out}`LOBO-L011` says so at load time when it is not, as a warning\n"
+    out = "{out}rather than a refusal — a private-network bind is a legitimate\n"
+    out = "{out}posture lobo cannot tell from a public one by reading an\n"
+    out = "{out}address. Authentication is ws14's; this line is the whole of\n"
+    out = "{out}v0's story and it is deliberately short.\n\n"
+    out = "{out}**Named limits at this pin**, so nobody has to discover them:\n\n"
+    out = "{out}* the endpoint's own admin `listen` — the recommended shape —\n"
+    out = "{out}  waits on multi-listener support: lobo binds ONE plaintext and\n"
+    out = "{out}  ONE ssl listener, so `metrics` is a switch on the server it is\n"
+    out = "{out}  written in, not a listener of its own;\n"
+    out = "{out}* the endpoint answers on the PLAINTEXT step path only. Over\n"
+    out = "{out}  TLS these two paths route to the filesystem like any other\n"
+    out = "{out}  URI — the same D24 rider the ws10 counters carry;\n"
+    out = "{out}* the switch is resolved at START. A reload that flips it takes\n"
+    out = "{out}  effect at the next restart (`ServerOpts` is process-wide, not\n"
+    out = "{out}  per-generation);\n"
+    out = "{out}* the scrape is an ORDINARY request. It appears in these\n"
+    out = "{out}  counters and in the access log, one scrape behind (a counter\n"
+    out = "{out}  that included its own scrape would have to lie), and it obeys\n"
+    out = "{out}  `memory_budget`: under a budget smaller than the exposition,\n"
+    out = "{out}  the scrape is a 503 with a name. That is correct.\n\n"
+    out = "{out}## The cardinality fence\n\n"
+    out = "{out}The registry above is the ONLY place a label may be invented.\n"
+    out = "{out}`metrics.sample` asserts that the label keys it was handed are\n"
+    out = "{out}exactly the keys the family declared, so a per-URI or\n"
+    out = "{out}per-client series is not expressible in lobo — not discouraged,\n"
+    out = "{out}not linted: unwriteable. `tools/lobo-metrics` measures the\n"
+    out = "{out}consequence on a live server, asserting that driving four more\n"
+    out = "{out}distinct URIs adds exactly zero series. Metrics that explode\n"
+    out = "{out}cardinality are how monitoring kills servers; the footgun gets\n"
+    out = "{out}a fence, not a hope.\n\n"
     out = "{out}\n## The duration ladder\n\n"
     out = "{out}Both histograms use one FIXED ladder of upper bounds, in\n"
     out = "{out}seconds:\n\n"

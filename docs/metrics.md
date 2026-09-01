@@ -6,10 +6,8 @@ below is the same string the `# HELP` line carries at
 `/metrics`, so a Grafana panel built from this page and a live
 scrape can never disagree.
 
-The endpoint, the recommended bind posture, the v0 authentication
-stance and the cardinality fence are in `docs/directives.md`
-under `metrics`; the memory rows are explained in
-`docs/BUDGET.md`.
+The memory rows are explained in `docs/BUDGET.md`; the endpoint
+itself is below.
 
 | metric | type | labels | help |
 |--------|------|--------|------|
@@ -34,6 +32,65 @@ under `metrics`; the memory rows are explained in
 | `lobo_live_region_bytes` | gauge | — | Process-wide bytes the runtime holds for live regions at scrape time. NOT an RSS proxy: the process-root arena, where every string materialization still lands, is not counted. |
 | `lobo_log_lines_dropped_total` | counter | — | Access-log lines dropped because a sink's bounded buffer was full (emit never blocks). |
 | `lobo_events_total` | counter | — | Vocabulary events emitted — the highest seq stamped. A log stream whose top seq matches this has no trailing hole. |
+
+## The endpoint
+
+```
+http {{
+  server {{
+    listen 127.0.0.1:9113;   # see the posture below
+    metrics on;              # lobo-native; nginx -t rejects it (L010)
+  }}
+}}
+```
+
+`metrics on` publishes two paths on that server's listener:
+
+| path | content type | body |
+|------|--------------|------|
+| `/metrics` | `text/plain; version=0.0.4; charset=utf-8` | the exposition above |
+| `/status.json` | `application/json` | the SAME schema-1 object `lobo status --format json` serves over the control channel (ws08 designed it once; ws12 serves it twice) |
+
+**The v0 access posture, plainly.** There is no authentication
+on the endpoint beyond WHERE IT IS BOUND. The exposition names
+your generations, your upstream error rates and your memory
+high waters; bind the server to loopback or an admin network.
+`LOBO-L011` says so at load time when it is not, as a warning
+rather than a refusal — a private-network bind is a legitimate
+posture lobo cannot tell from a public one by reading an
+address. Authentication is ws14's; this line is the whole of
+v0's story and it is deliberately short.
+
+**Named limits at this pin**, so nobody has to discover them:
+
+* the endpoint's own admin `listen` — the recommended shape —
+  waits on multi-listener support: lobo binds ONE plaintext and
+  ONE ssl listener, so `metrics` is a switch on the server it is
+  written in, not a listener of its own;
+* the endpoint answers on the PLAINTEXT step path only. Over
+  TLS these two paths route to the filesystem like any other
+  URI — the same D24 rider the ws10 counters carry;
+* the switch is resolved at START. A reload that flips it takes
+  effect at the next restart (`ServerOpts` is process-wide, not
+  per-generation);
+* the scrape is an ORDINARY request. It appears in these
+  counters and in the access log, one scrape behind (a counter
+  that included its own scrape would have to lie), and it obeys
+  `memory_budget`: under a budget smaller than the exposition,
+  the scrape is a 503 with a name. That is correct.
+
+## The cardinality fence
+
+The registry above is the ONLY place a label may be invented.
+`metrics.sample` asserts that the label keys it was handed are
+exactly the keys the family declared, so a per-URI or
+per-client series is not expressible in lobo — not discouraged,
+not linted: unwriteable. `tools/lobo-metrics` measures the
+consequence on a live server, asserting that driving four more
+distinct URIs adds exactly zero series. Metrics that explode
+cardinality are how monitoring kills servers; the footgun gets
+a fence, not a hope.
+
 
 ## The duration ladder
 
