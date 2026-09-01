@@ -1,0 +1,26 @@
+# nginx.proxy-https.conf.in — the ORACLE front of the https proxy
+# differential (wsm04): proxy_pass https:// to the fixture-cert
+# upstream, VERIFIED against the fixture CA (@CA@), SNI on (the
+# spellings lobo's stricter -t also accepts — the two templates
+# mirror exactly). @PORT@ the front port, @UPSTREAM@ the https
+# upstream host:port (localhost:<uport> — the name the fixture leaf
+# certifies). Loopback only.
+daemon off;
+pid nginx.pid;
+error_log error.log;
+
+events {
+}
+
+http {
+    access_log access.log;
+    server {
+        listen 127.0.0.1:@PORT@;
+        location /https/ {
+            proxy_pass https://@UPSTREAM@/;
+            proxy_ssl_trusted_certificate @CA@;
+            proxy_ssl_verify on;
+            proxy_ssl_server_name on;
+        }
+    }
+}

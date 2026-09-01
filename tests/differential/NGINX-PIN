@@ -13,4 +13,13 @@ version = 1.30.4
 tarball = nginx-1.30.4.tar.gz
 source = https://nginx.org/download/nginx-1.30.4.tar.gz
 sha256 = 4261dc90e9e47c1c4041276e9aaa3d48ebe2e664f728e14fa95ae6c67d57a08b
-configure = ./configure --without-http_rewrite_module --without-http_gzip_module
+# wsm04: --with-http_ssl_module joins the line — the https proxy
+# differential needs the oracle to SERVE https (the fixture-cert
+# upstream) and to dial https upstreams (proxy_pass https://). The
+# version stays the behavioral identity; rebuilding at the same
+# version with ssl is the documented PIN-changes-not-harness route
+# (docs/DIFFERENTIAL.md). Needs OpenSSL headers at build time (macOS:
+# add --with-cc-opt/-ld-opt for Homebrew openssl@3 — the recipe note
+# in docs/DIFFERENTIAL.md; host-specific flags are not part of this
+# line).
+configure = ./configure --without-http_rewrite_module --without-http_gzip_module --with-http_ssl_module
