@@ -1,6 +1,11 @@
-# wws — CI (ws00). Committed BEFORE any remote exists (the repo is
-# local until the human names it), so this has never run; it is
-# written against the pins so the first push is green or honestly
+# lobo — CI (ws00; repaired at ws12). Committed BEFORE any remote
+# existed, so it had never run — and had silently rotted twice: the
+# gauntlet was renamed at wsm03 (`wws-gauntlet` -> `lobo-gauntlet`)
+# and a THIRD pinned artifact arrived at wsm04 (`[std]`, a source tree
+# staged into .wolf-bin/std with its STD-REV marker), neither of which
+# reached this file. ws12 repairs both, renames the checkout path to
+# match the repo, and adds the host tools the rig leans on. It is
+# written against the pins so the first real run is green or honestly
 # red. Conventions mirrored from the wolf-lang/wolf-book CI: explicit
 # shell, timeout ceilings, loud SKIPs (a lane that cannot run says so;
 # it never passes vacuously). linux x86-64 first; the matrix grows
@@ -28,16 +33,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          path: wws
+          path: lobo
 
       - name: read toolchain pins
         id: pins
         shell: bash
-        working-directory: wws
+        working-directory: lobo
         run: |
           rev() { awk -v s="[$1]" '$0==s{f=1} f&&/^rev = /{gsub(/"/,"",$3); print $3; exit}' wolf-toolchain.toml; }
           echo "wolf=$(rev wolf)" >> "$GITHUB_OUTPUT"
           echo "lupin=$(rev lupin)" >> "$GITHUB_OUTPUT"
+          echo "std=$(rev std)" >> "$GITHUB_OUTPUT"
 
       # The sibling repos are private; the default token cannot read
       # them (the wolf-book lesson). With WOLF_CI_TOKEN the job runs
@@ -58,6 +64,7 @@ jobs:
             && git -C wolf-lang checkout --quiet "${{ steps.pins.outputs.wolf }}" || ok=0
           git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-interp" wolf-interp \
             && git -C wolf-interp checkout --quiet "${{ steps.pins.outputs.lupin }}" || ok=0
+          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-std" wolf-std || ok=0
           if [ "$ok" = 1 ]; then echo "toolchain=full" >> "$GITHUB_OUTPUT"
           else echo "::error::token present but sibling acquisition failed"; exit 1; fi
 
@@ -72,7 +79,14 @@ jobs:
         if: steps.acquire.outputs.toolchain == 'full'
         shell: bash
         working-directory: wolf-lang
-        run: cargo build --release -p wolf_driver -p wolf_rt
+        run: |
+          set -euo pipefail
+          # The stamp is used VERBATIM in `--version`, and
+          # wolf-toolchain.toml's version_line names the SHORT rev
+          # (the D57 shape sc30 recorded), so truncate here rather
+          # than letting the identity check refuse a full-sha stamp.
+          WOLF_COMMIT="$(echo "${{ steps.pins.outputs.wolf }}" | cut -c1-7)" \
+            cargo build --release -p wolf_driver -p wolf_rt
 
       - name: build pinned lupin (release)
         if: steps.acquire.outputs.toolchain == 'full'
@@ -80,13 +94,22 @@ jobs:
         working-directory: wolf-interp
         run: cargo build --release --bin lupin
 
+      # The wolf pin is built with the D57 dev stamp: WOLF_COMMIT is
+      # what makes `--version` claim the rev, and lib-toolchain.sh
+      # refuses the unstamped `+dev.unknown` a plain cargo build emits.
       - name: stage .wolf-bin
         if: steps.acquire.outputs.toolchain == 'full'
         shell: bash
         run: |
-          mkdir -p wws/.wolf-bin
-          cp wolf-lang/target/release/wolf wolf-lang/target/release/libwolf_rt.a wws/.wolf-bin/
-          cp wolf-interp/target/release/lupin wws/.wolf-bin/
+          set -euo pipefail
+          mkdir -p lobo/.wolf-bin
+          cp wolf-lang/target/release/wolf wolf-lang/target/release/libwolf_rt.a lobo/.wolf-bin/
+          cp wolf-interp/target/release/lupin lobo/.wolf-bin/
+          # [std] is a SOURCE TREE, not a binary: staged by the
+          # documented one-time action, identified by its STD-REV
+          # marker (a tree has no --version).
+          git -C wolf-std archive "${{ steps.pins.outputs.std }}" std | tar -x -C lobo/.wolf-bin/
+          git -C wolf-std rev-parse "${{ steps.pins.outputs.std }}" > lobo/.wolf-bin/std/STD-REV
 
       # The differential oracle, cached on the pin file — a CI step is
       # not a build script in the D33 sense (the wsc00 closeout records
@@ -97,13 +120,13 @@ jobs:
         id: nginx-cache
         uses: actions/cache@v4
         with:
-          path: wws/tests/differential/bin
-          key: nginx-${{ runner.os }}-${{ hashFiles('wws/tests/differential/NGINX-PIN') }}
+          path: lobo/tests/differential/bin
+          key: nginx-${{ runner.os }}-${{ hashFiles('lobo/tests/differential/NGINX-PIN') }}
 
       - name: build pinned nginx (cache miss only)
         if: steps.acquire.outputs.toolchain == 'full' && steps.nginx-cache.outputs.cache-hit != 'true'
         shell: bash
-        working-directory: wws
+        working-directory: lobo
         run: |
           set -euo pipefail
           pin() { sed -n "s/^$1 = //p" tests/differential/NGINX-PIN; }
@@ -114,12 +137,25 @@ jobs:
           cd "nginx-$(pin version)"
           $(pin configure)
           make -j"$(nproc)"
-          mkdir -p "$GITHUB_WORKSPACE/wws/tests/differential/bin"
-          cp objs/nginx "$GITHUB_WORKSPACE/wws/tests/differential/bin/nginx"
+          mkdir -p "$GITHUB_WORKSPACE/lobo/tests/differential/bin"
+          cp objs/nginx "$GITHUB_WORKSPACE/lobo/tests/differential/bin/nginx"
           rm -rf /tmp/nginx-build
 
-      - name: wws-gauntlet
+      # The rig's host tools beyond the toolchain (CLAUDE.md's list):
+      # POSIX sh, awk, jq, diff and a real OpenSSL 3.x for the TLS
+      # steps, plus nc for the acme/proxy/metrics drives. ubuntu-latest
+      # ships awk/jq/diff/openssl-3.x; netcat is the only add.
+      - name: host tools
         if: steps.acquire.outputs.toolchain == 'full'
         shell: bash
-        working-directory: wws
-        run: tools/wws-gauntlet
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq netcat-openbsd
+          openssl version
+
+      - name: lobo-gauntlet
+        if: steps.acquire.outputs.toolchain == 'full'
+        shell: bash
+        working-directory: lobo
+        run: tools/lobo-gauntlet
