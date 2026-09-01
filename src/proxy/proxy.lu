@@ -1181,6 +1181,59 @@ fn cli_dead() -> tlsc.Client {
     }
 }
 
+/// The operator hint that follows a NAMED upstream-TLS refusal —
+/// lobo's own prose, keyed by `std.x.tls.client`'s stable row name
+/// (ws12, wolf-std#3). Empty (and correct) for rows whose own name is
+/// the whole story, and empty for any row std grows later: a missing
+/// hint reads as a bare name, never as a broken build. Leading space
+/// included so the caller writes `"{name}{tls_hint(name, host)}"`.
+/// Total.
+fn tls_hint(name: str, sni_host: str) -> str {
+    if name == "timeout" {
+        return " (deadline expired mid-handshake)"
+    }
+    if name == "decode_error" {
+        return " (malformed flight — is the upstream speaking TLS?)"
+    }
+    if name == "downgrade" {
+        return " (the upstream answered below TLS 1.3)"
+    }
+    if name == "handshake_failure" {
+        return " (suite/alert — the profile is TLS 1.3 ChaCha20-Poly1305 X25519)"
+    }
+    if name == "decrypt_error" {
+        return " (the server Finished did not verify)"
+    }
+    if name == "zero" {
+        return " (all-zero shared secret)"
+    }
+    if name == "der" {
+        return " (unparseable certificate)"
+    }
+    if name == "unsupported_alg" {
+        return " (the chain or CertificateVerify uses an algorithm outside the ladder — RSA upstreams need an Ed25519/P-256 chain)"
+    }
+    if name == "expired" {
+        return " (upstream certificate)"
+    }
+    if name == "not_yet_valid" {
+        return " (upstream certificate)"
+    }
+    if name == "name_mismatch" {
+        return " (the chain does not certify \"{sni_host}\" — set proxy_ssl_name)"
+    }
+    if name == "not_ca" {
+        return " (chain issuer is not a CA)"
+    }
+    if name == "issuer_mismatch" {
+        return " (chain does not reach the trusted roots)"
+    }
+    if name == "unknown_critical" {
+        return " (certificate extension)"
+    }
+    ""
+}
+
 /// One decrypted application read as str. The record-layer rows
 /// (`bad_record_mac`, `decode_error`, `unexpected_message`) fold to
 /// `io` — each is a broken upstream to the relay (the caller's 502);
@@ -1298,109 +1351,24 @@ fn attempt_tls(
         net_close(up) else |_| {}
         return 502
     }
+    // ws12 (wolf-std#3/sc31): the row NAMES itself. What stood here
+    // was a twenty-arm match that re-listed std.x.tls.client's whole
+    // refusal vocabulary — a list lobo had to keep in step with a
+    // module it does not own, and which broke the build the day std
+    // grew a twenty-second row. `named` coarsens all of them to one
+    // `Row(str)` carrying the row's own name; the operator prose that
+    // used to ride each arm moves to `tls_hint`, which is lobo's own
+    // text keyed by a STRING — a new std row gets no hint, not a
+    // compile error. Bind first, then name (the sc31 call contract;
+    // the inline form is F-0103 on the checked tier). The messages
+    // are byte-identical to the twenty-arm shape.
     var gw: int = 0
     var why = ""
-    var cli = tlsc.complete(take pend) else |e| match e {
-        closed => {
-            gw = 502
-            why = "closed"
-            cli_dead()
-        },
-        timeout => {
-            gw = 504
-            why = "timeout (deadline expired mid-handshake)"
-            cli_dead()
-        },
-        io => {
-            gw = 502
-            why = "io"
-            cli_dead()
-        },
-        decode_error => {
-            gw = 502
-            why = "decode_error (malformed flight — is the upstream speaking TLS?)"
-            cli_dead()
-        },
-        bad_record_mac => {
-            gw = 502
-            why = "bad_record_mac"
-            cli_dead()
-        },
-        unexpected_message => {
-            gw = 502
-            why = "unexpected_message"
-            cli_dead()
-        },
-        illegal_parameter => {
-            gw = 502
-            why = "illegal_parameter"
-            cli_dead()
-        },
-        downgrade => {
-            gw = 502
-            why = "downgrade (the upstream answered below TLS 1.3)"
-            cli_dead()
-        },
-        handshake_failure => {
-            gw = 502
-            why = "handshake_failure (suite/alert — the profile is TLS 1.3 ChaCha20-Poly1305 X25519)"
-            cli_dead()
-        },
-        decrypt_error => {
-            gw = 502
-            why = "decrypt_error (the server Finished did not verify)"
-            cli_dead()
-        },
-        zero => {
-            gw = 502
-            why = "zero (all-zero shared secret)"
-            cli_dead()
-        },
-        der => {
-            gw = 502
-            why = "der (unparseable certificate)"
-            cli_dead()
-        },
-        unsupported_alg => {
-            gw = 502
-            why = "unsupported_alg (the chain or CertificateVerify uses an algorithm outside the ladder — RSA upstreams need an Ed25519/P-256 chain)"
-            cli_dead()
-        },
-        bad_signature => {
-            gw = 502
-            why = "bad_signature"
-            cli_dead()
-        },
-        expired => {
-            gw = 502
-            why = "expired (upstream certificate)"
-            cli_dead()
-        },
-        not_yet_valid => {
-            gw = 502
-            why = "not_yet_valid (upstream certificate)"
-            cli_dead()
-        },
-        name_mismatch => {
-            gw = 502
-            why = "name_mismatch (the chain does not certify \"{sni_host}\" — set proxy_ssl_name)"
-            cli_dead()
-        },
-        not_ca => {
-            gw = 502
-            why = "not_ca (chain issuer is not a CA)"
-            cli_dead()
-        },
-        issuer_mismatch => {
-            gw = 502
-            why = "issuer_mismatch (chain does not reach the trusted roots)"
-            cli_dead()
-        },
-        unknown_critical => {
-            gw = 502
-            why = "unknown_critical (certificate extension)"
-            cli_dead()
-        },
+    let attempted = tlsc.complete(take pend)
+    var cli = tlsc.named(attempted) else |Row(name)| {
+        gw = if name == "timeout" { 504 } else { 502 }
+        why = "{name}{tls_hint(name, sni_host)}"
+        cli_dead()
     }
     if gw != 0 {
         eprint(
