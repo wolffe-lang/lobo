@@ -20,17 +20,28 @@
 //! LOOPBACK LAW, enforced twice: config -t refuses a non-loopback
 //! cert_ca, and the dialer here refuses a non-loopback host AGAIN at
 //! run time (defense in depth; the refusal is a named error, never a
-//! quiet dial).
+//! quiet dial). The TRANSPORT may be https since wsm04 (the D25
+//! retirement): an https:// cert_ca dials through std.x.tls.client —
+//! chain + hostname VERIFIED against the cert_ca_root anchors, SNI
+//! from the URL host, the whole handshake under the txn deadline —
+//! and every handshake failure is a NAMED [error] line feeding the
+//! same backoff the http transport uses.
 //! JSON posture, honest: responses are read with a targeted scanner
 //! pinned to RFC 8555 field names against the pinned harness CA (the
 //! only CA this pin can reach). std.x.json stays out: its enum/Map
 //! surface costs compiler lanes (F-0012/F-0029, the jose header's own
 //! reasoning). When the client-TLS rung opens the real-CA door, the
-//! scanner's replacement rides that sprint.
+//! scanner's replacement rode partway at wsm04: the TRANSPORT can
+//! now reach an https directory, but the only CA lobo may dial is
+//! still the loopback harness CA (whose JSON this scanner is pinned
+//! against) — a production CA is post-v1 POLICY, not a client gap.
 //! File-header note (F-0016): comments never sit directly above a
 //! dotted call in this repo; `wolf fmt` splits the call at the dot.
 
+use std.net
 use std.x.jose
+use std.x.tls.cert
+use std.x.tls.client as tlsc
 
 // ------------------------------------------------------------------
 // the loopback HTTP/1.1 client
@@ -46,10 +57,18 @@ pub struct Resp {
     body: str,
 }
 
-/// Split an http:// URL into (host:port, path). Port 80 is implied
-/// when absent; path defaults to "/". Total.
+/// Split an http:// or https:// URL into (host:port, path). Port 80
+/// (http) or 443 (https) is implied when absent; path defaults to
+/// "/". Total.
 pub fn url_split(url: str) -> (str, str) {
-    var rest = url.strip_prefix("http://") else url
+    var https = false
+    var rest = url
+    if url.starts_with("https://") {
+        https = true
+        rest = url[8..url.len]
+    } else {
+        rest = url.strip_prefix("http://") else url
+    }
     let slash = rest.find("/") else -1
     var hostport = rest
     var path = "/"
@@ -58,9 +77,18 @@ pub fn url_split(url: str) -> (str, str) {
         path = rest[slash..rest.len]
     }
     if !hostport.contains(":") {
-        hostport = "{hostport}:80"
+        if https {
+            hostport = "{hostport}:443"
+        } else {
+            hostport = "{hostport}:80"
+        }
     }
     (hostport, path)
+}
+
+/// Whether a directory/endpoint URL wants the TLS transport. Total.
+fn url_https(url: str) -> bool {
+    url.starts_with("https://")
 }
 
 /// Whether `hostport` is loopback — the only host the dialer will
@@ -101,6 +129,227 @@ fn http_txn(hostport: str, req: str) -> str ! {io} {
     }
     net_close(fd) else |_| {}
     out
+}
+
+// ------------------------------------------------------------------
+// the https transport (wsm04, the D25 retirement) — the same one
+// transaction shape over std.x.tls.client. The client verifies
+// chain + hostname + CertificateVerify against the cert_ca_root
+// anchors before a byte of the request leaves; the deadline armed
+// before `begin` bounds the WHOLE handshake (the client's per-fd
+// contract), so a wedged TLS CA is a named failure, never a hang.
+// ------------------------------------------------------------------
+
+/// The wall clock as std.x.tls.cert's compact validation timestamp
+/// (civil breakdown via the sibling file's `civil`). Total.
+fn now_packed() -> int {
+    let c = civil(time_unix_ms() / 1000)
+    cert.timestamp(c.0, c.1, c.2, c.3, c.4, c.5)
+}
+
+/// One https transaction: dial loopback, shake TLS 1.3 (verified
+/// against the PEM anchors at `ca_root`), send `req`, read to close.
+/// Every handshake refusal is a NAMED [error] line (the LOUD-failure
+/// rule — the caller's generic transport message alone would bury
+/// WHY a directory dial died). Rows: io.
+fn tls_txn(hostport: str, req: str, ca_root: str) -> str ! {io} {
+    if !dial_ok(hostport) {
+        return io
+    }
+    let pem = fs_read_text(ca_root) else |_| {
+        eprint("lobo: [error] ACME https: cannot read cert_ca_root \"{ca_root}\"")
+        return io
+    }
+    var lens = List[int]()
+    let anchors = pem_blocks_of(pem, "CERTIFICATE", mut lens) else |_| {
+        eprint(
+            "lobo: [error] ACME https: cert_ca_root \"{ca_root}\" is not PEM CERTIFICATE material",
+        )
+        return io
+    }
+    if anchors.len == 0 {
+        eprint("lobo: [error] ACME https: cert_ca_root \"{ca_root}\" holds no CERTIFICATE block")
+        return io
+    }
+    let colon = hostport.rfind(":") else hostport.len
+    let host = hostport[0..colon]
+    let fd = net_connect(hostport) else |_| {
+        return io
+    }
+    // 15s, not the http transport's 5s: the measured std-client
+    // handshake costs ~3.6s on the wsm04 rig (four X25519 ladders +
+    // Ed25519 verifies, native tier with WOLF_MIDEND=0 — #146), and
+    // the harness CA's server half adds its own wolf-side compute; a
+    // 5s ceiling sat inside the knife-edge margin. Still bounded: a
+    // wedged CA is a named failure, never a hung serve loop.
+    net_deadline(fd, 15000) else |_| {}
+    let pend = tlsc.
+        begin(take net.Socket { fd: fd }, host, anchors, now_packed(), os_random(32), os_random(32)) else |_| {
+        eprint("lobo: [error] ACME https: ClientHello write to {hostport} failed")
+        net_close(fd) else |_| {}
+        return io
+    }
+    var hs_fail = ""
+    var cli = tlsc.complete(take pend) else |e| match e {
+        closed => {
+            hs_fail = "closed"
+            cli_dead()
+        },
+        timeout => {
+            hs_fail = "timeout (deadline expired mid-handshake)"
+            cli_dead()
+        },
+        io => {
+            hs_fail = "io"
+            cli_dead()
+        },
+        decode_error => {
+            hs_fail = "decode_error (malformed flight — is the CA speaking TLS?)"
+            cli_dead()
+        },
+        bad_record_mac => {
+            hs_fail = "bad_record_mac"
+            cli_dead()
+        },
+        unexpected_message => {
+            hs_fail = "unexpected_message"
+            cli_dead()
+        },
+        illegal_parameter => {
+            hs_fail = "illegal_parameter"
+            cli_dead()
+        },
+        downgrade => {
+            hs_fail = "downgrade (the CA answered below TLS 1.3)"
+            cli_dead()
+        },
+        handshake_failure => {
+            hs_fail = "handshake_failure (suite/alert — the profile is TLS 1.3 ChaCha20-Poly1305 X25519)"
+            cli_dead()
+        },
+        decrypt_error => {
+            hs_fail = "decrypt_error (the CA Finished did not verify)"
+            cli_dead()
+        },
+        zero => {
+            hs_fail = "zero (all-zero shared secret)"
+            cli_dead()
+        },
+        der => {
+            hs_fail = "der (unparseable certificate)"
+            cli_dead()
+        },
+        unsupported_alg => {
+            hs_fail = "unsupported_alg (the CA chain uses an algorithm outside the ladder)"
+            cli_dead()
+        },
+        bad_signature => {
+            hs_fail = "bad_signature"
+            cli_dead()
+        },
+        expired => {
+            hs_fail = "expired (CA certificate)"
+            cli_dead()
+        },
+        not_yet_valid => {
+            hs_fail = "not_yet_valid (CA certificate)"
+            cli_dead()
+        },
+        name_mismatch => {
+            hs_fail = "name_mismatch (the chain does not certify \"{host}\")"
+            cli_dead()
+        },
+        not_ca => {
+            hs_fail = "not_ca (chain issuer is not a CA)"
+            cli_dead()
+        },
+        issuer_mismatch => {
+            hs_fail = "issuer_mismatch (chain does not reach cert_ca_root)"
+            cli_dead()
+        },
+        unknown_critical => {
+            hs_fail = "unknown_critical (certificate extension)"
+            cli_dead()
+        },
+    }
+    if !hs_fail.is_empty() {
+        eprint("lobo: [error] ACME https: TLS handshake with {hostport} failed: {hs_fail}")
+        net_close(fd) else |_| {}
+        return io
+    }
+    tlsc.write(mut cli, req.bytes()) else |_| {
+        eprint("lobo: [error] ACME https: request write to {hostport} failed")
+        tlsc.close(take cli) else |_| {}
+        return io
+    }
+    var out = ""
+    var reading = true
+    while reading {
+        var got = List[int]()
+        let piece = tlsc.read(mut cli) else |e| match e {
+            closed => {
+                reading = false
+                List[int]()
+            },
+            timeout => {
+                reading = false
+                List[int]()
+            },
+            bad_record_mac => {
+                reading = false
+                List[int]()
+            },
+            decode_error => {
+                reading = false
+                List[int]()
+            },
+            unexpected_message => {
+                reading = false
+                List[int]()
+            },
+            io => {
+                reading = false
+                List[int]()
+            },
+        }
+        got = piece
+        if reading {
+            let text = str_from_utf8(got) else |_| {
+                reading = false
+                ""
+            }
+            if text.is_empty() {
+                reading = false
+            } else {
+                out = "{out}{text}"
+            }
+        }
+    }
+    tlsc.close(take cli) else |_| {}
+    out
+}
+
+/// A dead Client for refusal arms that must still yield the type
+/// (forgeable by the std client's own design; closed, never used).
+/// Total.
+fn cli_dead() -> tlsc.Client {
+    tlsc.Client {
+        fd: -1,
+        write_key: List[int](),
+        write_iv: List[int](),
+        write_seq: 0,
+        read_key: List[int](),
+        read_iv: List[int](),
+        read_seq: 0,
+    }
+}
+
+/// One transaction over whichever transport the URL names. Rows: io.
+fn txn_for(url: str, hostport: str, req: str, ca_root: str) -> str ! {io} {
+    if url_https(url) {
+        return tls_txn(hostport, req, ca_root)
+    }
+    http_txn(hostport, req)
 }
 
 /// The integer after "HTTP/1.1 " ("0" shapes parse to 0 — a 0 status
@@ -170,11 +419,11 @@ fn parse_resp(raw: str) -> Resp {
 }
 
 /// An unauthenticated GET (the directory, and the nonce endpoint —
-/// RFC 8555 allows GET on both). Rows: io.
-fn http_get(url: str) -> Resp ! {io} {
+/// RFC 8555 allows GET on both), over the URL's transport. Rows: io.
+fn http_get(url: str, ca_root: str) -> Resp ! {io} {
     let hp = url_split(url)
     let req = "GET {hp.1} HTTP/1.1\r\nHost: {hp.0}\r\nConnection: close\r\n\r\n"
-    let raw = http_txn(hp.0, req)?
+    let raw = txn_for(url, hp.0, req, ca_root)?
     parse_resp(raw)
 }
 
@@ -182,9 +431,9 @@ fn http_get(url: str) -> Resp ! {io} {
 /// The protected header inlines the account JWK while `kid` is empty
 /// (newAccount) and names the account URL thereafter (§6.2). Rows:
 /// io.
-fn http_post_jws(hostport: str, path: str, url: str, jws_body: str) -> Resp ! {io} {
+fn http_post_jws(hostport: str, path: str, url: str, jws_body: str, ca_root: str) -> Resp ! {io} {
     let req = "POST {path} HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: application/jose+json\r\nContent-Length: {jws_body.len}\r\nConnection: close\r\n\r\n{jws_body}"
-    let raw = http_txn(hostport, req)?
+    let raw = txn_for(url, hostport, req, ca_root)?
     parse_resp(raw)
 }
 
@@ -301,6 +550,7 @@ pub struct Flow {
     primary: str,
     contact: str,
     ca_url: str,
+    ca_root: str,
     renew_before_s: int,
     check_interval_s: int,
     // directory + conversation state
@@ -331,6 +581,7 @@ pub fn flow_new(
     names: str,
     contact: str,
     ca_url: str,
+    ca_root: str,
     renew_before_s: int,
     check_interval_s: int,
 ) -> Flow {
@@ -351,6 +602,7 @@ pub fn flow_new(
         primary: primary,
         contact: contact,
         ca_url: ca_url,
+        ca_root: ca_root,
         renew_before_s: renew_before_s,
         check_interval_s: check_interval_s,
         url_nonce: "",
@@ -389,7 +641,7 @@ fn post(mut fl: Flow, url: str, payload: str) -> Resp ! {io} {
             protected = jose.acme_protected_kid(fl.kid, fl.nonce, url)
         }
         let body = jose.acme_body(fl.acct_seed, protected, payload.bytes())
-        let r = http_post_jws(hp.0, hp.1, url, body)?
+        let r = http_post_jws(hp.0, hp.1, url, body, fl.ca_root)?
         if !r.nonce.is_empty() {
             fl.nonce = r.nonce
         }
@@ -415,7 +667,7 @@ fn step(mut fl: Flow, now_ms: int) -> str {
         fl.acct_seed = account_key(fl.store) else |_| {
             return fail(mut fl, "cannot read or create the account key under {fl.store}")
         }
-        let dir = http_get(fl.ca_url) else |_| {
+        let dir = http_get(fl.ca_url, fl.ca_root) else |_| {
             return fail(mut fl, "cannot reach the ACME directory {fl.ca_url}")
         }
         if dir.status != 200 {
@@ -430,7 +682,7 @@ fn step(mut fl: Flow, now_ms: int) -> str {
                 "ACME directory {fl.ca_url} is missing newNonce/newAccount/newOrder",
             )
         }
-        let nr = http_get(fl.url_nonce) else |_| {
+        let nr = http_get(fl.url_nonce, fl.ca_root) else |_| {
             return fail(mut fl, "cannot fetch a nonce from {fl.url_nonce}")
         }
         if nr.nonce.is_empty() {

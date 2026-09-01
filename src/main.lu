@@ -823,6 +823,7 @@ fn serve_main(prefix: str, conf: str) -> int {
         config.auto_names(c0),
         config.auto_contact(c0),
         config.auto_ca(c0),
+        config.auto_ca_root(c0),
         config.auto_renew_before_s(c0),
         config.auto_check_interval_s(c0),
     )
