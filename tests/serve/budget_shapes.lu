@@ -1,7 +1,7 @@
 //! check: run(exit=0)
 //! phase: run
 //! lanes: native checked
-//! stage-src: serve conn tls proxy http config obs
+//! stage-src: serve conn tls proxy http config obs metrics
 //!
 //! The ws10 budget's PURE shapes (docs/BUDGET.md): resolve_limits off
 //! parsed models (defaults, fence overrides, 0-means-unlimited, the

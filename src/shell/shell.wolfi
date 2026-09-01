@@ -1,9 +1,9 @@
 module pkg :: shell
-  wolfi v0 · toolchain 0.2.0 · edition v1
-  export_hash 87ed09eb67460b126d7b6c6dd81062354984f36ce9b14404edc3f5c4a5838c08
-  pkg_hash    87ed09eb67460b126d7b6c6dd81062354984f36ce9b14404edc3f5c4a5838c08
+  wolfi v0 · toolchain 0.2.1 · edition v1
+  export_hash 12f3cea90a63816612a9b01f778f9e0cd211c9082e291de2915c3cf1fee3b8d0
+  pkg_hash    12f3cea90a63816612a9b01f778f9e0cd211c9082e291de2915c3cf1fee3b8d0
   deps:
-    config  05fa389d384471aeaf3e9597692b9fc9cc5bf3d8c160cc31991c33ee86185e95
+    config  477e317a328d6e0f6a2ceabc8ff1d72af4bfaf5f0ee131de8a2537942e5d49bb
   items:
     [0] pub conf_hash — fn conf_hash(c: config.Conf) -> str · regions (ρ1) -> -
     [1] pub control_addr — fn control_addr(c: config.Conf) -> str · regions (ρ1) -> -
@@ -39,11 +39,11 @@ module pkg :: shell
     [31] pub signal_ok — fn signal_ok(name: str) -> bool
     [32] pub signal_unix — fn signal_unix(name: str) -> str
     [33] pub signal_verb — fn signal_verb(m: int) -> str
-    [34] pub status_head_text — fn status_head_text(current: int, quitting: bool, events: int) -> str
+    [34] pub status_head_text — fn status_head_text(current: int, quitting: bool, events: int, live_bytes: int) -> str
     [35] pub status_json_close — fn status_json_close() -> str
-    [36] pub status_json_obj — fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int) -> str
-    [37] pub status_json_open — fn status_json_open(current: int, quitting: bool, events: int) -> str
-    [38] pub status_line_text — fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int) -> str
+    [36] pub status_json_obj — fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int, mem_rt_hw: int) -> str
+    [37] pub status_json_open — fn status_json_open(current: int, quitting: bool, events: int, live_bytes: int) -> str
+    [38] pub status_line_text — fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int, mem_rt_hw: int) -> str
     [39] pub status_schema — fn status_schema() -> int
     [40] pub usage_text — fn usage_text() -> str
     [41] pub version — fn version() -> str

@@ -26,7 +26,7 @@
 /// frozen model; -t renders these as `[warn]` lines (they never
 /// change the exit code).
 pub fn lint(c: Conf) -> str {
-    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}{lint_log_inert(c)}{lint_log_native(c)}{lint_log_loses(c)}{lint_budget_native(c)}{lint_body_size_inert(c)}"
+    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}{lint_log_inert(c)}{lint_log_native(c)}{lint_log_loses(c)}{lint_budget_native(c)}{lint_body_size_inert(c)}{lint_metrics_native(c)}{lint_metrics_exposed(c)}"
 }
 
 /// LOBO-L001: `if` inside a `location` block.
@@ -280,6 +280,51 @@ fn lint_body_size_inert(c: Conf) -> str {
     while i < count(c) {
         if c.names[i] == "client_max_body_size" && c.ctx[i] != "http" && c.ctx[i] != "server" {
             out = "{out}LOBO-L009|{c.files[i]}:{c.lines[i]}|\"client_max_body_size\" at {c.ctx[i]} level parses but does not APPLY at this pin: lobo resolves limits at http/server level only (ws10 v0). Move the directive up a level, or wait for the per-location resolution row.\n"
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L010 (ws12): `metrics` is lobo-NATIVE (the WWS-L-native
+/// class) — nginx -t rejects the directive outright, so turning the
+/// endpoint on is the same one-way door as `cert auto`, `log_headers`
+/// and `memory_budget`. Named at load, deliberately.
+fn lint_metrics_native(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "metrics" {
+            out = "{out}LOBO-L010|{c.files[i]}:{c.lines[i]}|\"metrics\" is lobo-native (WWS-L-native class): nginx -t rejects it — nginx's own metrics story is a third-party module or the commercial build, lobo's is in core with no recompile (docs/metrics.md). Delete the line to walk back to an nginx-carryable config; nothing else in the server depends on it.\n"
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L011 (ws12): `metrics on` where the server's `listen` is not
+/// a loopback address. THE CARDINALITY FENCE keeps the exposition
+/// cheap; this lint keeps it PRIVATE, which is the entire v0 access
+/// posture — there is no auth on the endpoint beyond where it is
+/// bound (ws14 revisits, and the contract says so in as many words).
+/// A warning, not a refusal: a private-network bind is a legitimate
+/// admin posture lobo cannot tell apart from a public one by reading
+/// an address.
+fn lint_metrics_exposed(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        let on = c.names[i] == "metrics" && c.args_n[i] >= 1 && c.argp[c.args_at[i]] == "on"
+        if on {
+            // every listen at or under the same block level
+            var j: int = 0
+            while j < count(c) {
+                let same = c.names[j] == "listen" && c.args_n[j] >= 1 && c.parent[j] == c.parent[i]
+                if same && !listen_is_loopback(c.argp[c.args_at[j]]) {
+                    out = "{out}LOBO-L011|{c.files[i]}:{c.lines[i]}|\"metrics on\" publishes /metrics and /status.json on listen \"{c.argp[c.args_at[j]]}\", which is not a loopback address. lobo's v0 access posture for the endpoint IS the bind address — there is no auth beyond it (ws14 revisits), and the exposition names your generations, upstream error rates and memory high waters. Bind this server to 127.0.0.1 or an admin network, or turn the endpoint off.\n"
+                }
+                j = j + 1
+            }
         }
         i = i + 1
     }

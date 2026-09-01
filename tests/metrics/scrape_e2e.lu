@@ -1,0 +1,384 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs metrics
+//!
+//! THE ENDPOINT, END TO END (ws12): spawn the real lobo with
+//! `metrics on`, drive a KNOWN workload, scrape, and assert EXACT
+//! counts. The deterministic corpus is what makes exact assertion
+//! possible and the contract says to use it — a range here would hide
+//! precisely the off-by-one a counter exists to catch. Only timings
+//! are ranged (the histogram's `_count` is exact; which bucket a
+//! request lands in is not).
+//! What it pins:
+//!   1. the exposition's frame: the exact Content-Type from the spec,
+//!      a `# HELP`/`# TYPE` pair before every family, and no `# TYPE`
+//!      line written twice;
+//!   2. EXACT counts after a known drive — four 200s and one 404,
+//!      counted by class, with the scrape itself accounted one behind
+//!      (a counter that includes its own scrape can only ever report
+//!      the previous one, and that is the honest ordering);
+//!   3. the histogram is internally consistent: `_count` equals the
+//!      requests served and the `+Inf` bucket equals `_count`;
+//!   4. `/status.json` on the SAME listener is the SAME object the
+//!      control channel serves — ws08's design-once note, proved:
+//!      identical schema, identical generation members;
+//!   5. the ws10 interplay: under a tiny `memory_budget` the scrape
+//!      503s, because the exposition it would materialize is charged
+//!      like any other response body. A scrape that sheds under
+//!      pressure is CORRECT;
+//!   6. the endpoint is OFF by default — the same paths route to the
+//!      filesystem (404) when `metrics` is absent.
+//! Loopback only, OS-chosen ports, scratch cleared at START.
+
+use metrics
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn ask(port: int, reqtext: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 65536) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn get(port: int, path: str) -> str ! {io} {
+    ask(port, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+}
+
+fn body_of(reply: str) -> str {
+    let cut = reply.find("\r\n\r\n") else -1
+    if cut < 0 {
+        return ""
+    }
+    reply[cut + 4..reply.len]
+}
+
+fn line_with(text: str, needle: str) -> str {
+    for l in text.lines() {
+        if l.starts_with(needle) {
+            return l
+        }
+    }
+    ""
+}
+
+fn count_lines_starting(text: str, needle: str) -> int {
+    var n: int = 0
+    for l in text.lines() {
+        if l.starts_with(needle) {
+            n = n + 1
+        }
+    }
+    n
+}
+
+/// The value after the last space of a sample line, as an int; -1 when
+/// the line is absent or unparseable.
+fn value_of(text: str, needle: str) -> int {
+    let l = line_with(text, needle)
+    if l.is_empty() {
+        return -1
+    }
+    let sp = l.rfind(" ") else -1
+    if sp < 0 {
+        return -1
+    }
+    let v = l[sp + 1..l.len]
+    if v.is_empty() {
+        return -1
+    }
+    var n: int = 0
+    for b in v.bytes() {
+        if b < 48 || b > 57 {
+            return -1
+        }
+        n = n * 10 + b - 48
+    }
+    n
+}
+
+fn spawn_lobo(conf_path: str) -> int {
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(conf_path)
+    os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+}
+
+fn main() -> !int {
+    let d = "ws12_scrape"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/index.html", "SCRAPE-E2E\n")?
+
+    // ---------------------------------------------------------------
+    // part 1: the endpoint ON, no budget — the frame and exact counts
+    // ---------------------------------------------------------------
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid ws12_scrape/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  access_log ws12_scrape/access.log;\n  metrics on;\n  server {{ listen 127.0.0.1:{hp}; root ws12_scrape/w; index index.html; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+    let child = spawn_lobo("{d}/lobo.conf")
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // A KNOWN workload: four 200s and one 404. Nothing else touches
+    // this server, so every count below is exact.
+    var i: int = 0
+    while i < 4 {
+        let r = get(hp, "/index.html")?
+        assert(r.starts_with("HTTP/1.1 200 OK"), "the drive serves: {r}")
+        i = i + 1
+    }
+    let r404 = get(hp, "/nope.html")?
+    assert(r404.starts_with("HTTP/1.1 404 Not Found"), "the miss is a 404: {r404}")
+
+    // ---- the scrape's frame
+    let s1 = get(hp, "/metrics")?
+    assert(s1.starts_with("HTTP/1.1 200 OK"), "the scrape answers 200: {s1}")
+    assert(
+        s1.contains("Content-Type: {metrics.content_type()}\r\n"),
+        "the exposition's exact content type: {s1}",
+    )
+    assert(s1.contains("Cache-Control: no-store\r\n"), "a scrape is never cached: {s1}")
+    let b1 = body_of(s1)
+    // every family in the registry appears, with its pair, exactly once
+    for sp in metrics.registry() {
+        assert(
+            count_lines_starting(b1, "# TYPE {sp.name} ") == 1,
+            "exactly one TYPE line for {sp.name}",
+        )
+        assert(
+            count_lines_starting(b1, "# HELP {sp.name} ") == 1,
+            "exactly one HELP line for {sp.name}",
+        )
+    }
+
+    // ---- EXACT counts. The scrape is an ordinary request: it is
+    // being served as these numbers are read, so it cannot yet be in
+    // them. Five requests are complete at this point.
+    assert(value_of(b1, "lobo_requests_total{{class=\"2xx\"}} ") == 4, "four 200s, exactly:\n{b1}")
+    assert(value_of(b1, "lobo_requests_total{{class=\"4xx\"}} ") == 1, "one 404, exactly:\n{b1}")
+    assert(value_of(b1, "lobo_requests_total{{class=\"3xx\"}} ") == 0, "no redirects:\n{b1}")
+    assert(value_of(b1, "lobo_requests_total{{class=\"5xx\"}} ") == 0, "no server errors:\n{b1}")
+    assert(
+        value_of(b1, "lobo_connections_accepted_total ") == 6,
+        "five drives plus this scrape's own connection:\n{b1}",
+    )
+    assert(
+        value_of(b1, "lobo_request_duration_seconds_count ") == 5,
+        "the histogram counted every served request:\n{b1}",
+    )
+    assert(
+        value_of(b1, "lobo_request_duration_seconds_bucket{{le=\"+Inf\"}} ") == 5,
+        "+Inf holds every observation:\n{b1}",
+    )
+    assert(value_of(b1, "lobo_config_generation_current ") == 1, "generation 1 is current:\n{b1}")
+    assert(
+        value_of(b1, "lobo_config_generations{{state=\"current\"}} ") == 1,
+        "one current generation:\n{b1}",
+    )
+    assert(
+        value_of(b1, "lobo_config_generations{{state=\"draining\"}} ") == 0,
+        "nothing draining:\n{b1}",
+    )
+    assert(
+        value_of(b1, "lobo_budget_refusals_total{{gen=\"1\"}} ") == 0,
+        "no budget is armed here:\n{b1}",
+    )
+    assert(
+        value_of(b1, "lobo_request_region_bytes_high_water{{gen=\"1\"}} ") > 0,
+        "the MEASURED region high water is a real number:\n{b1}",
+    )
+    assert(
+        value_of(b1, "lobo_upstream_requests_total{{class=\"error\"}} ") == 0,
+        "nothing was proxied:\n{b1}",
+    )
+    assert(
+        line_with(b1, "lobo_build_info{{version=").ends_with(" 1"),
+        "the info metric is always 1:\n{b1}",
+    )
+
+    // ---- a SECOND scrape sees the first one. The counter that
+    // includes its own scrape reports one behind, exactly.
+    let b2 = body_of(get(hp, "/metrics")?)
+    assert(
+        value_of(b2, "lobo_requests_total{{class=\"2xx\"}} ") == 5,
+        "the first scrape's own 200 is now counted:\n{b2}",
+    )
+    assert(
+        value_of(b2, "lobo_request_duration_seconds_count ") == 6,
+        "six requests complete:\n{b2}",
+    )
+
+    // ---- /status.json is the SAME object the control channel serves
+    // (ws08's design-once note, proved)
+    let sj = body_of(get(hp, "/status.json")?)
+    assert(sj.starts_with("{{\"schema\":1,"), "the status object over http: {sj}")
+    assert(sj.contains("\"live_region_bytes\":"), "the measured live total: {sj}")
+    assert(sj.contains("\"mem_rt_high_water\":"), "the measured high water: {sj}")
+    let cj = shell.control_fetch(ep, "status json") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "status json over the control channel failed")
+        ""
+    }
+    // the two differ only in the numbers that moved between the reads
+    // (one more request served); the SHAPE is identical, which is the
+    // claim
+    assert(cj.starts_with("{{\"schema\":1,"), "the control object: {cj}")
+    assert(
+        cj.contains("\"gen\":1,\"state\":\"current\""),
+        "both carry the same generation member: {cj}",
+    )
+    assert(
+        sj.contains("\"gen\":1,\"state\":\"current\""),
+        "both carry the same generation member: {sj}",
+    )
+
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "lobo exited 0 (got {code})")
+
+    // ---------------------------------------------------------------
+    // part 2: the ws10 interplay — a scrape under a tiny budget SHEDS
+    // ---------------------------------------------------------------
+    let hp2 = free_port()?
+    let cp2 = free_port()?
+    let ep2 = "127.0.0.1:{cp2}"
+    let conf2 = "pid ws12_scrape/lobo2.pid;\ncontrol 127.0.0.1:{cp2};\nhttp {{\n  types {{ text/html html; }}\n  access_log ws12_scrape/access2.log;\n  error_log ws12_scrape/error2.log info;\n  memory_budget 1k;\n  metrics on;\n  server {{ listen 127.0.0.1:{hp2}; root ws12_scrape/w; index index.html; }}\n}}\n"
+    fs_write_text("{d}/lobo2.conf", conf2)?
+    let child2 = spawn_lobo("{d}/lobo2.conf")
+    if !wait_alive(ep2) {
+        os_kill(child2) else |_| {}
+        let _ = os_wait(child2) else |_| 0
+        assert(false, "the second lobo never became alive")
+    }
+    // an ordinary request fits the 1k budget
+    let ok2 = get(hp2, "/index.html")?
+    assert(ok2.starts_with("HTTP/1.1 200 OK"), "a small request fits 1k: {ok2}")
+    // the exposition does not — it is charged like any other response
+    // body, so the scrape sheds. This is the CORRECT answer.
+    let shed = get(hp2, "/metrics")?
+    assert(
+        shed.starts_with("HTTP/1.1 503 Service Temporarily Unavailable"),
+        "a scrape whose exposition blows the budget is a 503 with a name: {shed}",
+    )
+    assert(line_with(shed, "Connection:").contains("close"), "the refusal closes: {shed}")
+    time_sleep_ms(200)
+    let st2 = shell.control_fetch(ep2, "status") else |_| {
+        os_kill(child2) else |_| {}
+        assert(false, "status fetch failed")
+        ""
+    }
+    assert(
+        line_with(st2, "generation 1:").contains("budget-503s=1"),
+        "the shed scrape is counted like any other refusal: {st2}",
+    )
+    let rq2 = shell.control_send(ep2, "quit") else |_| {
+        os_kill(child2) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq2.contains("draining then exiting"), "quit announces: {rq2}")
+    let code2 = os_wait(child2) else |_| -1
+    assert(code2 == 0, "the second lobo exited 0 (got {code2})")
+    let el2 = fs_read_text("{d}/error2.log")?
+    assert(
+        el2.contains("budget-exceeded gen=1 site=admin"),
+        "the refusal names the admin site (the fifth site, appended):\n{el2}",
+    )
+
+    // ---------------------------------------------------------------
+    // part 3: the endpoint is OFF by default
+    // ---------------------------------------------------------------
+    let hp3 = free_port()?
+    let cp3 = free_port()?
+    let ep3 = "127.0.0.1:{cp3}"
+    let conf3 = "pid ws12_scrape/lobo3.pid;\ncontrol 127.0.0.1:{cp3};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp3}; root ws12_scrape/w; index index.html; }}\n}}\n"
+    fs_write_text("{d}/lobo3.conf", conf3)?
+    let child3 = spawn_lobo("{d}/lobo3.conf")
+    if !wait_alive(ep3) {
+        os_kill(child3) else |_| {}
+        let _ = os_wait(child3) else |_| 0
+        assert(false, "the third lobo never became alive")
+    }
+    let off1 = get(hp3, "/metrics")?
+    assert(
+        off1.starts_with("HTTP/1.1 404 Not Found"),
+        "with no `metrics` directive the path is an ordinary miss: {off1}",
+    )
+    let off2 = get(hp3, "/status.json")?
+    assert(off2.starts_with("HTTP/1.1 404 Not Found"), "so is the status path: {off2}")
+    let rq3 = shell.control_send(ep3, "quit") else |_| {
+        os_kill(child3) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq3.contains("draining then exiting"), "quit announces: {rq3}")
+    let code3 = os_wait(child3) else |_| -1
+    assert(code3 == 0, "the third lobo exited 0 (got {code3})")
+
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

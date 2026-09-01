@@ -1,0 +1,155 @@
+//! check: run(exit=0, stdout="small: 200 charged true bounded true\nstream: 200 200 O(1)-in-file-size true charged true\nhead: 200 rt==0 true\nlive: reclaimed true\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate, mem.region.account.1, mem.region.account.2
+//! stage-src: serve conn tls proxy http config obs metrics
+//!
+//! THE NUMBERS ARE MEASURED (ws12): `serve.ReqOut.mem_rt` is not
+//! lobo's estimate of what a response cost — it is `region_bytes` read
+//! inside the per-response region the ws10 audit put there
+//! ([mem.region.account.1], wolf-lang s131). This witness pins the
+//! four RELATIONS lobo depends on, never the units (which are the
+//! native arena's alignment-rounded container storage on one tier and
+//! the checked machine's shadow model on another — the clause says so
+//! and this test refuses to compare them):
+//!   1. a served small file charges the region something, and that
+//!      charge is BOUNDED (a small body is small memory);
+//!   2. THE O(1) CLAIM, measured: two streamed files of different
+//!      lengths charge the SAME high water, because each 64 KiB chunk
+//!      dies at its `}`. ws10 could only argue this from the outside,
+//!      by sampling RSS with ps(1) and calling the difference noise;
+//!      the runtime's own ledger says it as an equality. This is the
+//!      sprint's whole point in one assertion;
+//!   3. a HEAD materializes no body, so it charges nothing (rt == 0)
+//!      — the same request shape whose budget charge is also zero;
+//!   4. the regions are RECLAIMED WHOLESALE: `live_region_bytes()`
+//!      after the responses is back at its reading before them
+//!      ([mem.region.account.2]), which is the property that makes a
+//!      long-running lobo's body memory bounded.
+//! What the measurement also FOUND, and what the docs now teach: the
+//! runtime's charge for a 64 KiB chunk is ~1 MiB, not 64 KiB — a byte
+//! buffer is a `List[int]` (8 bytes an element) and the ledger is
+//! cumulative, so the push-growth's abandoned buffers stay charged
+//! ([mem.region.account.1] says they must). The budget's `file` site
+//! charges 64 KiB. The gap is real, it is NOT a lobo bug, and it is
+//! filed upstream — docs/BUDGET.md carries the numbers.
+//! Loopback only; the doc root is a per-test scratch dir cleared at
+//! the START (sc12 idempotency).
+
+use config
+use http
+use serve
+
+fn read_reply(cli: int) -> str ! {io} {
+    net_deadline(cli, 4000) else |_| {
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 65536) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                return io
+            },
+            utf8 => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    out
+}
+
+/// Serve exactly one request through `serve_request` and hand back its
+/// ReqOut — the seam that carries the measured number out. The reply
+/// is drained so the client fd never blocks the writer.
+fn drive(c: config.Conf, req: str) -> serve.ReqOut ! {io} {
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let port = net_port(l) else |_| {
+        return io
+    }
+    let cli = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_write(cli, req) else |_| {
+        return io
+    }
+    let conn = net_accept(l) else |_| {
+        return io
+    }
+    let cut = req.find("\r\n\r\n") else req.len
+    let head = req[0..cut]
+    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0)
+    net_close(conn) else |_| {}
+    let _ = read_reply(cli) else ""
+    net_close(cli) else |_| {}
+    net_close(l) else |_| {}
+    ro
+}
+
+fn main() -> !int {
+    let root = "ws12_rm"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all(root)?
+    fs_write_text("{root}/small.html", "<html>\nhi\n</html>\n")?
+    // 128 KiB and 256 KiB — two and four whole 64 KiB stream chunks,
+    // both past the 65536 small/stream boundary the writer draws, and
+    // both small enough that the reply fits the loopback socket buffer
+    // (this test's client reads only after serve_request returns, so a
+    // reply larger than the buffer would deadlock the writer — the
+    // spawn-free rig has no second reader). Built by DOUBLING: a
+    // 5120-iteration append is quadratic and eats the runner's
+    // per-file ceiling.
+    var big = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    var i: int = 0
+    while i < 11 {
+        big = "{big}{big}"
+        i = i + 1
+    }
+    fs_write_text("{root}/big.bin", big)?
+    fs_write_text("{root}/bigger.bin", "{big}{big}")?
+
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws12_rm; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+
+    // the live-region baseline, read BEFORE any response region exists
+    let base = live_region_bytes()
+
+    // 1. the small path: one region, one body, a real charge
+    let r1 = drive(c, "GET /small.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    print("small: {r1.acc.status} charged {r1.mem_rt > 0} bounded {r1.mem_rt < 65536}")
+
+    // 2. the stream path, TWICE, at 1x and 2x the length: the high
+    // water is the largest single chunk region, so doubling the file
+    // does not move it. An equality, not a range — the per-chunk
+    // region makes streaming O(1) in the file's size and the runtime
+    // says so itself.
+    let r2 = drive(c, "GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    let r2b = drive(c, "GET /bigger.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    print(
+        "stream: {r2.acc.status} {r2b.acc.status} O(1)-in-file-size {r2.mem_rt == r2b.mem_rt} charged {r2.mem_rt > 0}",
+    )
+
+    // 3. HEAD materializes no body — nothing to region, nothing charged
+    let r3 = drive(c, "HEAD /small.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    print("head: {r3.acc.status} rt==0 {r3.mem_rt == 0}")
+
+    // 4. every response region died at its `}` — the live total is back
+    // where it started ([mem.region.account.2]'s wholesale reclamation,
+    // which is what bounds a long-running lobo's body memory)
+    print("live: reclaimed {live_region_bytes() == base}")
+
+    fs_remove_dir_all(root) else |_| {}
+    0
+}

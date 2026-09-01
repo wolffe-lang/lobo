@@ -73,6 +73,12 @@ if ! tools/lobo-logvars --check; then
     exit 1
 fi
 
+step "metrics docs (docs/metrics.md, ws12)"
+if ! tools/lobo-metricsdoc --check; then
+    echo "lobo-gauntlet: FAILED at metricsdoc — see above for the ritual" >&2
+    exit 1
+fi
+
 step "interface freshness (.wolfi)"
 if ! tools/lobo-interface --check; then
     echo "lobo-gauntlet: FAILED at wolfi — see above for the ritual" >&2
@@ -130,6 +136,12 @@ fi
 step "replay (ws11: the planted drain race explored to a finding, its .loborace artifact replayed byte-stable, the fix's frontier closed)"
 if ! tools/lobo-replay; then
     echo "lobo-gauntlet: FAILED at replay — the replay-the-race witness (ws11)" >&2
+    exit 1
+fi
+
+step "metrics (ws12: the exposition checked clause by clause against the vendored spec, exact counts, cardinality held)"
+if ! tools/lobo-metrics; then
+    echo "lobo-gauntlet: FAILED at metrics" >&2
     exit 1
 fi
 

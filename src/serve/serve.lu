@@ -19,6 +19,7 @@
 use config
 use conn
 use http
+use metrics
 use obs
 use proxy
 
@@ -225,13 +226,20 @@ pub fn mime_for(c: config.Conf, path: str) -> str {
 /// (serve/ reads directives; http/ never does). `token` is the
 /// Server header identity, `keepalive_timeout_ms` the idle gap before
 /// a persistent connection is closed, `keepalive_requests` the per-
-/// connection request budget.
+/// connection request budget. ws12 adds `metrics_on` — the effective
+/// `metrics` switch. Like every other field here it is resolved ONCE
+/// at start: ServerOpts is process-wide, not per-generation (only
+/// `http.Limits` and the config model itself freeze per generation),
+/// so a reload that flips the endpoint takes effect at the next
+/// restart. Said out loud rather than implied; the per-generation
+/// ServerOpts freeze is routed residue.
 pub struct ServerOpts {
     token: str,
     keepalive_timeout_ms: int,
     keepalive_requests: int,
     read_timeout_ms: int,
     challenge_dir: str,
+    metrics_on: bool,
 }
 
 /// The lobo-flavoured defaults (nginx analogues: keepalive_timeout 75s,
@@ -243,6 +251,7 @@ pub fn default_opts() -> ServerOpts {
         keepalive_requests: 1000,
         read_timeout_ms: 60000,
         challenge_dir: "",
+        metrics_on: false,
     }
 }
 
@@ -285,15 +294,29 @@ pub fn resolve_limits(c: config.Conf) -> http.Limits {
 /// refused at that site (`limit`/`would` are the event's numbers);
 /// `used` is the admitted-bytes total either way — the high-water
 /// the status surface aggregates.
+/// One request's memory accounting. `used`/`limit`/`would`/`site` are
+/// ws10's ADMISSION meter — bytes lobo decided to let in, counted by
+/// lobo, above the runtime. `rt` is ws12's MEASURED half: the largest
+/// `region_bytes` reading taken inside a per-response region while
+/// serving this request ([mem.region.account.1], wolf-lang s131) —
+/// the runtime's own ledger, not lobo's estimate. The two are
+/// different numbers on purpose and the docs say so: `used` is what
+/// the budget rules on (it is knowable BEFORE the bytes are admitted,
+/// which is what makes a pre-admission 503 possible); `rt` is what
+/// the machine actually charged (knowable only after). `rt` is 0 for
+/// a request that materialized no regioned body — a HEAD, a 304, an
+/// error response, or the TLS path, whose body cannot be regioned at
+/// this pin (the D24 residue).
 struct Charge {
     used: int,
     site: str,
     limit: int,
     would: int,
+    rt: int,
 }
 
 fn charge_new(budget: int) -> Charge {
-    Charge { used: 0, site: "", limit: budget, would: 0 }
+    Charge { used: 0, site: "", limit: budget, would: 0, rt: 0 }
 }
 
 // ------------------------------------------------------------------
@@ -673,6 +696,15 @@ fn serve_file(
                 failed = true
                 List[int]()
             }
+            // ws12: the runtime's OWN number for this response's body.
+            // Read after the read that charges it and before the block
+            // closes — an int, so it crosses the boundary like `wcode`.
+            // Monotone and stable between allocations by
+            // [mem.region.account.1]; its UNITS are the native arena's
+            // (alignment-rounded container storage), which is why the
+            // docs quote it as measured-per-tier and never compare it
+            // to `chg.used`.
+            chg.rt = region_bytes(resp)
             if !failed {
                 net_write(sock, head) else |e| match e {
                     closed => {
@@ -800,6 +832,16 @@ fn serve_file(
                     },
                 }
             }
+            // ws12: the HIGH WATER of the per-chunk regions, not their
+            // sum — each dies at this `}`, so what a streamed file
+            // costs the machine at once is the largest single chunk
+            // region, and that is the number the budget's `file` site
+            // charges 64 KiB for. Summing would report a file size and
+            // call it memory.
+            let chunk_rt = region_bytes(chunkr)
+            if chunk_rt > chg.rt {
+                chg.rt = chunk_rt
+            }
             // scalar tail on purpose — see the small-path region note
             wcode = wcode
         }
@@ -826,6 +868,85 @@ fn keep_token(keep: bool) -> str {
         return "keep-alive"
     }
     "close"
+}
+
+// ------------------------------------------------------------------
+// the admin endpoint (ws12) — /metrics and /status.json
+//
+// TWO PHASE, on purpose. serve/ knows HTTP framing; it does not know
+// the counters, which live as plain ints in the ENTRY's poll loop
+// (src/metrics/metrics.lu's header says why that is the measured
+// hot-path answer and not a shortcut). So `serve_request` RECOGNISES
+// an admin request and hands it back unanswered — `ReqOut.admin` names
+// which one — and the entry renders the body and calls `write_admin`.
+// The alternative, handing serve a pre-rendered snapshot every pass,
+// would build a few KB of exposition eighty times a second whether or
+// not anyone scraped; at this pin those bytes are never reclaimed
+// (wolf-lang#191), so the loop would leak megabytes an hour to answer
+// a scrape that arrives once a minute. Recognition costs two string
+// compares.
+//
+// V0 POSTURE, stated here and in docs/directives.md: the endpoint
+// answers on the PLAINTEXT step path only. `serve_conn_cn` (the TLS
+// and blocking path) has its own flow and no second phase, so over TLS
+// these two paths route to the filesystem like any other URI — the
+// same D24/D27 rider ws10's counters carry. Access control is the bind
+// address and nothing else (ws14 revisits); LOBO-L011 says so at load.
+// ------------------------------------------------------------------
+
+/// Which admin surface `path` names, or "" for an ordinary request.
+/// Answers "" when the endpoint is off — the switch is the whole
+/// access gate at v0, so an off endpoint's paths must route to the
+/// filesystem exactly as they would have. Total.
+pub fn admin_kind(on: bool, path: str) -> str {
+    if !on {
+        return ""
+    }
+    if path == metrics.metrics_path() {
+        return "metrics"
+    }
+    if path == metrics.status_path() {
+        return "status"
+    }
+    ""
+}
+
+/// Write an admin response: a 200 with `ctype`, `body`, and the
+/// keepalive token — the entry's half of the two-phase endpoint.
+/// Returns the body byte count for the access record. The header set
+/// is deliberately the minimum a scraper needs: no Last-Modified, no
+/// ETag, no Accept-Ranges on a body that is different every time.
+/// Rows: the net builtins' `closed`/`io` — the same two-tag row every
+/// writer in this module carries (W0602's "reuse one spelling"
+/// reading, already the house shape for conn's write pair).
+#[allow(w0602)]
+pub fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io} {
+    var cn = conn_mod_plain(conn)
+    var head = "HTTP/1.1 200 OK\r\n"
+    head = "{head}{hline("Server", token)}"
+    head = "{head}{hline("Date", now_date())}"
+    head = "{head}{hline("Content-Type", ctype)}"
+    head = "{head}{hline("Content-Length", "{body.len}")}"
+    head = "{head}{hline("Connection", keep_token(keep))}"
+    head = "{head}{hline("Cache-Control", "no-store")}"
+    head = "{head}\r\n"
+    write_all(mut cn, head)?
+    write_all(mut cn, body)?
+    body.len
+}
+
+/// The 503 an admin response takes when its rendered body would blow
+/// the request's memory budget — the ws10 `file` site's rule applied
+/// to a body lobo generates rather than reads. Total.
+pub fn write_admin_503(conn: int, token: str) {
+    var cn = conn_mod_plain(conn)
+    send_err(mut cn, 503, false, token)
+}
+
+/// The error-body length for an admin 503, so the entry can fill the
+/// access record without reaching into serve's internals. Total.
+pub fn admin_err_len(token: str) -> int {
+    err_len(503, false, token)
 }
 
 /// Execute a routing decision against the fs: directory redirect,
@@ -1302,7 +1423,11 @@ pub fn serve_conn_cn(
 /// non-empty when the memory budget refused (head|body|body-chunked|
 /// file — the entry emits `budget-exceeded` and counts it),
 /// `bud_limit`/`bud_would` its numbers, and `mem_hw` the request's
-/// admitted-bytes total (the per-generation high-water's feed).
+/// admitted-bytes total (the per-generation high-water's feed). ws12
+/// adds `mem_rt`: the MEASURED region bytes this request's response
+/// body cost the runtime ([mem.region.account.1]) — 0 where no
+/// regioned body was materialized. `mem_hw` is the meter, `mem_rt` is
+/// the machine; the entry high-waters both, separately.
 pub struct ReqOut {
     close: bool,
     carry: str,
@@ -1312,6 +1437,8 @@ pub struct ReqOut {
     bud_limit: int,
     bud_would: int,
     mem_hw: int,
+    mem_rt: int,
+    admin: str,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -1327,6 +1454,27 @@ fn req_out(close: bool, carry: str, acc: obs.Access, chg: Charge) -> ReqOut {
         bud_limit: chg.limit,
         bud_would: chg.would,
         mem_hw: chg.used,
+        mem_rt: chg.rt,
+        admin: "",
+    }
+}
+
+/// A ReqOut for a recognised ADMIN request: nothing has been written
+/// and `admin` names which surface the entry must render. The access
+/// record is filled except for status and body bytes, which only the
+/// entry knows. Total.
+fn req_out_admin(close: bool, carry: str, acc: obs.Access, chg: Charge, kind: str) -> ReqOut {
+    ReqOut {
+        close: close,
+        carry: carry,
+        logged: true,
+        acc: acc,
+        bud_site: chg.site,
+        bud_limit: chg.limit,
+        bud_would: chg.would,
+        mem_hw: chg.used,
+        mem_rt: chg.rt,
+        admin: kind,
     }
 }
 
@@ -1476,6 +1624,21 @@ pub fn serve_request(
     }
 
     let keep = req.keepalive && served + 1 < opts.keepalive_requests
+
+    // ws12: the admin endpoint, recognised and handed BACK. Every
+    // fence and every budget site above has already run, so a scrape
+    // that blew the header budget is a 503 like any other request
+    // (the ws10 interplay, and a rig case). GET and HEAD only — the
+    // 405 for anything else is `handle_request`'s job, so an admin
+    // path with a POST falls through to routing and answers 405 there
+    // exactly as it would for a file.
+    if opts.metrics_on && (req.method == "GET" || req.method == "HEAD") {
+        let kind = admin_kind(true, norm)
+        if !kind.is_empty() {
+            return req_out_admin(!keep, if keep { rest } else { "" }, acc, chg, kind)
+        }
+    }
+
     var should_close = false
     let pplan = proxy.plan(c, norm)
     if pplan.is_proxy {
@@ -1566,6 +1729,8 @@ pub struct ConnStep {
     bud_limit: int,
     bud_would: int,
     mem_hw: int,
+    mem_rt: int,
+    admin: str,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -1583,6 +1748,8 @@ fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, ac
         bud_limit: 0,
         bud_would: 0,
         mem_hw: 0,
+        mem_rt: 0,
+        admin: "",
     }
 }
 
@@ -1614,6 +1781,8 @@ fn step_serve(
         bud_limit: ro.bud_limit,
         bud_would: ro.bud_would,
         mem_hw: ro.mem_hw,
+        mem_rt: ro.mem_rt,
+        admin: ro.admin,
     }
 }
 

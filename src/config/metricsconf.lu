@@ -1,0 +1,109 @@
+//! member: true
+//! config/metricsconf — the ws12 `metrics` directive: the endpoint
+//! switch, its `-t` validation, and the exposure posture the lint
+//! reads. Resolution is v0's first-server-else-http, the same D29
+//! pattern logconf and limitsconf use (server selection is host-blind
+//! at this pin, so there is one effective server).
+//! The directive is lobo-NATIVE (nginx `-t` rejects it — linted
+//! LOBO-L010, the WWS-L-native class), and it is a SWITCH, not a
+//! location: at this pin lobo binds one plaintext listener and one TLS
+//! listener, so the contract's recommended shape — the metrics
+//! endpoint on its own admin `listen` — has nothing to bind to. That
+//! shape is named residue, not silently dropped: docs/directives.md
+//! says so, and LOBO-L011 says it at load time to anyone who turns the
+//! endpoint on where the listener is not loopback.
+
+/// The effective `metrics` switch: true when the effective level says
+/// `on`. Absent, `off`, or an unrecognised value (the -t half already
+/// named it) all read as OFF — the endpoint is opt-in and a config
+/// lobo cannot understand never publishes one. Total.
+pub fn metrics_on(c: Conf) -> bool {
+    let r = metrics_row(c)
+    if r < 0 {
+        return false
+    }
+    c.argp[c.args_at[r]] == "on"
+}
+
+/// The row index of the effective `metrics` directive: the first
+/// server block's own row wins, else an http-level row, else -1.
+/// Total.
+fn metrics_row(c: Conf) -> int {
+    let fs = first_server(c)
+    var http_row: int = -1
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "metrics" && c.args_n[i] >= 1 {
+            if fs >= 0 && c.parent[i] == fs {
+                return i
+            }
+            if c.ctx[i] == "http" && http_row < 0 {
+                http_row = i
+            }
+        }
+        i = i + 1
+    }
+    http_row
+}
+
+/// The -t half: every `metrics` directive's VALUE is `on` or `off`,
+/// wherever it appears (not only the effective level — a bad value
+/// anywhere is a config error, as the oracle rules for its own
+/// flag directives). First failure wins; "" when clean. The
+/// diagnostic keeps the oracle's shape for a flag
+/// (`invalid value "x" in "metrics" directive, it must be "on" or
+/// "off"` — nginx's own wording for ngx_conf_set_flag_slot, probed).
+/// Total.
+pub fn metrics_check(c: Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "metrics" && c.args_n[i] >= 1 {
+            let v = c.argp[c.args_at[i]]
+            if !(v == "on" || v == "off") {
+                return "invalid value \"{v}\" in \"metrics\" directive, it must be \"on\" or \"off\" in {c.files[i]}:{c.lines[i]}"
+            }
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// Whether the address `metrics on` would publish on is a LOOPBACK
+/// address — the whole of lobo's v0 access posture for the endpoint
+/// (there is no auth beyond bind-address discipline; ws14 revisits,
+/// and docs/directives.md states the posture plainly). Reads the
+/// `listen` value at face: an address that begins `127.`, is `::1`,
+/// or is `localhost` is loopback; a bare port, `*`, `0.0.0.0` or any
+/// routable address is not. Total.
+pub fn listen_is_loopback(addr: str) -> bool {
+    let host = listen_host(addr)
+    if host.is_empty() {
+        return false
+    }
+    if host == "::1" || host == "localhost" || host == "[::1]" {
+        return true
+    }
+    host.starts_with("127.")
+}
+
+/// The host part of a `listen` value: everything before the LAST
+/// colon when what follows is all digits, else the whole value. A
+/// bare port (`8080`) has no host and answers "". Total.
+fn listen_host(addr: str) -> str {
+    let colon = addr.rfind(":") else -1
+    if colon < 0 {
+        return ""
+    }
+    let tail = addr[colon + 1..addr.len]
+    if tail.is_empty() {
+        return ""
+    }
+    for b in tail.bytes() {
+        if b < 48 || b > 57 {
+            return addr
+        }
+    }
+    addr[0..colon]
+}

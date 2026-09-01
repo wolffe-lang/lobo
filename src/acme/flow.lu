@@ -189,88 +189,15 @@ fn tls_txn(hostport: str, req: str, ca_root: str) -> str ! {io} {
         net_close(fd) else |_| {}
         return io
     }
+    // ws12 (wolf-std#3/sc31): the row names itself — the twenty-arm
+    // match that re-listed std.x.tls.client's refusal vocabulary is
+    // gone (see the proxy's twin site for the argument). Bind first,
+    // then name; the message is byte-identical to the old shape.
     var hs_fail = ""
-    var cli = tlsc.complete(take pend) else |e| match e {
-        closed => {
-            hs_fail = "closed"
-            cli_dead()
-        },
-        timeout => {
-            hs_fail = "timeout (deadline expired mid-handshake)"
-            cli_dead()
-        },
-        io => {
-            hs_fail = "io"
-            cli_dead()
-        },
-        decode_error => {
-            hs_fail = "decode_error (malformed flight — is the CA speaking TLS?)"
-            cli_dead()
-        },
-        bad_record_mac => {
-            hs_fail = "bad_record_mac"
-            cli_dead()
-        },
-        unexpected_message => {
-            hs_fail = "unexpected_message"
-            cli_dead()
-        },
-        illegal_parameter => {
-            hs_fail = "illegal_parameter"
-            cli_dead()
-        },
-        downgrade => {
-            hs_fail = "downgrade (the CA answered below TLS 1.3)"
-            cli_dead()
-        },
-        handshake_failure => {
-            hs_fail = "handshake_failure (suite/alert — the profile is TLS 1.3 ChaCha20-Poly1305 X25519)"
-            cli_dead()
-        },
-        decrypt_error => {
-            hs_fail = "decrypt_error (the CA Finished did not verify)"
-            cli_dead()
-        },
-        zero => {
-            hs_fail = "zero (all-zero shared secret)"
-            cli_dead()
-        },
-        der => {
-            hs_fail = "der (unparseable certificate)"
-            cli_dead()
-        },
-        unsupported_alg => {
-            hs_fail = "unsupported_alg (the CA chain uses an algorithm outside the ladder)"
-            cli_dead()
-        },
-        bad_signature => {
-            hs_fail = "bad_signature"
-            cli_dead()
-        },
-        expired => {
-            hs_fail = "expired (CA certificate)"
-            cli_dead()
-        },
-        not_yet_valid => {
-            hs_fail = "not_yet_valid (CA certificate)"
-            cli_dead()
-        },
-        name_mismatch => {
-            hs_fail = "name_mismatch (the chain does not certify \"{host}\")"
-            cli_dead()
-        },
-        not_ca => {
-            hs_fail = "not_ca (chain issuer is not a CA)"
-            cli_dead()
-        },
-        issuer_mismatch => {
-            hs_fail = "issuer_mismatch (chain does not reach cert_ca_root)"
-            cli_dead()
-        },
-        unknown_critical => {
-            hs_fail = "unknown_critical (certificate extension)"
-            cli_dead()
-        },
+    let attempted = tlsc.complete(take pend)
+    var cli = tlsc.named(attempted) else |Row(name)| {
+        hs_fail = "{name}{tls_hint(name, host)}"
+        cli_dead()
     }
     if !hs_fail.is_empty() {
         eprint("lobo: [error] ACME https: TLS handshake with {hostport} failed: {hs_fail}")
@@ -327,6 +254,56 @@ fn tls_txn(hostport: str, req: str, ca_root: str) -> str ! {io} {
     }
     tlsc.close(take cli) else |_| {}
     out
+}
+
+/// The operator hint that follows a NAMED ACME-directory TLS refusal —
+/// lobo's own prose, keyed by `std.x.tls.client`'s stable row name
+/// (ws12, wolf-std#3). Empty for rows whose name is the whole story
+/// and for any row std grows later. Leading space included. Total.
+fn tls_hint(name: str, host: str) -> str {
+    if name == "timeout" {
+        return " (deadline expired mid-handshake)"
+    }
+    if name == "decode_error" {
+        return " (malformed flight — is the CA speaking TLS?)"
+    }
+    if name == "downgrade" {
+        return " (the CA answered below TLS 1.3)"
+    }
+    if name == "handshake_failure" {
+        return " (suite/alert — the profile is TLS 1.3 ChaCha20-Poly1305 X25519)"
+    }
+    if name == "decrypt_error" {
+        return " (the CA Finished did not verify)"
+    }
+    if name == "zero" {
+        return " (all-zero shared secret)"
+    }
+    if name == "der" {
+        return " (unparseable certificate)"
+    }
+    if name == "unsupported_alg" {
+        return " (the CA chain uses an algorithm outside the ladder)"
+    }
+    if name == "expired" {
+        return " (CA certificate)"
+    }
+    if name == "not_yet_valid" {
+        return " (CA certificate)"
+    }
+    if name == "name_mismatch" {
+        return " (the chain does not certify \"{host}\")"
+    }
+    if name == "not_ca" {
+        return " (chain issuer is not a CA)"
+    }
+    if name == "issuer_mismatch" {
+        return " (chain does not reach cert_ca_root)"
+    }
+    if name == "unknown_critical" {
+        return " (certificate extension)"
+    }
+    ""
 }
 
 /// A dead Client for refusal arms that must still yield the type

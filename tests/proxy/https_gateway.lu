@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: proxy http config obs serve conn tls
+//! stage-src: proxy http config obs serve conn tls metrics
 //!
 //! wsm04, the D21 retirement's FAILURE half, live: an https upstream
 //! that never speaks TLS must become a bounded, NAMED gateway error —

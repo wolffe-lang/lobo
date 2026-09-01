@@ -39,10 +39,14 @@ premise and found it half-true at the current pin:
 
 ### The audit method (a deliverable)
 
-No in-language region accounting exists at this pin (`region_bytes` /
-`live_region_bytes` live in `wolf_rt` but reach no lane — the query +
-creation-time-cap ask is filed as **wolf-lang#187**, with this page's
-use case as the customer). So the audit observes from OUTSIDE:
+**ws12 update — the audit no longer has to observe from outside.**
+wolf-lang s131 landed `region_bytes(r)` and `live_region_bytes()`
+([mem.region.account.1/.2]) at pin `0.2.1+dev.e6cf24e`, and lobo reads
+them: the numbers below stopped being estimates. What follows is kept
+in full because it is still the *shape* of the audit, and because the
+`ps(1)` witness still guards the half the ledger cannot see (#191's
+string work, which lands in no named region at all). The OUTSIDE
+method:
 
 1. `tests/rig/memdrive.lu` drives N keepalive requests over **one**
    connection (a close before N is a named failure — the keepalive
@@ -58,6 +62,77 @@ a 20k-iteration `region`-wrapped List loop holds 1.5 MB where the bare
 loop holds 84 MB (regions work, cross-call included — despite a
 misleading W1001, filed as **wolf-lang#192**); the same loop over str
 interpolation holds 666 MB with or without the region (#191).
+**#192 healed at the ws12 pin**: r04 fixed both halves (W1001 gains its
+call test, E1010 reads through the error row), so the misleading
+diagnostic that made the ws10 probe hard to read is gone.
+
+## The measured numbers (ws12)
+
+`serve` now reads `region_bytes` inside the per-response and per-chunk
+regions the ws10 audit put there, and carries the reading out as
+`ReqOut.mem_rt`. The entry high-waters it per generation beside ws10's
+metered figure. Both are published: `mem-rt-hw` in `lobo status`,
+`mem_rt_high_water` in the JSON, `lobo_request_region_bytes_high_water`
+at `/metrics`, and the process-wide `live_region_bytes()` as
+`live-region-bytes:` / `lobo_live_region_bytes`.
+
+**Two numbers, two questions, never subtracted from each other:**
+
+| | `mem-hw` (ws10) | `mem-rt-hw` (ws12) |
+|---|---|---|
+| what it counts | bytes lobo DECIDED to admit | bytes the RUNTIME charged the response region |
+| who computes it | lobo's admission meter | the region ledger, `[mem.region.account.1]` |
+| when it is knowable | BEFORE the bytes are read — which is what makes a pre-admission 503 possible | only after |
+| what it rules | the budget | nothing; it reports |
+| units | request bytes | implementation-measured per tier |
+
+**What the ledger says, measured 2026-09-01, pin `0.2.1+dev.e6cf24e`,
+macOS/arm64** (`tests/serve/region_measured.lu` pins the relations;
+these are the raw readings behind it):
+
+| response | budget charges | region ledger reads |
+|---|---|---|
+| an 18-byte file | 18 | **496** native / 288 checked |
+| one 64 KiB stream chunk | 65,536 | **1,048,560** native / 1,048,576 checked |
+| a HEAD | 0 | **0** |
+| a 128 KiB file, streamed | 65,536 (one chunk) | 1,048,560 |
+| a 256 KiB file, streamed | 65,536 (one chunk) | 1,048,560 — *the same number* |
+
+Read the last two rows first: **doubling the file does not move the
+number.** That is the O(1)-in-file-size claim ws10 could only argue
+from RSS noise, now stated by the runtime as an equality, and it is the
+property that makes a long-running lobo's body memory bounded. The
+per-chunk region works exactly as designed.
+
+Now the honest part. **A 64 KiB chunk charges 1 MiB — 16x.** Two
+multipliers, neither of them a lobo bug and neither of them hidden:
+
+1. **8x, because a byte buffer is a `List[int]`.** `fs_read_chunk`,
+   `fs_read_bytes` and `net_read_bytes` all return one machine int (8
+   bytes) per byte. 64 KiB of file is 512 KiB of storage.
+2. **2x, because the ledger is cumulative by contract.**
+   `[mem.region.account.1]`: "a reallocation's abandoned buffer stays
+   charged; nothing is ever subtracted while the region lives". A list
+   grown to 65,536 elements by doubling therefore charges the sum of
+   every buffer it ever had — 8+16+…+524,288 ≈ 1,048,568, which is what
+   we measure, to the byte.
+
+Filed, not absorbed: **wolf-lang#203** (the byte-buffer representation,
+with these numbers), and a comment on **#187** because the gap bears on
+the cap half's units. Until one of them lands, read `memory_budget` as
+what it is: a POLICY instrument in admitted-request bytes, bounding
+what lobo lets in, deterministically, before it is read. It is not a
+prediction of RSS, and on the streaming path an operator who reads
+`memory_budget 1m` as "about a megabyte of memory per request" is out
+by 16x. That paragraph exists so nobody has to find this out from a
+graph.
+
+`live_region_bytes()` is the process-wide companion, and it carries its
+own caveat from the clause: it is **not an RSS proxy**. The
+process-root arena — where, at this pin, every string materialization
+still lands (#191) — is never counted. On an idle lobo it reads 0,
+because every response region has died; that is `[mem.region.account.2]`
+working, not a broken gauge.
 
 ## The fence and the budget
 
@@ -120,6 +195,7 @@ site:
 
 | site | when it checks | over → | notes |
 |---|---|---|---|
+| `admin` | on the ws12 `/metrics` and `/status.json` endpoint, before the rendered body is written | 503, close | the fifth site, appended (the frozen field keeps its key; the VALUE set widens). The exposition is a response body lobo materializes, so it is charged like one — a scrape that sheds under a tiny budget is CORRECT, and a rig case |
 | `head` | after the head is framed and parses clean | 503, close | fences (414/400) precede it; the head was necessarily read to be measured — the fence bounds that over-admission at `n × size` |
 | `body` | BEFORE reading a declared (Content-Length) body | 503, half-close drain, close | the budget's strongest moment: refused pre-admission, zero body bytes read; `would` = head + declared length |
 | `body-chunked` | while chunks accumulate | 503, half-close drain, close | fence (413) checked against the same running total first; `would` reports `budget+1` — the crossing point (an unread chunked body's true total is unknowable) |
@@ -146,6 +222,14 @@ below are the plaintext step path's until TLS joins it).
 
 ### Which half is structural today (the honest line)
 
+**ws12 status of the gated half:** s132 (the `region r(cap: N)` half of
+#187, with D68's fault ruling) had not merged to wolf-lang trunk at
+this sprint's Act-2 start — `origin/trunk` was `e6cf24e`, the query
+half only. ws12 therefore took the contract's named-gate defer: the
+meter ships query-only and honest, and the cap adoption is routed to
+the next ws sprint with **wolf-lang#187** as owner. Nothing below
+changes; the paragraph is now dated rather than open-ended.
+
 Enforcement today is **admission metering above the regions**: lobo
 counts the bytes it admits into the request's working set — it makes
 every admission decision, so the meter is deterministic and refusals
@@ -163,16 +247,22 @@ Recorded as the campaign's named deferral with #187 as owner.
 ## Observability
 
 - **Log event** (ws09 vocabulary, appended — nothing renamed):
-  `budget-exceeded gen=<g> site=<head|body|body-chunked|file>
+  `budget-exceeded gen=<g> site=<head|body|body-chunked|file|admin>
   budget=<bytes> would=<bytes>` at level `error`, through the same
   seam as every generation event (stderr always; the configured
   `error_log` level-gated, text or JSON door). The refused request
   also writes an ordinary access line with `status` 503.
 - **Status stanza** (ws08 surface, additive — schema stays 1): each
   generation's line gains `mem-hw=<bytes>` (the high-water admitted
-  bytes of any single request served under that generation) and
-  `budget-503s=<n>` (refusals). JSON: `"mem_high_water"`,
-  `"budget_503s"`. ws12's metrics endpoint serves the same object.
+  bytes of any single request served under that generation),
+  `budget-503s=<n>` (refusals) and, from ws12, `mem-rt-hw=<bytes>` (the
+  MEASURED high water). The stanza head gains
+  `live-region-bytes: <bytes>`. JSON: `"mem_high_water"`,
+  `"budget_503s"`, `"mem_rt_high_water"`, `"live_region_bytes"`.
+  ws12's metrics endpoint serves this same object at `/status.json`,
+  and the exposition's `lobo_request_admitted_bytes_high_water` /
+  `lobo_request_region_bytes_high_water` / `lobo_live_region_bytes`
+  carry the same three numbers for a scraper (docs/metrics.md).
 
 ## Witnesses
 
@@ -184,6 +274,12 @@ Recorded as the campaign's named deferral with #187 as owner.
 - `tests/serve/budget_refusals.lu` — in-process round-trips: every
   exceed-site's status, the fence-first interplay both ways, HEAD's
   zero file charge.
+- `tests/serve/region_measured.lu` — THE MEASURED witness (ws12): a
+  small file charges a bounded region, a HEAD charges nothing, two
+  stream files of different lengths charge the SAME high water (the
+  O(1) claim as an equality), and `live_region_bytes()` returns to its
+  entry reading after every response — `[mem.region.account.1/.2]`'s
+  relations, never their units.
 - `tests/serve/budget_e2e.lu` — the corpus config with a deliberately
   tiny budget + a large-header request pins the 503-with-a-name end
   to end: the wire status, the access-log 503, the `budget-exceeded`

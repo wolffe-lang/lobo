@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: serve conn tls proxy http config obs
+//! stage-src: serve conn tls proxy http config obs metrics
 //!
 //! A file larger than the 65536 stream threshold is served in bounded
 //! chunks (no whole-file-into-memory — ws02 pitfall). 100000 ASCII

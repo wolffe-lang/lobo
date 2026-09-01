@@ -98,6 +98,15 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws12: the metrics half of -t — the endpoint switch is on|off,
+    // wherever it appears. One named [emerg], first failure wins.
+    if verdict == 0 {
+        let xerr = metrics_check(c)
+        if !xerr.is_empty() {
+            eprint("lobo: [emerg] {xerr}")
+            verdict = 1
+        }
+    }
     // wsm04: the upstream-TLS half of -t — an https proxy_pass names
     // its trust anchors (the client verifies always) and the file
     // loads. One named [emerg], first failure wins.

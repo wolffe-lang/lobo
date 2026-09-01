@@ -10,7 +10,9 @@
 //! Connection: close), the ordinary 503 access-log line, the
 //! `budget-exceeded` error-log event with its frozen field keys
 //! (gen/site/budget/would), and the status stanza's per-generation
-//! aggregates (`mem-hw`, `budget-503s`) in both the human text and
+//! aggregates (`mem-hw`, `budget-503s`, and ws12's MEASURED
+//! `mem-rt-hw`/`live-region-bytes` — the runtime's own region ledger,
+//! [mem.region.account.1/.2]) in both the human text and
 //! the schema-1 JSON. A served under-budget request feeds `mem-hw`
 //! without a refusal. Loopback only, OS-chosen ports, scratch cleared
 //! at START.
@@ -142,6 +144,14 @@ fn main() -> !int {
     assert(g1.contains("budget-503s=1"), "one refusal counted: {g1}")
     assert(g1.contains("mem-hw="), "the high-water fact prints: {g1}")
     assert(!g1.contains("mem-hw=0 "), "a served request raised the high-water: {g1}")
+    // ws12: the MEASURED half beside the metered half — same line, two
+    // different questions, neither pretending to be the other
+    assert(g1.contains("mem-rt-hw="), "the measured high-water fact prints: {g1}")
+    assert(!g1.contains("mem-rt-hw=0"), "the served 200 charged a real response region: {g1}")
+    assert(
+        line_with(st, "live-region-bytes:").starts_with("live-region-bytes: "),
+        "the stanza head carries the process-wide live-region total:\n{st}",
+    )
     let sj = shell.control_fetch(ep, "status json") else |_| {
         os_kill(child) else |_| {}
         assert(false, "status json fetch failed")
@@ -150,6 +160,8 @@ fn main() -> !int {
     assert(sj.contains("\"schema\":1"), "schema stays 1 (additive widening): {sj}")
     assert(sj.contains("\"budget_503s\":1"), "json counts the refusal: {sj}")
     assert(sj.contains("\"mem_high_water\":"), "json carries the high-water: {sj}")
+    assert(sj.contains("\"mem_rt_high_water\":"), "json carries the measured high-water: {sj}")
+    assert(sj.contains("\"live_region_bytes\":"), "json carries the live-region total: {sj}")
 
     // quit — flush-on-quit puts both log stories on disk
     let rq = shell.control_send(ep, "quit") else |_| {
