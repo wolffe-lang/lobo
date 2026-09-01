@@ -1,7 +1,7 @@
 module pkg :: shell
   wolfi v0 · toolchain 0.2.1 · edition v1
-  export_hash 1b58dd521996cfda01a97c0431986d5f3decce93cc27bbf110bca8cf91ef436d
-  pkg_hash    1b58dd521996cfda01a97c0431986d5f3decce93cc27bbf110bca8cf91ef436d
+  export_hash 9a4276acd59090ee2b12eac983e9825f8730a47d251209639185c836c1901dd6
+  pkg_hash    9a4276acd59090ee2b12eac983e9825f8730a47d251209639185c836c1901dd6
   deps:
     config  f8feca78c2a1d2c6d299f8beb49eaf8c356fe00188e410a6db49f43115b92cd7
   items:
@@ -39,11 +39,11 @@ module pkg :: shell
     [31] pub signal_ok — fn signal_ok(name: str) -> bool
     [32] pub signal_unix — fn signal_unix(name: str) -> str
     [33] pub signal_verb — fn signal_verb(m: int) -> str
-    [34] pub status_head_text — fn status_head_text(current: int, quitting: bool, events: int) -> str
+    [34] pub status_head_text — fn status_head_text(current: int, quitting: bool, events: int, live_bytes: int) -> str
     [35] pub status_json_close — fn status_json_close() -> str
-    [36] pub status_json_obj — fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int) -> str
-    [37] pub status_json_open — fn status_json_open(current: int, quitting: bool, events: int) -> str
-    [38] pub status_line_text — fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int) -> str
+    [36] pub status_json_obj — fn status_json_obj(gen: int, state: str, live: int, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int, mem_rt_hw: int) -> str
+    [37] pub status_json_open — fn status_json_open(current: int, quitting: bool, events: int, live_bytes: int) -> str
+    [38] pub status_line_text — fn status_line_text(gen: int, live: int, state: str, age_ms: int, hash: str, remaining_ms: int, mem_hw: int, budget_503s: int, mem_rt_hw: int) -> str
     [39] pub status_schema — fn status_schema() -> int
     [40] pub usage_text — fn usage_text() -> str
     [41] pub version — fn version() -> str

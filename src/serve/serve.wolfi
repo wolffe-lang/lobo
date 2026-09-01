@@ -1,7 +1,7 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.1 · edition v1
-  export_hash 2bac884cf48f0d6eede6c96d9483fae495a3acca4eaba10c1585901f6bc831dd
-  pkg_hash    2bac884cf48f0d6eede6c96d9483fae495a3acca4eaba10c1585901f6bc831dd
+  export_hash 2b013640f8b0276ccbcc3fbbf0c0f0e9e26da5925502500f9a12be4e840baae1
+  pkg_hash    2b013640f8b0276ccbcc3fbbf0c0f0e9e26da5925502500f9a12be4e840baae1
   deps:
     config  f8feca78c2a1d2c6d299f8beb49eaf8c356fe00188e410a6db49f43115b92cd7
     conn  2108c319b5aeb0085134ede547be8975181e65a28c31fac0bc87b423370459fc
@@ -27,7 +27,7 @@ module pkg :: serve
     [15] pub status_phrase — fn status_phrase(code: int) -> str
     [16] pub to_hex — fn to_hex(n: int) -> str
     [17] pub version — fn version() -> str
-    [18] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int }
-    [19] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int }
+    [18] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int, mem_rt: int }
+    [19] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int, mem_rt: int }
     [20] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str }
 
