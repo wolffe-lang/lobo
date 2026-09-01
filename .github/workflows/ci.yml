@@ -129,7 +129,8 @@ jobs:
         working-directory: lobo
         run: |
           set -euo pipefail
-          pin() { sed -n "s/^$1 = //p" tests/differential/NGINX-PIN; }
+          PIN="$PWD/tests/differential/NGINX-PIN"
+          pin() { sed -n "s/^$1 = //p" "$PIN"; }
           mkdir -p /tmp/nginx-build && cd /tmp/nginx-build
           curl -sSLO "$(pin source)"
           echo "$(pin sha256)  $(pin tarball)" | sha256sum -c -
