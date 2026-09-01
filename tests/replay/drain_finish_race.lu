@@ -1,0 +1,87 @@
+//! check: run(exit=0, stdout="lobo: [notice] generation-draining gen=1 held=2 seq=1\nlobo: [notice] connection-retired gen=1 remaining=1 seq=2\nlobo: [notice] connection-retired gen=1 remaining=0 seq=3\nlobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=0 seq=4")
+//! phase: run
+//! lanes: lupin
+//! stage-src: shell config
+//!
+//! THE PLANTED RACE (ws11 — replay the race). A model of the ws08
+//! drain-finish hazard, kept ALIVE as the replay witness's specimen:
+//! generation 1 is draining two held connections under a
+//! worker_shutdown_timeout, and this collector decides "the drain is
+//! finished" by RACING the timeout message against the close events
+//! in one `select` — the composite "count every close, then retire"
+//! was never atomic against the two message kinds that decide it
+//! (the book's ch17 class, in lobo's own vocabulary). The REAL loop
+//! does not have this bug: retirement there is a STATE CHECK
+//! (live == 0, or the timeout consulted against the clock), never a
+//! message race — drain_finish_fixed.lu is that shape, explored
+//! deterministic. This file's directive pins the strict-FIFO outcome
+//! (the clean drain: what an unseeded run — a developer's laptop —
+//! always sees); `tools/lobo-replay` explores it, proves the
+//! accounting is schedule-dependent, captures the failing schedule as
+//! a .loborace artifact, and replays it byte-stable. The stdout IS
+//! the log excerpt a bug report would carry: the real vocabulary
+//! builders, seq-stamped by the model's own emission seam.
+//!
+//! Lane note: lupin only — the schedule SPACE is the deterministic
+//! interpreter's (--seed/--schedule/--explore). The native tier's
+//! scheduler is the real machine's: the same race exists there but
+//! its outcome cannot be pinned or replayed, which is the whole
+//! point of this sprint (docs/REPLAY.md states the boundary).
+
+use shell
+
+/// One held connection on the draining generation: its clean close
+/// arrives as a message. A task, because the CLOSE ORDER is the
+/// schedule — which connection closes first, and whether the timeout
+/// beats the last close, is exactly what the explorer permutes.
+fn client(closes: channel[int]) {
+    closes.send(1)
+}
+
+/// The worker_shutdown_timeout expiring, modeled as a message racing
+/// the closes — THE PLANT. The real loop never receives its timeout
+/// as a peer of the close events; it checks the clock against the
+/// draining generation's state.
+fn timer(deadline: channel[int]) {
+    deadline.send(1)
+}
+
+fn main() -> !int {
+    let closes = channel[int](4)
+    let deadline = channel[int](1)
+    var live = 2
+    var drained = 0
+    var aborted = 0
+    var seq = 0
+    seq = seq + 1
+    print("lobo: [notice] {shell.ev_seq(shell.ev_generation_draining(1, live), seq)}")
+    scope pool {
+        pool.spawn(fn() { client(closes) })
+        pool.spawn(fn() { client(closes) })
+        pool.spawn(fn() { timer(deadline) })
+        var deciding = true
+        while deciding {
+            select {
+                _ from closes => {
+                    live = live - 1
+                    drained = drained + 1
+                    seq = seq + 1
+                    print(
+                        "lobo: [notice] {shell.ev_seq(shell.ev_connection_retired(1, live), seq)}",
+                    )
+                    if live == 0 {
+                        deciding = false
+                    }
+                },
+                _ from deadline => {
+                    aborted = live
+                    live = 0
+                    deciding = false
+                },
+            }
+        }
+    }
+    seq = seq + 1
+    print("lobo: [notice] {shell.ev_seq(shell.ev_generation_retired(1, drained, aborted, 0), seq)}")
+    0
+}
