@@ -1,0 +1,203 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: metrics
+//!
+//! The metric registry and the exposition format, PURE (all three
+//! lanes — no net, no fs, no clock: just a table and string building).
+//! What this pins:
+//!   * the registry is WELL FORMED — every family carries the `lobo_`
+//!     prefix, a known type, a non-empty help line that is one line,
+//!     and every counter's name ends `_total` (the exposition
+//!     convention a scraper's tooling reads);
+//!   * names are UNIQUE — two rows with one name would emit two
+//!     `# TYPE` lines for one family, which the format forbids;
+//!   * THE CARDINALITY FENCE holds in both directions: the declared
+//!     label shape renders, and this test states the fence's negative
+//!     half in prose because a wolf test cannot catch its own trap —
+//!     `sample("lobo_requests_total", ["uri"], …)` traps in-process,
+//!     which is the design (a per-URI label is not expressible);
+//!   * the ESCAPERS follow the exposition spec, including the
+//!     multi-byte pass-through;
+//!   * the HISTOGRAM's ladder is fixed, its buckets render CUMULATIVE,
+//!     and `_sum`/`_count` agree with what was observed.
+
+use metrics
+
+fn count_bytes(s: str, b: int) -> int {
+    var n: int = 0
+    for x in s.bytes() {
+        if x == b {
+            n = n + 1
+        }
+    }
+    n
+}
+
+fn line_at(s: str, i: int) -> str {
+    var seen: int = 0
+    var start: int = 0
+    var j: int = 0
+    for b in s.bytes() {
+        if b == 10 {
+            if seen == i {
+                return s[start..j]
+            }
+            seen = seen + 1
+            start = j + 1
+        }
+        j = j + 1
+    }
+    ""
+}
+
+fn main() -> !int {
+    // ---- the registry is well formed
+    let reg = metrics.registry()
+    assert(reg.len > 0, "the registry is not empty")
+    for s in reg {
+        assert(s.name.starts_with("lobo_"), "every family is namespaced: {s.name}")
+        assert(
+            s.kind == "counter" || s.kind == "gauge" || s.kind == "histogram",
+            "v0 types only (no summary, no native histogram): {s.name} is {s.kind}",
+        )
+        assert(!s.help.is_empty(), "{s.name} carries help text")
+        assert(!s.help.contains("\n"), "{s.name}'s help is ONE line")
+        if s.kind == "counter" {
+            assert(s.name.ends_with("_total"), "a counter's name ends _total: {s.name}")
+        }
+        if s.kind == "histogram" {
+            assert(s.name.ends_with("_seconds"), "a duration histogram names its unit: {s.name}")
+            assert(
+                s.labels.is_empty(),
+                "v0 histograms are unlabelled (the bucket series is the cardinality): {s.name}",
+            )
+        }
+        assert(metrics.registered(s.name), "every row answers `registered`: {s.name}")
+    }
+    assert(!metrics.registered("lobo_not_a_metric"), "an unregistered name is refused")
+
+    // ---- names are unique
+    for a in metrics.registry() {
+        var hits: int = 0
+        for b in metrics.registry() {
+            if a.name == b.name {
+                hits = hits + 1
+            }
+        }
+        assert(hits == 1, "one `# TYPE` line per family: {a.name} appears {hits} times")
+    }
+
+    // ---- the exposition: header + sample shapes
+    let h = metrics.header("lobo_connections_accepted_total")
+    assert(
+        line_at(h, 0) == "# HELP lobo_connections_accepted_total Connections accepted since start.",
+        "HELP carries the registry's own text: {h}",
+    )
+    assert(
+        line_at(h, 1) == "# TYPE lobo_connections_accepted_total counter",
+        "TYPE names the registered kind: {h}",
+    )
+    let s0 = metrics.sample0("lobo_connections_accepted_total", 41)
+    assert(
+        s0 == "lobo_connections_accepted_total 41\n",
+        "an unlabelled sample carries no braces: {s0}",
+    )
+    let s1 = metrics.sample1("lobo_connections_active", "gen", "2", 7)
+    assert(s1 == "lobo_connections_active{{gen=\"2\"}} 7\n", "a one-label sample: {s1}")
+    var ks = List[str]()
+    (mut ks).push("gen")
+    (mut ks).push("id")
+    (mut ks).push("state")
+    var vs = List[str]()
+    (mut vs).push("1")
+    (mut vs).push("170bd52762257ed1")
+    (mut vs).push("draining")
+    let s3 = metrics.sample("lobo_config_generation_info", ks, vs, 1)
+    assert(
+        s3 ==
+            "lobo_config_generation_info{{gen=\"1\",id=\"170bd52762257ed1\",state=\"draining\"}} 1\n",
+        "the info metric writes its labels in the registry's order: {s3}",
+    )
+    // THE FENCE, stated: metrics.sample("lobo_requests_total", ["uri"],
+    // ["/a"], 1) TRAPS — a per-URI label is not expressible through
+    // this API, which is the whole cardinality design. A wolf test
+    // cannot catch its own trap, so the negative half is prose here and
+    // a rig case at the endpoint.
+
+    // ---- the escapers (defence in depth; the fence above already
+    // forbids attacker-influenced label values from reaching them)
+    assert(metrics.esc_help("a\\b") == "a\\\\b", "help escapes backslash")
+    assert(metrics.esc_help("a\nb") == "a\\nb", "help escapes newline")
+    assert(metrics.esc_help("a\"b") == "a\"b", "a quote is literal in help")
+    assert(metrics.esc_label("a\"b") == "a\\\"b", "a label value escapes the quote")
+    assert(metrics.esc_label("a\\b") == "a\\\\b", "a label value escapes backslash")
+    assert(metrics.esc_label("a\nb") == "a\\nb", "a label value escapes newline")
+    assert(metrics.esc_label("héllo") == "héllo", "multi-byte text passes through intact")
+    assert(metrics.esc_label("") == "", "the empty value stays empty")
+
+    // ---- the fixed ladder
+    let bs = metrics.buckets_ms()
+    assert(bs.len == 11, "eleven bounds plus an implicit +Inf: {bs.len}")
+    assert(bs[0] == 5, "the ladder starts at 5ms")
+    assert(bs[bs.len - 1] == 10000, "the ladder ends at 10s")
+    var prev: int = 0
+    for b in bs {
+        assert(b > prev, "the ladder is strictly increasing at {b}")
+        prev = b
+    }
+    assert(metrics.secs3(0) == "0.000", "0ms renders 0.000")
+    assert(metrics.secs3(5) == "0.005", "5ms renders 0.005")
+    assert(metrics.secs3(50) == "0.050", "50ms renders 0.050")
+    assert(metrics.secs3(2500) == "2.500", "2500ms renders 2.500")
+    assert(metrics.secs3(10000) == "10.000", "10000ms renders 10.000")
+
+    // ---- the histogram: cumulative buckets, sum and count
+    var hh = metrics.hist_new()
+    metrics.hist_observe(mut hh, 1)
+    metrics.hist_observe(mut hh, 7)
+    metrics.hist_observe(mut hh, 60000)
+    let rh = metrics.render_hist("lobo_request_duration_seconds", hh)
+    assert(rh.contains("# TYPE lobo_request_duration_seconds histogram\n"), "TYPE: {rh}")
+    assert(
+        rh.contains("lobo_request_duration_seconds_bucket{{le=\"0.005\"}} 1\n"),
+        "the 1ms observation lands in the 5ms bucket: {rh}",
+    )
+    assert(
+        rh.contains("lobo_request_duration_seconds_bucket{{le=\"0.010\"}} 2\n"),
+        "buckets are CUMULATIVE — the 7ms observation adds to the 5ms one: {rh}",
+    )
+    assert(
+        rh.contains("lobo_request_duration_seconds_bucket{{le=\"10.000\"}} 2\n"),
+        "the minute-long observation is past the ladder: {rh}",
+    )
+    assert(
+        rh.contains("lobo_request_duration_seconds_bucket{{le=\"+Inf\"}} 3\n"),
+        "+Inf holds every observation: {rh}",
+    )
+    assert(rh.contains("lobo_request_duration_seconds_sum 60.008\n"), "the sum in seconds: {rh}")
+    assert(rh.contains("lobo_request_duration_seconds_count 3\n"), "the count: {rh}")
+    // an empty histogram still exposes its whole ladder (a scraper
+    // must not have to guess which buckets exist)
+    let empty = metrics.render_hist("lobo_upstream_duration_seconds", metrics.hist_new())
+    assert(
+        count_bytes(empty, 10) == 2 + bs.len + 3,
+        "HELP + TYPE + every bound + +Inf + sum + count: {empty}",
+    )
+
+    // ---- the content type is the spec's, exactly
+    assert(
+        metrics.content_type() == "text/plain; version=0.0.4; charset=utf-8",
+        "the exposition content type: {metrics.content_type()}",
+    )
+
+    // ---- the generated docs page carries every family, from the table
+    let md = metrics.docs_markdown()
+    for s in metrics.registry() {
+        assert(md.contains("`{s.name}`"), "the docs page names {s.name}")
+        assert(md.contains(s.help), "the docs page carries {s.name}'s own help line")
+    }
+    assert(md.contains("NEVER hand-edited"), "the page says what it is")
+
+    0
+}

@@ -1,0 +1,545 @@
+//! member: true
+//! metrics — the counter registry and the Prometheus text exposition
+//! (ws12). PURE: no io, no fs, no net, no clock. The module owns three
+//! things and nothing else:
+//!   1. the REGISTRY — every metric lobo can ever emit, declared once
+//!      here with its name, type and help text. Nothing outside this
+//!      table may be exposed: `sample` asserts the name is registered
+//!      and that the labels it was handed are exactly the label KEYS
+//!      the row declared. That assertion is the cardinality fence, and
+//!      it is the reason there is no per-URI and no per-client label
+//!      in lobo — the API cannot express one (report 11's spirit: the
+//!      footgun gets a fence, not a hope; monitoring that explodes
+//!      cardinality is how monitoring kills servers).
+//!   2. the ESCAPERS — help text and label values per the exposition
+//!      spec. The fence above already forbids attacker-influenced
+//!      label values; the escapers exist anyway, one function each,
+//!      tested (defence in depth).
+//!   3. the EXPOSITION — `# HELP`/`# TYPE`/sample lines, and the fixed
+//!      histogram ladder for request duration.
+//! The COUNTERS THEMSELVES DO NOT LIVE HERE. They live as plain `int`s
+//! in the entry's poll loop, and that is the measured hot-path answer,
+//! not a shortcut: lobo is SPAWN-FREE (D7 — one poll loop, one task,
+//! by design, so a dropped log line can never become a stalled
+//! request), so there is exactly one mutator of every counter. Per-task
+//! shards would aggregate one shard; an atomic would take a fence no
+//! other thread can observe. An increment is `n = n + 1` on a local:
+//! zero allocation, zero synchronisation, and checked arithmetic — a
+//! counter that would overflow traps loudly rather than wrapping. The
+//! day lobo grows a second serving task (the D24 stepper work) that
+//! sentence stops being true, and THIS COMMENT is the place the next
+//! sprint must come back to; the exposition side does not change, only
+//! how the entry reaches the numbers.
+//! Scrape cost: rendering is string building over a bounded registry —
+//! it allocates like any other response body and is charged to the
+//! request's region like any other response body. The scrape is an
+//! ordinary request: it appears in its own counters and in the access
+//! log, and it is subject to the ws10 budget (a scrape 503ing under a
+//! tiny budget is CORRECT).
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+/// This module's interface version. Total; never traps.
+pub fn version() -> str {
+    "0.1.0"
+}
+
+// ------------------------------------------------------------------
+// the registry — names, types, help, and the declared label shape
+// ------------------------------------------------------------------
+
+/// One registered metric family. `kind` is `counter`, `gauge` or
+/// `histogram` (v0 has no summary and no native histogram — both are
+/// named post-v1). `labels` is the SPACE-SEPARATED list of label keys
+/// this family declares, in the order the exposition writes them, or
+/// "" for an unlabelled family; `sample` refuses anything else. `help`
+/// is one line of operator English — the generated docs page and the
+/// `# HELP` line are the same string, so the doc can never drift.
+pub struct Spec {
+    name: str,
+    kind: str,
+    labels: str,
+    help: str,
+}
+
+/// THE REGISTRY. Adding a metric means adding a row here and nothing
+/// else: the exposition, the `-t`-time name check, the generated
+/// documentation page and the cardinality fence all read this table.
+/// Every name carries the `lobo_` prefix; every counter's name ends
+/// `_total` (the Prometheus convention, and `sample` is not the place
+/// that enforces spelling — `registry_wellformed` is, and it runs in
+/// the pure test). Total.
+pub fn registry() -> List[Spec] {
+    var r = List[Spec]()
+
+    // --- identity and configuration (ws04/ws08) ---
+    (mut r).push(Spec {
+        name: "lobo_build_info",
+        kind: "gauge",
+        labels: "version",
+        help: "Build identity of the running lobo; always 1 (the info-metric idiom).",
+    })
+    (mut r).push(Spec {
+        name: "lobo_config_generation_info",
+        kind: "gauge",
+        labels: "gen id state",
+        help: "One series per live configuration generation, labelled with its content-hash id and state; always 1 (the info-metric idiom).",
+    })
+    (mut r).push(Spec {
+        name: "lobo_config_generation_current",
+        kind: "gauge",
+        labels: "",
+        help: "The generation number currently accepting new connections.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_config_generations",
+        kind: "gauge",
+        labels: "state",
+        help: "Live configuration generations by state (current or draining).",
+    })
+
+    // --- connections and the drain (ws02/ws08) ---
+    (mut r).push(Spec {
+        name: "lobo_connections_accepted_total",
+        kind: "counter",
+        labels: "",
+        help: "Connections accepted since start.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_connections_active",
+        kind: "gauge",
+        labels: "gen",
+        help: "Connections currently held, by the generation that accepted them.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_connections_retired_total",
+        kind: "counter",
+        labels: "gen outcome",
+        help: "Connections retired from a draining generation: outcome drained (finished) or aborted (worker_shutdown_timeout forced the close).",
+    })
+
+    // --- requests (ws02/ws09) ---
+    (mut r).push(Spec {
+        name: "lobo_requests_total",
+        kind: "counter",
+        labels: "class",
+        help: "Requests served, by response status class (2xx/3xx/4xx/5xx). Deliberately NOT by URI or by client: see the cardinality fence.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_request_duration_seconds",
+        kind: "histogram",
+        labels: "",
+        help: "Request service time in seconds, over a fixed 5ms..10s ladder.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_request_bytes_total",
+        kind: "counter",
+        labels: "",
+        help: "Request header and body bytes admitted.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_response_bytes_total",
+        kind: "counter",
+        labels: "",
+        help: "Response body bytes written.",
+    })
+
+    // --- the proxy leg (ws03) ---
+    (mut r).push(Spec {
+        name: "lobo_upstream_requests_total",
+        kind: "counter",
+        labels: "class",
+        help: "Proxied requests by upstream status class; class \"error\" counts legs that produced no upstream status (dial, TLS or read failure).",
+    })
+    (mut r).push(Spec {
+        name: "lobo_upstream_duration_seconds",
+        kind: "histogram",
+        labels: "",
+        help: "Upstream leg time in seconds, over the same 5ms..10s ladder as the client-facing histogram.",
+    })
+
+    // --- TLS (ws05/ws06) ---
+    (mut r).push(Spec {
+        name: "lobo_tls_handshakes_total",
+        kind: "counter",
+        labels: "",
+        help: "TLS handshakes that completed and served a connection.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_tls_handshake_failures_total",
+        kind: "counter",
+        labels: "reason",
+        help: "TLS handshakes lobo refused or lost, by reason (refused, timeout, io).",
+    })
+
+    // --- the budget, metered and measured (ws10 + ws12) ---
+    (mut r).push(Spec {
+        name: "lobo_budget_refusals_total",
+        kind: "counter",
+        labels: "gen",
+        help: "Requests refused with 503 by memory_budget, by generation.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_request_admitted_bytes_high_water",
+        kind: "gauge",
+        labels: "gen",
+        help: "Highest admitted-bytes total of any single request served under the generation — lobo's own ADMISSION METER, the number the budget rules on.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_request_region_bytes_high_water",
+        kind: "gauge",
+        labels: "gen",
+        help: "Highest MEASURED response-region charge of any single request served under the generation, read from the runtime's own ledger. A different unit from the admitted-bytes gauge and never to be subtracted from it.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_live_region_bytes",
+        kind: "gauge",
+        labels: "",
+        help: "Process-wide bytes the runtime holds for live regions at scrape time. NOT an RSS proxy: the process-root arena, where every string materialization still lands, is not counted.",
+    })
+
+    // --- logging and the event stream (ws09/ws11) ---
+    (mut r).push(Spec {
+        name: "lobo_log_lines_dropped_total",
+        kind: "counter",
+        labels: "",
+        help: "Access-log lines dropped because a sink's bounded buffer was full (emit never blocks).",
+    })
+    (mut r).push(Spec {
+        name: "lobo_events_total",
+        kind: "counter",
+        labels: "",
+        help: "Vocabulary events emitted — the highest seq stamped. A log stream whose top seq matches this has no trailing hole.",
+    })
+    r
+}
+
+/// The registered row for `name`, or a row with an empty name when
+/// there is none. Total.
+pub fn spec_of(name: str) -> Spec {
+    for s in registry() {
+        if s.name == name {
+            return s
+        }
+    }
+    Spec { name: "", kind: "", labels: "", help: "" }
+}
+
+/// Whether `name` is a registered metric family. The `-t` check and
+/// the rig's conformance pass both read this. Total.
+pub fn registered(name: str) -> bool {
+    !spec_of(name).name.is_empty()
+}
+
+// ------------------------------------------------------------------
+// the escapers — exposition-format text safety, one function each
+// ------------------------------------------------------------------
+
+/// Escape HELP text per the exposition format: backslash and newline
+/// only (a quote is literal in help). Total.
+pub fn esc_help(v: str) -> str {
+    var out = ""
+    var start: int = 0
+    var i: int = 0
+    for b in v.bytes() {
+        if b == 92 || b == 10 {
+            if i > start {
+                out = "{out}{v[start..i]}"
+            }
+            out = if b == 92 {
+                "{out}\\\\"
+            } else {
+                "{out}\\n"
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if i > start {
+        out = "{out}{v[start..i]}"
+    }
+    out
+}
+
+/// Escape a label VALUE per the exposition format: backslash, double
+/// quote and newline. The registry's label fence already forbids
+/// attacker-influenced values from reaching here; this is the second
+/// wall, not the first. Total.
+pub fn esc_label(v: str) -> str {
+    var out = ""
+    var start: int = 0
+    var i: int = 0
+    for b in v.bytes() {
+        if b == 92 || b == 34 || b == 10 {
+            if i > start {
+                out = "{out}{v[start..i]}"
+            }
+            if b == 92 {
+                out = "{out}\\\\"
+            } else if b == 34 {
+                out = "{out}\\\""
+            } else {
+                out = "{out}\\n"
+            }
+            start = i + 1
+        }
+        i = i + 1
+    }
+    if i > start {
+        out = "{out}{v[start..i]}"
+    }
+    out
+}
+
+// ------------------------------------------------------------------
+// the exposition — HELP/TYPE headers and sample lines
+// ------------------------------------------------------------------
+
+/// The exact Content-Type the Prometheus text exposition format
+/// requires. Total.
+pub fn content_type() -> str {
+    "text/plain; version=0.0.4; charset=utf-8"
+}
+
+/// The `# HELP` and `# TYPE` pair for a registered family, newline
+/// terminated. The help text comes from the registry, never from the
+/// call site — that is what keeps the generated docs page honest.
+/// TRAPS when `name` is not registered: an unregistered family is a
+/// lobo bug, caught in-process, never a malformed scrape.
+pub fn header(name: str) -> str {
+    let s = spec_of(name)
+    assert(!s.name.is_empty(), "metrics: `{name}` is not in the registry")
+    "# HELP {s.name} {esc_help(s.help)}\n# TYPE {s.name} {s.kind}\n"
+}
+
+/// One sample line: `name{k="v",...} value`, newline terminated.
+/// `keys` and `vals` are parallel and must match the family's declared
+/// label shape EXACTLY — same keys, same order. THE CARDINALITY FENCE
+/// LIVES HERE: a caller that invents a label (a URI, a client address)
+/// traps in-process instead of teaching a scrape target to eat the
+/// server's memory. Values are ints; the histogram and the duration
+/// families render their own floats.
+pub fn sample(name: str, keys: List[str], vals: List[str], value: int) -> str {
+    let s = spec_of(name)
+    assert(!s.name.is_empty(), "metrics: `{name}` is not in the registry")
+    assert(
+        keys.len == vals.len,
+        "metrics: `{name}` got {keys.len} label keys and {vals.len} values",
+    )
+    assert(
+        label_shape(keys) == s.labels,
+        "metrics: `{name}` declares labels \"{s.labels}\" but got \"{label_shape(keys)}\" — the registry is the only place a label may be invented",
+    )
+    "{s.name}{label_text(keys, vals)} {value}\n"
+}
+
+/// The space-joined key list a caller handed in, for comparison with
+/// the registry's declared shape. Total.
+fn label_shape(keys: List[str]) -> str {
+    var out = ""
+    var first = true
+    for k in keys {
+        if first {
+            out = k
+            first = false
+        } else {
+            out = "{out} {k}"
+        }
+    }
+    out
+}
+
+/// The `{k="v",k="v"}` clause, or "" when there are no labels. Total.
+fn label_text(keys: List[str], vals: List[str]) -> str {
+    if keys.len == 0 {
+        return ""
+    }
+    var out = "{{"
+    var i: int = 0
+    let n = keys.len
+    while i < n {
+        let sep = if i == 0 { "" } else { "," }
+        out = "{out}{sep}{keys[i]}=\"{esc_label(vals[i])}\""
+        i = i + 1
+    }
+    "{out}}}"
+}
+
+/// A one-label sample — the shape nearly every call site wants,
+/// without the two-List ceremony. Total (traps on the same fences as
+/// `sample`).
+pub fn sample1(name: str, key: str, val: str, value: int) -> str {
+    var ks = List[str]()
+    (mut ks).push(key)
+    var vs = List[str]()
+    (mut vs).push(val)
+    sample(name, ks, vs, value)
+}
+
+/// An unlabelled sample. Total (same fences). Total.
+pub fn sample0(name: str, value: int) -> str {
+    sample(name, List[str](), List[str](), value)
+}
+
+// ------------------------------------------------------------------
+// the histogram — a FIXED ladder, in milliseconds, rendered in seconds
+// ------------------------------------------------------------------
+
+/// The bucket ladder's upper bounds in MILLISECONDS: 5, 10, 25, 50,
+/// 100, 250, 500, 1000, 2500, 5000, 10000 — a log-ish 5ms..10s ladder
+/// chosen for a web server's shape (an nginx static hit is single-digit
+/// ms; a slow upstream is seconds; anything past 10s is the `+Inf`
+/// bucket and a page). FIXED at v0 and documented as fixed: a
+/// per-deployment ladder is a configuration surface with a cardinality
+/// cost, and native histograms are named post-v1. The `+Inf` bucket is
+/// implicit — `observe` keeps one slot past this list. Total.
+pub fn buckets_ms() -> List[int] {
+    var b = List[int]()
+    (mut b).push(5)
+    (mut b).push(10)
+    (mut b).push(25)
+    (mut b).push(50)
+    (mut b).push(100)
+    (mut b).push(250)
+    (mut b).push(500)
+    (mut b).push(1000)
+    (mut b).push(2500)
+    (mut b).push(5000)
+    (mut b).push(10000)
+    b
+}
+
+/// One histogram's state: cumulative-per-bucket counts are NOT stored —
+/// `counts` holds the per-bucket tallies and the renderer accumulates,
+/// which keeps `observe` a single increment. The last slot is `+Inf`.
+/// `sum_ms` and `n` carry the sum and the observation count.
+pub struct Hist {
+    counts: List[int],
+    sum_ms: int,
+    n: int,
+}
+
+/// A zeroed histogram over the fixed ladder (one slot per bound plus
+/// `+Inf`). Allocated ONCE at start by the entry, never per request.
+/// Total.
+pub fn hist_new() -> Hist {
+    var c = List[int]()
+    var i: int = 0
+    let n = buckets_ms().len + 1
+    while i < n {
+        (mut c).push(0)
+        i = i + 1
+    }
+    Hist { counts: c, sum_ms: 0, n: 0 }
+}
+
+/// Record one observation of `ms`. ZERO ALLOCATION: the slot list was
+/// built at start and this is an index write plus two adds. The adds
+/// are checked — a counter that would overflow traps loudly, which is
+/// the correct answer for a number no honest workload can reach (and
+/// Prometheus counters reset on restart by convention anyway). A
+/// NEGATIVE observation is a caller bug and traps. Total otherwise.
+pub fn hist_observe(mut h: Hist, ms: int) {
+    assert(ms >= 0, "metrics: negative duration observed ({ms}ms)")
+    let bs = buckets_ms()
+    var i: int = 0
+    let n = bs.len
+    while i < n {
+        if ms <= bs[i] {
+            h.counts[i] = h.counts[i] + 1
+            h.sum_ms = h.sum_ms + ms
+            h.n = h.n + 1
+            return
+        }
+        i = i + 1
+    }
+    h.counts[n] = h.counts[n] + 1
+    h.sum_ms = h.sum_ms + ms
+    h.n = h.n + 1
+}
+
+/// A whole histogram family: the `# HELP`/`# TYPE` pair, the
+/// CUMULATIVE `_bucket` series (Prometheus buckets are cumulative —
+/// each is "observations ≤ le"), the `_sum` in seconds and the
+/// `_count`. Traps when `name` is not a registered histogram. Total
+/// otherwise.
+pub fn render_hist(name: str, h: Hist) -> str {
+    let s = spec_of(name)
+    assert(!s.name.is_empty(), "metrics: `{name}` is not in the registry")
+    assert(s.kind == "histogram", "metrics: `{name}` is a {s.kind}, not a histogram")
+    var out = header(name)
+    let bs = buckets_ms()
+    var i: int = 0
+    var acc: int = 0
+    let n = bs.len
+    while i < n {
+        acc = acc + h.counts[i]
+        out = "{out}{name}_bucket{{le=\"{secs3(bs[i])}\"}} {acc}\n"
+        i = i + 1
+    }
+    acc = acc + h.counts[n]
+    out = "{out}{name}_bucket{{le=\"+Inf\"}} {acc}\n"
+    out = "{out}{name}_sum {secs3(h.sum_ms)}\n"
+    out = "{out}{name}_count {h.n}\n"
+    out
+}
+
+/// Milliseconds as a fixed-point seconds literal with three decimals —
+/// the exposition wants a float and this is the only float lobo
+/// writes. Integer arithmetic throughout (no float type crosses this
+/// module). Total for non-negative ms.
+pub fn secs3(ms: int) -> str {
+    let whole = ms / 1000
+    let frac = ms - whole * 1000
+    var f = "{frac}"
+    if frac < 10 {
+        f = "00{frac}"
+    } else if frac < 100 {
+        f = "0{frac}"
+    }
+    "{whole}.{f}"
+}
+
+// ------------------------------------------------------------------
+// the generated documentation page
+// ------------------------------------------------------------------
+
+/// The metrics reference page, generated from the registry — never
+/// hand-kept, exactly like the directive and log-variable tables. The
+/// gauntlet regenerates it and refuses a drift, so a metric whose help
+/// text changed cannot ship with a stale doc.
+pub fn docs_markdown() -> str {
+    var out = "# Metrics (generated)\n\n"
+    out = "{out}Generated from `src/metrics/metrics.lu` (`metrics.registry`) by\n"
+    out = "{out}`tools/lobo-metricsdoc` — NEVER hand-edited. Every row\n"
+    out = "{out}below is the same string the `# HELP` line carries at\n"
+    out = "{out}`/metrics`, so a Grafana panel built from this page and a live\n"
+    out = "{out}scrape can never disagree.\n\n"
+    out = "{out}The endpoint, the recommended bind posture, the v0 authentication\n"
+    out = "{out}stance and the cardinality fence are in `docs/directives.md`\n"
+    out = "{out}under `metrics`; the memory rows are explained in\n"
+    out = "{out}`docs/BUDGET.md`.\n\n"
+    out = "{out}| metric | type | labels | help |\n"
+    out = "{out}|--------|------|--------|------|\n"
+    for s in registry() {
+        let lab = if s.labels.is_empty() {
+            "—"
+        } else {
+            "`{s.labels}`"
+        }
+        out = "{out}| `{s.name}` | {s.kind} | {lab} | {s.help} |\n"
+    }
+    out = "{out}\n## The duration ladder\n\n"
+    out = "{out}Both histograms use one FIXED ladder of upper bounds, in\n"
+    out = "{out}seconds:\n\n"
+    var ladder = ""
+    for b in buckets_ms() {
+        let sep = if ladder.is_empty() { "" } else { ", " }
+        ladder = "{ladder}{sep}`{secs3(b)}`"
+    }
+    out = "{out}{ladder}, `+Inf`\n\n"
+    out = "{out}It is fixed on purpose: a per-deployment ladder is a\n"
+    out = "{out}configuration surface with a cardinality cost, and native\n"
+    out = "{out}histograms are named post-v1.\n"
+    out
+}

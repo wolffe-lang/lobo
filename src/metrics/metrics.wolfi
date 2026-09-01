@@ -1,0 +1,26 @@
+module pkg :: metrics
+  wolfi v0 · toolchain 0.2.1 · edition v1
+  export_hash 96f6502a598fd1c50c51da9bea0acf8414b6766725acda85adfba989a1d6f9d1
+  pkg_hash    96f6502a598fd1c50c51da9bea0acf8414b6766725acda85adfba989a1d6f9d1
+  deps: (none)
+  items:
+    [0] pub buckets_ms — fn buckets_ms() -> prelude.List[int] · regions () -> ρ_caller
+    [1] pub content_type — fn content_type() -> str
+    [2] pub docs_markdown — fn docs_markdown() -> str
+    [3] pub esc_help — fn esc_help(v: str) -> str
+    [4] pub esc_label — fn esc_label(v: str) -> str
+    [5] pub header — fn header(name: str) -> str
+    [6] pub hist_new — fn hist_new() -> self.Hist · regions () -> ρ_caller
+    [7] pub hist_observe — fn hist_observe(mut h: self.Hist, ms: int) · regions (ρ1, -) -> -
+    [8] pub registered — fn registered(name: str) -> bool
+    [9] pub registry — fn registry() -> prelude.List[self.Spec] · regions () -> ρ_caller
+    [10] pub render_hist — fn render_hist(name: str, h: self.Hist) -> str · regions (-, ρ1) -> -
+    [11] pub sample — fn sample(name: str, keys: prelude.List[str], vals: prelude.List[str], value: int) -> str · regions (-, ρ1, ρ2, -) -> -
+    [12] pub sample0 — fn sample0(name: str, value: int) -> str
+    [13] pub sample1 — fn sample1(name: str, key: str, val: str, value: int) -> str
+    [14] pub secs3 — fn secs3(ms: int) -> str
+    [15] pub spec_of — fn spec_of(name: str) -> self.Spec · regions (-) -> ρ_caller
+    [16] pub version — fn version() -> str
+    [17] pub Hist — struct Hist { counts: prelude.List[int], sum_ms: int, n: int }
+    [18] pub Spec — struct Spec { name: str, kind: str, labels: str, help: str }
+
