@@ -9,8 +9,11 @@
 //! value, a second auto block, both mechanisms in one block, a
 //! missing/wildcard/malformed server_name, a TLS-less auto block, a
 //! config with no plaintext listener for the challenge, and the CA
-//! shapes this pin refuses by name (absent, https://, non-loopback —
-//! the loopback-law unit refusal the contract demands). Pure over
+//! shapes refused by name (absent, non-loopback — the loopback-law
+//! unit refusal the contract demands — and, since wsm04's D25
+//! retirement, an https:// LOOPBACK directory is LEGAL when
+//! cert_ca_root names its trust anchor and refused by name when it
+//! does not; the old https transport gate is retired). Pure over
 //! parse_str; all three lanes.
 
 use config
@@ -153,6 +156,8 @@ fn main() -> int {
     let no_ca = conf_of(base("        server_name a.test;\n        cert auto;\n", plain_block()))
     assert(config.auto_check(no_ca).contains("requires \"cert_ca\""), "absent cert_ca refused")
 
+    // wsm04 (D25 retired): a NON-loopback https CA is refused by the
+    // HOST law (not the transport — that gate is gone)
     let https = conf_of(
         base(
             "        server_name a.test;\n        cert auto;\n        cert_ca https://acme-v02.api.letsencrypt.org/directory;\n",
@@ -160,9 +165,35 @@ fn main() -> int {
         ),
     )
     assert(
-        config.auto_check(https).contains("no TLS client at this pin"),
-        "https cert_ca refused citing the std.x.tls client gate",
+        config.auto_check(https).contains("loopback law"),
+        "non-loopback https cert_ca refused by the loopback law (the transport gate retired)",
     )
+
+    // an https LOOPBACK directory with no cert_ca_root: refused BY
+    // NAME (the client verifies always)
+    let https_noroot = conf_of(
+        base(
+            "        server_name a.test;\n        cert auto;\n        cert_ca https://localhost:14000/dir;\n",
+            plain_block(),
+        ),
+    )
+    assert(
+        config.auto_check(https_noroot).contains("cert_ca_root"),
+        "https loopback cert_ca without cert_ca_root refused by name",
+    )
+
+    // the D25 flip itself: https loopback + cert_ca_root is CLEAN
+    let https_ok = conf_of(
+        base(
+            "        server_name a.test;\n        cert auto;\n        cert_ca https://localhost:14000/dir;\n        cert_ca_root /tmp/ca.pem;\n",
+            plain_block(),
+        ),
+    )
+    assert(
+        config.auto_check(https_ok).is_empty(),
+        "https loopback cert_ca + cert_ca_root passes the pure -t half",
+    )
+    assert(config.auto_ca_root(https_ok) == "/tmp/ca.pem", "auto_ca_root accessor reads the path")
 
     let remote = conf_of(
         base(

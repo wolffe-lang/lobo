@@ -212,6 +212,16 @@ fn pem_blocks(text: str, label: str, mut lens: List[int]) -> List[int] ! {bad} {
     }
 }
 
+/// Concatenated DER of every CERTIFICATE block in a PEM text — the
+/// upstream-TLS trust-anchor currency (wsm04: std.x.tls.client takes
+/// concatenated DER roots; DER is self-delimiting, so no lengths ride
+/// along). The `bad` row is a malformed block; ZERO blocks decode to
+/// an EMPTY list, the caller's error to name. Total otherwise.
+pub fn pem_certs(text: str) -> List[int] ! {bad} {
+    var lens = List[int]()
+    pem_blocks(text, "CERTIFICATE", mut lens)
+}
+
 // ------------------------------------------------------------------
 // a small DER walker — for the PRIVATE KEY side (the certificate side
 // is std.x.tls.cert's decoder; keys are this module's to parse)

@@ -1,0 +1,108 @@
+//! member: true
+//! config/proxyssl — the -t half of the upstream-TLS leg (wsm04, the
+//! D21 retirement): `proxy_pass https://` rides std.x.tls.client, and
+//! that client VERIFIES ALWAYS — chain + hostname + CertificateVerify
+//! against CALLER-SUPPLIED trust anchors; it has no unverified mode.
+//! So the -t contract here is stricter than nginx's and the deltas are
+//! NAMED, never silent: an https target REQUIRES
+//! `proxy_ssl_trusted_certificate` (nginx's directive name; nginx's
+//! own default — proxy_ssl_verify off, no anchors — is a verification
+//! posture lobo will not reproduce), `proxy_ssl_verify` may only say
+//! `on`, and `proxy_ssl_server_name` may only say `on` (SNI always
+//! rides the dial: the client's hostname IS its verification name).
+//! The checks live in config/ because -t owns config-time validation
+//! (the ws05 sslcert precedent, the ws06 certauto precedent); proxy/
+//! owns the wire.
+//! Path posture, named: the trusted-certificate path is used AS
+//! WRITTEN (the harness writes absolute paths; a relative path reads
+//! against the server's working directory) — a delta from nginx's
+//! prefix-relative resolution, recorded in the directive table.
+//! Lane note: `proxy_tls_check` is pure over the frozen model (all
+//! three lanes); `proxy_tls_probe` is fs (native + checked), exactly
+//! the sslcert split.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo; `wolf fmt` splits the call at the dot.
+
+/// The first argument of the nearest `name` directive walking OUT
+/// from block `from` (location, then server, then http, then main —
+/// the parent chain; nginx's innermost-wins inheritance). Returns
+/// (value, row) or ("", -1). Total.
+fn up_arg(c: Conf, from: int, name: str) -> (str, int) {
+    var blk = from
+    var guard: int = 0
+    while blk >= 0 && guard < 64 {
+        var i: int = 0
+        let total = c.names.len
+        while i < total {
+            if c.names[i] == name && c.parent[i] == blk && c.args_n[i] >= 1 {
+                return (c.argp[c.args_at[i]], i)
+            }
+            i = i + 1
+        }
+        blk = c.parent[blk]
+        guard = guard + 1
+    }
+    ("", -1)
+}
+
+/// The pure half of the upstream-TLS -t validation: "" when clean,
+/// else ONE named [emerg] message — the first failure wins (the -t
+/// single-error posture). Pure; all three lanes.
+pub fn proxy_tls_check(c: Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "proxy_pass" && c.args_n[i] >= 1 {
+            let arg = c.argp[c.args_at[i]]
+            if arg.starts_with("https://") {
+                let loc = c.parent[i]
+                let t = up_arg(c, loc, "proxy_ssl_trusted_certificate")
+                if t.1 < 0 {
+                    return "\"proxy_pass\" names an https:// upstream with no \"proxy_ssl_trusted_certificate\" — lobo's client-TLS leg (std.x.tls.client) verifies the upstream chain ALWAYS and needs the trust anchors named (nginx's verify-off default is a posture lobo will not reproduce; the delta is deliberate and documented): add \"proxy_ssl_trusted_certificate <ca.pem>;\" in {c.files[i]}:{c.lines[i]}"
+                }
+                let v = up_arg(c, loc, "proxy_ssl_verify")
+                if v.1 >= 0 && v.0 != "on" {
+                    return "\"proxy_ssl_verify {v.0}\" — lobo's https upstream leg VERIFIES ALWAYS (std.x.tls.client has no unverified mode; the delta from nginx's off-default is named in the directive table): remove the directive or spell it \"on\" in {c.files[v.1]}:{c.lines[v.1]}"
+                }
+                let sn = up_arg(c, loc, "proxy_ssl_server_name")
+                if sn.1 >= 0 && sn.0 != "on" {
+                    return "\"proxy_ssl_server_name {sn.0}\" — lobo always sends SNI on the https upstream leg (the std client's hostname is also its verification name): remove the directive or spell it \"on\" in {c.files[sn.1]}:{c.lines[sn.1]}"
+                }
+            }
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// The fs half: every https target's trust-anchor file must READ and
+/// parse as at least one PEM CERTIFICATE block (nginx -t reads its
+/// proxy_ssl_trusted_certificate too). "" when clean, else the named
+/// message. fs — native + checked only.
+pub fn proxy_tls_probe(c: Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "proxy_pass" && c.args_n[i] >= 1 {
+            let arg = c.argp[c.args_at[i]]
+            if arg.starts_with("https://") {
+                let t = up_arg(c, c.parent[i], "proxy_ssl_trusted_certificate")
+                if t.1 >= 0 {
+                    let pem = fs_read_text(t.0) else |_| {
+                        return "cannot load certificate \"{t.0}\": the \"proxy_ssl_trusted_certificate\" file does not read (path is used as written — absolute recommended) in {c.files[t.1]}:{c.lines[t.1]}"
+                    }
+                    var ok = true
+                    let anchors = pem_certs(pem) else |_| {
+                        ok = false
+                        List[int]()
+                    }
+                    if !ok || anchors.len == 0 {
+                        return "\"proxy_ssl_trusted_certificate\" file \"{t.0}\" holds no readable CERTIFICATE block (concatenated PEM roots expected) in {c.files[t.1]}:{c.lines[t.1]}"
+                    }
+                }
+            }
+        }
+        i = i + 1
+    }
+    ""
+}

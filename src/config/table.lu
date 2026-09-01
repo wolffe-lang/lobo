@@ -470,7 +470,47 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "upstream handoff; URI rewrite per the ws03 probe matrix; variable/https forms are named_error",
+        "upstream handoff; URI rewrite per the ws03 probe matrix; https:// rides std.x.tls.client (wsm04 — VERIFIED ALWAYS, proxy_ssl_trusted_certificate required at -t); the variable form is named_error",
+    )
+    row(
+        mut t,
+        "proxy_ssl_trusted_certificate",
+        "http server location",
+        "",
+        1,
+        1,
+        "implemented",
+        "trust anchors for proxy_pass https:// (wsm04): concatenated PEM roots the std.x.tls.client verifies the upstream chain+hostname against; REQUIRED for an https upstream (lobo has no unverified mode — nginx's verify-off default is a named delta); path used as written (absolute recommended; nginx resolves prefix-relative — named delta)",
+    )
+    row(
+        mut t,
+        "proxy_ssl_verify",
+        "http server location",
+        "",
+        1,
+        1,
+        "implemented",
+        "wsm04: lobo's https upstream leg verifies ALWAYS, so only \"on\" is accepted — \"off\" is a named -t refusal (nginx defaults off; the inverted default is a deliberate, documented delta)",
+    )
+    row(
+        mut t,
+        "proxy_ssl_server_name",
+        "http server location",
+        "",
+        1,
+        1,
+        "implemented",
+        "wsm04: SNI always rides the https upstream dial (the client's hostname is its verification name), so only \"on\" is accepted — \"off\" is a named -t refusal (nginx defaults off; named delta)",
+    )
+    row(
+        mut t,
+        "proxy_ssl_name",
+        "http server location",
+        "",
+        1,
+        1,
+        "implemented",
+        "wsm04: overrides the SNI/verification hostname for the https upstream leg (default: the selected peer's host — nginx defaults to the proxy_pass authority, which for a pool is the pool name; the per-peer default is a named delta)",
     )
     row(
         mut t,
@@ -830,10 +870,10 @@ pub fn table() -> Table {
     // ---- implemented at ws06: certificates without the dance (ACME).
     // The cert* family is lobo-native (the L004 one-way door: an nginx
     // -t rejects these names — the linter says so at load). HTTP-01
-    // against a LOOPBACK directory at this pin: the std.x.tls ladder
-    // has no client handshake yet, so an https:// or non-loopback
-    // cert_ca is refused BY NAME at -t citing the gate (the D21/D25
-    // rider); the flip rides the std client rung, not this table.
+    // against a LOOPBACK directory — http:// or, since wsm04 (the D25
+    // retirement), https:// via std.x.tls.client with cert_ca_root as
+    // the trust anchor. A non-loopback cert_ca stays refused BY NAME
+    // (the loopback law, forever).
     row(
         mut t,
         "cert",
@@ -862,7 +902,17 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "lobo-native (ws06): the ACME directory URL. LOOPBACK http:// ONLY at this pin — the std.x.tls ladder has no client handshake, so a real (https) CA is refused by name at -t until that rung lands (named gate)",
+        "lobo-native (ws06; https at wsm04): the ACME directory URL — loopback http:// or https:// (the https dial rides std.x.tls.client, verified against cert_ca_root). LOOPBACK ONLY forever: a non-loopback URL is a named -t refusal (the loopback law)",
+    )
+    row(
+        mut t,
+        "cert_ca_root",
+        "http server",
+        "",
+        1,
+        1,
+        "implemented",
+        "lobo-native (wsm04): the trust-anchor PEM for an https cert_ca — the ACME client verifies the directory's chain against it ALWAYS (required when cert_ca is https://; the harness CA writes its root out for exactly this)",
     )
     row(
         mut t,
