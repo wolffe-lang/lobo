@@ -1,13 +1,13 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.0 · edition v1
-  export_hash 29b0a9315b953a63472b601a12178e0d6a1355374858d01d29023d7abc3b559a
-  pkg_hash    29b0a9315b953a63472b601a12178e0d6a1355374858d01d29023d7abc3b559a
+  export_hash 086e789f40e66c9cc13d2827af4df3bbbee3f41667463d8f2cbc97a949ac05c7
+  pkg_hash    086e789f40e66c9cc13d2827af4df3bbbee3f41667463d8f2cbc97a949ac05c7
   deps:
-    config  7a5f005ab9f8550b75f175da4d238bdc42f7f7264e189a0009b63b5b5ea5eead
-    conn  0d826354fbdf8520ca57bb3ebe8d9a126c111d658e9dc347d50e98a83f9962e4
-    http  4692d7ac6e92714e1493bac6891a6a0604bb39d47c7a8e1f9f39f4cc7b7986e5
+    config  05fa389d384471aeaf3e9597692b9fc9cc5bf3d8c160cc31991c33ee86185e95
+    conn  ed4196a4348e952e9d8ae67eb61c98e92fdbd015d928330532e268d822b744aa
+    http  757b4fe5402e1ad162ae6903d52a31921a49edebd14f2b79872b164db2fc27de
     obs  bb7dc34bfc6ea6ca08d4dcb228bdd42507f4feb8f15e58bdd4d45621ed605a8b
-    proxy  425732fec3a82228a9f7342e4dbb9bf27a6c96f65ce3d82af900d627ec087e7d
+    proxy  def690ff64fc7edb3d3bc09c15a3fbc02525a70a1ef00e3d1c0078d16f919987
   items:
     [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
     [1] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -) -> ρ_caller
