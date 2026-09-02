@@ -1,0 +1,150 @@
+//! check: run(exit=0, stdout="rounds ok\nbreach: contained true alloc-contract true reclaimed true pipe-silent true\nafter: ok true\n")
+//! phase: run
+//! lanes: native lupin
+//! conforms: mem.region.cap.1, mem.region.cap.3, conc.proc.exit, conc.proc.kill
+//!
+//! THE CAP ADOPTION'S SHAPE, executable (ws13 — the ws12 named-gate,
+//! flipped at the language level and gated at the codegen level):
+//! the exact program a budgeted lobo request runs — a proc that reads
+//! a body into a region created with `cap:`, writes head and body to
+//! the BARE client socket, and reports its write outcome and the
+//! measured `region_bytes` through a loopback SELF-PIPE (a proc's
+//! `normal(value)` is unreadable at the join and a channel cannot be
+//! a proc argument on wolfc — wolf-lang#219 records the gap) — and
+//! the join that maps the exit reason the way serve maps it to a
+//! status: normal → the response went out (200), error → the socket
+//! broke (close), fault(alloc-contract) → the cap refused the body
+//! (503 with a name, site=region), anything else → 500. Pinned here,
+//! in ONE module, on all three lanes: 200 rounds of the normal path
+//! with the number coming back; a breach contained at the boundary
+//! ([mem.region.cap.3], D68) with `live_region_bytes()` already back
+//! at baseline at the join (free-then-deliver) and NOTHING on the
+//! pipe (the killed proc ran no further code, [conc.proc.kill]); and
+//! the next round clean. The same shape spawned from a non-entry
+//! module is what the release tier refuses (`func.addr … outside this
+//! object's subset`) — so the adoption lives on branch ws13-cap and
+//! this witness holds the contract lobo will consume the day #219
+//! closes. The checked lane is not declared: `conform-run --checked`
+//! answers `unsupported@mem` for EVERY proc spawn at this pin —
+//! wolf-lang's own `corpus/conc/proc_cap_fault_join.lu` included —
+//! with an empty diagnostic, while `run --checked` runs the same
+//! files (#219's second observation, bisected from ws13).
+//! docs/BUDGET.md is the story. Loopback only, port 0.
+
+/// The body proc: fill a capped region as a body would, write to the
+/// socket, report `<wcode> <rt>` on the pipe. Row: io on a failed
+/// write (the join reads which through the pipe).
+fn body(n: int, cap: int, sock: int, pipe: int) -> int ! {io} {
+    var rt = 0
+    var wcode = 0
+    region r(cap: cap) {
+        var xs = List[int]()
+        for i in 0..n {
+            (mut xs).push(i)
+        }
+        rt = region_bytes(r)
+        net_write(sock, "body {xs.len}") else |_| {
+            wcode = 1
+        }
+        wcode = wcode
+    }
+    net_write(pipe, "{wcode} {rt}\n") else |_| {}
+    if wcode != 0 {
+        return io
+    }
+    0
+}
+
+/// Spawn and join one body: (class 0 normal / 1 error / 2 alloc-
+/// contract / 3 other fault / 4 timeout, rt from the pipe or 0, the
+/// live-region reading AT the join). Total.
+fn run_one(n: int, cap: int, sock: int, pipe_w: int, pipe_r: int) -> (int, int, int) {
+    let w = spawn proc body(n, cap, sock, pipe_w)
+    let m = w.monitor()
+    var cls = 3
+    var live_at_join = 0
+    select {
+        exit(reason) from m => {
+            live_at_join = live_region_bytes()
+            if reason.is_normal() {
+                cls = 0
+            } else if reason.is_error() {
+                cls = 1
+            } else if reason.is_alloc_contract() {
+                cls = 2
+            } else {
+                cls = 3
+            }
+        },
+        timeout(5.s) => {
+            cls = 4
+        },
+    }
+    var rt = 0
+    if cls == 0 || cls == 1 {
+        net_deadline(pipe_r, 1000) else |_| {}
+        let line = net_read(pipe_r, 64) else |_| {
+            ""
+        }
+        let sp = line.find(" ") else -1
+        if sp > 0 {
+            for b in line[sp + 1..line.len].trim().bytes() {
+                rt = rt * 10 + b - 48
+            }
+        }
+    }
+    (cls, rt, live_at_join)
+}
+
+fn main() -> !int {
+    let l = net_listen("127.0.0.1:0")?
+    let p = net_port(l)?
+    let cli = net_connect("127.0.0.1:{p}")?
+    let srv = net_accept(l)?
+    let pw = net_connect("127.0.0.1:{p}")?
+    let pr = net_accept(l)?
+    net_deadline(cli, 2000) else |_| {}
+    let base = live_region_bytes()
+
+    var i = 0
+    while i < 200 {
+        let a = run_one(100, 1000000, srv, pw, pr)
+        let got = net_read(cli, 64) else |_| {
+            ""
+        }
+        if a.0 != 0 || a.1 < 1 || !got.starts_with("body 100") {
+            print("bad round {i}: cls={a.0} rt={a.1} got={got}")
+            return 10
+        }
+        i = i + 1
+    }
+    print("rounds ok")
+
+    let b = run_one(100, 64, srv, pw, pr)
+    // the pipe must be SILENT: a killed proc wrote nothing
+    net_deadline(pr, 100) else |_| {}
+    var silent = false
+    let stray = net_read(pr, 64) else |_| {
+        silent = true
+        ""
+    }
+    if stray.is_empty() {
+        silent = true
+    }
+    print(
+        "breach: contained {b.0 != 3 && b.0 != 4} alloc-contract {b.0 == 2} reclaimed {b.2 == base} pipe-silent {silent}",
+    )
+    if b.0 != 2 {
+        return 11
+    }
+
+    let c = run_one(100, 1000000, srv, pw, pr)
+    net_read(cli, 64) else |_| {
+        ""
+    }
+    print("after: ok {c.0 == 0 && c.1 > 0}")
+    if c.0 != 0 {
+        return 12
+    }
+    0
+}
