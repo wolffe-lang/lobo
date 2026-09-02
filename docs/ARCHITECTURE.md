@@ -27,6 +27,10 @@ src/
   obs/       logging (ws09: format compiler, variable table,
              oracle-pinned escapers, JSON doors, bounded sinks)
                                           [real; wsc03]
+  resolver/  async upstream DNS (ws13): the DNS-over-TCP wire half
+             (pure), the TTL cache, and the pending-query table the
+             poll loop ticks like any other socket — a leaf that calls
+             nobody; docs/RESOLVER.md   [real; wsc05]
   metrics/   the counter registry and the Prometheus text exposition
              (ws12: names/types/help/label shapes in ONE table, the
              cardinality fence in `sample`, the fixed histogram
@@ -38,8 +42,14 @@ src/
 
 Intended call direction once real (locked by the sprint contracts,
 not by this page): `main → shell → {config, serve}`;
-`serve → {http, proxy, obs}`; `proxy → {http, obs}`; `config` and
-`http` call nobody above the builtin tiers. `obs` is called by
+`serve → {http, proxy, obs, resolver}`; `proxy → {http, obs,
+resolver}`; `config` and `http` call nobody above the builtin tiers.
+`resolver` (ws13) is the third leaf: `proxy` asks it which name a
+request must wait for and what a cached name expands to, `serve`
+carries its state through the step, and `main` owns that state and
+ticks it once per pass — the arrows `main → resolver`, `serve →
+resolver`, `proxy → resolver` are ws13's, declared in its contract's
+closeout. `obs` is called by
 everyone and calls nobody. `metrics` (ws12) is the second leaf beside
 `obs`: it calls nobody. `main` calls it for the exposition; `serve`
 calls it only for the two endpoint PATH constants, never for a number

@@ -129,9 +129,10 @@ schema-versioned JSON lines — docs/LOGGING.md). The event NAMES and
 FIELD KEYS are a stable contract; ws09's JSON door renders them
 verbatim (`"event":"<name>"` plus one member per field, digit values
 typed as numbers, keys byte-identical — `age-ms` stays `age-ms`).
-Seven events (the sixth is wsm01's EXTENSION, the seventh ws10's —
-each appended, nothing renamed); the LEVEL column is ws09's (§5: the
-wws mapping is documented per event, not vibes):
+Nine events (the sixth is wsm01's EXTENSION, the seventh ws10's, the
+eighth and ninth ws13's — each appended, nothing renamed); the LEVEL
+column is ws09's (§5: the wws mapping is documented per event, not
+vibes):
 
 | event | level | fields | emitted when |
 |-------|-------|--------|--------------|
@@ -142,6 +143,8 @@ wws mapping is documented per event, not vibes):
 | `generation-retired` | notice | `gen`, `drained`, `aborted`, `age-ms` | a draining generation reached zero (or timed out): `drained` closed cleanly, `aborted` force-closed by the timeout |
 | `signal-received` | notice | `sig`, `verb` | a real OS signal arrived and was mapped to an operator verb (wsm01): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb — the line that tells a signal-driven reload from a control-channel one |
 | `budget-exceeded` | error | `gen`, `site`, `budget`, `would` | a request was refused by its `memory_budget` (ws10): `site` the deterministic exceed-site (`head`\|`body`\|`body-chunked`\|`file`), `budget` the configured bytes, `would` what admitting it would have charged; the request also writes an ordinary 503 access line (docs/BUDGET.md) |
+| `upstream-resolved` | notice | `host`, `addrs`, `ttl-ms`, `took-ms` | the resolver answered an upstream name (ws13): `addrs` how many addresses, `ttl-ms` how long the cache holds them (the record TTL or `valid=`, floored at 1 s), `took-ms` the query's wall time (docs/RESOLVER.md) |
+| `upstream-resolve-failed` | error | `host`, `reason`, `took-ms` | an upstream name did not resolve (ws13): `reason` one of `nxdomain`\|`servfail`\|`refused`\|`noaddr`\|`malformed`\|`rcode`\|`timeout`\|`io`\|`dial`; the failure is held 1 s and the requests parked on the name answer 502 |
 
 **The seq stamp (ws11, appended — nothing renamed).** Every vocabulary
 event above carries one more trailing field, `seq=N`: the event's
