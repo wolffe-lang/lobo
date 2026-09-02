@@ -1,0 +1,145 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! THE PROC PATH, END TO END (ws13): the real lobo under a
+//! `memory_budget 4k` serves an 18-byte index 200 THROUGH THE CAPPED
+//! PROC (the meter admits it, the cap — 65536 ledger units — covers
+//! the ~500 the ledger charges), the status stanza counts no refusal,
+//! and `mem-rt-hw` is non-zero: the measured region bytes came back
+//! out of the proc through the entry's loopback self-pipe. The 503
+//! half of the mapping cannot be reached from a config at this pin
+//! (16× the directive covers every body the meter admits — docs/
+//! BUDGET.md); `tests/serve/budget_cap.lu` drives the join directly
+//! for that. Loopback only, OS-chosen ports, scratch cleared at START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn ask(port: int, reqtext: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn line_with(text: str, needle: str) -> str {
+    for l in text.lines() {
+        if l.contains(needle) {
+            return l
+        }
+    }
+    ""
+}
+
+/// Spawn lobo on `conf`, run `f`'s two requests, stop it. Returns the
+/// (first reply, status text). Row: io.
+fn run_server(d: str, conf: str, hp: int, ep: str, req: str) -> (str, str) ! {io} {
+    fs_write_text("{d}/lobo.conf", conf) else |_| {
+        return io
+    }
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+    let r = ask(hp, req)?
+    time_sleep_ms(200)
+    let st = shell.control_fetch(ep, "status") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "status fetch failed")
+        ""
+    }
+    shell.control_fetch(ep, "stop") else |_| {
+        ""
+    }
+    os_kill(child) else |_| {}
+    let _ = os_wait(child) else |_| 0
+    (r, st)
+}
+
+fn main() -> !int {
+    let d = "ws13_cap_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    // exactly 18 bytes
+    fs_write_text("{d}/w/index.html", "CAP-E2E-18-BYTES!\n")?
+    let get = "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+    // B. a budget whose envelope holds: 200 through the proc, the
+    // measured number back through the pipe
+    let hp2 = free_port()?
+    let cp2 = free_port()?
+    let ep2 = "127.0.0.1:{cp2}"
+    let conf_b = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp2};\nhttp {{\n  types {{ text/html html; }}\n  memory_budget 4k;\n  server {{ listen 127.0.0.1:{hp2}; root {d}/w; index index.html; }}\n}}\n"
+    let b = run_server(d, conf_b, hp2, ep2, get)?
+    assert(
+        b.0.starts_with("HTTP/1.1 200 OK") && b.0.contains("CAP-E2E-18-BYTES!"),
+        "served through the proc: {b.0}",
+    )
+    let g2 = line_with(b.1, "generation 1:")
+    assert(g2.contains("budget-503s=0"), "no refusal: {g2}")
+    assert(
+        g2.contains("mem-rt-hw=") && !g2.contains("mem-rt-hw=0 "),
+        "the measured number came back through the self-pipe: {g2}",
+    )
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

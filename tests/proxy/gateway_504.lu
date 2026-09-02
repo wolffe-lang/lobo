@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: proxy http config obs serve conn tls metrics resolver
+//! stage-src: proxy http config obs serve budget conn tls metrics resolver
 //!
 //! The 504 path, live: lobo proxies to an upstream that ACCEPTS but
 //! never replies (a listener left un-accepted — the kernel completes

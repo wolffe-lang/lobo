@@ -16,6 +16,7 @@
 //! File-header note (F-0016): comments never sit directly above a
 //! dotted call in this repo; `wolf fmt` splits the call at the dot.
 
+use budget
 use config
 use conn
 use http
@@ -241,6 +242,8 @@ pub struct ServerOpts {
     read_timeout_ms: int,
     challenge_dir: str,
     metrics_on: bool,
+    pipe_w: int,
+    pipe_r: int,
 }
 
 /// The lobo-flavoured defaults (nginx analogues: keepalive_timeout 75s,
@@ -253,6 +256,8 @@ pub fn default_opts() -> ServerOpts {
         read_timeout_ms: 60000,
         challenge_dir: "",
         metrics_on: false,
+        pipe_w: -1,
+        pipe_r: -1,
     }
 }
 
@@ -308,16 +313,102 @@ pub fn resolve_limits(c: config.Conf) -> http.Limits {
 /// a request that materialized no regioned body — a HEAD, a 304, an
 /// error response, or the TLS path, whose body cannot be regioned at
 /// this pin (the D24 residue).
+/// ws13 adds `cap` — the region cap in LEDGER units the runtime
+/// enforced on this request's body regions (0 when the budget is
+/// off) — and the self-pipe ends the body proc reports through
+/// (`pipe_w`/`pipe_r`, -1 = none: the number stays inside the proc).
 struct Charge {
     used: int,
     site: str,
     limit: int,
     would: int,
     rt: int,
+    cap: int,
+    pipe_w: int,
+    pipe_r: int,
 }
 
-fn charge_new(budget: int) -> Charge {
-    Charge { used: 0, site: "", limit: budget, would: 0, rt: 0 }
+fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
+    Charge {
+        used: 0,
+        site: "",
+        limit: budget,
+        would: 0,
+        rt: 0,
+        cap: if budget > 0 { ledger_cap(budget) } else { 0 },
+        pipe_w: pipe_w,
+        pipe_r: pipe_r,
+    }
+}
+
+// ------------------------------------------------------------------
+// the cap (ws13, wsc05) — the meter becomes enforced by the runtime.
+// s132 gave regions a creation-time byte budget (`region r(cap: n)`,
+// [mem.region.cap.1]) and D68 ruled that a breach INSIDE A PROC is
+// contained at the proc boundary and reaches the join as
+// `fault(alloc-contract)` ([mem.region.cap.3], [conc.proc.exit]);
+// in the root domain a breach is process death. So the regioned
+// body work of a BUDGETED request runs inside a `spawn proc` — the
+// first proc in lobo's request path — and the join maps the reason:
+// normal → the response went out; error → the socket broke (the
+// row the proc raised); fault(alloc-contract) → the cap refused the
+// body: a 503 with a name (site=region); any other fault → a 500
+// (a trap contained, where before ws13 it was the process).
+//
+// THE UNITS (docs/BUDGET.md carries the arithmetic in full): the cap
+// bounds the region's LEDGER, which [mem.region.account.1] keeps in
+// the tier's own units, cumulative and high-water — and #203 measured
+// lobo's streaming shape at 16× the payload (8× because a byte buffer
+// is a List[int], 2× because growth's abandoned buffers stay
+// charged). `ledger_cap` is that envelope: sixteen times the
+// directive's bytes, so the cap agrees with the meter on every shape
+// the meter models and fires exactly where the meter's payload
+// arithmetic is WRONG — a body under ~44 bytes carries a fixed
+// container overhead the envelope does not cover, which is the
+// witness's shape and no operating budget's. When #203 lands the
+// constant changes with the pin, in one place.
+//
+// WHAT COMES BACK. A proc's `normal(value)` is unreadable at the
+// join and a channel cannot be a proc argument on wolfc (filed from
+// ws13), so the proc reports the two scalars the loop needs — the
+// write outcome and ws12's measured `region_bytes` reading — through
+// a loopback SELF-PIPE the entry opens once (`open_self_pipe`): one
+// line, `<wcode> <rt>`, written before the proc returns; the join
+// reads it after a normal or error exit and never after a fault (a
+// killed proc wrote nothing). Without a pipe (-1, the in-process
+// tests) the fault path still works and `rt` reads 0.
+// ------------------------------------------------------------------
+
+/// The region cap, in LEDGER units, for a `memory_budget` of
+/// `budget` request bytes: 16× — the #203 envelope for lobo's body
+/// shapes at this pin (8× List[int] storage × 2× cumulative growth
+/// history). Total.
+pub fn ledger_cap(budget: int) -> int {
+    budget * 16
+}
+
+/// The loopback self-pipe a body proc reports through: (write end,
+/// read end), two connected loopback sockets the entry keeps for the
+/// process's life. Row: net io (a host that refuses a loopback pair
+/// runs without one — `rt` then stays inside the proc). Loopback
+/// only, port 0.
+pub fn open_self_pipe() -> (int, int) ! {io} {
+    let l = net_listen("127.0.0.1:0")?
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    let w = net_connect("127.0.0.1:{p}") else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    let r = net_accept(l) else |_| {
+        net_close(l) else |_| {}
+        net_close(w) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    (w, r)
 }
 
 // ------------------------------------------------------------------
@@ -688,6 +779,43 @@ fn serve_file(
         // (a `mut cn` write inside the region is E1010 — the TLS arm
         // above is the retaining case it guards against).
         let sock = conn.fd(cn)
+        if chg.limit > 0 {
+            // ws13: BUDGETED — the body work runs in a proc under the
+            // region cap; the join maps the reason (see the cap block
+            // above). The meter already admitted this body; the cap is
+            // the runtime's own word on it.
+            let oc = budget.run_small(sock, path, head, chg.cap, chg.pipe_w, chg.pipe_r)
+            let cls = oc.cls
+            if cls == 2 {
+                chg.site = "region"
+                chg.would = chg.limit + 1
+                acc.status = 503
+                acc.body_bytes = err_len(503, false, token)
+                send_err(mut cn, 503, false, token)
+                return true
+            }
+            if cls >= 3 {
+                acc.status = 500
+                acc.body_bytes = err_len(500, false, token)
+                send_err(mut cn, 500, false, token)
+                return true
+            }
+            let rep = (oc.wcode, oc.rt)
+            chg.rt = rep.1
+            if rep.0 == 3 {
+                acc.status = 500
+                acc.body_bytes = err_len(500, false, token)
+                send_err(mut cn, 500, false, token)
+                return true
+            }
+            if rep.0 == 1 {
+                return closed
+            }
+            if rep.0 != 0 {
+                return io
+            }
+            return !keep
+        }
         var failed = false
         // 0 clean, 1 closed, 2 io — the write rows carried across the
         // region boundary as a scalar (heap values must not escape it)
@@ -754,6 +882,34 @@ fn serve_file(
     // a lone 0x80 is data). A mid-stream read error can only close —
     // bytes are already on the wire.
     write_all(mut cn, head)?
+    if chg.limit > 0 {
+        // ws13: BUDGETED — the chunks stream inside a proc, each in a
+        // capped region; a breach is contained at the boundary and,
+        // with the head already on the wire, can only CLOSE (the
+        // event still names site=region)
+        let oc = budget.run_stream(conn.fd(cn), path, chg.cap, chg.pipe_w, chg.pipe_r)
+        let cls = oc.cls
+        if cls == 2 {
+            chg.site = "region"
+            chg.would = chg.limit + 1
+            return true
+        }
+        if cls >= 3 {
+            return true
+        }
+        let rep = (oc.wcode, oc.rt)
+        chg.rt = rep.1
+        if rep.0 == 1 {
+            return closed
+        }
+        if rep.0 == 2 {
+            return io
+        }
+        if rep.0 != 0 {
+            return true
+        }
+        return !keep
+    }
     let fd = fs_open(path) else |_| {
         // could not even open after stat: nothing sent yet past head,
         // but Content-Length is committed, so close
@@ -1263,7 +1419,7 @@ pub fn serve_conn_cn(
         // ws10, the `head` site: fences (414/400) already spoke above;
         // the budget rules what they admitted. A budget 503 always
         // closes — shedding memory is the point (docs/BUDGET.md).
-        var chg = charge_new(limits.memory_budget)
+        var chg = charge_new(limits.memory_budget, opts.pipe_w, opts.pipe_r)
         chg.used = hr.head.len
         if chg.limit > 0 && chg.used > chg.limit {
             send_err(mut cn, 503, false, opts.token)
@@ -1444,6 +1600,7 @@ pub struct ReqOut {
     bud_site: str,
     bud_limit: int,
     bud_would: int,
+    bud_cap: int,
     mem_hw: int,
     mem_rt: int,
     admin: str,
@@ -1465,6 +1622,7 @@ fn req_out(close: bool, carry: str, acc: obs.Access, chg: Charge) -> ReqOut {
         bud_site: chg.site,
         bud_limit: chg.limit,
         bud_would: chg.would,
+        bud_cap: chg.cap,
         mem_hw: chg.used,
         mem_rt: chg.rt,
         admin: "",
@@ -1489,6 +1647,7 @@ fn req_out_wait(acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
         bud_site: "",
         bud_limit: chg.limit,
         bud_would: 0,
+        bud_cap: 0,
         mem_hw: 0,
         mem_rt: 0,
         admin: "",
@@ -1512,6 +1671,7 @@ fn req_out_admin(close: bool, carry: str, acc: obs.Access, chg: Charge, kind: st
         bud_site: chg.site,
         bud_limit: chg.limit,
         bud_would: chg.would,
+        bud_cap: chg.cap,
         mem_hw: chg.used,
         mem_rt: chg.rt,
         admin: kind,
@@ -1546,7 +1706,7 @@ pub fn serve_request(
     var cn = conn_mod_plain(conn)
     var acc = obs.access_new()
     acc.request = raw_line(head)
-    var chg = charge_new(limits.memory_budget)
+    var chg = charge_new(limits.memory_budget, opts.pipe_w, opts.pipe_r)
     let req = http.parse_request(head, limits) else |e| match e {
         malformed => {
             acc.status = 400
@@ -1798,6 +1958,7 @@ pub struct ConnStep {
     bud_site: str,
     bud_limit: int,
     bud_would: int,
+    bud_cap: int,
     mem_hw: int,
     mem_rt: int,
     admin: str,
@@ -1821,6 +1982,7 @@ fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, ac
         bud_site: "",
         bud_limit: 0,
         bud_would: 0,
+        bud_cap: 0,
         mem_hw: 0,
         mem_rt: 0,
         admin: "",
@@ -1871,6 +2033,7 @@ fn step_serve(
         bud_site: ro.bud_site,
         bud_limit: ro.bud_limit,
         bud_would: ro.bud_would,
+        bud_cap: ro.bud_cap,
         mem_hw: ro.mem_hw,
         mem_rt: ro.mem_rt,
         admin: ro.admin,
