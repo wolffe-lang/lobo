@@ -1,14 +1,14 @@
 module pkg :: proxy
-  wolfi v0 · toolchain 0.2.2 · edition v1
-  export_hash d721698028ab8d7f98df6eb7d54b4fe603ad91981572aca7be1aab4c08499219
-  pkg_hash    d721698028ab8d7f98df6eb7d54b4fe603ad91981572aca7be1aab4c08499219
+  wolfi v0 · toolchain 0.2.3 · edition v1
+  export_hash 6fa3467d0251a913446bc6aa7ed6303246c3c420eed2a7a66c1c8ee3692e8b47
+  pkg_hash    6fa3467d0251a913446bc6aa7ed6303246c3c420eed2a7a66c1c8ee3692e8b47
   deps:
-    config  1ae103637af25655a31f61cfbf9e5d2f0870c20247781e85c4970c90ae1ea7c2
-    http  aca51a98027b998b95f129fd5b9b8f283d4f89587124ba1af91b65d1e5dbde6c
-    resolver  21442f70c4a638339a1ecaab43480b37355aed3d33ebdacbaefb4e95c8e5f4c6
-    std.net  40d6b794837d02a30fbbd171f56de2191bc3b38d469b24b873a9aeff8ee5064a
-    std.x.tls.cert  f99bd7c4b52600513b4dd4b52a22d7b135adfcc42f7e8e7bf25bd33b668e3ce3
-    std.x.tls.client  45ff216351f509d1bf3e94bd0d73dec827bbbdc44947cc1936e375e18dcb3fba
+    config  4ca8619eed493da02f2439b1eef73db3a5b7b2b39a30e5caaf716938200531ed
+    http  6e18c1b349576e6c7acf4b757cfceb8543558460150de261f1d511946166219e
+    resolver  335a608ed8a1bcaebc89315ca204485dd53b25c5cc15e7b78fd88a4e99e07f2e
+    std.net  5f86de6191f80aa0ae69fc4f423c9f6f0e9f765c2a7263dedb7713dd225246d0
+    std.x.tls.cert  869655ab09c4766bcc4957a31b0d738cbb9870c829ec2918c879d863d3556442
+    std.x.tls.client  d6cedd582a881052ed5de585f86f9f47d3e1e3d3ef55b6dd63837325965ca7bd
   items:
     [0] pub build_upstream — fn build_upstream(c: config.Conf, req: http.Request, pl: self.Plan, phost: str, pport: int, remote_addr: str, body: str) -> str · regions (ρ1, ρ2, ρ3, -, -, -, -) -> -
     [1] pub expand_var — fn expand_var(v: str, host: str, remote_addr: str, proxy_host: str, inbound_xff: str) -> str
