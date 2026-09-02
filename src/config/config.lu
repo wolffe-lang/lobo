@@ -107,6 +107,17 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws13: the resolver half of -t — `resolver` names an address and
+    // takes nginx's parameters (valid=, ipv4=, ipv6=; the two lobo
+    // cannot honour refuse by name), `resolver_timeout` parses as a
+    // time. One named [emerg], first failure wins.
+    if verdict == 0 {
+        let rerr = resolver_check(c)
+        if !rerr.is_empty() {
+            eprint("lobo: [emerg] {rerr}")
+            verdict = 1
+        }
+    }
     // wsm04: the upstream-TLS half of -t — an https proxy_pass names
     // its trust anchors (the client verifies always) and the file
     // loads. One named [emerg], first failure wins.

@@ -562,6 +562,27 @@ pub fn table() -> Table {
         "implemented",
         "upstream read deadline (expiry -> 504)",
     )
+    // ---- ws13 (wsc05 opens): the resolver — async upstream DNS
+    row(
+        mut t,
+        "resolver",
+        "http server location",
+        "",
+        1,
+        -1,
+        "implemented",
+        "ws13: address [valid=time] [ipv4=on|off] [ipv6=on|off]; lobo's own DNS client (TCP transport — nginx tries UDP first, delta) resolves proxy_pass/upstream NAMES at runtime through a TTL cache the ONE poll loop multiplexes (docs/RESOLVER.md). Deltas, named: applies to STATIC proxy_pass names too (nginx resolves those once at load and never again — trac #1064; L013 says so at load), A records only (ipv6=on is accepted and answers nothing; ipv4=off refuses at -t), the first address is used (nginx round-robins several), a failed name is held 1s (nginx re-asks), status_zone= refuses by name",
+    )
+    row(
+        mut t,
+        "resolver_timeout",
+        "http server location",
+        "",
+        1,
+        1,
+        "implemented",
+        "ws13: how long a name may take to resolve before the request answers 502 (nginx's default 30s); the query is abandoned, the failure held 1s (docs/RESOLVER.md)",
+    )
     row(
         mut t,
         "proxy_send_timeout",

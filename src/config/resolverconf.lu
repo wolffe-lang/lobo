@@ -1,0 +1,222 @@
+//! resolverconf — the `resolver` / `resolver_timeout` half of the
+//! config model (ws13, wsc05 opens): the -t checks in nginx's own
+//! wording where the oracle has one (probed against nginx/1.30.4's
+//! ngx_resolver parameters), lobo-named where the delta is lobo's
+//! (A-only resolution, the status zone), and the little helpers the
+//! lints and proxy share — the effective resolver row for a block,
+//! the address/parameter split, the IP-literal classifier. The
+//! resolver CLIENT itself is the `resolver` module; proxy consumes
+//! the settings through its plan. Same module as config.lu (D32:
+//! one directory, one module).
+
+/// True when `host` is an IPv4 dotted quad or an IPv6 literal (bare
+/// or bracketed) — an authority that needs no resolving. Total.
+pub fn resolver_is_literal(host: str) -> bool {
+    if host.is_empty() {
+        return false
+    }
+    if host.contains(":") {
+        return true
+    }
+    var dots: int = 0
+    for b in host.bytes() {
+        if b == 46 {
+            dots = dots + 1
+        } else if b < 48 || b > 57 {
+            return false
+        }
+    }
+    dots == 3
+}
+
+/// The HOST of a `proxy_pass` argument (`is_pass`: strip the scheme
+/// and the URI) or of an upstream `server` peer (`host[:port]`), the
+/// port and a bracketed IPv6's brackets removed; "" for a variable
+/// form or an unreadable shape. Total.
+pub fn authority_host(arg: str, is_pass: bool) -> str {
+    var a = arg
+    if is_pass {
+        if a.contains("$") {
+            return ""
+        }
+        if a.starts_with("http://") {
+            a = a[7..a.len]
+        } else if a.starts_with("https://") {
+            a = a[8..a.len]
+        } else {
+            return ""
+        }
+        let slash = a.find("/") else -1
+        if slash >= 0 {
+            a = a[0..slash]
+        }
+    }
+    if a.starts_with("[") {
+        let close = a.find("]") else -1
+        if close > 0 {
+            return a[1..close]
+        }
+        return ""
+    }
+    let colon = a.rfind(":") else -1
+    if colon > 0 && !a[0..colon].contains(":") {
+        return a[0..colon]
+    }
+    a
+}
+
+/// Whether an `upstream` block named `name` exists. Total.
+pub fn upstream_exists(c: Conf, name: str) -> bool {
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "upstream" && c.kinds[i] == "b" && c.args_n[i] >= 1 {
+            if c.argp[c.args_at[i]] == name {
+                return true
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
+/// The index of the `resolver` row in effect at row `at` — the nearest
+/// enclosing block (walking `parent`) that holds one — or -1. An
+/// upstream peer's block is the upstream itself, whose parent is
+/// http. Total.
+pub fn resolver_row_for(c: Conf, at: int) -> int {
+    var blk = c.parent[at]
+    var guard: int = 0
+    while blk >= 0 && guard < 64 {
+        var i: int = 0
+        while i < count(c) {
+            if c.names[i] == "resolver" && c.parent[i] == blk && c.args_n[i] >= 1 {
+                return i
+            }
+            i = i + 1
+        }
+        blk = c.parent[blk]
+        guard = guard + 1
+    }
+    -1
+}
+
+/// True when a `resolver` directive is in effect at row `at`. Total.
+pub fn resolver_in_effect(c: Conf, at: int) -> bool {
+    resolver_row_for(c, at) >= 0
+}
+
+/// The resolver ADDRESS of `resolver` row `r`: the first argument
+/// that is not a `name=value` parameter, with `:53` appended when it
+/// names no port (nginx's default), an IPv6 literal bracketed. ""
+/// when the row has none. Total.
+pub fn resolver_address(c: Conf, r: int) -> str {
+    let at = c.args_at[r]
+    var j: int = 0
+    while j < c.args_n[r] {
+        let a = c.argp[at + j]
+        if !a.contains("=") {
+            if a.starts_with("[") {
+                if a.contains("]:") {
+                    return a
+                }
+                return "{a}:53"
+            }
+            if a.contains(":") {
+                return a
+            }
+            return "{a}:53"
+        }
+        j = j + 1
+    }
+    ""
+}
+
+/// The `valid=` parameter of `resolver` row `r` in ms, or 0 when the
+/// record TTL rules. Total (an invalid time answers 0; -t named it).
+pub fn resolver_valid_ms(c: Conf, r: int) -> int {
+    let at = c.args_at[r]
+    var j: int = 0
+    while j < c.args_n[r] {
+        let a = c.argp[at + j]
+        if a.starts_with("valid=") {
+            return time_ms(a[6..a.len])
+        }
+        j = j + 1
+    }
+    0
+}
+
+/// The `resolver_timeout` in effect at row `at` in ms (nearest
+/// enclosing block; nginx's default 30s). Total.
+pub fn resolver_timeout_for(c: Conf, at: int) -> int {
+    var blk = c.parent[at]
+    var guard: int = 0
+    while blk >= 0 && guard < 64 {
+        var i: int = 0
+        while i < count(c) {
+            if c.names[i] == "resolver_timeout" && c.parent[i] == blk && c.args_n[i] >= 1 {
+                let v = time_ms(c.argp[c.args_at[i]])
+                return if v > 0 { v } else { 30000 }
+            }
+            i = i + 1
+        }
+        blk = c.parent[blk]
+        guard = guard + 1
+    }
+    30000
+}
+
+/// The -t half: every `resolver` row names an address and takes only
+/// the parameters nginx takes — `valid=<time>`, `ipv4=on|off`,
+/// `ipv6=on|off` (probed wording: `invalid parameter "x"`); the two
+/// lobo cannot honour refuse BY NAME (`ipv4=off` — lobo resolves A
+/// records only at v1; `status_zone=` — no resolver status zone);
+/// `resolver_timeout` parses as a time. "" when clean; else the one
+/// [emerg] line, first failure wins. Total.
+pub fn resolver_check(c: Conf) -> str {
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "resolver" {
+            let at = c.args_at[i]
+            var have_addr = false
+            var j: int = 0
+            while j < c.args_n[i] {
+                let a = c.argp[at + j]
+                if !a.contains("=") {
+                    have_addr = true
+                } else if a.starts_with("valid=") {
+                    if time_ms(a[6..a.len]) < 0 {
+                        return "\"resolver\" directive invalid parameter \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                    }
+                } else if a.starts_with("ipv4=") {
+                    let v = a[5..a.len]
+                    if v == "off" {
+                        return "\"resolver\" directive \"ipv4=off\" is not supported: lobo resolves A records only at this pin (docs/RESOLVER.md names the delta) in {c.files[i]}:{c.lines[i]}"
+                    }
+                    if v != "on" {
+                        return "\"resolver\" directive invalid parameter \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                    }
+                } else if a.starts_with("ipv6=") {
+                    let v = a[5..a.len]
+                    if v != "on" && v != "off" {
+                        return "\"resolver\" directive invalid parameter \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                    }
+                } else if a.starts_with("status_zone=") {
+                    return "\"resolver\" directive \"status_zone=\" is not supported: lobo has no resolver status zone (the counters live at /metrics — docs/RESOLVER.md) in {c.files[i]}:{c.lines[i]}"
+                } else {
+                    return "\"resolver\" directive invalid parameter \"{a}\" in {c.files[i]}:{c.lines[i]}"
+                }
+                j = j + 1
+            }
+            if !have_addr {
+                return "\"resolver\" directive requires an address in {c.files[i]}:{c.lines[i]}"
+            }
+        } else if c.names[i] == "resolver_timeout" && c.args_n[i] >= 1 {
+            if time_ms(c.argp[c.args_at[i]]) < 0 {
+                return "\"resolver_timeout\" directive invalid value in {c.files[i]}:{c.lines[i]}"
+            }
+        }
+        i = i + 1
+    }
+    ""
+}

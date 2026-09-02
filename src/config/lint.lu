@@ -26,7 +26,7 @@
 /// frozen model; -t renders these as `[warn]` lines (they never
 /// change the exit code).
 pub fn lint(c: Conf) -> str {
-    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}{lint_log_inert(c)}{lint_log_native(c)}{lint_log_loses(c)}{lint_budget_native(c)}{lint_body_size_inert(c)}{lint_metrics_native(c)}{lint_metrics_exposed(c)}"
+    "{lint_if_in_location(c)}{lint_psh_shadow(c)}{lint_alias_slash(c)}{lint_cert_native(c)}{lint_log_inert(c)}{lint_log_native(c)}{lint_log_loses(c)}{lint_budget_native(c)}{lint_body_size_inert(c)}{lint_metrics_native(c)}{lint_metrics_exposed(c)}{lint_name_unresolved(c)}{lint_resolver_static(c)}"
 }
 
 /// LOBO-L001: `if` inside a `location` block.
@@ -324,6 +324,63 @@ fn lint_metrics_exposed(c: Conf) -> str {
                     out = "{out}LOBO-L011|{c.files[i]}:{c.lines[i]}|\"metrics on\" publishes /metrics and /status.json on listen \"{c.argp[c.args_at[j]]}\", which is not a loopback address. lobo's v0 access posture for the endpoint IS the bind address — there is no auth beyond it (ws14 revisits), and the exposition names your generations, upstream error rates and memory high waters. Bind this server to 127.0.0.1 or an admin network, or turn the endpoint off.\n"
                 }
                 j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L012 (ws13): a `proxy_pass` (or an `upstream` `server`) names
+/// a HOSTNAME and no `resolver` is in effect for it. Without a
+/// resolver the name reaches the dial as text and the host resolver
+/// answers it SYNCHRONOUSLY on the poll loop's thread with no
+/// deadline — every other connection waits behind a slow or dead
+/// nameserver (report 11 §2 item 9, the stall docs/RESOLVER.md
+/// measures). nginx has the same shape at load time only (it resolves
+/// once and keeps the address until reload — trac #1064); lobo
+/// resolves at every dial, so the stall recurs. A warning: the config
+/// carries and serves; the fix is one directive.
+fn lint_name_unresolved(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        let is_pass = c.names[i] == "proxy_pass" && c.args_n[i] >= 1
+        let is_peer = c.names[i] == "server" && c.ctx[i] == "upstream" && c.args_n[i] >= 1
+        if is_pass || is_peer {
+            let host = authority_host(c.argp[c.args_at[i]], is_pass)
+            if !host.is_empty() &&
+                !resolver_is_literal(host) &&
+                !(is_pass && upstream_exists(c, host)) {
+                if !resolver_in_effect(c, i) {
+                    out = "{out}LOBO-L012|{c.files[i]}:{c.lines[i]}|\"{c.names[i]}\" names the host \"{host}\" and no \"resolver\" is in effect: the name is resolved by the host resolver at every dial, synchronously on the poll loop, with no deadline — a slow or dead nameserver stalls every connection behind it (docs/RESOLVER.md measures the stall). Add \"resolver <address> valid=30s;\" to resolve asynchronously through lobo's cache, or name an IP literal.\n"
+                }
+            }
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// LOBO-L013 (ws13): a `resolver` IS in effect for a static
+/// `proxy_pass` name — the named DELTA: nginx resolves a static
+/// proxy_pass name ONCE at load through the system resolver and never
+/// consults `resolver` for it (only the variable form and `server ...
+/// resolve` do); lobo resolves it through `resolver` at runtime, under
+/// the TTL cache, so a changed record is picked up without a reload
+/// (trac #1064's complaint, answered). Informational: says out loud
+/// that this config behaves differently under lobo, in lobo's favour.
+fn lint_resolver_static(c: Conf) -> str {
+    var out = ""
+    var i: int = 0
+    while i < count(c) {
+        if c.names[i] == "proxy_pass" && c.args_n[i] >= 1 {
+            let host = authority_host(c.argp[c.args_at[i]], true)
+            if !host.is_empty() &&
+                !resolver_is_literal(host) &&
+                !upstream_exists(c, host) &&
+                resolver_in_effect(c, i) {
+                out = "{out}LOBO-L013|{c.files[i]}:{c.lines[i]}|\"proxy_pass\" names the host \"{host}\" and a \"resolver\" is in effect: lobo re-resolves this name at runtime through the resolver's TTL cache (a changed record applies without a reload); nginx resolves a static proxy_pass name ONCE at load via the system resolver and ignores \"resolver\" for it (trac #1064). A named delta in lobo's favour (docs/RESOLVER.md) — nothing to change.\n"
             }
         }
         i = i + 1
