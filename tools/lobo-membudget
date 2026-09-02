@@ -41,6 +41,26 @@
 # trips every drive) and the host's page compressor stops writing
 # the verdict. The compressor's own counters (`vm_stat`) are the
 # evidence a red should be read against.
+#
+# THE CAP, ENFORCED (ws14 — the ws13 adoption landed at the 5f99b9f
+# pin, wolf-lang#219 closed): a SECOND server runs under
+# `memory_budget 40k`, so every budgeted response's body work runs
+# inside a proc under `region r(cap: 16 x 40960)` (docs/BUDGET.md's
+# arithmetic), and the suite RE-BASELINES the same rounds through
+# that path — round A'/B' under the same two gates as A/B — then
+# drives the breach THROUGH A REAL SOCKET against the release
+# binary: the ledger's growth law charges 16 x pow2ceil(N) − 16 for
+# an N-byte body (measured at the bump: 4,097 bytes → 131,056), so a
+# 33,000-byte file under a 40k budget is ADMITTED by the meter
+# (head + 33,000 < 40,960) and REFUSED by the runtime (1,048,560 >
+# 655,360): `fault(alloc-contract)` at the join → 503 with a name,
+# `site=region … cap=655360` in the log — while the 32,768-byte file
+# beside it (a power of two: 524,272) serves 200 in full, the server
+# keeps serving keepalive requests afterwards (the proc died, the
+# server lived), and `lobo status` counts exactly one budget-503
+# with `mem-rt-hw` non-zero (the measured bytes came back through the
+# self-pipe). The band where the cap fires on an admitted request —
+# budget < pow2ceil(body) — is the finding BUDGET.md carries.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
@@ -159,8 +179,92 @@ else
     fi
 fi
 
+# ---------------------------------------------------------------
+# ws14: THE CAP, ENFORCED — the second server, under a budget
+# ---------------------------------------------------------------
+# breach.bin: 33,000 bytes — pow2ceil 65,536 → the ledger charges
+# 1,048,560 against a cap of 16 x 40,960 = 655,360. fits.bin: 32,768
+# bytes — a power of two → 524,272, under the cap.
+head -c 33000 /dev/zero | tr '\0' 'B' > "$scratch/w/breach.bin"
+head -c 32768 /dev/zero | tr '\0' 'F' > "$scratch/w/fits.bin"
+hp2=$("$WOLF" run ./tests/rig/freeport.lu)
+ctp=$("$WOLF" run ./tests/rig/freeport.lu)
+conf2="$scratch/lobo-cap.conf"
+printf 'pid %s/lobo-cap.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; application/octet-stream bin; }\n  memory_budget 40k;\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
+    "$scratch" "$ctp" "$hp2" "$scratch" > "$conf2"
+
+"$LOBO" serve -p . -c "$conf2" 2> "$scratch/lobo-cap.log" &
+pid=$!
+i=0
+while [ $i -lt 80 ]; do
+    if grep -q "generation-activated gen=1" "$scratch/lobo-cap.log" 2>/dev/null; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+hp="$hp2"
+
+drive 100 /small.html "cap warmup: 100 keepalive requests through the capped proc"
+pair " (cap)"
+if [ -n "${ga:-}" ] && [ "$diff" -ge 3200 ]; then
+    say "note — the capped differential tripped once (the compressor's signature); re-driving the pair on the same server"
+    pair " (cap, re-drive)"
+fi
+if [ -z "${ga:-}" ]; then
+    check "cap: RSS sampled at all checkpoints (r0='$r0' r1='$r1' r2='$r2')" 1
+else
+    if [ "$diff" -lt 3200 ]; then
+        check "cap: response bodies die with their response THROUGH THE PROC (B-A ${diff} KB < 3200 KB): the capped region is load-bearing" 0
+    else
+        check "cap: response bodies die with their response THROUGH THE PROC (B-A ${diff} KB < 3200 KB) — tripped twice" 1
+    fi
+    perreq=$((gb / 400))
+    if [ "$perreq" -lt 64 ]; then
+        check "cap: per-request retention ratchet through the proc (${perreq} KB/req < 64 KB/req)" 0
+    else
+        check "cap: per-request retention ratchet through the proc (${perreq} KB/req < 64 KB/req)" 1
+    fi
+fi
+
+# the breach, through a real socket: admitted by the meter, refused
+# by the runtime at the join
+ask() { # ask <path> — one raw GET, the whole reply on stdout
+    printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$1" | nc 127.0.0.1 "$hp2" 2>/dev/null
+}
+r503=$(ask /breach.bin | tr -d '\r')
+if printf '%s\n' "$r503" | head -1 | grep -q '^HTTP/1.1 503 Service Temporarily Unavailable$' \
+    && printf '%s\n' "$r503" | grep -q '^Connection: close$'; then
+    check "cap breach: 33,000 bytes under memory_budget 40k (admitted: head + 33,000 < 40,960) is refused at the join — 503 Service Temporarily Unavailable, Connection: close, through a real socket" 0
+else
+    check "cap breach: expected a 503 through the socket, got: $(printf '%s' "$r503" | head -1)" 1
+fi
+sleep 0.2
+if grep -q 'budget-exceeded gen=1 site=region budget=40960 would=40961 cap=655360' "$scratch/lobo-cap.log"; then
+    check "cap breach: the event names the runtime's refusal — budget-exceeded site=region budget=40960 would=40961 cap=655360 (16 x the directive, ledger units)" 0
+else
+    check "cap breach: the site=region event is missing from the log: $(grep budget-exceeded "$scratch/lobo-cap.log" | head -1)" 1
+fi
+r200=$(ask /fits.bin)
+got_len=$(printf '%s' "$r200" | sed -n 's/^Content-Length: \([0-9]*\).*/\1/p' | head -1)
+body_len=$(printf '%s' "$r200" | awk 'BEGIN{RS="\r\n\r\n"} NR==2{printf "%d", length($0)}')
+if printf '%s' "$r200" | head -1 | grep -q '^HTTP/1.1 200 OK' && [ "$got_len" = 32768 ] && [ "$body_len" = 32768 ]; then
+    check "cap fits: the 32,768-byte file beside it (a power of two: 524,272 ledger units under the 655,360 cap) serves 200 in full through the proc" 0
+else
+    check "cap fits: expected 200 with 32768 body bytes, got status '$(printf '%s' "$r200" | head -1)' len=$got_len body=$body_len" 1
+fi
+drive 50 /small.html "the server lives: 50 keepalive requests after the contained breach"
+st=$("$LOBO" status -p . -c "$conf2" 2>/dev/null)
+g1=$(printf '%s\n' "$st" | grep 'generation 1:' | head -1)
+if printf '%s' "$g1" | grep -q 'budget-503s=1' && printf '%s' "$g1" | grep -q 'mem-rt-hw=' && ! printf '%s' "$g1" | grep -q 'mem-rt-hw=0 '; then
+    check "status: exactly one budget-503 counted and mem-rt-hw non-zero (the measured bytes came back through the self-pipe): ${g1}" 0
+else
+    check "status: expected budget-503s=1 and a non-zero mem-rt-hw, got: ${g1}" 1
+fi
+
+kill "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+
 if [ "$red" != 0 ]; then
     echo "lobo-membudget: RED — $red of $total checks failed (logs under $scratch/)" >&2
     exit 1
 fi
-echo "lobo-membudget: $total/$total checks green (bodies O(1) per response; the str half is wolf-lang#191's, named above)"
+echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; the breach → 503 site=region through a real socket; the str half is wolf-lang#191's, named above)"
