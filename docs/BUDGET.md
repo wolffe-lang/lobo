@@ -196,7 +196,7 @@ site:
 | site | when it checks | over → | notes |
 |---|---|---|---|
 | `admin` | on the ws12 `/metrics` and `/status.json` endpoint, before the rendered body is written | 503, close | the fifth site, appended (the frozen field keeps its key; the VALUE set widens). The exposition is a response body lobo materializes, so it is charged like one — a scrape that sheds under a tiny budget is CORRECT, and a rig case |
-| `region` | ws14 (built at ws13): at the runtime's own region cap — `16 × budget` ledger units — inside the body proc: the read for a small file, the first chunk for a streamed one | 503, close (small path); close (stream path — the head is on the wire) | the sixth site: the RUNTIME refused, not the meter ([mem.region.cap.3], D68: the breach is contained at the proc boundary and reaches the join as `fault(alloc-contract)`). `would` reports `budget+1` (a killed proc's charge is unobservable at the join) and the event gains a trailing `cap=<ledger units>` field. Reachable from a config through a real socket in the growth-law band below (`tools/lobo-membudget`'s cap rounds are the witness); on any budget at or above the next power of two over the served body it is the backstop the theorem describes |
+| `region` | ws14 (built at ws13): at the runtime's own region cap — `16 × pow2ceil(budget)` ledger units, ws15's D40 envelope — inside the body proc: the read for a small file, the first chunk for a streamed one | 503, close (small path); close (stream path — the head is on the wire) | the sixth site: the RUNTIME refused, not the meter ([mem.region.cap.3], D68: the breach is contained at the proc boundary and reaches the join as `fault(alloc-contract)`). `would` reports `budget+1` (a killed proc's charge is unobservable at the join) and the event gains a trailing `cap=<ledger units>` field. **Not reachable from a config since D40** — the envelope follows the growth law, so no body the meter admits can cross the cap (the theorem below, asserted over the whole admissible shape space). It is the backstop for a runtime charge the meter does not model, and its witness is the join driven directly in `tests/serve/budget_cap.lu` |
 | `head` | after the head is framed and parses clean | 503, close | fences (414/400) precede it; the head was necessarily read to be measured — the fence bounds that over-admission at `n × size` |
 | `body` | BEFORE reading a declared (Content-Length) body | 503, half-close drain, close | the budget's strongest moment: refused pre-admission, zero body bytes read; `would` = head + declared length |
 | `body-chunked` | while chunks accumulate | 503, half-close drain, close | fence (413) checked against the same running total first; `would` reports `budget+1` — the crossing point (an unread chunked body's true total is unknowable) |
@@ -228,7 +228,7 @@ r(cap: n)` ([mem.region.cap.1-3]) and D68 ruled a breach inside a
 proc contained at the proc boundary, reaching the join as
 `fault(alloc-contract)`. ws13 consumed them: a budgeted request's
 regioned body work runs inside a `spawn proc` (`src/budget`, the
-first proc in lobo's request path) under `cap: 16 × memory_budget`,
+first proc in lobo's request path) under `cap: ledger_cap(memory_budget)`,
 and the join maps the reason — normal → the response went out, error
 → the socket broke, `fault(alloc-contract)` → **503 with a name,
 `site=region`**, any other fault → 500 (a trap contained, where
@@ -258,32 +258,34 @@ that binary.
 | lane | the cap adoption | how it is known |
 |---|---|---|
 | native (debug tier) | runs | `tests/serve/budget_cap.lu` (the four relations, the join driven directly), `budget_cap_e2e.lu` (the real server, 200 through the proc, `mem-rt-hw` back through the pipe), `cap_shape.lu` |
-| release (`WOLF_MIDEND=0`) | runs — #219's fix | the gauntlet's tiers step builds it; `tools/lobo-membudget`'s cap rounds drive the breach through a real socket against `target/lobo-release` |
+| release (`WOLF_MIDEND=0`) | runs — #219's fix | the gauntlet's tiers step builds it; `tools/lobo-membudget`'s cap rounds drive the whole budgeted path through a real socket against `target/lobo-release` — since ws15 that includes D40's closure measurement (the ws14 breach serving 200, the meter's 503 beside it) |
 | checked — `wolf conform-run --checked` (the s23 UB machine, the corpus runner's lane) | **refuses, by name**: `unsupported` at `mem`, `x-unsupported-construct: "structured concurrency in checked execution (C1 deferred)"` — the machine runs no `spawn`/scope/`select` at all; a proc is refused where every spawn is (the C1 sprint, not a fix) | `//! checked-refuses:` on `budget_cap.lu` and `cap_shape.lu` — the runner ASSERTS the named record, never skips the lane (at v0.2.2 the record was empty: #219's second observation, fixed by s134). Every witness that fires a refusal BEFORE the proc keeps its checked lane (`budget_refusals.lu`, `budget_e2e.lu`, `region_measured.lu`) |
 | checked — `wolf run --checked` | runs (it is the NATIVE build under the checked profile, a different machine) | not a corpus lane; stated so nobody bisects it again |
 | lupin | runs the shape (`cap_shape.lu`); the serve suite cannot run there (lupin has no fs) | the corpus lane |
 
 **The arithmetic (the directive documents it).** The cap bounds the
 region's LEDGER, which `[mem.region.account.1]` keeps in the tier's
-own units — cumulative, high-water — and #203 measured lobo's
-streaming shape at **16×** the payload (8× because a byte buffer is
-a `List[int]`, 2× because growth's abandoned buffers stay charged).
-So `ledger_cap(budget) = budget × 16`: a `memory_budget 64k` is a
-region cap of 1,048,576 ledger units, which the 1,048,560 a 64 KiB
-chunk charges fits by sixteen bytes. The spec's own advice is to
-derive caps from measured readings rather than payload constants,
-and lobo publishes the reading (`mem-rt-hw`) the constant was
-derived from; when #203 changes the ratio the constant changes with
-the pin, in one place.
+own units — cumulative, high-water. Two factors set it:
 
-**The growth law, and the band where the cap fires on an admitted
-request (ws14's finding).** ws13 wrote a theorem here — that the cap
-cannot fire on any request the meter admits — from one measurement
-(496 ledger units for an 18-byte file, read as "≈ 8N + 352"). It is
-false, and the end-to-end witness this sprint was asked for is what
-found it. Measured at the 5f99b9f bump, native tier, `fs_read_bytes`
-into a fresh capped region (`tests/serve/budget_cap.lu` pins the
-relations; these are the raw readings):
+- **16×, the per-byte factor.** #203 measured lobo's streaming shape
+  at sixteen times the payload: 8× because a byte buffer is a
+  `List[int]`, 2× because growth's abandoned buffers stay charged.
+- **`pow2ceil`, the growth factor.** The buffer grows by DOUBLING and
+  the ledger keeps every abandoned buffer, so a body's charge is set
+  by the smallest power of two at or above it, not by the body.
+
+So `ledger_cap(budget) = 16 × pow2ceil(budget)` — **D40 (ws15)**. ws13
+wrote `budget × 16` from a single measurement; ws14 measured the whole
+curve, found the flat envelope false, and routed the decision; this is
+its resolution. The spec's own advice is to derive caps from measured
+readings rather than payload constants, and lobo publishes the reading
+(`mem-rt-hw`) the arithmetic is checked against; when #203 changes the
+growth law the exponent changes with the pin, in one place.
+
+**The growth law (ws14's measurement, unchanged).** Measured at the
+5f99b9f bump, native tier, `fs_read_bytes` into a fresh capped region
+(`tests/serve/budget_cap.lu` pins the relations; these are the raw
+readings):
 
 | body bytes N | ledger charge | ÷ N |
 |---|---|---|
@@ -296,32 +298,54 @@ relations; these are the raw readings):
 | 40,000 | 1,048,560 | 26.2 |
 | 65,535 / 65,536 | 1,048,560 | 16.0 |
 
-The law is `charge(N) = 16 × pow2ceil(N) − 16` (+48 below a few
-hundred bytes): the buffer grows by doubling and the ledger keeps
-every abandoned buffer, so the charge is 16× the payload exactly AT
-a power of two — where #203 measured, and where the 64 KiB chunk
-sits — and up to 32× just past one. #203's own thread already names
-the fix on the runtime's side (a buffer sized from the known bound
-instead of grown; wolf-std sc32 showed `fs_read_chunk(f, n)` charges
-exactly what the unbounded read charges). Consequence for the cap:
-**a small body is refused by the runtime whenever `memory_budget <
-pow2ceil(body)`**, even though the meter admitted it — the band is
-`[head + N, pow2ceil(N))`, and it is wide (a 33,000-byte file under
-`memory_budget 40k` is refused; under `64k` it serves). The stream
-path is outside the band by construction (one 64 KiB chunk against
-a cap of at least 16 × (head + 65,536)). Every refusal in the band
-is loud — `budget-exceeded … site=region … cap=<n>`, a 503 with
-`Connection: close`, the proc dead and the server alive — and this
-is the shape `tools/lobo-membudget` drives through a real socket on
-every gauntlet run. **Operator rule until the envelope moves:** set
-`memory_budget` to at least the power of two above the largest small
-file you serve (or `64k`+, which covers the stream path). The
-envelope is deliberately left at #203's 16× this sprint rather than
-silently widened to the growth law (`16 × pow2ceil(budget)` would
-make the region site unreachable from any config again, which is a
-campaign decision about what the cap is FOR — backstop or
-enforcement — not a lane's); the ledger row that owns the decision
-is D40.
+The law is `charge(N) = 16 × pow2ceil(N) − 16`: 16× the payload
+exactly AT a power of two — where #203 measured, and where the 64 KiB
+chunk sits — and up to 32× just past one.
+
+**What D40 changed, and why.** Under ws13's flat `budget × 16`
+envelope the law opened a BAND in which the runtime refused a request
+the meter had ADMITTED: a 33,000-byte file under `memory_budget 40k`
+was admitted (head + 33,000 < 40,960) and then charged 1,048,560
+against a cap of 655,360, dying at the join. That is the cap acting as
+a SECOND METER with different arithmetic from the first — two numbers
+an operator must reconcile, one of them undocumented in their config.
+ws14 left the envelope alone and routed the decision, because "what is
+the cap FOR" is a campaign question, not a lane's. The answer is
+**backstop**: the meter is the surface an operator configures and
+reasons about; the cap exists to contain a runtime charge the meter
+does not model, and it should never fire on a shape the meter has
+already ruled on.
+
+Making the envelope follow the law is what delivers that, and the
+theorem is now true rather than aspirational:
+
+> **No body the meter admits can cross the cap.** Small path: the
+> meter admits only `N ≤ budget`, so `pow2ceil(N) ≤ pow2ceil(budget)`
+> and the charge `16 × pow2ceil(N) − 16` is strictly under
+> `16 × pow2ceil(budget)`. Stream path: a streamed body is admitted
+> only when the meter can charge one 64 KiB chunk, so
+> `budget ≥ 65,536`, so the cap is at least 2,097,152 — over the
+> 1,048,560 a chunk region charges.
+
+It is ASSERTED, not just argued: `tests/serve/budget_cap.lu` walks
+every budget from 1 byte up past the stream threshold and checks the
+worst admissible body against the cap at each. And it is MEASURED end
+to end: `tools/lobo-membudget` serves the exact file ws14 measured as
+a breach — 33,000 bytes under `memory_budget 40k` — and reads back
+`mem-rt-hw=1048560` against a cap of 1,048,576, a 200 in full with a
+sixteen-unit margin, with NO `site=region` event anywhere in the run.
+The 50,000-byte file beside it is still a 503 `site=file`: the meter
+refuses it, before any proc is spawned.
+
+**Operator rule.** Set `memory_budget` to the bytes you are willing to
+admit. That is the whole rule — there is no second arithmetic to
+reconcile, and no power-of-two footnote. (ws14's rule, "set it to at
+least the power of two above the largest small file you serve", is
+RETIRED by D40; a config written to it is still correct, just no
+longer necessary.) What the cap costs you is address space the region
+may reserve, not bytes it will use: a budget of 40k caps its regions
+at 1,048,576 ledger units rather than 655,360, and the ledger is a
+count, not an allocation.
 
 **Per-CONNECTION budgets** (a cap on the conn's carry at accept)
 stay the second door: they need the proc boundary to be a
@@ -380,10 +404,13 @@ is no longer gated on anything upstream).
 - `tests/serve/cap_shape.lu` — the one-module shape on native AND
   lupin (200 rounds, a breach, the next round clean); the checked
   lane's named refusal asserted.
-- `tools/lobo-membudget`'s cap rounds (ws14) — the release binary
-  under `memory_budget 40k`: rounds A'/B' re-baselined THROUGH the
-  proc (the same two gates), the growth-law breach through a real
-  socket (`33,000` bytes → 503 `site=region cap=655360`), the
-  power-of-two neighbour serving 200 in full, fifty keepalive
-  requests after the breach, `budget-503s=1` and `mem-rt-hw` in
-  `lobo status`.
+- `tools/lobo-membudget`'s cap rounds (ws14, re-baselined at ws15) —
+  the release binary under `memory_budget 40k`: rounds A'/B'
+  re-baselined THROUGH the proc (the same two gates), then D40's
+  closure through a real socket — the 33,000-byte file ws14 measured
+  as a `site=region` breach now serves 200 in full
+  (`mem-rt-hw=1048560` against a cap of 1,048,576), the power-of-two
+  neighbour beside it serves 200, a 50,000-byte file is refused by
+  the METER (503 `site=file`) and NO `site=region` event appears
+  anywhere in the run, fifty keepalive requests after it,
+  `budget-503s=1` and `mem-rt-hw` in `lobo status`.
