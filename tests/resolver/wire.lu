@@ -1,0 +1,116 @@
+//! check: run(exit=0, stdout="query ok\nanswer ok\nfailures ok\nliterals ok\nrotate ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: resolver
+//!
+//! The DNS wire half, pure (ws13): the A/IN query lobo sends is the
+//! RFC 1035 §4.1 message under the §4.2.2 TCP length prefix, byte for
+//! byte; a hand-built answer with a compression pointer, a CNAME in
+//! front of two A records and two TTLs decodes to the address set in
+//! answer order with the SMALLEST TTL; every failure shape is a NAMED
+//! reason (nxdomain, servfail, refused, noaddr, malformed, a wrong id)
+//! and never a trap; the IP-literal classifier says which authorities
+//! need no resolving; and the round-robin rotation over a cached set
+//! is nginx's "several addresses, used in a round-robin fashion".
+
+use resolver
+
+/// Push the space-separated decimal bytes of `spec`. Total.
+fn push_dec(mut out: List[int], spec: str) {
+    var v: int = 0
+    var have = false
+    for b in spec.bytes() {
+        if b >= 48 && b <= 57 {
+            v = v * 10 + b - 48
+            have = true
+        } else if have {
+            (mut out).push(v)
+            v = 0
+            have = false
+        }
+    }
+    if have {
+        (mut out).push(v)
+    }
+}
+
+fn main() -> !int {
+    // --- the query: id 0x1234, name "app.test." (trailing dot tolerated)
+    let q = resolver.build_query(4660, "app.test.")
+    // length 26 = 12 header + 10 qname (3app4test0) + 4
+    assert(q.len == 28, "framed length: {q.len}")
+    assert(q[0] == 0 && q[1] == 26, "length prefix {q[0]} {q[1]}")
+    assert(q[2] == 18 && q[3] == 52, "id bytes")
+    assert(q[4] == 1 && q[5] == 0, "flags: RD only")
+    assert(q[6] == 0 && q[7] == 1, "qdcount 1")
+    assert(q[14] == 3 && q[15] == 97 && q[16] == 112 && q[17] == 112, "label app")
+    assert(q[18] == 4 && q[23] == 0, "label test + terminator")
+    assert(q[24] == 0 && q[25] == 1 && q[26] == 0 && q[27] == 1, "A IN")
+    print("query ok")
+
+    // --- an answer: header, the question echoed, CNAME app.test ->
+    // real.test (pointer-free), then two A records whose NAME is a
+    // pointer to offset 12 (the question's name), TTLs 300 and 60.
+    var m = List[int]()
+    // id, flags QR|RD|RA rcode 0, qd 1, an 3, ns 0, ar 0
+    push_dec(mut m, "18 52 129 128 0 1 0 3 0 0 0 0")
+    // question: 3app4test0 A IN
+    push_dec(mut m, "3 97 112 112 4 116 101 115 116 0 0 1 0 1")
+    // CNAME: name=ptr(12), type 5, class 1, ttl 300, rdlen 11, 4real4test0
+    push_dec(mut m, "192 12 0 5 0 1 0 0 1 44 0 11 4 114 101 97 108 4 116 101 115 116 0")
+    // A 10.0.0.7 ttl 300 (name ptr 12)
+    push_dec(mut m, "192 12 0 1 0 1 0 0 1 44 0 4 10 0 0 7")
+    // A 10.0.0.8 ttl 60
+    push_dec(mut m, "192 12 0 1 0 1 0 0 0 60 0 4 10 0 0 8")
+    let a = resolver.parse_answer(4660, m)
+    assert(a.ok, "answer ok: {a.reason}")
+    assert(a.addrs.len == 2, "two A records: {a.addrs.len}")
+    assert(a.addrs[0] == "10.0.0.7" && a.addrs[1] == "10.0.0.8", "answer order")
+    assert(a.ttl_ms == 60000, "smallest ttl: {a.ttl_ms}")
+    print("answer ok")
+
+    // --- failures, each named
+    let wrong = resolver.parse_answer(1, m)
+    assert(!wrong.ok && wrong.reason == "malformed", "wrong id: {wrong.reason}")
+    var nx = List[int]()
+    push_dec(mut nx, "18 52 129 131 0 1 0 0 0 0 0 0")
+    push_dec(mut nx, "3 97 112 112 4 116 101 115 116 0 0 1 0 1")
+    let n = resolver.parse_answer(4660, nx)
+    assert(!n.ok && n.reason == "nxdomain", "nxdomain: {n.reason}")
+    var sf = List[int]()
+    push_dec(mut sf, "18 52 129 130 0 0 0 0 0 0 0 0")
+    assert(resolver.parse_answer(4660, sf).reason == "servfail", "servfail")
+    var rf = List[int]()
+    push_dec(mut rf, "18 52 129 133 0 0 0 0 0 0 0 0")
+    assert(resolver.parse_answer(4660, rf).reason == "refused", "refused")
+    var clean = List[int]()
+    push_dec(mut clean, "18 52 129 128 0 0 0 0 0 0 0 0")
+    assert(resolver.parse_answer(4660, clean).reason == "noaddr", "no A record")
+    var short = List[int]()
+    push_dec(mut short, "18 52")
+    assert(resolver.parse_answer(4660, short).reason == "malformed", "short")
+    var trunc = List[int]()
+    push_dec(mut trunc, "18 52 129 128 0 1 0 1 0 0 0 0 3 97 112")
+    assert(resolver.parse_answer(4660, trunc).reason == "malformed", "truncated name")
+    print("failures ok")
+
+    // --- literals
+    assert(resolver.is_ip_literal("127.0.0.1"), "v4")
+    assert(resolver.is_ip_literal("[::1]"), "v6 bracketed")
+    assert(!resolver.is_ip_literal("app.test"), "a name")
+    assert(!resolver.is_ip_literal("10.0.0"), "three octets is a name")
+    assert(!resolver.is_ip_literal(""), "empty")
+    print("literals ok")
+
+    // --- the set helpers
+    let set = resolver.split_set("10.0.0.7,10.0.0.8,10.0.0.9")
+    assert(set.len == 3 && set[2] == "10.0.0.9", "split")
+    assert(resolver.split_set("").len == 0, "empty set")
+    var rs = resolver.new()
+    assert(resolver.rotate(mut rs, "app.test").len == 0, "no entry rotates to nothing")
+    assert(!resolver.is_fresh(rs, "app.test", 0), "no entry is not fresh")
+    assert(resolver.failure(rs, "app.test") == "", "no entry has no failure")
+    print("rotate ok")
+    0
+}

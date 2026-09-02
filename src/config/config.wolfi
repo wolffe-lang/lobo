@@ -1,10 +1,10 @@
 module pkg :: config
-  wolfi v0 · toolchain 0.2.1 · edition v1
-  export_hash 477e317a328d6e0f6a2ceabc8ff1d72af4bfaf5f0ee131de8a2537942e5d49bb
-  pkg_hash    477e317a328d6e0f6a2ceabc8ff1d72af4bfaf5f0ee131de8a2537942e5d49bb
+  wolfi v0 · toolchain 0.2.2 · edition v1
+  export_hash 1ae103637af25655a31f61cfbf9e5d2f0870c20247781e85c4970c90ae1ea7c2
+  pkg_hash    1ae103637af25655a31f61cfbf9e5d2f0870c20247781e85c4970c90ae1ea7c2
   deps:
-    std.x.crypto.curve25519  880f39bab9b724d9db12af67de79fbb1206ae94a3c4fed40f1cc52654a62fe86
-    std.x.tls.cert  1d50e6f357748f9bdfbf10aac1d3e023a3fbbfc9349ac22258799e76acea0cab
+    std.x.crypto.curve25519  905ad4adcbb13bb69e6e2952dbb011e170ceb535a4b131271431e11649f66027
+    std.x.tls.cert  f99bd7c4b52600513b4dd4b52a22d7b135adfcc42f7e8e7bf25bd33b668e3ce3
   items:
     [0] pub access_out_buffer — fn access_out_buffer(c: self.Conf, i: int) -> int · regions (ρ1, -) -> -
     [1] pub access_out_count — fn access_out_count(c: self.Conf) -> int · regions (ρ1) -> -
@@ -12,72 +12,81 @@ module pkg :: config
     [3] pub access_out_fmt — fn access_out_fmt(c: self.Conf, i: int) -> str · regions (ρ1, -) -> -
     [4] pub access_out_json — fn access_out_json(c: self.Conf, i: int) -> bool · regions (ρ1, -) -> -
     [5] pub access_out_path — fn access_out_path(c: self.Conf, i: int) -> str · regions (ρ1, -) -> -
-    [6] pub auto_ca — fn auto_ca(c: self.Conf) -> str · regions (ρ1) -> -
-    [7] pub auto_ca_root — fn auto_ca_root(c: self.Conf) -> str · regions (ρ1) -> -
-    [8] pub auto_challenge_dir — fn auto_challenge_dir(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
-    [9] pub auto_check — fn auto_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [10] pub auto_check_interval_s — fn auto_check_interval_s(c: self.Conf) -> int · regions (ρ1) -> -
-    [11] pub auto_contact — fn auto_contact(c: self.Conf) -> str · regions (ρ1) -> -
-    [12] pub auto_names — fn auto_names(c: self.Conf) -> str · regions (ρ1) -> -
-    [13] pub auto_on — fn auto_on(c: self.Conf) -> bool · regions (ρ1) -> -
-    [14] pub auto_primary — fn auto_primary(c: self.Conf) -> str · regions (ρ1) -> -
-    [15] pub auto_renew_before_s — fn auto_renew_before_s(c: self.Conf) -> int · regions (ρ1) -> -
-    [16] pub auto_server — fn auto_server(c: self.Conf) -> int · regions (ρ1) -> -
-    [17] pub auto_store — fn auto_store(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
-    [18] pub auto_store_probe — fn auto_store_probe(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
-    [19] pub body_max — fn body_max(c: self.Conf) -> int · regions (ρ1) -> -
-    [20] pub check — fn check(prefix: str, conf_rel: str, dump: bool) -> int
-    [21] pub combined_text — fn combined_text() -> str
-    [22] pub count — fn count(c: self.Conf) -> int · regions (ρ1) -> -
-    [23] pub delta_count — fn delta_count(c: self.Conf) -> int · regions (ρ1) -> -
-    [24] pub directives_markdown — fn directives_markdown() -> str
-    [25] pub errlog_json — fn errlog_json(c: self.Conf) -> bool · regions (ρ1) -> -
-    [26] pub errlog_level — fn errlog_level(c: self.Conf) -> str · regions (ρ1) -> -
-    [27] pub errlog_path — fn errlog_path(c: self.Conf) -> str · regions (ρ1) -> -
-    [28] pub find — fn find(t: self.Table, name: str, ctx: str) -> int · regions (ρ1, -, -) -> -
-    [29] pub fmt_vars — fn fmt_vars(f: str) -> str
-    [30] pub header_buffers — fn header_buffers(c: self.Conf) -> (int, int) · regions (ρ1) -> ρ_caller
-    [31] pub lex — fn lex(src: str) -> self.Toks · regions (-) -> ρ_caller
-    [32] pub limits_check — fn limits_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [33] pub lint — fn lint(c: self.Conf) -> str · regions (ρ1) -> -
-    [34] pub listen_is_loopback — fn listen_is_loopback(addr: str) -> bool
-    [35] pub load — fn load(prefix: str, conf_rel: str) -> self.Conf · regions (-, -) -> ρ_caller
-    [36] pub log_check — fn log_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [37] pub log_headers_join — fn log_headers_join(c: self.Conf) -> str · regions (ρ1) -> -
-    [38] pub logfmt_esc — fn logfmt_esc(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
-    [39] pub logfmt_row — fn logfmt_row(c: self.Conf, name: str) -> int · regions (ρ1, -) -> -
-    [40] pub logfmt_text — fn logfmt_text(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
-    [41] pub match_glob — fn match_glob(pat: str, name: str) -> bool
-    [42] pub mem_budget — fn mem_budget(c: self.Conf) -> int · regions (ρ1) -> -
-    [43] pub metrics_check — fn metrics_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [44] pub metrics_on — fn metrics_on(c: self.Conf) -> bool · regions (ρ1) -> -
-    [45] pub nearest — fn nearest(t: self.Table, name: str) -> str · regions (ρ1, -) -> -
-    [46] pub ok — fn ok(c: self.Conf) -> bool · regions (ρ1) -> -
-    [47] pub parse_str — fn parse_str(src: str, file: str) -> self.Conf · regions (-, -) -> ρ_caller
-    [48] pub pem_certs — fn pem_certs(text: str) -> prelude.List[int] ! {bad} · regions (-) -> ρ_caller
-    [49] pub pem_first_label — fn pem_first_label(text: str) -> str
-    [50] pub pkcs8_parse — fn pkcs8_parse(der_bytes: prelude.List[int]) -> self.KeyInfo · regions (ρ1) -> ρ_caller
-    [51] pub proxy_tls_check — fn proxy_tls_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [52] pub proxy_tls_probe — fn proxy_tls_probe(c: self.Conf) -> str · regions (ρ1) -> -
-    [53] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
-    [54] pub render_conf — fn render_conf(c: self.Conf) -> str · regions (ρ1) -> -
-    [55] pub render_spans — fn render_spans(t: self.Toks) -> str · regions (ρ1) -> -
-    [56] pub render_t — fn render_t(c: self.Conf) -> str · regions (ρ1) -> -
-    [57] pub size_bytes — fn size_bytes(s: str) -> int
-    [58] pub spec_at — fn spec_at(t: self.Table, i: int) -> self.Spec · regions (ρ1, -) -> ρ_caller
-    [59] pub spec_count — fn spec_count(t: self.Table) -> int · regions (ρ1) -> -
-    [60] pub ssl_none — fn ssl_none() -> self.SslConf · regions () -> ρ_caller
-    [61] pub ssl_ok — fn ssl_ok(s: self.SslConf) -> bool · regions (ρ1) -> -
-    [62] pub ssl_resolve — fn ssl_resolve(c: self.Conf, prefix: str) -> self.SslConf · regions (ρ1, -) -> ρ_caller
-    [63] pub ssl_select — fn ssl_select(s: self.SslConf, sni_host: str) -> int · regions (ρ1, -) -> -
-    [64] pub table — fn table() -> self.Table · regions () -> ρ_caller
-    [65] pub time_ms — fn time_ms(s: str) -> int
-    [66] pub version — fn version() -> str
-    [67] pub word_segments — fn word_segments(text: str) -> str
-    [68] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int }
-    [69] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[int] }
-    [70] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
-    [71] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[int], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[int], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
-    [72] pub Table — struct Table { specs: prelude.List[self.Spec] }
-    [73] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
+    [6] pub authority_host — fn authority_host(arg: str, is_pass: bool) -> str
+    [7] pub auto_ca — fn auto_ca(c: self.Conf) -> str · regions (ρ1) -> -
+    [8] pub auto_ca_root — fn auto_ca_root(c: self.Conf) -> str · regions (ρ1) -> -
+    [9] pub auto_challenge_dir — fn auto_challenge_dir(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
+    [10] pub auto_check — fn auto_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [11] pub auto_check_interval_s — fn auto_check_interval_s(c: self.Conf) -> int · regions (ρ1) -> -
+    [12] pub auto_contact — fn auto_contact(c: self.Conf) -> str · regions (ρ1) -> -
+    [13] pub auto_names — fn auto_names(c: self.Conf) -> str · regions (ρ1) -> -
+    [14] pub auto_on — fn auto_on(c: self.Conf) -> bool · regions (ρ1) -> -
+    [15] pub auto_primary — fn auto_primary(c: self.Conf) -> str · regions (ρ1) -> -
+    [16] pub auto_renew_before_s — fn auto_renew_before_s(c: self.Conf) -> int · regions (ρ1) -> -
+    [17] pub auto_server — fn auto_server(c: self.Conf) -> int · regions (ρ1) -> -
+    [18] pub auto_store — fn auto_store(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
+    [19] pub auto_store_probe — fn auto_store_probe(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
+    [20] pub body_max — fn body_max(c: self.Conf) -> int · regions (ρ1) -> -
+    [21] pub check — fn check(prefix: str, conf_rel: str, dump: bool) -> int
+    [22] pub combined_text — fn combined_text() -> str
+    [23] pub count — fn count(c: self.Conf) -> int · regions (ρ1) -> -
+    [24] pub delta_count — fn delta_count(c: self.Conf) -> int · regions (ρ1) -> -
+    [25] pub directives_markdown — fn directives_markdown() -> str
+    [26] pub errlog_json — fn errlog_json(c: self.Conf) -> bool · regions (ρ1) -> -
+    [27] pub errlog_level — fn errlog_level(c: self.Conf) -> str · regions (ρ1) -> -
+    [28] pub errlog_path — fn errlog_path(c: self.Conf) -> str · regions (ρ1) -> -
+    [29] pub find — fn find(t: self.Table, name: str, ctx: str) -> int · regions (ρ1, -, -) -> -
+    [30] pub fmt_vars — fn fmt_vars(f: str) -> str
+    [31] pub header_buffers — fn header_buffers(c: self.Conf) -> (int, int) · regions (ρ1) -> ρ_caller
+    [32] pub lex — fn lex(src: str) -> self.Toks · regions (-) -> ρ_caller
+    [33] pub limits_check — fn limits_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [34] pub lint — fn lint(c: self.Conf) -> str · regions (ρ1) -> -
+    [35] pub listen_is_loopback — fn listen_is_loopback(addr: str) -> bool
+    [36] pub load — fn load(prefix: str, conf_rel: str) -> self.Conf · regions (-, -) -> ρ_caller
+    [37] pub log_check — fn log_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [38] pub log_headers_join — fn log_headers_join(c: self.Conf) -> str · regions (ρ1) -> -
+    [39] pub logfmt_esc — fn logfmt_esc(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
+    [40] pub logfmt_row — fn logfmt_row(c: self.Conf, name: str) -> int · regions (ρ1, -) -> -
+    [41] pub logfmt_text — fn logfmt_text(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
+    [42] pub match_glob — fn match_glob(pat: str, name: str) -> bool
+    [43] pub mem_budget — fn mem_budget(c: self.Conf) -> int · regions (ρ1) -> -
+    [44] pub metrics_check — fn metrics_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [45] pub metrics_on — fn metrics_on(c: self.Conf) -> bool · regions (ρ1) -> -
+    [46] pub nearest — fn nearest(t: self.Table, name: str) -> str · regions (ρ1, -) -> -
+    [47] pub ok — fn ok(c: self.Conf) -> bool · regions (ρ1) -> -
+    [48] pub parse_str — fn parse_str(src: str, file: str) -> self.Conf · regions (-, -) -> ρ_caller
+    [49] pub pem_certs — fn pem_certs(text: str) -> prelude.List[int] ! {bad} · regions (-) -> ρ_caller
+    [50] pub pem_first_label — fn pem_first_label(text: str) -> str
+    [51] pub pkcs8_parse — fn pkcs8_parse(der_bytes: prelude.List[int]) -> self.KeyInfo · regions (ρ1) -> ρ_caller
+    [52] pub proxy_tls_check — fn proxy_tls_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [53] pub proxy_tls_probe — fn proxy_tls_probe(c: self.Conf) -> str · regions (ρ1) -> -
+    [54] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
+    [55] pub render_conf — fn render_conf(c: self.Conf) -> str · regions (ρ1) -> -
+    [56] pub render_spans — fn render_spans(t: self.Toks) -> str · regions (ρ1) -> -
+    [57] pub render_t — fn render_t(c: self.Conf) -> str · regions (ρ1) -> -
+    [58] pub resolver_address — fn resolver_address(c: self.Conf, r: int) -> str · regions (ρ1, -) -> -
+    [59] pub resolver_check — fn resolver_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [60] pub resolver_in_effect — fn resolver_in_effect(c: self.Conf, at: int) -> bool · regions (ρ1, -) -> -
+    [61] pub resolver_is_literal — fn resolver_is_literal(host: str) -> bool
+    [62] pub resolver_row_for — fn resolver_row_for(c: self.Conf, at: int) -> int · regions (ρ1, -) -> -
+    [63] pub resolver_timeout_for — fn resolver_timeout_for(c: self.Conf, at: int) -> int · regions (ρ1, -) -> -
+    [64] pub resolver_valid_ms — fn resolver_valid_ms(c: self.Conf, r: int) -> int · regions (ρ1, -) -> -
+    [65] pub size_bytes — fn size_bytes(s: str) -> int
+    [66] pub spec_at — fn spec_at(t: self.Table, i: int) -> self.Spec · regions (ρ1, -) -> ρ_caller
+    [67] pub spec_count — fn spec_count(t: self.Table) -> int · regions (ρ1) -> -
+    [68] pub ssl_none — fn ssl_none() -> self.SslConf · regions () -> ρ_caller
+    [69] pub ssl_ok — fn ssl_ok(s: self.SslConf) -> bool · regions (ρ1) -> -
+    [70] pub ssl_resolve — fn ssl_resolve(c: self.Conf, prefix: str) -> self.SslConf · regions (ρ1, -) -> ρ_caller
+    [71] pub ssl_select — fn ssl_select(s: self.SslConf, sni_host: str) -> int · regions (ρ1, -) -> -
+    [72] pub table — fn table() -> self.Table · regions () -> ρ_caller
+    [73] pub time_ms — fn time_ms(s: str) -> int
+    [74] pub upstream_exists — fn upstream_exists(c: self.Conf, name: str) -> bool · regions (ρ1, -) -> -
+    [75] pub version — fn version() -> str
+    [76] pub word_segments — fn word_segments(text: str) -> str
+    [77] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int }
+    [78] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[int] }
+    [79] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
+    [80] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[int], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[int], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
+    [81] pub Table — struct Table { specs: prelude.List[self.Spec] }
+    [82] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
 

@@ -1,7 +1,7 @@
 //! check: run(exit=0)
 //! phase: run
 //! lanes: native checked
-//! stage-src: serve conn tls proxy http config obs metrics
+//! stage-src: serve conn tls proxy http config obs metrics resolver
 //!
 //! The ws10 exceed-site table, in process (docs/BUDGET.md §sites):
 //! every deterministic refusal site answers 503-with-a-name over a

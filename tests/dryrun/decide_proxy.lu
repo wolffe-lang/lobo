@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: dryrun http proxy config
+//! stage-src: dryrun http proxy config resolver
 //!
 //! The dry-run's proxy decisions, offline: the upstream URL through
 //! ws03's REAL rewrite arithmetic (proxy.rewrite_target), the pool

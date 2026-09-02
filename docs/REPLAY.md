@@ -167,3 +167,58 @@ maintainer the decisive event ORDER; `events:` bounds the window's
 completeness; the drain model in tests/replay/ is the template for
 driving that order deterministically under the rig and exploring its
 neighborhood for the counterexample the incident sampled.
+
+## Tier 2, re-read at ws13 (what the language must provide, stated against s132)
+
+ws11 filed the Tier-2 gate as **wolf-lang#197** with three shapes:
+(1) a runtime opt-in to the seeded scheduler for a NON-test binary,
+(2) schedule capture as a value mid-run, (3) the record/replay io
+boundary stated by the language. ws13 re-reads them against the pin
+that carries s132 — regions with caps, and D68's proc-boundary faults
+— because ws13 also put the first **proc** into lobo's request path
+(the cap adoption: the regioned body work of a budgeted request runs
+inside a `spawn proc`, and its breach reaches the join as
+`fault(alloc-contract)`). Four things follow, each a shape, none
+built:
+
+1. **A capture must be written on the JOIN side, never inside the
+   failing proc.** `[conc.proc.kill]`: a contained trap runs no
+   further user code in the proc — no defer, no handler, no writer.
+   The 5xx that Tier 2 wants to attach a schedule to is DECIDED at the
+   join (the loop maps the exit reason to the response), so the
+   capture writer lives in the loop, keyed on the reason class. This
+   is already how lobo's `budget-exceeded site=region` event is
+   emitted; a capture would ride the same seam.
+2. **The reason class is a stable key.** `[conc.proc.exit]` is a
+   closed set and `fault(kind)` draws `kind` from `[conf.trap.set]`'s
+   closed vocabulary. A capture-on-5xx policy can therefore be
+   spelled as a set of reason classes (`fault(alloc-contract)`,
+   `fault(*)`, `error(*)`) rather than a status code — and the same
+   spelling works for a future per-connection proc. The ask to #197:
+   the mid-run capture surface should be reachable from a monitor's
+   `exit(reason)` arm, so the join that already holds the reason can
+   ask "the schedule so far" in the same select.
+3. **The record boundary now has a natural place: the proc argument
+   record.** s87's `[abi.native.procenv]` copies a proc's arguments at
+   spawn. For lobo's body proc those are `(sock, path, head, cap,
+   pipe)` — scalars and strings, no sockets read INSIDE the proc except
+   the file and the write to the client. A Tier-2 recorder that
+   captures proc argument records at spawn (plus the seed) has
+   recorded everything the proc's schedule depended on; the io that
+   crosses the membrane (the socket write) is replayed against a sink.
+   That is #197's third shape made concrete: **record at the proc
+   boundary, replay the proc**, not the process.
+4. **What a proc can say back is the limit on what a capture can
+   carry.** At this pin a proc's `normal(value)` is unreadable at the
+   join and a channel cannot be a proc argument on wolfc (filed from
+   ws13; the cap adoption carries its one number out through a
+   loopback self-pipe). A capture token or a schedule handle produced
+   INSIDE a proc could not leave it either. So shape (2)'s "capture
+   as a value" must be a value the JOIN side obtains — from the
+   monitor, the supervisor, or a runtime query keyed by the proc id —
+   not one the proc hands back.
+
+None of this changes lobo's honesty boundary above: a running lobo
+still prints no seed and promises no replay. It changes what the ask
+looks like, and the four points are posted to #197 as the ws13
+re-read.

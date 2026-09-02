@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union, err.propagate
-//! stage-src: proxy config http
+//! stage-src: proxy config http resolver
 //!
 //! wsm04, the D21 retirement's PURE half: `proxy_pass https://` now
 //! PARSES (scheme carried, no named refusal — the io leg dials

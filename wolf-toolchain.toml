@@ -14,66 +14,76 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang TRUNK at ws12 acquisition (e6cf24e — the 2026-09-01 ledger
-# ritual atop s131). The v0.2.1 tag EXISTS now (75fd2d0, seven commits
-# back), but the number this sprint came for — `region_bytes(r)` /
-# `live_region_bytes()`, `[mem.region.account.1/.2]` — landed in s131
-# AFTER it, so a tag build would not carry it. Trunk, therefore, in
-# the D57 DEV-STAMP shape sc30/wsm04 recorded: built with
-# WOLF_COMMIT=e6cf24e (the xtask dist stamp, computed by the builder —
-# D33 bans build scripts), so `--version` claims `0.2.1+dev.e6cf24e`
-# and the binary's own pin clause agrees with this rev by
-# construction. A PLAIN `cargo build` is unstamped and prints
-# `+dev.unknown` — the identity check below refuses it (unverifiable
-# is dev). What the bump brings this repo, each measured not assumed
-# at the bump:
-#   * s131 (a2ae70b) — THE SPRINT'S REASON: region_bytes/live_region_bytes
-#     three-tier, prelude builtins typed pure. lobo's ws10 meter stops
-#     estimating from the outside.
-#   * r04 (e6548a9) — #192's two halves fixed: W1001 gains its call
-#     test (the "misleading W1001" BUDGET.md recorded at addcd7f is
-#     GONE at this pin — re-probed, see docs/BUDGET.md) and E1010
-#     reads through the error row; D66's defer-at-scope-exit sentence;
-#     #189's \u{...} bound.
-#   * D67 (be3af95) — the comma insists in PATTERNS: separators
-#     required between struct/tuple/call pattern members. Blast radius
-#     on lobo measured at the bump: zero (fmt emits no lax form, and
-#     lobo's tree round-trips byte-identical).
-#   * s128-s130 carried forward from the previous pin's note.
-# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, FIFTH
-# measurement — still open, the gauntlet's release step keeps
-# WOLF_MIDEND=0. See [std]'s note.
-# Pairing note (F-0064, reported never gated): wolf@e6cf24e declares
-# lupin 0.1.20 and the staged sibling IS 0.1.20 — the advance notice
-# wsm04 recorded has caught up; the pairing agrees exactly.
-# Build (in a scratch clone at the rev):
-#   WOLF_COMMIT=e6cf24e cargo build --release -p wolf_driver -p wolf_rt
+# wolf-lang at the v0.2.2 RELEASE TAG (8cda3aa — "the learners'
+# release", tagged 2026-09-02) — THE BARE STAMP AT LAST. ws12 ran
+# trunk in the D57 dev-stamp shape because s131's region query
+# post-dated v0.2.1; s132 (the cap half of #187, D68's fault ruling)
+# merged BEFORE this tag, so the tag build carries everything lobo
+# needs and `--version` claims `0.2.2` with no +dev suffix — the
+# first time since wsm03 the [wolf] pin names a release, not a
+# commit. Built AT THE TAG with the xtask dist stamp the builder
+# computes (D33 bans build scripts): WOLF_COMMIT=8cda3aa
+# WOLF_RELEASE=v0.2.2 — the release stamp is granted only when that
+# exact tag points at HEAD, so a plain `cargo build` prints
+# `+dev.unknown` and the identity check below refuses it
+# (unverifiable is dev). What the bump brings this repo, each
+# measured not assumed at the bump:
+#   * s132 (D68, #187 closed) — THE SPRINT'S REASON: `region r(cap: n)`
+#     bounds a region's ledger in the tier's own units
+#     ([mem.region.cap.1-3]); a breach inside a proc is contained at
+#     the boundary and reaches the join as `fault(alloc-contract)`
+#     ([conc.proc.exit], `is_alloc_contract()`). ws13's cap adoption
+#     is this clause set consumed: the ws10 meter becomes enforced by
+#     the runtime.
+#   * r05 letters — #206 (a bare entry name means `.`), #198
+#     (STR_ESC derives escapes), #209 (a trap runs no defers at the
+#     root — lupin divergence recorded for is34), #205 (the refusal
+#     probes' flake retired). Blast radius on lobo measured at the
+#     bump: zero (no lobo source moved; suite counts identical).
+#   * s133 — the language server navigates (definition/references/
+#     rename). Tooling, not codegen; nothing lobo builds changes.
+#   * s60a — windows-native bring-up. lobo's serve loop leans on the
+#     task layer and net deadlines, which that host refuses by name;
+#     lobo stays Linux+macOS (docs/platforms.md is the ledger).
+# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, SIXTH
+# measurement — still open (issue OPEN at the bump), the gauntlet's
+# release step keeps WOLF_MIDEND=0. See [std]'s note.
+# Pairing note (F-0064, reported never gated): wolf@v0.2.2 declares
+# lupin 0.1.22 and the staged sibling IS 0.1.22 — the pairing agrees
+# exactly, at a TAG on both sides for the first time.
+# Build (in a scratch worktree at the tag):
+#   git checkout v0.2.2
+#   WOLF_COMMIT=8cda3aa WOLF_RELEASE=v0.2.2 \
+#     cargo build --release -p wolf_driver -p wolf_rt
 # and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ —
 # the native tier needs the staticlib beside the driver.
 repo = "wolffe-lang/wolf-lang"
-rev = "e6cf24e7c03f25c8ac6676fc9cb743827524bc8e"
-version_line = "wolf 0.2.1+dev.e6cf24e (wolfgang, pin e6cf24e)"
+rev = "8cda3aa41004775bb4a4c0a600d7fb673143b7d0"
+version_line = "wolf 0.2.2 (wolfgang, pin 8cda3aa)"
 
 [lupin]
-# lupin at the v0.1.20 RELEASE TAG (D57: build the tag, so --version
-# claims the release with no +dev suffix). The named fallback wsm04
-# took — 0.1.19, because is31 had not shipped — retires here: 0.1.20
-# is the sibling wolf-std pins at sc31, so lobo, wolf-std and the
-# wolf driver's own pairing line all name the SAME interpreter for the
-# first time. 0.1.20 carries is31 (the arms agree — match arms over
-# the product domain, lupin's half of s130); is30's net byte tier
-# (net_read_bytes/net_write_bytes, F-0102) rides forward unchanged and
-# stays the load-bearing piece for std.x.tls.client's loopback
-# handshake on the lupin lane. Its conformance pin (b80d239, the
-# v0.2.1 release's parent — seven commits behind [wolf]'s e6cf24e) is
-# information, not this file's rev. Bumped together with [wolf] as
-# always. Build AT THE TAG (scratch clone):
-#   git checkout v0.1.20 && cargo build --release --bin lupin
+# lupin at the v0.1.22 RELEASE TAG (753d686; D57: build the tag, so
+# --version claims the release with no +dev suffix). 0.1.22 is "the
+# mirror holds" (is33): the region cap lands whole-pipe — `region
+# r(cap: n)`, `trap(alloc-contract)` past the budget, and inside a
+# proc the contained trap reaches the join as `fault(alloc-contract)`
+# (the spelling was `error("trap", kind)` before, which made a crash
+# answer `is_error()` true — is33 corrects it to `[conc.proc.exit]`'s
+# closed set). That is exactly the surface ws13's cap adoption
+# matches on, so the checked AND lupin lanes of the membudget suite
+# run the same fault path the native tier does. Its conformance pin
+# (2bfbe5e, the s132 merge — wolf-lang trunk's head when the release
+# stepped, one commit before the v0.2.2 tag's own parent chain) is
+# information, not this file's rev; the v0.2.2 CHANGELOG names
+# 0.1.22 as ITS pairing, so the two tags name each other. Bumped
+# together with [wolf] as always. Build AT THE TAG (scratch
+# worktree):
+#   git checkout v0.1.22 && cargo build --release --bin lupin
 # stage target/release/lupin into .wolf-bin/.
 repo = "wolffe-lang/wolf-interp"
-rev = "e3736c154dad2d5c4bdb7b7ad706b74b56a903f0"
-version_line = "lupin 0.1.20 (wolf-interp, reference interpreter at pin b80d239)"
-
+rev = "753d686b923859562a6dd443d2bfbba3c06db745"
+version_line = "lupin 0.1.22 (wolf-interp, reference interpreter at pin 2bfbe5e)"
+ [std]'s note.
 [std]
 # wolf-std, pinned at TRUNK a62a5d4 (the sc31 docs commit atop the
 # sc31 merge) — THE BUMP THAT CARRIES `named` / `row_name`
@@ -94,20 +104,22 @@ version_line = "lupin 0.1.20 (wolf-interp, reference interpreter at pin b80d239)
 #   git -C <wolf-std-checkout> rev-parse <rev> > .wolf-bin/std/STD-REV
 # lib-toolchain.sh REFUSES when the tree is missing or STD-REV drifts
 # from `rev` (a tree has no --version; the marker is its identity).
-# PIN AGREEMENT at this bump (measured, not assumed): wolf-std's own
-# wolf pin at a62a5d4 is 75fd2d0 (the v0.2.1 tag) and its lupin pin is
-# 0.1.20. This repo's [lupin] AGREES exactly; this repo's [wolf] runs
-# SEVEN COMMITS AHEAD of std's — deliberately, and named: s131's
-# region query is the whole reason for the bump and post-dates the
-# tag. wsm04's "no forward drift for the first time" therefore does
-# not hold here; the drift is forward-only (std is built against an
-# ancestor of our driver) and the gauntlet's both-tiers build over the
-# staged tree is the measurement that it carries.
+# PIN AGREEMENT at the ws13 bump (measured, not assumed): wolf-std's
+# own wolf pin at a62a5d4 is STILL 75fd2d0 (the v0.2.1 tag) and its
+# lupin pin 0.1.20 — std's trunk has not moved since ws12 (a62a5d4 IS
+# origin/trunk at the bump). This repo's [wolf] now runs ONE RELEASE
+# ahead of std's (v0.2.2 vs v0.2.1) and its [lupin] two point
+# releases ahead (0.1.22 vs 0.1.20); both forward-only, both named:
+# s132's cap is the reason, and std has no sprint on it yet. The
+# gauntlet's both-tiers build over the staged tree is the measurement
+# that the a62a5d4 tree carries under the newer driver (sc31's
+# surface is unchanged by any r05 letter — grep-checked at the bump:
+# no `std/` file names a construct #206/#198/#209 moved).
 # KNOWN CAVEAT at this pin pair: wolf-lang#146 (the loop-versioning
 # noalias guard built from a non-dominating len load, sc_muladd) —
-# re-probed at e6cf24e at THIS bump (the FIFTH measurement, recorded
-# in the wsc03 closeout): the gauntlet's release step keeps
-# WOLF_MIDEND=0 until the fix enters the [wolf] pin; the flip-back
-# rides that bump.
+# re-probed at v0.2.2 at THIS bump (the SIXTH measurement, recorded
+# in the ws13 CHANGELOG entry): the issue is OPEN and the gauntlet's
+# release step keeps WOLF_MIDEND=0 until the fix enters the [wolf]
+# pin; the flip-back rides that bump.
 repo = "wolffe-lang/wolf-std"
 rev = "a62a5d4248c391b3c26d51195ed5cfd69732b9ce"

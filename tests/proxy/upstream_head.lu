@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: lupin
 //! conforms: err.union
-//! stage-src: proxy http config
+//! stage-src: proxy http config resolver
 //!
 //! The upstream request BYTES, pinned against the pinned oracle. This
 //! builds a config + a parsed request and asserts proxy.build_upstream

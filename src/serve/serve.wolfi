@@ -1,19 +1,20 @@
 module pkg :: serve
-  wolfi v0 · toolchain 0.2.1 · edition v1
-  export_hash 8d0a1a8545657078e795e8dd4e65da562e05ff0f895a876c67ab8e0a24b957fe
-  pkg_hash    8d0a1a8545657078e795e8dd4e65da562e05ff0f895a876c67ab8e0a24b957fe
+  wolfi v0 · toolchain 0.2.2 · edition v1
+  export_hash 4047181389d08cb8f453236f23805ea8f670b838907c050ffe6d60914bf4b785
+  pkg_hash    4047181389d08cb8f453236f23805ea8f670b838907c050ffe6d60914bf4b785
   deps:
-    config  477e317a328d6e0f6a2ceabc8ff1d72af4bfaf5f0ee131de8a2537942e5d49bb
-    conn  3e46b597ee127b31360f2ec57f53ea473bd0c3af2d76480c6903b591a0307f26
-    http  51b7620be3cc2e3a5ca4bd5b34265aa3226f0f75b437e301819efcd2948c0ed2
-    metrics  b6038a75d11ae54e17b0b4e59b5e2952b783ce4b92ea9345d2151eaf9b66412e
-    obs  848dc93b73568f5bd7c59c3d93a1d8b887d28aa1d5cd9aab27397e39db7f26e6
-    proxy  95ed1515b60adf9d300ba0e8a9b6407cfd2fb7ae5f500e5719eb1641eb70e3ee
+    config  1ae103637af25655a31f61cfbf9e5d2f0870c20247781e85c4970c90ae1ea7c2
+    conn  45b9f7ad2108f3c71e08df7a599ba9ba026ca89e0a52be0d99e560bd1033e89d
+    http  aca51a98027b998b95f129fd5b9b8f283d4f89587124ba1af91b65d1e5dbde6c
+    metrics  4b5df0203d1acd9644aa7d69595f2684c4c566bc41ec678956e8e1719afc71ce
+    obs  430867230c735e2034b603b078e83a2c9e035587cb721d80fb12ad1f8297cfe9
+    proxy  d721698028ab8d7f98df6eb7d54b4fe603ad91981572aca7be1aab4c08499219
+    resolver  21442f70c4a638339a1ecaab43480b37355aed3d33ebdacbaefb4e95c8e5f4c6
   items:
     [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
     [1] pub admin_err_len — fn admin_err_len(token: str) -> int
     [2] pub admin_kind — fn admin_kind(on: bool, path: str) -> str
-    [3] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -) -> ρ_caller
+    [3] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int, mut rs: resolver.Resolver) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4) -> ρ_caller
     [4] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
     [5] pub error_body — fn error_body(code: int, server: str) -> str
     [6] pub error_response — fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str
@@ -25,14 +26,14 @@ module pkg :: serve
     [12] pub raw_line — fn raw_line(head: str) -> str
     [13] pub resolve_limits — fn resolve_limits(c: config.Conf) -> http.Limits · regions (ρ1) -> ρ_caller
     [14] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
-    [15] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (ρ1, ρ2, ρ3, ρ4, -) -> -
-    [16] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -) -> ρ_caller
+    [15] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, mut rs: resolver.Resolver) · regions (ρ1, ρ2, ρ3, ρ4, -, ρ5) -> -
+    [16] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int, mut rs: resolver.Resolver) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4) -> ρ_caller
     [17] pub status_phrase — fn status_phrase(code: int) -> str
     [18] pub to_hex — fn to_hex(n: int) -> str
     [19] pub version — fn version() -> str
     [20] pub write_admin — fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io}
     [21] pub write_admin_503 — fn write_admin_503(conn: int, token: str)
-    [22] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int, mem_rt: int, admin: str }
-    [23] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int, mem_rt: int, admin: str }
+    [22] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
+    [23] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
     [24] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool }
 

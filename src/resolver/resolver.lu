@@ -1,0 +1,723 @@
+//! resolver — upstream names resolved IN TIME (ws13, wsc05 opens):
+//! a DNS stub client over TCP (RFC 1035 §4.2.2 framing, RFC 7766) that
+//! the ONE poll loop multiplexes like any other socket, plus the TTL
+//! cache nginx's `resolver ... valid=` names. report 11 §2 item 9 —
+//! "async DNS for upstreams", STRONG demand, the last strong-evidence
+//! item wsc03 left unshipped — lands here.
+//!
+//! WHY A CLIENT, NOT A CALL. wolf's `net_connect` hands its address
+//! string to the host (`TcpStream::connect` → getaddrinfo): a NAME is
+//! resolved synchronously, on the calling thread, with no deadline —
+//! and std.net at a62a5d4 says in its own header that `dns`/`resolve`
+//! is not a function the module has. So there is no blocking call for
+//! a task to wrap: the only way to turn a name into an address without
+//! stalling the loop is to speak DNS over a socket the loop already
+//! knows how to wait on. That is what this module does. The std ask
+//! (a resolver surface in std.net — wolf-std#4) and the wolf-lang
+//! ask (the dial's synchronous resolve + the unsurfaced connect
+//! deadline — wolf-lang#217) are FILED, not absorbed; docs/
+//! RESOLVER.md carries the measurement both cite.
+//!
+//! THE SEAM. Three halves, each pure or bounded:
+//!   * the WIRE — `build_query` / `parse_answer`, pure over `List[int]`
+//!     (A records only at v1 — a named delta from nginx's `ipv6=on`
+//!     default; CNAME chains ride the answer section as the resolver
+//!     already flattened them);
+//!   * the CACHE — host → address set + expiry, `valid=` overriding
+//!     the record TTL exactly as nginx's directive does, failures held
+//!     for one second (a bounded storm, named);
+//!   * the PENDING TABLE — one TCP query socket per in-flight name,
+//!     polled by `tick` under a 1 ms deadline every pass and closed at
+//!     `resolver_timeout`. The loop PARKS a connection whose target
+//!     name is not fresh (serve says which name; main skips the row
+//!     until the query settles) — nothing else waits.
+//! TCP only (nginx tries UDP first, TCP on truncation) — a named delta
+//! (wolf has no UDP surface), and every recursive resolver answers on
+//! 53/tcp (RFC 7766 §1). The dial to the resolver itself is
+//! `net_connect`: loopback-instant in every test, one handshake RTT in
+//! production, and bounded only by the OS because the prelude surfaces
+//! no connect deadline (the filed half).
+//!
+//! State is PARALLEL PRIMITIVE COLUMNS (the config/pool pattern): a
+//! List of a local struct or of List[int] is refused on one lane or
+//! another, so every table here is `List[str]`/`List[int]` rebuilt on
+//! mutation, and a query's received bytes are carried as hex text.
+//! Loopback only, forever: every test's resolver is a loopback rig
+//! server (tests/rig/dnssrv). File-header note (F-0016): comments
+//! never sit directly above a dotted call.
+
+use std.hex
+
+/// The module's interface version (the banner prints every module's).
+/// Total.
+pub fn version() -> str {
+    "0.1.0"
+}
+
+// ------------------------------------------------------------------
+// the wire — pure over byte lists
+// ------------------------------------------------------------------
+
+/// A byte list of `s`'s ASCII bytes. Total.
+fn ascii(s: str) -> List[int] {
+    var out = List[int]()
+    for b in s.bytes() {
+        (mut out).push(b)
+    }
+    out
+}
+
+/// Append `src` to `dst`. Total.
+fn push_all(mut dst: List[int], src: List[int]) {
+    var i: int = 0
+    let n = src.len
+    while i < n {
+        (mut dst).push(src[i])
+        i = i + 1
+    }
+}
+
+/// Big-endian uint16 at `at` (bounds checked by the caller). Total.
+fn be16(b: List[int], at: int) -> int {
+    b[at] * 256 + b[at + 1]
+}
+
+/// Big-endian uint32 at `at` (bounds checked by the caller). Total.
+fn be32(b: List[int], at: int) -> int {
+    ((b[at] * 256 + b[at + 1]) * 256 + b[at + 2]) * 256 + b[at + 3]
+}
+
+/// Push a big-endian uint16. Total for 0..65535.
+fn put16(mut out: List[int], v: int) {
+    (mut out).push(v / 256 % 256)
+    (mut out).push(v % 256)
+}
+
+/// True when `host` is an IPv4 dotted quad or a bracketed/bare IPv6
+/// literal — a name that needs no resolving. Total.
+pub fn is_ip_literal(host: str) -> bool {
+    if host.is_empty() {
+        return false
+    }
+    if host.contains(":") {
+        return true
+    }
+    var dots: int = 0
+    for b in host.bytes() {
+        if b == 46 {
+            dots = dots + 1
+        } else if b < 48 || b > 57 {
+            return false
+        }
+    }
+    dots == 3
+}
+
+/// The QNAME wire form of `name`: length-prefixed labels, a zero
+/// terminator; a trailing dot is tolerated. Total (labels over 63
+/// bytes are truncated to 63 — the resolver answers NXDOMAIN, which is
+/// the honest verdict for a name that cannot exist).
+fn qname(name: str) -> List[int] {
+    var out = List[int]()
+    var label = List[int]()
+    for b in name.bytes() {
+        if b == 46 {
+            if label.len > 0 {
+                (mut out).push(if label.len > 63 { 63 } else { label.len })
+                var k: int = 0
+                while k < label.len && k < 63 {
+                    (mut out).push(label[k])
+                    k = k + 1
+                }
+                label = List[int]()
+            }
+        } else {
+            (mut label).push(b)
+        }
+    }
+    if label.len > 0 {
+        (mut out).push(if label.len > 63 { 63 } else { label.len })
+        var k: int = 0
+        while k < label.len && k < 63 {
+            (mut out).push(label[k])
+            k = k + 1
+        }
+    }
+    (mut out).push(0)
+    out
+}
+
+/// A TCP-framed A/IN query for `name` under message id `id`
+/// (recursion desired, one question): the two-byte length prefix RFC
+/// 1035 §4.2.2 requires, then the message. Pure. Total.
+pub fn build_query(id: int, name: str) -> List[int] {
+    var msg = List[int]()
+    put16(mut msg, id % 65536)
+    put16(mut msg, 256)
+    put16(mut msg, 1)
+    put16(mut msg, 0)
+    put16(mut msg, 0)
+    put16(mut msg, 0)
+    push_all(mut msg, qname(name))
+    put16(mut msg, 1)
+    put16(mut msg, 1)
+    var out = List[int]()
+    put16(mut out, msg.len)
+    push_all(mut out, msg)
+    out
+}
+
+/// A parsed answer. `reason` is "" on success, else one of the FROZEN
+/// failure names the log event carries: `nxdomain`, `servfail`,
+/// `refused`, `noaddr` (a clean answer with no A record), `malformed`
+/// (framing or a wrong id), `rcode` (any other error code — the code
+/// itself is not an operator's business). `addrs` are dotted quads in
+/// answer order; `ttl_ms` is the SMALLEST A-record TTL in ms.
+pub struct Answer {
+    ok: bool,
+    reason: str,
+    addrs: List[str],
+    ttl_ms: int,
+}
+
+fn failed(reason: str) -> Answer {
+    Answer { ok: false, reason: reason, addrs: List[str](), ttl_ms: 0 }
+}
+
+/// The byte offset just past the name starting at `at` (compression
+/// pointers end a name in two bytes), or -1 when the message runs
+/// out. Total.
+fn skip_name(msg: List[int], at: int) -> int {
+    var i = at
+    let n = msg.len
+    while i < n {
+        let l = msg[i]
+        if l == 0 {
+            return i + 1
+        }
+        if l >= 192 {
+            return if i + 2 <= n { i + 2 } else { -1 }
+        }
+        i = i + 1 + l
+    }
+    -1
+}
+
+/// Parse one DNS message (the length prefix already stripped) as the
+/// answer to query `id`. Pure. Total — every malformed shape is a
+/// named failure, never a trap.
+pub fn parse_answer(id: int, msg: List[int]) -> Answer {
+    if msg.len < 12 {
+        return failed("malformed")
+    }
+    if be16(msg, 0) != id % 65536 {
+        return failed("malformed")
+    }
+    let flags = be16(msg, 2)
+    if flags / 32768 % 2 != 1 {
+        return failed("malformed")
+    }
+    let rcode = flags % 16
+    if rcode == 3 {
+        return failed("nxdomain")
+    }
+    if rcode == 2 {
+        return failed("servfail")
+    }
+    if rcode == 5 {
+        return failed("refused")
+    }
+    if rcode != 0 {
+        return failed("rcode")
+    }
+    let qd = be16(msg, 4)
+    let an = be16(msg, 6)
+    var at = 12
+    var q: int = 0
+    while q < qd {
+        at = skip_name(msg, at)
+        if at < 0 || at + 4 > msg.len {
+            return failed("malformed")
+        }
+        at = at + 4
+        q = q + 1
+    }
+    var addrs = List[str]()
+    var ttl_min = -1
+    var a: int = 0
+    while a < an {
+        at = skip_name(msg, at)
+        if at < 0 || at + 10 > msg.len {
+            return failed("malformed")
+        }
+        let rtype = be16(msg, at)
+        let ttl = be32(msg, at + 4)
+        let rdlen = be16(msg, at + 8)
+        at = at + 10
+        if at + rdlen > msg.len {
+            return failed("malformed")
+        }
+        if rtype == 1 && rdlen == 4 {
+            (mut addrs).push("{msg[at]}.{msg[at + 1]}.{msg[at + 2]}.{msg[at + 3]}")
+            if ttl_min < 0 || ttl < ttl_min {
+                ttl_min = ttl
+            }
+        }
+        at = at + rdlen
+        a = a + 1
+    }
+    if addrs.len == 0 {
+        return failed("noaddr")
+    }
+    Answer { ok: true, reason: "", addrs: addrs, ttl_ms: ttl_min * 1000 }
+}
+
+// ------------------------------------------------------------------
+// the cache and the pending table — the loop's state
+// ------------------------------------------------------------------
+
+/// The resolver state the poll loop owns: the cache (host → the
+/// comma-joined address set, the failure name or "", the expiry, and
+/// a round-robin cursor) and the pending table (host → the query
+/// socket, the message id, the bytes received so far as hex, the
+/// deadline, the start time, and the `valid=` override to cache
+/// under). `events` accumulates vocabulary events for the loop to
+/// emit and drain. `next_id` seeds message ids.
+pub struct Resolver {
+    hosts: List[str],
+    addrs: List[str],
+    fails: List[str],
+    expires: List[int],
+    rr: List[int],
+    q_hosts: List[str],
+    q_fds: List[int],
+    q_ids: List[int],
+    q_bufs: List[str],
+    q_deadline: List[int],
+    q_started: List[int],
+    q_valid: List[int],
+    events: List[str],
+    next_id: int,
+}
+
+/// An empty resolver. Total.
+pub fn new() -> Resolver {
+    Resolver {
+        hosts: List[str](),
+        addrs: List[str](),
+        fails: List[str](),
+        expires: List[int](),
+        rr: List[int](),
+        q_hosts: List[str](),
+        q_fds: List[int](),
+        q_ids: List[int](),
+        q_bufs: List[str](),
+        q_deadline: List[int](),
+        q_started: List[int](),
+        q_valid: List[int](),
+        events: List[str](),
+        next_id: 1,
+    }
+}
+
+/// The number of cached names (fresh or stale). Total.
+pub fn cached(rs: Resolver) -> int {
+    rs.hosts.len
+}
+
+/// The number of in-flight queries. Total.
+pub fn pending(rs: Resolver) -> int {
+    rs.q_hosts.len
+}
+
+/// The cache index of `host`, or -1. Total.
+fn cache_index(rs: Resolver, host: str) -> int {
+    let key = host.lower()
+    var i: int = 0
+    while i < rs.hosts.len {
+        if rs.hosts[i] == key {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The pending index of `host`, or -1. Total.
+fn pending_index(rs: Resolver, host: str) -> int {
+    let key = host.lower()
+    var i: int = 0
+    while i < rs.q_hosts.len {
+        if rs.q_hosts[i] == key {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// True while a query for `host` is in flight. Total.
+pub fn is_pending(rs: Resolver, host: str) -> bool {
+    pending_index(rs, host) >= 0
+}
+
+/// True when `host` has a cache entry that has not expired — an
+/// answer (any addresses) OR a held failure. Total.
+pub fn is_fresh(rs: Resolver, host: str, now: int) -> bool {
+    let i = cache_index(rs, host)
+    if i < 0 {
+        return false
+    }
+    rs.expires[i] > now
+}
+
+/// The cached failure name for `host` ("" when the entry answered
+/// with addresses, or when there is no entry). Total.
+pub fn failure(rs: Resolver, host: str) -> str {
+    let i = cache_index(rs, host)
+    if i < 0 {
+        return ""
+    }
+    rs.fails[i]
+}
+
+/// The cached address set of `host`, in answer order ("" when none).
+/// Total.
+pub fn addr_set(rs: Resolver, host: str) -> str {
+    let i = cache_index(rs, host)
+    if i < 0 {
+        return ""
+    }
+    rs.addrs[i]
+}
+
+/// Split a comma-joined address set. Total.
+pub fn split_set(set: str) -> List[str] {
+    var out = List[str]()
+    if set.is_empty() {
+        return out
+    }
+    var cur = ""
+    for b in set.bytes() {
+        if b == 44 {
+            (mut out).push(cur)
+            cur = ""
+        } else {
+            cur = "{cur}{b as char}"
+        }
+    }
+    (mut out).push(cur)
+    out
+}
+
+/// The cached addresses of `host` rotated to start at its round-robin
+/// cursor, the cursor advanced — nginx's "several addresses, used in
+/// a round-robin fashion" for a resolved proxy_pass name. Empty when
+/// there is no answer. Total.
+pub fn rotate(mut rs: Resolver, host: str) -> List[str] {
+    let i = cache_index(rs, host)
+    if i < 0 {
+        return List[str]()
+    }
+    let all = split_set(rs.addrs[i])
+    if all.len == 0 {
+        return all
+    }
+    let start = rs.rr[i] % all.len
+    var out = List[str]()
+    var k: int = 0
+    while k < all.len {
+        (mut out).push(all[(start + k) % all.len])
+        k = k + 1
+    }
+    var nrr = List[int]()
+    var j: int = 0
+    while j < rs.rr.len {
+        (mut nrr).push(if j == i { rs.rr[j] + 1 } else { rs.rr[j] })
+        j = j + 1
+    }
+    rs.rr = nrr
+    out
+}
+
+/// Store (or replace) the cache entry for `host`. `set` "" with a
+/// `fail` name is a held failure; the entry lives until `expires`.
+/// Rebuilds the columns (never index-assigns). Total.
+fn cache_put(mut rs: Resolver, host: str, set: str, fail: str, expires: int) {
+    let key = host.lower()
+    var nh = List[str]()
+    var na = List[str]()
+    var nf = List[str]()
+    var ne = List[int]()
+    var nr = List[int]()
+    var seen = false
+    var i: int = 0
+    while i < rs.hosts.len {
+        if rs.hosts[i] == key {
+            seen = true
+            (mut nh).push(key)
+            (mut na).push(set)
+            (mut nf).push(fail)
+            (mut ne).push(expires)
+            (mut nr).push(rs.rr[i])
+        } else {
+            (mut nh).push(rs.hosts[i])
+            (mut na).push(rs.addrs[i])
+            (mut nf).push(rs.fails[i])
+            (mut ne).push(rs.expires[i])
+            (mut nr).push(rs.rr[i])
+        }
+        i = i + 1
+    }
+    if !seen {
+        (mut nh).push(key)
+        (mut na).push(set)
+        (mut nf).push(fail)
+        (mut ne).push(expires)
+        (mut nr).push(0)
+    }
+    rs.hosts = nh
+    rs.addrs = na
+    rs.fails = nf
+    rs.expires = ne
+    rs.rr = nr
+}
+
+/// Remove pending row `at`, closing nothing (the caller closed the
+/// socket). Total.
+fn pending_drop(mut rs: Resolver, at: int) {
+    var nh = List[str]()
+    var nf = List[int]()
+    var ni = List[int]()
+    var nb = List[str]()
+    var nd = List[int]()
+    var ns = List[int]()
+    var nv = List[int]()
+    var i: int = 0
+    while i < rs.q_hosts.len {
+        if i != at {
+            (mut nh).push(rs.q_hosts[i])
+            (mut nf).push(rs.q_fds[i])
+            (mut ni).push(rs.q_ids[i])
+            (mut nb).push(rs.q_bufs[i])
+            (mut nd).push(rs.q_deadline[i])
+            (mut ns).push(rs.q_started[i])
+            (mut nv).push(rs.q_valid[i])
+        }
+        i = i + 1
+    }
+    rs.q_hosts = nh
+    rs.q_fds = nf
+    rs.q_ids = ni
+    rs.q_bufs = nb
+    rs.q_deadline = nd
+    rs.q_started = ns
+    rs.q_valid = nv
+}
+
+/// Replace pending row `at`'s received-bytes hex. Total.
+fn pending_buf(mut rs: Resolver, at: int, buf: str) {
+    var nb = List[str]()
+    var i: int = 0
+    while i < rs.q_bufs.len {
+        (mut nb).push(if i == at { buf } else { rs.q_bufs[i] })
+        i = i + 1
+    }
+    rs.q_bufs = nb
+}
+
+/// Failures are held this long: one second — nginx does not cache a
+/// failed resolution at all (the next request re-asks), lobo bounds
+/// the storm a dead name would otherwise make of the loop. Named in
+/// docs/RESOLVER.md. Total.
+pub fn failure_hold_ms() -> int {
+    1000
+}
+
+/// The smallest TTL lobo honours: a 0-TTL answer is held one second
+/// (nginx re-resolves such a name on every request; a request parked
+/// on a name that is stale the instant it lands would park forever).
+/// Named delta. Total.
+pub fn min_ttl_ms() -> int {
+    1000
+}
+
+/// Settle a completed answer (or a failure) for pending row `at`:
+/// cache it, record the event, drop the row. Total.
+fn settle(mut rs: Resolver, at: int, ans: Answer, now: int) {
+    let host = rs.q_hosts[at]
+    let took = now - rs.q_started[at]
+    let valid = rs.q_valid[at]
+    if ans.ok {
+        var ttl = ans.ttl_ms
+        if valid > 0 {
+            ttl = valid
+        }
+        if ttl < min_ttl_ms() {
+            ttl = min_ttl_ms()
+        }
+        var set = ""
+        var i: int = 0
+        while i < ans.addrs.len {
+            set = if i == 0 { ans.addrs[i] } else { "{set},{ans.addrs[i]}" }
+            i = i + 1
+        }
+        cache_put(mut rs, host, set, "", now + ttl)
+        (mut rs.events).push(ev_resolved(host, ans.addrs.len, ttl, took))
+    } else {
+        cache_put(mut rs, host, "", ans.reason, now + failure_hold_ms())
+        (mut rs.events).push(ev_resolve_failed(host, ans.reason, took))
+    }
+    pending_drop(mut rs, at)
+}
+
+/// The `upstream-resolved` vocabulary event (ws13, appended — nothing
+/// renamed): `host` the name, `addrs` how many addresses answered,
+/// `ttl-ms` how long the cache holds them (the record TTL, or the
+/// `valid=` override, floored at one second), `took-ms` the query's
+/// wall time. Level notice. Total.
+pub fn ev_resolved(host: str, addrs: int, ttl_ms: int, took_ms: int) -> str {
+    "upstream-resolved host={host} addrs={addrs} ttl-ms={ttl_ms} took-ms={took_ms}"
+}
+
+/// The `upstream-resolve-failed` vocabulary event (ws13, appended):
+/// `reason` is one of the frozen names (nxdomain|servfail|refused|
+/// noaddr|malformed|rcode|timeout|io|dial), `took-ms` the wall time
+/// to the verdict. Level error. Total.
+pub fn ev_resolve_failed(host: str, reason: str, took_ms: int) -> str {
+    "upstream-resolve-failed host={host} reason={reason} took-ms={took_ms}"
+}
+
+/// Drain the accumulated events (the loop emits them through the
+/// ws09 seam, which stamps `seq=`). Total.
+pub fn take_events(mut rs: Resolver) -> List[str] {
+    let out = rs.events
+    rs.events = List[str]()
+    out
+}
+
+/// Start a query for `host` against the resolver at `addr`
+/// (`host:port`, an IP literal — nginx's `resolver` address), to be
+/// abandoned at `now + timeout_ms` and cached under `valid_ms` (0 =
+/// the record TTL). Idempotent while a query for the host is in
+/// flight. A dial that fails settles IMMEDIATELY as a held `dial`
+/// failure (the loop parks nothing on a resolver it cannot reach).
+/// Total.
+pub fn start(mut rs: Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int, now: int) {
+    if is_pending(rs, host) || is_fresh(rs, host, now) {
+        return
+    }
+    let key = host.lower()
+    let id = rs.next_id % 65536
+    rs.next_id = rs.next_id + 1
+    if rs.next_id > 65535 {
+        rs.next_id = 1
+    }
+    var dial_ok = true
+    let fd = net_connect(addr) else |_| {
+        dial_ok = false
+        0
+    }
+    if !dial_ok {
+        cache_put(mut rs, key, "", "dial", now + failure_hold_ms())
+        (mut rs.events).push(ev_resolve_failed(key, "dial", 0))
+        return
+    }
+    var sent = true
+    net_write_bytes(fd, build_query(id, key)) else |_| {
+        sent = false
+    }
+    if !sent {
+        net_close(fd) else |_| {}
+        cache_put(mut rs, key, "", "io", now + failure_hold_ms())
+        (mut rs.events).push(ev_resolve_failed(key, "io", 0))
+        return
+    }
+    (mut rs.q_hosts).push(key)
+    (mut rs.q_fds).push(fd)
+    (mut rs.q_ids).push(id)
+    (mut rs.q_bufs).push("")
+    (mut rs.q_deadline).push(now + timeout_ms)
+    (mut rs.q_started).push(now)
+    (mut rs.q_valid).push(valid_ms)
+}
+
+/// One poll pass over the pending table: each query socket gets a
+/// 1 ms read deadline and one bounded read; a complete TCP frame is
+/// parsed and settled, a closed or broken socket settles as `io`, a
+/// query past its deadline settles as `timeout`. Rows are walked from
+/// the END so a settled row's drop cannot shift an unvisited one.
+/// Total; never blocks the loop past `pending × ~1 ms`.
+pub fn tick(mut rs: Resolver, now: int) {
+    var i = rs.q_hosts.len - 1
+    while i >= 0 {
+        let fd = rs.q_fds[i]
+        if now >= rs.q_deadline[i] {
+            net_close(fd) else |_| {}
+            settle(mut rs, i, failed("timeout"), now)
+        } else {
+            net_deadline(fd, 1) else |_| {}
+            var got = List[int]()
+            var broke = false
+            var waiting = false
+            got = net_read_bytes(fd, 4096) else |e| match e {
+                timeout => {
+                    waiting = true
+                    List[int]()
+                },
+                closed => {
+                    broke = true
+                    List[int]()
+                },
+                io => {
+                    broke = true
+                    List[int]()
+                },
+            }
+            if !waiting && got.len == 0 {
+                broke = true
+            }
+            if broke {
+                net_close(fd) else |_| {}
+                settle(mut rs, i, failed("io"), now)
+            } else if !waiting {
+                let buf = "{rs.q_bufs[i]}{hex.encode(got)}"
+                var whole = List[int]()
+                whole = hex.decode(buf) else |_| { List[int]() }
+                if whole.len >= 2 && whole.len >= 2 + be16(whole, 0) {
+                    let n = be16(whole, 0)
+                    var msg = List[int]()
+                    var k: int = 2
+                    while k < 2 + n {
+                        (mut msg).push(whole[k])
+                        k = k + 1
+                    }
+                    net_close(fd) else |_| {}
+                    // hoisted: a read of `rs` inside a `mut rs` call's
+                    // argument list is a path conflict on the lupin lane
+                    // ([mem.model.path.disjoint]); wolfc orders the read
+                    // first and says nothing — a divergence, noted
+                    let qid = rs.q_ids[i]
+                    settle(mut rs, i, parse_answer(qid, msg), now)
+                } else {
+                    pending_buf(mut rs, i, buf)
+                }
+            }
+        }
+        i = i - 1
+    }
+}
+
+/// Resolve `host` INLINE: start the query and tick until it settles
+/// or `timeout_ms` passes. The blocking driver's path (serve_conn,
+/// which the rig and the differential drive directly) — and, before
+/// the loop learned to park, the whole server's: THE STALL docs/
+/// RESOLVER.md measures is this function on the loop thread. Total.
+pub fn resolve_now(mut rs: Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int) {
+    let t0 = time_unix_ms()
+    start(mut rs, host, addr, timeout_ms, valid_ms, t0)
+    while is_pending(rs, host) {
+        time_sleep_ms(2)
+        tick(mut rs, time_unix_ms())
+    }
+}

@@ -198,6 +198,14 @@ pub fn registry() -> List[Spec] {
         help: "Process-wide bytes the runtime holds for live regions at scrape time. NOT an RSS proxy: the process-root arena, where every string materialization still lands, is not counted.",
     })
 
+    // --- the resolver (ws13) ---
+    (mut r).push(Spec {
+        name: "lobo_upstream_resolutions_total",
+        kind: "counter",
+        labels: "result",
+        help: "Upstream names the resolver settled, by result (ok, failed). The failure reason is in the upstream-resolve-failed log event, not a label.",
+    })
+
     // --- logging and the event stream (ws09/ws11) ---
     (mut r).push(Spec {
         name: "lobo_log_lines_dropped_total",

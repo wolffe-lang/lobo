@@ -1,0 +1,104 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked
+//! conforms: err.propagate
+//!
+//! resolvedrive — rig DRIVER for tools/lobo-resolver (the corpus lane
+//! runs it bare, which exercises exactly the no-argument usage path:
+//! exit 2). The ws13 stall measurement's load shape: argv is
+//! `<front-port>`; open connection A and send a PROXIED request whose
+//! upstream is a NAME the rig's DNS server will answer only after its
+//! scripted delay; then, at once, open connection B and send a STATIC
+//! request; time B to its last byte (the number that says whether the
+//! loop stalled behind the resolver), then A (the number that says
+//! the delay was real), then a THIRD request on a fresh connection
+//! for the same name (the number that says the cache answered).
+//! Prints `static-ms=<n> proxied-ms=<n> cached-ms=<n>` and the three
+//! status lines; the harness rules on them. Loopback only, forever.
+
+/// Parse a decimal port from argv — `io` on anything not 1..65535.
+fn to_port(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 || b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 65535 {
+            return io
+        }
+    }
+    if n == 0 {
+        return io
+    }
+    n
+}
+
+/// Dial the front and send `req`; the socket stays open. Row: io.
+fn send_only(port: int, req: str) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_write(c, req) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    c
+}
+
+/// Read to close under `ms`; "" on nothing. Total.
+fn read_all(c: int, ms: int) -> str {
+    net_deadline(c, ms) else |_| {}
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn status_line(reply: str) -> str {
+    let eol = reply.find("\r\n") else reply.len
+    reply[0..eol]
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len < 1 {
+        eprint("usage: resolvedrive <front-port>")
+        return 2
+    }
+    let port = to_port(args[0]) else |_| {
+        eprint("resolvedrive: bad port")
+        return 2
+    }
+    let ta = time_unix_ms()
+    let a = send_only(port, "GET /up/one HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let tb = time_unix_ms()
+    let b = send_only(port, "GET /index.html HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let rb = read_all(b, 10000)
+    let static_ms = time_unix_ms() - tb
+    let ra = read_all(a, 10000)
+    let proxied_ms = time_unix_ms() - ta
+    let tc = time_unix_ms()
+    let c = send_only(port, "GET /up/two HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let rc = read_all(c, 10000)
+    let cached_ms = time_unix_ms() - tc
+    print("static-ms={static_ms} proxied-ms={proxied_ms} cached-ms={cached_ms}")
+    print("static: {status_line(rb)}")
+    print("proxied: {status_line(ra)}")
+    print("cached: {status_line(rc)}")
+    0
+}

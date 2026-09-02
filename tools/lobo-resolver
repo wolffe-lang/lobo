@@ -1,0 +1,133 @@
+#!/bin/sh
+# lobo-resolver — THE STALL WITNESS (ws13, wsc05 opens; report 11 §2
+# item 9, "async DNS for upstreams"). A real lobo, a real loopback DNS
+# server that answers only after a scripted delay (tests/rig/dnssrv),
+# a real backend (tests/rig/rigback), and one driver
+# (tests/rig/resolvedrive) that sends a PROXIED request whose upstream
+# is a NAME, then at once a STATIC request on a second connection, and
+# times both. What gates:
+#   * static-ms  < 300  — the static request was served WHILE the name
+#                          was resolving: the loop did not stall behind
+#                          the resolver. Before ws13 the dial resolved
+#                          the name synchronously on the loop's thread
+#                          and this number was the resolver's delay
+#                          plus change (docs/RESOLVER.md records the
+#                          before/after pair measured on this rig).
+#   * proxied-ms >= delay — the delay was real and the proxied request
+#                          waited for the answer, not around it.
+#   * cached-ms  < 300  — a second request for the same name made NO
+#                          round trip: the record file the DNS server
+#                          writes holds exactly ONE query.
+#   * the `upstream-resolved` vocabulary event landed in error.log with
+#     its frozen keys, and the access line names the RESOLVED address.
+# Loopback only, port 0 everywhere, deadline on every read.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+LOBO="$(pwd)/target/lobo-release"
+if [ ! -x "$LOBO" ]; then
+    echo "lobo-resolver: FAILED — $LOBO missing; the gauntlet's build step makes it" >&2
+    exit 1
+fi
+
+DELAY=800
+scratch="target/lobo-resolver"
+rm -rf "$scratch"
+mkdir -p "$scratch/w"
+printf 'STATIC-WHILE-RESOLVING\n' > "$scratch/w/index.html"
+printf 'app.test A 127.0.0.1 60\n' > "$scratch/dns.table"
+printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\nConnection: close\r\n\r\nUPSTREAM' > "$scratch/reply.raw"
+
+red=0
+total=0
+say() { echo "lobo-resolver: $1"; }
+check() { # check <desc> <ok(0/1)>
+    total=$((total + 1))
+    if [ "$2" = 0 ]; then
+        say "ok — $1"
+    else
+        say "FAILED — $1" >&2
+        red=$((red + 1))
+    fi
+}
+wait_port() { # wait_port <file>
+    for _ in $(seq 1 50); do
+        p=$(head -1 "$1" 2>/dev/null)
+        case "$p" in '' | *[!0-9]*) sleep 0.1; continue ;; esac
+        echo "$p"; return 0
+    done
+    return 1
+}
+
+# the DNS server: one table, a record of every QNAME, up to 4 queries,
+# each answered after DELAY ms
+"$WOLF" run ./tests/rig/dnssrv/dnssrv.lu "$scratch/dns.table" "$scratch/dns.record" 4 "$DELAY" > "$scratch/dns.port" 2> "$scratch/dns.err" &
+dnspid=$!
+dport=$(wait_port "$scratch/dns.port") || { say "FAILED — dnssrv never printed its port ($(cat "$scratch/dns.err"))" >&2; kill "$dnspid" 2>/dev/null; exit 1; }
+
+# the backend: two exchanges
+"$WOLF" run ./tests/rig/rigback/rigback.lu "$scratch/back.record" "$scratch/reply.raw" 2 > "$scratch/back.port" 2> "$scratch/back.err" &
+backpid=$!
+bport=$(wait_port "$scratch/back.port") || { say "FAILED — rigback never printed its port" >&2; kill "$dnspid" "$backpid" 2>/dev/null; exit 1; }
+
+hp=$("$WOLF" run ./tests/rig/freeport.lu)
+cat > "$scratch/lobo.conf" <<CONF
+pid $scratch/lobo.pid;
+http {
+  types { text/html html; }
+  log_format up '\$upstream_addr \$status \$request';
+  access_log $scratch/access.log up;
+  error_log $scratch/error.log notice;
+  resolver 127.0.0.1:$dport valid=30s;
+  resolver_timeout 5s;
+  server {
+    listen 127.0.0.1:$hp;
+    root $scratch/w;
+    index index.html;
+    location /up/ { proxy_pass http://app.test:$bport/; }
+  }
+}
+CONF
+
+"$LOBO" serve -p . -c "$scratch/lobo.conf" 2> "$scratch/lobo.log" &
+pid=$!
+i=0
+while [ $i -lt 80 ]; do
+    if grep -q "generation-activated gen=1" "$scratch/lobo.log" 2>/dev/null; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+
+out=$("$WOLF" run ./tests/rig/resolvedrive.lu "$hp" 2> "$scratch/drive.err")
+drc=$?
+kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+kill "$dnspid" "$backpid" 2>/dev/null; wait "$dnspid" "$backpid" 2>/dev/null
+
+if [ "$drc" != 0 ]; then
+    say "FAILED — the driver did not complete (stderr: $(tail -c 200 "$scratch/drive.err"))" >&2
+    exit 1
+fi
+printf '%s\n' "$out" | sed 's|^|lobo-resolver:   |'
+nums=$(printf '%s\n' "$out" | sed -n '1p')
+static_ms=$(printf '%s' "$nums" | sed -n 's/.*static-ms=\([0-9]*\).*/\1/p')
+proxied_ms=$(printf '%s' "$nums" | sed -n 's/.*proxied-ms=\([0-9]*\).*/\1/p')
+cached_ms=$(printf '%s' "$nums" | sed -n 's/.*cached-ms=\([0-9]*\).*/\1/p')
+
+say "measured with the resolver delaying every answer ${DELAY} ms: static-ms=${static_ms} proxied-ms=${proxied_ms} cached-ms=${cached_ms}"
+[ -n "$static_ms" ] && [ "$static_ms" -lt 300 ]; check "the static request was served WHILE the name resolved (static-ms=${static_ms} < 300): the loop did not stall behind the resolver" $?
+[ -n "$proxied_ms" ] && [ "$proxied_ms" -ge "$DELAY" ]; check "the proxied request waited for the answer, not around it (proxied-ms=${proxied_ms} >= ${DELAY})" $?
+[ -n "$cached_ms" ] && [ "$cached_ms" -lt 300 ]; check "the second request for the name made no round trip (cached-ms=${cached_ms} < 300)" $?
+printf '%s\n' "$out" | grep -q '^static: HTTP/1.1 200 OK'; check "static request answered 200" $?
+printf '%s\n' "$out" | grep -q '^proxied: HTTP/1.1 200 OK'; check "proxied request answered 200 through the resolved address" $?
+printf '%s\n' "$out" | grep -q '^cached: HTTP/1.1 200 OK'; check "cached request answered 200" $?
+queries=$(grep -c . "$scratch/dns.record" 2>/dev/null || echo 0)
+[ "$queries" = 1 ]; check "the DNS server saw exactly ONE query for two proxied requests (saw $queries)" $?
+grep -q 'upstream-resolved host=app.test addrs=1 ttl-ms=30000 took-ms=[0-9]* seq=[0-9]*' "$scratch/error.log"; check "the upstream-resolved event landed with its frozen keys and the seq stamp" $?
+grep -q "^127.0.0.1:$bport 200 GET /up/one" "$scratch/access.log"; check "the access line names the RESOLVED address (\$upstream_addr = 127.0.0.1:$bport), not the text" $?
+
+if [ "$red" != 0 ]; then
+    echo "lobo-resolver: RED — $red of $total checks failed (logs under $scratch/)" >&2
+    exit 1
+fi
+echo "lobo-resolver: $total/$total checks green (the name resolves in time: static-ms=${static_ms} while the resolver held the answer ${DELAY} ms)"

@@ -1,0 +1,302 @@
+//! member: true
+//! dnssrv — the resolver rig's LOOPBACK DNS SERVER, in wolf (the
+//! dogfood rule; ws13). A DNS-over-TCP authority (RFC 1035 §4.2.2
+//! framing) that answers A queries from a scripted table, RECORDS
+//! every QNAME it is asked (so a harness can count round trips — a
+//! cache hit is a query that never arrived), and can DELAY each answer
+//! by a scripted number of milliseconds: the delay knob is the "slow
+//! resolver" report 11 §2 item 9 complains about, made deterministic
+//! on loopback. RIG-PRIVATE test infrastructure; NOT resolver/'s
+//! territory (it does not share a line of code with the client — the
+//! encoder here is written from the RFC a second time on purpose).
+//! Loopback only, port 0 always.
+//! Argv: <table-file> <record-file> [max-queries] [delay-ms]
+//! The table file is one entry per line:
+//!   `name A ip[,ip...] ttl`    answer these addresses with this TTL
+//!   `name NX`                  answer NXDOMAIN
+//!   `name EMPTY`               answer NOERROR with no records
+//! An unknown name is NXDOMAIN. Prints its port on stdout, then
+//! serves up to max-queries (default 1) connections, one query each,
+//! appending each QNAME to the record file.
+//! File-header note (F-0016): comments never sit directly above a
+//! dotted call in this repo.
+
+/// Big-endian uint16 at `at`. Total.
+fn be16(b: List[int], at: int) -> int {
+    b[at] * 256 + b[at + 1]
+}
+
+/// Push a big-endian uint16. Total.
+fn put16(mut out: List[int], v: int) {
+    (mut out).push(v / 256 % 256)
+    (mut out).push(v % 256)
+}
+
+/// Push a big-endian uint32. Total.
+fn put32(mut out: List[int], v: int) {
+    (mut out).push(v / 16777216 % 256)
+    (mut out).push(v / 65536 % 256)
+    (mut out).push(v / 256 % 256)
+    (mut out).push(v % 256)
+}
+
+/// Parse a decimal, else `deflt`. Total.
+fn dec(s: str, deflt: int) -> int {
+    var n: int = 0
+    var have = false
+    for b in s.bytes() {
+        if b >= 48 && b <= 57 {
+            n = n * 10 + b - 48
+            have = true
+        }
+    }
+    if have { n } else { deflt }
+}
+
+/// Read one TCP-framed DNS message from `conn` (the length prefix,
+/// then exactly that many bytes). Row: io on a short read. Total
+/// otherwise.
+fn read_message(conn: int) -> List[int] ! {io} {
+    var buf = List[int]()
+    var want = -1
+    while want < 0 || buf.len < 2 + want {
+        let piece = net_read_bytes(conn, 4096) else |_| {
+            return io
+        }
+        if piece.len == 0 {
+            return io
+        }
+        var i: int = 0
+        while i < piece.len {
+            (mut buf).push(piece[i])
+            i = i + 1
+        }
+        if want < 0 && buf.len >= 2 {
+            want = be16(buf, 0)
+        }
+        if buf.len > 70000 {
+            return io
+        }
+    }
+    var msg = List[int]()
+    var k: int = 2
+    while k < 2 + want {
+        (mut msg).push(buf[k])
+        k = k + 1
+    }
+    msg
+}
+
+/// The QNAME of the first question as dotted text, and the offset
+/// just past the question section. ("", -1) on a malformed message.
+/// Total.
+fn question(msg: List[int]) -> (str, int) {
+    if msg.len < 12 {
+        return ("", -1)
+    }
+    var name = ""
+    var i = 12
+    while i < msg.len {
+        let l = msg[i]
+        if l == 0 {
+            i = i + 1
+            if i + 4 > msg.len {
+                return ("", -1)
+            }
+            return (name, i + 4)
+        }
+        if l >= 192 || i + 1 + l > msg.len {
+            return ("", -1)
+        }
+        var k: int = 0
+        var label = ""
+        while k < l {
+            label = "{label}{msg[i + 1 + k] as char}"
+            k = k + 1
+        }
+        name = if name.is_empty() { label } else { "{name}.{label}" }
+        i = i + 1 + l
+    }
+    ("", -1)
+}
+
+/// Split a dotted quad into its four bytes. Total (a bad quad answers
+/// 0.0.0.0 — the table is the harness's own).
+fn quad(ip: str) -> List[int] {
+    var out = List[int]()
+    var v: int = 0
+    for b in ip.bytes() {
+        if b == 46 {
+            (mut out).push(v % 256)
+            v = 0
+        } else if b >= 48 && b <= 57 {
+            v = v * 10 + b - 48
+        }
+    }
+    (mut out).push(v % 256)
+    while out.len < 4 {
+        (mut out).push(0)
+    }
+    out
+}
+
+/// The framed answer to `msg` (whose question ends at `qend`) for the
+/// scripted entry: `kind` A|NX|EMPTY, `ips` comma-joined, `ttl`. The
+/// question is echoed; each A record names the question by a
+/// compression pointer to offset 12 (so the client's pointer path is
+/// exercised on every answer). Total.
+fn answer(msg: List[int], qend: int, kind: str, ips: str, ttl: int) -> List[int] {
+    var body = List[int]()
+    // id
+    (mut body).push(msg[0])
+    (mut body).push(msg[1])
+    // flags: QR AA RD RA + rcode
+    let rcode = if kind == "NX" { 3 } else { 0 }
+    (mut body).push(133)
+    (mut body).push(128 + rcode)
+    var addrs = List[str]()
+    if kind == "A" {
+        var cur = ""
+        for b in ips.bytes() {
+            if b == 44 {
+                (mut addrs).push(cur)
+                cur = ""
+            } else {
+                cur = "{cur}{b as char}"
+            }
+        }
+        if !cur.is_empty() {
+            (mut addrs).push(cur)
+        }
+    }
+    put16(mut body, 1)
+    put16(mut body, addrs.len)
+    put16(mut body, 0)
+    put16(mut body, 0)
+    var i = 12
+    while i < qend {
+        (mut body).push(msg[i])
+        i = i + 1
+    }
+    var a: int = 0
+    while a < addrs.len {
+        (mut body).push(192)
+        (mut body).push(12)
+        put16(mut body, 1)
+        put16(mut body, 1)
+        put32(mut body, ttl)
+        put16(mut body, 4)
+        let q = quad(addrs[a])
+        var k: int = 0
+        while k < 4 {
+            (mut body).push(q[k])
+            k = k + 1
+        }
+        a = a + 1
+    }
+    var out = List[int]()
+    put16(mut out, body.len)
+    var j: int = 0
+    while j < body.len {
+        (mut out).push(body[j])
+        j = j + 1
+    }
+    out
+}
+
+/// The scripted entry for `name`: (kind, ips, ttl); NX for an unknown
+/// name. Total.
+fn lookup(table: str, name: str) -> (str, str, int) {
+    let key = name.lower()
+    for line in table.lines() {
+        let t = line.trim()
+        if t.is_empty() || t.starts_with("#") {
+            continue
+        }
+        var cols = List[str]()
+        var cur = ""
+        for b in t.bytes() {
+            if b == 32 || b == 9 {
+                if !cur.is_empty() {
+                    (mut cols).push(cur)
+                    cur = ""
+                }
+            } else {
+                cur = "{cur}{b as char}"
+            }
+        }
+        if !cur.is_empty() {
+            (mut cols).push(cur)
+        }
+        if cols.len >= 2 && cols[0].lower() == key {
+            if cols[1] == "A" && cols.len >= 3 {
+                let ttl = if cols.len >= 4 { dec(cols[3], 60) } else { 60 }
+                return ("A", cols[2], ttl)
+            }
+            if cols[1] == "EMPTY" {
+                return ("EMPTY", "", 0)
+            }
+            return ("NX", "", 0)
+        }
+    }
+    ("NX", "", 0)
+}
+
+fn main() -> !int {
+    var table_path = ""
+    var record = ""
+    var maxq: int = 1
+    var delay: int = 0
+    var i: int = 0
+    for a in env_args() {
+        if i == 0 {
+            table_path = a
+        } else if i == 1 {
+            record = a
+        } else if i == 2 {
+            maxq = dec(a, 1)
+        } else if i == 3 {
+            delay = dec(a, 0)
+        }
+        i = i + 1
+    }
+    if i < 2 {
+        eprint("usage: dnssrv <table-file> <record-file> [max-queries] [delay-ms]")
+        return 2
+    }
+    let table = fs_read_text(table_path)?
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    fs_write_text(record, "")?
+    print("{port}")
+
+    var served: int = 0
+    var seen = ""
+    while served < maxq {
+        let conn = net_accept(l) else |_| {
+            continue
+        }
+        net_deadline(conn, 5000) else |_| {}
+        var bad = false
+        let msg = read_message(conn) else |_| {
+            bad = true
+            List[int]()
+        }
+        if !bad {
+            let q = question(msg)
+            if q.1 > 0 {
+                seen = "{seen}{q.0}\n"
+                fs_write_text(record, seen)?
+                let e = lookup(table, q.0)
+                if delay > 0 {
+                    time_sleep_ms(delay)
+                }
+                net_write_bytes(conn, answer(msg, q.1, e.0, e.1, e.2)) else |_| {}
+            }
+        }
+        net_close(conn) else |_| {}
+        served = served + 1
+    }
+    net_close(l)?
+    0
+}

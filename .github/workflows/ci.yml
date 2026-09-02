@@ -85,6 +85,13 @@ jobs:
           # wolf-toolchain.toml's version_line names the SHORT rev
           # (the D57 shape sc30 recorded), so truncate here rather
           # than letting the identity check refuse a full-sha stamp.
+          # ws13: when the pinned rev IS a release tag (v0.2.2 was the
+          # first), the D57 release stamp rides along — xtask's own
+          # rule, granted only when that exact tag points at HEAD —
+          # so `--version` claims the bare version the pin file names.
+          # A trunk pin has no such tag and stays `+dev.<short>`.
+          TAG="$(git tag --points-at HEAD | grep '^v[0-9]' | head -1 || true)"
+          if [ -n "$TAG" ]; then export WOLF_RELEASE="$TAG"; fi
           WOLF_COMMIT="$(echo "${{ steps.pins.outputs.wolf }}" | cut -c1-7)" \
             cargo build --release -p wolf_driver -p wolf_rt
 

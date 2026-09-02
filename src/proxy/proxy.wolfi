@@ -1,13 +1,14 @@
 module pkg :: proxy
-  wolfi v0 · toolchain 0.2.1 · edition v1
-  export_hash 95ed1515b60adf9d300ba0e8a9b6407cfd2fb7ae5f500e5719eb1641eb70e3ee
-  pkg_hash    95ed1515b60adf9d300ba0e8a9b6407cfd2fb7ae5f500e5719eb1641eb70e3ee
+  wolfi v0 · toolchain 0.2.2 · edition v1
+  export_hash d721698028ab8d7f98df6eb7d54b4fe603ad91981572aca7be1aab4c08499219
+  pkg_hash    d721698028ab8d7f98df6eb7d54b4fe603ad91981572aca7be1aab4c08499219
   deps:
-    config  477e317a328d6e0f6a2ceabc8ff1d72af4bfaf5f0ee131de8a2537942e5d49bb
-    http  51b7620be3cc2e3a5ca4bd5b34265aa3226f0f75b437e301819efcd2948c0ed2
-    std.net  3474801ad6988297130bc765303ac2b36ac6ec761eae01c70b7cadbd3e8f3881
-    std.x.tls.cert  1d50e6f357748f9bdfbf10aac1d3e023a3fbbfc9349ac22258799e76acea0cab
-    std.x.tls.client  d3c878a5369ad65845c9c160f612381e988240ed0f5a51ae0fc3a42897d23588
+    config  1ae103637af25655a31f61cfbf9e5d2f0870c20247781e85c4970c90ae1ea7c2
+    http  aca51a98027b998b95f129fd5b9b8f283d4f89587124ba1af91b65d1e5dbde6c
+    resolver  21442f70c4a638339a1ecaab43480b37355aed3d33ebdacbaefb4e95c8e5f4c6
+    std.net  40d6b794837d02a30fbbd171f56de2191bc3b38d469b24b873a9aeff8ee5064a
+    std.x.tls.cert  f99bd7c4b52600513b4dd4b52a22d7b135adfcc42f7e8e7bf25bd33b668e3ce3
+    std.x.tls.client  45ff216351f509d1bf3e94bd0d73dec827bbbdc44947cc1936e375e18dcb3fba
   items:
     [0] pub build_upstream — fn build_upstream(c: config.Conf, req: http.Request, pl: self.Plan, phost: str, pport: int, remote_addr: str, body: str) -> str · regions (ρ1, ρ2, ρ3, -, -, -, -) -> -
     [1] pub expand_var — fn expand_var(v: str, host: str, remote_addr: str, proxy_host: str, inbound_xff: str) -> str
@@ -19,19 +20,21 @@ module pkg :: proxy
     [7] pub plan — fn plan(c: config.Conf, path: str) -> self.Plan · regions (ρ1, -) -> ρ_caller
     [8] pub pool_named — fn pool_named(c: config.Conf, name: str) -> self.UpPool · regions (ρ1, -) -> ρ_caller
     [9] pub relay_response — fn relay_response(up: self.UpResponse, body: str, token: str, date: str, keep: bool) -> str · regions (ρ1, -, -, -, -) -> -
-    [10] pub rewrite_target — fn rewrite_target(matched: str, has_uri: bool, uri: str, path: str, query: str) -> str
-    [11] pub run — fn run(client: int, c: config.Conf, req: http.Request, body: str, pl: self.Plan, remote_addr: str, token: str, date: str, keep: bool, mut acc: self.RunAcc) -> bool ! {closed, io} · regions (-, ρ1, ρ2, -, ρ3, -, -, -, -, ρ4) -> -
-    [12] pub run_acc — fn run_acc() -> self.RunAcc · regions () -> ρ_caller
-    [13] pub set_headers — fn set_headers(c: config.Conf, loc: int, srv: int, http_blk: int) -> (prelude.List[str], prelude.List[str]) · regions (ρ1, -, -, -) -> ρ_caller
-    [14] pub status_code — fn status_code(status_line: str) -> int
-    [15] pub status_code_of — fn status_code_of(status_line: str) -> int
-    [16] pub swrr_new — fn swrr_new(n: int) -> self.Swrr · regions (-) -> ρ_caller
-    [17] pub swrr_pick — fn swrr_pick(mut s: self.Swrr, weights: prelude.List[int], up: prelude.List[bool]) -> int · regions (ρ1, ρ2, ρ3) -> -
-    [18] pub version — fn version() -> str
-    [19] pub PassTarget — struct PassTarget { scheme: str, authority: str, is_pool: bool, has_uri: bool, uri: str, err: str }
-    [20] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int, trust_path: str, ssl_name: str }
-    [21] pub RunAcc — struct RunAcc { addr: str, status: int, body_bytes: int, up_ms: int }
-    [22] pub Swrr — struct Swrr { current: prelude.List[int] }
-    [23] pub UpPool — struct UpPool { name: str, hosts: prelude.List[str], ports: prelude.List[int], weights: prelude.List[int], max_fails: prelude.List[int], fail_ms: prelude.List[int], backup: prelude.List[bool] }
-    [24] pub UpResponse — struct UpResponse { status_line: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int }
+    [10] pub resolve_need — fn resolve_need(c: config.Conf, path: str, rs: resolver.Resolver, now: int) -> self.Need · regions (ρ1, -, ρ2, -) -> ρ_caller
+    [11] pub rewrite_target — fn rewrite_target(matched: str, has_uri: bool, uri: str, path: str, query: str) -> str
+    [12] pub run — fn run(client: int, c: config.Conf, req: http.Request, body: str, pl: self.Plan, remote_addr: str, token: str, date: str, keep: bool, mut rs: resolver.Resolver, mut acc: self.RunAcc) -> bool ! {closed, io} · regions (-, ρ1, ρ2, -, ρ3, -, -, -, -, ρ4, ρ5) -> -
+    [13] pub run_acc — fn run_acc() -> self.RunAcc · regions () -> ρ_caller
+    [14] pub set_headers — fn set_headers(c: config.Conf, loc: int, srv: int, http_blk: int) -> (prelude.List[str], prelude.List[str]) · regions (ρ1, -, -, -) -> ρ_caller
+    [15] pub status_code — fn status_code(status_line: str) -> int
+    [16] pub status_code_of — fn status_code_of(status_line: str) -> int
+    [17] pub swrr_new — fn swrr_new(n: int) -> self.Swrr · regions (-) -> ρ_caller
+    [18] pub swrr_pick — fn swrr_pick(mut s: self.Swrr, weights: prelude.List[int], up: prelude.List[bool]) -> int · regions (ρ1, ρ2, ρ3) -> -
+    [19] pub version — fn version() -> str
+    [20] pub Need — struct Need { host: str, addr: str, timeout_ms: int, valid_ms: int }
+    [21] pub PassTarget — struct PassTarget { scheme: str, authority: str, is_pool: bool, has_uri: bool, uri: str, err: str }
+    [22] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int, trust_path: str, ssl_name: str, resolver: str, resolver_valid_ms: int, resolver_timeout_ms: int }
+    [23] pub RunAcc — struct RunAcc { addr: str, status: int, body_bytes: int, up_ms: int }
+    [24] pub Swrr — struct Swrr { current: prelude.List[int] }
+    [25] pub UpPool — struct UpPool { name: str, hosts: prelude.List[str], ports: prelude.List[int], weights: prelude.List[int], max_fails: prelude.List[int], fail_ms: prelude.List[int], backup: prelude.List[bool], rows: prelude.List[int] }
+    [26] pub UpResponse — struct UpResponse { status_line: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int }
 

@@ -1,0 +1,183 @@
+//! check: run(exit=0, stdout="rows ok\nchecks ok\nhelpers ok\nlints ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: config
+//!
+//! The `resolver` / `resolver_timeout` directives, pure (ws13): the
+//! rows parse at http/server/location; the -t half answers nginx's
+//! own `invalid parameter` wording for a parameter nginx would refuse
+//! and a lobo-named refusal for the two nginx accepts but lobo cannot
+//! honour (`ipv4=off` — A records only; `status_zone=`); the helpers
+//! proxy and the lints share answer the address (default port 53
+//! appended, a bracketed IPv6 kept), the `valid=` override, the
+//! innermost timeout, and the row in effect for a location, a server
+//! and an upstream peer; L012 names a hostname with no resolver in
+//! effect and stays silent for an IP literal, a pool name and a
+//! resolved name; L013 names the static-name delta exactly when a
+//! resolver IS in effect.
+
+use config
+
+fn has(s: str, needle: str) -> bool {
+    s.contains(needle)
+}
+
+fn main() -> !int {
+    let src = "http {{ resolver 127.0.0.1:5353 valid=30s ipv6=off; resolver_timeout 5s; upstream pool {{ server app.internal:8080; server 10.0.0.9:8080; }} server {{ listen 127.0.0.1:8080; resolver [::1] valid=1m; location /a/ {{ resolver_timeout 2s; proxy_pass http://api.example:9000/; }} location /b/ {{ proxy_pass http://10.0.0.5:9000/; }} location /c/ {{ proxy_pass http://pool; }} }} }}"
+    let c = config.parse_str(src, "r.conf")
+    assert(
+        config.resolver_check(c).is_empty(),
+        "clean config checks clean: {config.resolver_check(c)}",
+    )
+    print("rows ok")
+
+    // --- the -t half
+    let bad1 = config.parse_str("http {{ resolver 127.0.0.1 bogus=1; }}", "b1.conf")
+    let e1 = config.resolver_check(bad1)
+    assert(
+        has(e1, "\"resolver\" directive invalid parameter \"bogus=1\" in b1.conf:1"),
+        "unknown parameter: {e1}",
+    )
+    let bad2 = config.parse_str("http {{ resolver 127.0.0.1 ipv4=off; }}", "b2.conf")
+    assert(has(config.resolver_check(bad2), "\"ipv4=off\" is not supported"), "ipv4=off named")
+    let bad3 = config.parse_str("http {{ resolver 127.0.0.1 status_zone=z; }}", "b3.conf")
+    assert(
+        has(config.resolver_check(bad3), "\"status_zone=\" is not supported"),
+        "status_zone named",
+    )
+    let bad4 = config.parse_str("http {{ resolver 127.0.0.1 valid=soon; }}", "b4.conf")
+    assert(has(config.resolver_check(bad4), "invalid parameter \"valid=soon\""), "bad valid")
+    let bad5 = config.parse_str("http {{ resolver valid=30s; }}", "b5.conf")
+    assert(has(config.resolver_check(bad5), "requires an address"), "no address")
+    let bad6 = config.parse_str("http {{ resolver_timeout later; }}", "b6.conf")
+    assert(
+        has(
+            config.resolver_check(bad6),
+            "\"resolver_timeout\" directive invalid value in b6.conf:1",
+        ),
+        "bad timeout",
+    )
+    let ok7 = config.
+        parse_str(
+        "http {{ resolver 10.0.0.53 valid=10s ipv4=on ipv6=on; resolver_timeout 500ms; }}",
+        "o7.conf",
+    )
+    assert(config.resolver_check(ok7).is_empty(), "nginx's parameters carry")
+    print("checks ok")
+
+    // --- the helpers
+    assert(
+        config.authority_host("http://api.example:9000/x", true) == "api.example",
+        "host of a pass",
+    )
+    assert(
+        config.authority_host("https://api.example/", true) == "api.example",
+        "https pass, no port",
+    )
+    assert(config.authority_host("http://[::1]:9000/", true) == "::1", "bracketed v6")
+    assert(config.authority_host("http://$backend", true) == "", "variable form is nobody's")
+    assert(config.authority_host("app.internal:8080", false) == "app.internal", "a peer")
+    assert(
+        config.resolver_is_literal("10.0.0.5") && !config.resolver_is_literal("api.example"),
+        "literals",
+    )
+    assert(config.upstream_exists(c, "pool") && !config.upstream_exists(c, "api.example"), "pools")
+    // rows: find the three proxy_pass rows and the peer row
+    var pa: int = -1
+    var pb: int = -1
+    var peer: int = -1
+    var i: int = 0
+    while i < c.names.len {
+        if c.names[i] == "proxy_pass" {
+            let a = c.argp[c.args_at[i]]
+            if a.contains("api.example") {
+                pa = i
+            }
+            if a.contains("10.0.0.5") {
+                pb = i
+            }
+        }
+        if c.names[i] == "server" &&
+            c.ctx[i] == "upstream" &&
+            c.argp[c.args_at[i]].contains("app.internal") {
+            peer = i
+        }
+        i = i + 1
+    }
+    assert(pa >= 0 && pb >= 0 && peer >= 0, "rows found")
+    let ra = config.resolver_row_for(c, pa)
+    assert(
+        ra >= 0 && config.resolver_address(c, ra) == "[::1]:53",
+        "location /a/ sees the server's resolver: {config.resolver_address(c, ra)}",
+    )
+    assert(config.resolver_valid_ms(c, ra) == 60000, "valid=1m")
+    assert(
+        config.resolver_timeout_for(c, pa) == 2000,
+        "innermost timeout wins: {config.resolver_timeout_for(c, pa)}",
+    )
+    let rp = config.resolver_row_for(c, peer)
+    assert(
+        rp >= 0 && config.resolver_address(c, rp) == "127.0.0.1:5353",
+        "the peer sees http's resolver: {config.resolver_address(c, rp)}",
+    )
+    assert(config.resolver_valid_ms(c, rp) == 30000, "valid=30s")
+    assert(config.resolver_timeout_for(c, peer) == 5000, "http's timeout")
+    let none = config.
+        parse_str("http {{ server {{ location / {{ proxy_pass http://x.test/; }} }} }}", "n.conf")
+    var px: int = -1
+    var k: int = 0
+    while k < none.names.len {
+        if none.names[k] == "proxy_pass" {
+            px = k
+        }
+        k = k + 1
+    }
+    assert(!config.resolver_in_effect(none, px), "no resolver anywhere")
+    assert(config.resolver_timeout_for(none, px) == 30000, "the 30s default")
+    print("helpers ok")
+
+    // --- the lints
+    let l_none = config.lint(none)
+    assert(
+        has(
+            l_none,
+            "LOBO-L012|n.conf:1|\"proxy_pass\" names the host \"x.test\" and no \"resolver\" is in effect",
+        ),
+        "L012 fires: {l_none}",
+    )
+    assert(!has(l_none, "LOBO-L013"), "L013 silent without a resolver")
+    let l_full = config.lint(c)
+    assert(
+        !has(l_full, "LOBO-L012"),
+        "L012 silent: every name has a resolver, the literal and the pool need none: {l_full}",
+    )
+    assert(
+        has(
+            l_full,
+            "LOBO-L013|r.conf:1|\"proxy_pass\" names the host \"api.example\" and a \"resolver\" is in effect",
+        ),
+        "L013 names the delta: {l_full}",
+    )
+    let lit = config.
+        parse_str(
+        "http {{ server {{ location / {{ proxy_pass http://10.0.0.5/; }} }} upstream u {{ server 10.0.0.6:80; }} }}",
+        "l.conf",
+    )
+    assert(
+        !has(config.lint(lit), "LOBO-L012") && !has(config.lint(lit), "LOBO-L013"),
+        "literals lint nothing",
+    )
+    let peer_only = config.
+        parse_str(
+        "http {{ upstream u {{ server app.internal:80; }} server {{ location / {{ proxy_pass http://u; }} }} }}",
+        "p.conf",
+    )
+    let lp = config.lint(peer_only)
+    assert(
+        has(lp, "LOBO-L012|p.conf:1|\"server\" names the host \"app.internal\""),
+        "a peer name fires L012: {lp}",
+    )
+    print("lints ok")
+    0
+}
