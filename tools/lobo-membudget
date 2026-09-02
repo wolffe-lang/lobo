@@ -28,6 +28,19 @@
 # padded shape). The absolute assertion prints its numbers and stays
 # a loud skip until the [wolf] pin carries the #191 fix; then it
 # flips to a hard gate.
+#
+# THE ORACLE'S OWN NOISE (ws14, measured 2026-09-02 at the 5f99b9f
+# bump, macOS/arm64 with the compressor holding ~40 GB): ps(1)'s RSS
+# can SHRINK between two samples when the kernel compresses idle
+# pages, so round A's growth read 6976 / 7792 KB where the steady
+# reading is ~10.6 MB (2 of 9 quiet runs; 0 of 15 at the previous
+# pin) — and the differential then blamed the shortfall on round B.
+# A leak is monotone and reproducible; a compressed sample is not.
+# So a tripped differential is RE-DRIVEN ONCE, both pairs printed,
+# and only a second trip is red — the gate stays real (a 6.4 MB leak
+# trips every drive) and the host's page compressor stops writing
+# the verdict. The compressor's own counters (`vm_stat`) are the
+# evidence a red should be read against.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
@@ -95,31 +108,43 @@ drive() { # drive <count> <path> <desc>
 
 # warmup — allocator pools, lazy init, first-touch costs land here
 drive 100 /small.html "warmup: 100 keepalive requests on one connection"
-r0=$(rss_kb)
 
-# round A: 400 small-body requests over ONE connection
-drive 400 /small.html "round A: 400 keepalive requests, 16 B body, one connection"
-r1=$(rss_kb)
-
-# round B: 400 big-body requests over ONE connection — same head
-# shape, bodies 1000x larger; the region claim says SAME memory cost
-drive 400 /big.html "round B: 400 keepalive requests, 16 KiB body, one connection"
-r2=$(rss_kb)
+# rounds A and B, as one pair (re-driven once on a tripped
+# differential — the header's compressor note)
+pair() { # pair <label> — sets r0 r1 r2 ga gb diff
+    r0=$(rss_kb)
+    # round A: 400 small-body requests over ONE connection
+    drive 400 /small.html "round A$1: 400 keepalive requests, 16 B body, one connection"
+    r1=$(rss_kb)
+    # round B: 400 big-body requests over ONE connection — same head
+    # shape, bodies 1000x larger; the region claim says SAME memory cost
+    drive 400 /big.html "round B$1: 400 keepalive requests, 16 KiB body, one connection"
+    r2=$(rss_kb)
+    if [ -z "$r0" ] || [ -z "$r1" ] || [ -z "$r2" ]; then
+        ga=""
+        return
+    fi
+    ga=$((r1 - r0))
+    gb=$((r2 - r1))
+    diff=$((gb - ga))
+    say "growth$1: round A ${ga} KB, round B ${gb} KB, body-attributable difference ${diff} KB (a leaked 16 KiB body x 400 would be ~6400 KB)"
+}
+pair ""
+if [ -n "${ga:-}" ] && [ "$diff" -ge 3200 ]; then
+    say "note — the differential tripped once (round A ${ga} KB against a ~10.6 MB steady reading is the compressor's signature, not a body leak); re-driving the pair on the same server"
+    pair " (re-drive)"
+fi
 
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 
-if [ -z "$r0" ] || [ -z "$r1" ] || [ -z "$r2" ]; then
+if [ -z "${ga:-}" ]; then
     check "RSS sampled at all checkpoints (r0='$r0' r1='$r1' r2='$r2')" 1
 else
-    ga=$((r1 - r0))
-    gb=$((r2 - r1))
-    diff=$((gb - ga))
-    say "growth: round A ${ga} KB, round B ${gb} KB, body-attributable difference ${diff} KB (a leaked 16 KiB body x 400 would be ~6400 KB)"
     if [ "$diff" -lt 3200 ]; then
         check "response bodies die with their response (B-A ${diff} KB < 3200 KB): the per-response region is load-bearing" 0
     else
-        check "response bodies die with their response (B-A ${diff} KB < 3200 KB)" 1
+        check "response bodies die with their response (B-A ${diff} KB < 3200 KB) — tripped twice: a leak, not the compressor" 1
     fi
     perreq=$((gb / 400))
     if [ "$perreq" -lt 64 ]; then
