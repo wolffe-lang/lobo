@@ -1,7 +1,7 @@
 //! check: run(exit=0)
 //! phase: run
 //! lanes: native checked
-//! stage-src: serve conn tls proxy http config obs metrics resolver
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
 //!
 //! The ws10 exceed-site table, in process (docs/BUDGET.md §sites):
 //! every deterministic refusal site answers 503-with-a-name over a
@@ -89,9 +89,11 @@ fn main() -> !int {
     assert(r1.starts_with("HTTP/1.1 503 Service Temporarily Unavailable"), "head site 503: {r1}")
     assert(r1.contains("Connection: close"), "budget 503 closes")
 
-    // ---- under the budget: the same request without the pad serves
-    let r2 = round(base, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
-    assert(r2.starts_with("HTTP/1.1 200 OK"), "under budget serves: {r2}")
+    // ---- under the budget, the same request without the pad SERVES:
+    // that round lives in budget_cap.lu since ws14 — a budgeted 200
+    // runs through the capped proc, which the checked lane (the UB
+    // machine) refuses by name; every refusal below fires BEFORE the
+    // proc, so this file keeps its checked lane
 
     // ---- interplay 1: over BOTH client_max_body_size and the budget
     // -> the fence's 413 (the more specific error wins)

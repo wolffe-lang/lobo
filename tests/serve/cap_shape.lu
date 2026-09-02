@@ -1,35 +1,40 @@
 //! check: run(exit=0, stdout="rounds ok\nbreach: contained true alloc-contract true reclaimed true pipe-silent true\nafter: ok true\n")
 //! phase: run
 //! lanes: native lupin
+//! checked-refuses: structured concurrency in checked execution (C1 deferred)
 //! conforms: mem.region.cap.1, mem.region.cap.3, conc.proc.exit, conc.proc.kill
 //!
 //! THE CAP ADOPTION'S SHAPE, executable (ws13 — the ws12 named-gate,
-//! flipped at the language level and gated at the codegen level):
-//! the exact program a budgeted lobo request runs — a proc that reads
-//! a body into a region created with `cap:`, writes head and body to
-//! the BARE client socket, and reports its write outcome and the
-//! measured `region_bytes` through a loopback SELF-PIPE (a proc's
-//! `normal(value)` is unreadable at the join and a channel cannot be
-//! a proc argument on wolfc — wolf-lang#219 records the gap) — and
-//! the join that maps the exit reason the way serve maps it to a
-//! status: normal → the response went out (200), error → the socket
-//! broke (close), fault(alloc-contract) → the cap refused the body
-//! (503 with a name, site=region), anything else → 500. Pinned here,
-//! in ONE module, on all three lanes: 200 rounds of the normal path
-//! with the number coming back; a breach contained at the boundary
-//! ([mem.region.cap.3], D68) with `live_region_bytes()` already back
-//! at baseline at the join (free-then-deliver) and NOTHING on the
-//! pipe (the killed proc ran no further code, [conc.proc.kill]); and
-//! the next round clean. The same shape spawned from a non-entry
-//! module is what the release tier refuses (`func.addr … outside this
-//! object's subset`) — so the adoption lives on branch ws13-cap and
-//! this witness holds the contract lobo will consume the day #219
-//! closes. The checked lane is not declared: `conform-run --checked`
-//! answers `unsupported@mem` for EVERY proc spawn at this pin —
-//! wolf-lang's own `corpus/conc/proc_cap_fault_join.lu` included —
-//! with an empty diagnostic, while `run --checked` runs the same
-//! files (#219's second observation, bisected from ws13).
-//! docs/BUDGET.md is the story. Loopback only, port 0.
+//! flipped at the language level and, until ws14, gated at the
+//! codegen level): the exact program a budgeted lobo request runs — a
+//! proc that reads a body into a region created with `cap:`, writes
+//! head and body to the BARE client socket, and reports its write
+//! outcome and the measured `region_bytes` through a loopback
+//! SELF-PIPE (a proc's `normal(value)` is unreadable at the join and a
+//! channel cannot be a proc argument on wolfc — wolf-lang#219 records
+//! the gap) — and the join that maps the exit reason the way serve
+//! maps it to a status: normal → the response went out (200), error →
+//! the socket broke (close), fault(alloc-contract) → the cap refused
+//! the body (503 with a name, site=region), anything else → 500.
+//! Pinned here, in ONE module, on the lanes that run procs: 200
+//! rounds of the normal path with the number coming back; a breach
+//! contained at the boundary ([mem.region.cap.3], D68) with
+//! `live_region_bytes()` already back at baseline at the join
+//! (free-then-deliver) and NOTHING on the pipe (the killed proc ran no
+//! further code, [conc.proc.kill]); and the next round clean. The
+//! same shape spawned from a non-entry module is what the release
+//! tier refused until s134 (wolf-lang#219: `func.addr … outside this
+//! object's subset`); at the 5f99b9f pin `src/budget` IS that module
+//! and ws14 merged the adoption — this witness stays as the contract
+//! the adoption keeps, on lupin too (the serve suite cannot run there:
+//! lupin has no fs). The checked lane is the UB machine, which
+//! refuses every proc spawn BY NAME — `conform-run --checked` answers
+//! `unsupported@mem` naming "structured concurrency in checked
+//! execution (C1 deferred)" (s134 named it; at v0.2.2 the record was
+//! empty, #219's second observation) — and the runner asserts that
+//! name above instead of skipping the lane. `wolf run --checked` is a
+//! different machine (the native build under the checked profile) and
+//! runs this file. docs/BUDGET.md is the story. Loopback only, port 0.
 
 /// The body proc: fill a capped region as a body would, write to the
 /// socket, report `<wcode> <rt>` on the pipe. Row: io on a failed
