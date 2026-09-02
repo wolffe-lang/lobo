@@ -112,7 +112,7 @@ await_pre() { # await_pre <file> — the held connection has made its FIRST
     # sleep here raced the reload and measured the wrong generation.
     i=0
     while [ $i -lt 100 ]; do
-        grep -q '^pre=' "$1" 2>/dev/null && return 0
+        grep -q '^pre=..*' "$1" 2>/dev/null && return 0
         sleep 0.1
         i=$((i + 1))
     done
@@ -238,6 +238,9 @@ fi
 held_ok() { # held_ok <post> — the old config, or a close; never the new one
     case "$1" in GEN-B) return 1 ;; *) return 0 ;; esac
 }
+if [ -z "$ng_pre" ] || [ -z "$lb_pre" ]; then
+    row "3. the held connections made their first request BEFORE the reload (nginx pre='$ng_pre' lobo pre='$lb_pre') — an empty pre is a harness fault, not a server one" 1
+fi
 if [ "$ng_pre" = GEN-A ] && [ "$lb_pre" = GEN-A ] && held_ok "$ng_post" && held_ok "$lb_post"; then
     row "3. an already-open connection is NEVER served the NEW config: nginx answered '$ng_post' and lobo answered '$lb_post' on a keepalive connection held across the reload — neither is GEN-B, while new connections had already moved to it" 0
 else

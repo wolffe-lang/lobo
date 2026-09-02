@@ -84,6 +84,37 @@ fn body_line(reply: str) -> str {
     body.trim()
 }
 
+/// Read one keep-alive reply far enough to see the first BODY line.
+/// A single `net_read` is not enough: lobo writes the head and the
+/// body with separate calls, so on Linux the header block and the
+/// body arrive in different segments and one read yields headers
+/// only (macOS coalesced them, which is why the linux CI found this
+/// and the local gauntlet did not). Reads until the body carries a
+/// newline, bounded by `tries` so a silent peer cannot hang the rig.
+fn read_reply(conn: int, tries: int) -> str ! {io} {
+    var buf = ""
+    var i: int = 0
+    while i < tries {
+        let at = buf.find("\r\n\r\n") else -1
+        if at >= 0 {
+            let seen = buf[at + 4..buf.len]
+            let nl = seen.find("\n") else -1
+            if nl >= 0 {
+                return buf
+            }
+        }
+        let piece = net_read(conn, 8192) else |_| {
+            return io
+        }
+        if piece.is_empty() {
+            return buf
+        }
+        buf = "{buf}{piece}"
+        i = i + 1
+    }
+    buf
+}
+
 fn main() -> !int {
     let args = env_args()
     if args.len != 2 {
@@ -96,7 +127,7 @@ fn main() -> !int {
     let c = net_connect("127.0.0.1:{port}")?
     net_deadline(c, 5000)?
     net_write(c, get)?
-    let first = net_read(c, 8192)?
+    let first = read_reply(c, 16)?
     print("pre={body_line(first)}")
     time_sleep_ms(hold)
     net_write(c, get) else |_| {
@@ -104,8 +135,13 @@ fn main() -> !int {
         net_close(c) else |_| {}
         return 0
     }
-    let second = net_read(c, 8192) else |_| {
+    let second = read_reply(c, 16) else |_| {
         print("post=<read failed>")
+        net_close(c) else |_| {}
+        return 0
+    }
+    if second.is_empty() {
+        print("post=<closed>")
         net_close(c) else |_| {}
         return 0
     }
