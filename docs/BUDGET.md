@@ -196,7 +196,7 @@ site:
 | site | when it checks | over → | notes |
 |---|---|---|---|
 | `admin` | on the ws12 `/metrics` and `/status.json` endpoint, before the rendered body is written | 503, close | the fifth site, appended (the frozen field keeps its key; the VALUE set widens). The exposition is a response body lobo materializes, so it is charged like one — a scrape that sheds under a tiny budget is CORRECT, and a rig case |
-| `region` | ws13, on branch ws13-cap: at the runtime's own region cap (`16 × budget` ledger units) inside the body proc — the read for a small file, the first chunk for a streamed one | 503, close (small path); close (stream path — the head is on the wire) | the sixth site: the RUNTIME refused, not the meter. `would` reports `budget+1` (a killed proc's charge is unobservable at the join, [mem.region.cap.3]) and the event gains a trailing `cap=<ledger units>` field. Unreachable from a config at this pin (see the theorem below); gated on wolf-lang#219 |
+| `region` | ws14 (built at ws13): at the runtime's own region cap — `16 × budget` ledger units — inside the body proc: the read for a small file, the first chunk for a streamed one | 503, close (small path); close (stream path — the head is on the wire) | the sixth site: the RUNTIME refused, not the meter ([mem.region.cap.3], D68: the breach is contained at the proc boundary and reaches the join as `fault(alloc-contract)`). `would` reports `budget+1` (a killed proc's charge is unobservable at the join) and the event gains a trailing `cap=<ledger units>` field. Reachable from a config through a real socket in the growth-law band below (`tools/lobo-membudget`'s cap rounds are the witness); on any budget at or above the next power of two over the served body it is the backstop the theorem describes |
 | `head` | after the head is framed and parses clean | 503, close | fences (414/400) precede it; the head was necessarily read to be measured — the fence bounds that over-admission at `n × size` |
 | `body` | BEFORE reading a declared (Content-Length) body | 503, half-close drain, close | the budget's strongest moment: refused pre-admission, zero body bytes read; `would` = head + declared length |
 | `body-chunked` | while chunks accumulate | 503, half-close drain, close | fence (413) checked against the same running total first; `would` reports `budget+1` — the crossing point (an unread chunked body's true total is unknowable) |
@@ -221,42 +221,47 @@ the blocking TLS path predates the step loop and carries no access
 record or event channel (the D24/D27 rider; the counters and events
 below are the plaintext step path's until TLS joins it).
 
-### Which half is structural today (the honest line, ws13 edition)
+### Which half is structural today — BOTH (ws14 edition)
 
-**The cap is BUILT and it is GATED — by codegen, not by the language.**
-s132 shipped `region r(cap: n)` ([mem.region.cap.1-3]) and D68 ruled
-a breach inside a proc contained at the proc boundary, reaching the
-join as `fault(alloc-contract)`; both are in the v0.2.2 pin ws13
-runs. ws13 consumed them: a budgeted request's regioned body work
-runs inside a `spawn proc` under `cap: 16 × memory_budget`, and the
-join maps the reason — normal → the response went out, error → the
-socket broke, `fault(alloc-contract)` → **503 with a name,
+**The meter admits; the runtime enforces.** s132 shipped `region
+r(cap: n)` ([mem.region.cap.1-3]) and D68 ruled a breach inside a
+proc contained at the proc boundary, reaching the join as
+`fault(alloc-contract)`. ws13 consumed them: a budgeted request's
+regioned body work runs inside a `spawn proc` (`src/budget`, the
+first proc in lobo's request path) under `cap: 16 × memory_budget`,
+and the join maps the reason — normal → the response went out, error
+→ the socket broke, `fault(alloc-contract)` → **503 with a name,
 `site=region`**, any other fault → 500 (a trap contained, where
-before it was the process). The measured `region_bytes` reading
-ws12 publishes comes back out of the proc through a loopback
-self-pipe the entry opens once, because a proc's `normal(value)` is
-unreadable at the join and a channel cannot be a proc argument on
-wolfc. All of it is witnessed on the native tier — the envelope
-served through the proc with the number back, the stream path chunk
-by chunk, the join driven directly to a contained breach with
-`live_region_bytes()` already at baseline at the join.
+before it was the process). The measured `region_bytes` reading ws12
+publishes comes back out of the proc through a loopback self-pipe
+the entry opens once, because a proc's `normal(value)` is unreadable
+at the join and a channel cannot be a proc argument on wolfc
+(wolf-lang#219 records the gap; D38 in the ledger).
 
-**And the release tier refuses to emit it.** A `spawn proc` whose
-spawner lives in any module but the entry lands its entry shim
-outside its object — `func.addr of @budget.run_small.task0.entry
-outside this object's subset` — the wolf-lang#136 shape, recurring
-for a PROC after s117 fixed it for tasks and closures. A 30-line
-two-module reproducer is filed as **wolf-lang#219** together with a
-second observation (`conform-run --checked` answers `unsupported` at
-`mem` with an empty diagnostic where `run --checked` runs the same
-file). lobo's gauntlet builds the release tier on every commit, so a
-proc the release tier cannot emit is not a proc lobo can ship: the
-adoption lives, whole and green on native, on branch **`ws13-cap`**
-(two commits atop ws13's DNS work; the flip is a merge the day #219
-closes), and trunk carries the single-module shape witness
-`tests/serve/cap_shape.lu` on all three lanes — the exact program a
-budgeted request runs, minus the module boundary the emitter
-refuses.
+ws13 built it and the release tier refused to emit it — a `spawn
+proc` whose spawner lives in any module but the entry landed its
+entry shim outside its object (`func.addr of
+@budget.run_small.task0.entry outside this object's subset`, the
+#136 shape for a PROC). Filed as **wolf-lang#219**; s134 fixed it
+(the LLVM emitter now declares an out-of-subset `func.addr` referee
+by its mangled symbol and lets the linker resolve it — under every
+partition, `WOLF_MIDEND=0` included, which is the mode lobo's
+gauntlet builds in while #146 is open), and **ws14 merged the
+adoption at the 5f99b9f pin**. The proof is the gauntlet's own
+release step: `WOLF_MIDEND=0 wolf build --release src/main.lu` links
+`src/budget`'s proc, and every release-binary witness (`lobo-
+membudget`, `lobo-signal`, `lobo-resolver`, the differentials) runs
+that binary.
+
+**Per lane, stated:**
+
+| lane | the cap adoption | how it is known |
+|---|---|---|
+| native (debug tier) | runs | `tests/serve/budget_cap.lu` (the four relations, the join driven directly), `budget_cap_e2e.lu` (the real server, 200 through the proc, `mem-rt-hw` back through the pipe), `cap_shape.lu` |
+| release (`WOLF_MIDEND=0`) | runs — #219's fix | the gauntlet's tiers step builds it; `tools/lobo-membudget`'s cap rounds drive the breach through a real socket against `target/lobo-release` |
+| checked — `wolf conform-run --checked` (the s23 UB machine, the corpus runner's lane) | **refuses, by name**: `unsupported` at `mem`, `x-unsupported-construct: "structured concurrency in checked execution (C1 deferred)"` — the machine runs no `spawn`/scope/`select` at all; a proc is refused where every spawn is (the C1 sprint, not a fix) | `//! checked-refuses:` on `budget_cap.lu` and `cap_shape.lu` — the runner ASSERTS the named record, never skips the lane (at v0.2.2 the record was empty: #219's second observation, fixed by s134). Every witness that fires a refusal BEFORE the proc keeps its checked lane (`budget_refusals.lu`, `budget_e2e.lu`, `region_measured.lu`) |
+| checked — `wolf run --checked` | runs (it is the NATIVE build under the checked profile, a different machine) | not a corpus lane; stated so nobody bisects it again |
+| lupin | runs the shape (`cap_shape.lu`); the serve suite cannot run there (lupin has no fs) | the corpus lane |
 
 **The arithmetic (the directive documents it).** The cap bounds the
 region's LEDGER, which `[mem.region.account.1]` keeps in the tier's
@@ -269,31 +274,60 @@ chunk charges fits by sixteen bytes. The spec's own advice is to
 derive caps from measured readings rather than payload constants,
 and lobo publishes the reading (`mem-rt-hw`) the constant was
 derived from; when #203 changes the ratio the constant changes with
-the pin, in one place, and this paragraph shrinks.
+the pin, in one place.
 
-**A theorem the witnesses found: at this pin the cap cannot fire on
-any request the meter admits.** The meter's `head` site charges the
-request head first (≥ ~50 bytes for any real request), so a budget
-that admits a body of N bytes is at least 50 + N, and the cap is at
-least 16 × (50 + N) = 800 + 16N ledger units. The small path's
-region charges ≈ 8N + 352 (measured: 496 for 18 bytes), which is
-below 800 + 16N for every N; the stream path's chunk region charges
-1,048,560 against a cap of at least 16 × (50 + 65,536) = 1,049,376.
-The cap is therefore exactly what the contract asked for — the
-runtime's own enforcement of the meter's admission — and it agrees
-with the meter on every shape the meter models; it would fire only
-where the meter's payload arithmetic is WRONG, which is the day a
-new body shape reaches serve without a charge site, and that day it
-answers 503 instead of letting the process grow. The 503 half of the
-mapping is therefore proven by driving the join directly
-(`budget_cap.lu` on ws13-cap; `cap_shape.lu` here), not from a
-config, and that is said out loud rather than staged.
+**The growth law, and the band where the cap fires on an admitted
+request (ws14's finding).** ws13 wrote a theorem here — that the cap
+cannot fire on any request the meter admits — from one measurement
+(496 ledger units for an 18-byte file, read as "≈ 8N + 352"). It is
+false, and the end-to-end witness this sprint was asked for is what
+found it. Measured at the 5f99b9f bump, native tier, `fs_read_bytes`
+into a fresh capped region (`tests/serve/budget_cap.lu` pins the
+relations; these are the raw readings):
+
+| body bytes N | ledger charge | ÷ N |
+|---|---|---|
+| 18 | 496 | 27.6 |
+| 1,000 | 16,368 | 16.4 |
+| **1,024** | 16,368 | 16.0 |
+| **1,025** | **32,752** | **32.0** |
+| 4,096 | 65,520 | 16.0 |
+| 4,097 | 131,056 | 32.0 |
+| 40,000 | 1,048,560 | 26.2 |
+| 65,535 / 65,536 | 1,048,560 | 16.0 |
+
+The law is `charge(N) = 16 × pow2ceil(N) − 16` (+48 below a few
+hundred bytes): the buffer grows by doubling and the ledger keeps
+every abandoned buffer, so the charge is 16× the payload exactly AT
+a power of two — where #203 measured, and where the 64 KiB chunk
+sits — and up to 32× just past one. #203's own thread already names
+the fix on the runtime's side (a buffer sized from the known bound
+instead of grown; wolf-std sc32 showed `fs_read_chunk(f, n)` charges
+exactly what the unbounded read charges). Consequence for the cap:
+**a small body is refused by the runtime whenever `memory_budget <
+pow2ceil(body)`**, even though the meter admitted it — the band is
+`[head + N, pow2ceil(N))`, and it is wide (a 33,000-byte file under
+`memory_budget 40k` is refused; under `64k` it serves). The stream
+path is outside the band by construction (one 64 KiB chunk against
+a cap of at least 16 × (head + 65,536)). Every refusal in the band
+is loud — `budget-exceeded … site=region … cap=<n>`, a 503 with
+`Connection: close`, the proc dead and the server alive — and this
+is the shape `tools/lobo-membudget` drives through a real socket on
+every gauntlet run. **Operator rule until the envelope moves:** set
+`memory_budget` to at least the power of two above the largest small
+file you serve (or `64k`+, which covers the stream path). The
+envelope is deliberately left at #203's 16× this sprint rather than
+silently widened to the growth law (`16 × pow2ceil(budget)` would
+make the region site unreachable from any config again, which is a
+campaign decision about what the cap is FOR — backstop or
+enforcement — not a lane's); the ledger row that owns the decision
+is D40.
 
 **Per-CONNECTION budgets** (a cap on the conn's carry at accept)
 stay the second door: they need the proc boundary to be a
 per-connection unit, which is the D24 stepper's rework, not this
-sprint's. Recorded in the ledger with #219 as the owner of the
-whole cap arm.
+sprint's. Recorded in the ledger (D24 owns the stepper; the cap arm
+is no longer gated on anything upstream).
 
 ## Observability
 
@@ -335,3 +369,21 @@ whole cap arm.
   tiny budget + a large-header request pins the 503-with-a-name end
   to end: the wire status, the access-log 503, the `budget-exceeded`
   event fields, and the status stanza's counters.
+- `tests/serve/budget_cap.lu` — THE CAP witness (ws13/ws14): the
+  budget-off path unchanged, the envelope holding through the proc
+  with `mem_rt` back through the self-pipe, the stream path chunk by
+  chunk, and the join driven directly to a contained
+  `fault(alloc-contract)` with `live_region_bytes()` at baseline.
+- `tests/serve/budget_cap_e2e.lu` — the real server under
+  `memory_budget 4k`: 200 through the capped proc, `mem-rt-hw`
+  non-zero in the status stanza.
+- `tests/serve/cap_shape.lu` — the one-module shape on native AND
+  lupin (200 rounds, a breach, the next round clean); the checked
+  lane's named refusal asserted.
+- `tools/lobo-membudget`'s cap rounds (ws14) — the release binary
+  under `memory_budget 40k`: rounds A'/B' re-baselined THROUGH the
+  proc (the same two gates), the growth-law breach through a real
+  socket (`33,000` bytes → 503 `site=region cap=655360`), the
+  power-of-two neighbour serving 200 in full, fifty keepalive
+  requests after the breach, `budget-503s=1` and `mem-rt-hw` in
+  `lobo status`.

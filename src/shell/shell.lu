@@ -841,7 +841,8 @@ pub fn ev_signal_received(m: int) -> str {
 /// A request was refused by its vhost's `memory_budget` (ws10 — the
 /// vocabulary's seventh event, appended, nothing renamed): `gen` the
 /// generation that served it, `site` the deterministic exceed-site
-/// (head|body|body-chunked|file), `budget` the configured bytes,
+/// (head|body|body-chunked|file|admin; `region` rides the ws13/ws14
+/// twin below with its `cap`), `budget` the configured bytes,
 /// `would` what admitting the request would have charged. Level
 /// `error` (a shed request is an operator's signal, not a notice).
 /// The refused request also writes an ordinary 503 access line.

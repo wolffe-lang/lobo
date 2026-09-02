@@ -130,7 +130,7 @@ fn main() -> !int {
     // FIRST, so the checked lane (the UB machine) reaches the spawn
     // before anything else can fail there — the machine's client
     // handle dies after the server side's close (D41), which would
-    // otherwise turn its named refusal into an io exit
+    // otherwise turn its named refusal into an io exit (wolf-lang#224)
     let r1 = drive(c, get, 4096, pipe.0, pipe.1)?
     assert(serve.ledger_cap(4096) == 65536, "the arithmetic: 16x")
     print("envelope: {r1.acc.status} rt>0 {r1.mem_rt > 0} site={r1.bud_site}")

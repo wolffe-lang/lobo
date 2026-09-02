@@ -326,7 +326,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "lobo-native (ws10, linted L008): per-request admitted-bytes budget -> 503 with a name (nginx's answer to memory pressure is the OOM killer); 0/absent = off. Admission metering at this pin; the region-cap half (ws13: 16x the directive in ledger units, enforced inside a per-request proc) is built on branch ws13-cap and gated on the release tier's proc-shim refusal, wolf-lang#219 (docs/BUDGET.md)",
+        "lobo-native (ws10, linted L008): per-request admitted-bytes budget -> 503 with a name (nginx's answer to memory pressure is the OOM killer); 0/absent = off. Admission metering AND the runtime's own region cap (ws14, wolf-lang#219 closed): a budgeted body runs inside a per-request proc under a cap of 16x the directive in LEDGER units; a breach is a 503 site=region. The ledger charges 16 x pow2ceil(body) per small body, so a budget below the next power of two above a served file trips the cap on an admitted request — docs/BUDGET.md's growth-law band",
     )
     row(
         mut t,
