@@ -1,0 +1,229 @@
+//! check: run(exit=0, stdout="miss ok\nanswered ok\ncache ok\nvalid ok\ntimeout ok\nio ok\ndial ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union, err.propagate
+//! stage-src: resolver
+//!
+//! The resolver's LOOP HALF, round-tripped spawn-free (ws13): this
+//! test is its own DNS server. `start` dials a loopback listener the
+//! test owns and sends the query; the test accepts, reads the framed
+//! query, writes a framed answer; `tick` — the one call the poll loop
+//! makes per pass — reads it under a 1 ms deadline, settles the cache,
+//! and records the vocabulary event. Pinned: a name is not fresh
+//! before it is asked; one round trip answers it with its address set
+//! and the record TTL (floored at the one-second minimum, named); a
+//! second `start` inside the TTL is a NO-OP (no socket, no query — the
+//! cache is the whole point); `valid=` overrides the record TTL the
+//! way nginx's directive does; a query past `resolver_timeout` settles
+//! as `timeout` and is HELD as a failure for one second; a resolver
+//! that closes without answering settles as `io`; a resolver nobody
+//! listens on settles as `dial` at once. Loopback only, port 0.
+
+use resolver
+
+/// Push a big-endian uint16. Total.
+fn put16(mut out: List[int], v: int) {
+    (mut out).push(v / 256 % 256)
+    (mut out).push(v % 256)
+}
+
+/// Read one framed query off `conn` (whole, loopback). Row: io.
+fn read_query(conn: int) -> List[int] ! {io} {
+    net_deadline(conn, 2000) else |_| {}
+    let got = net_read_bytes(conn, 4096) else |_| {
+        return io
+    }
+    if got.len < 2 {
+        return io
+    }
+    var msg = List[int]()
+    var k: int = 2
+    while k < got.len {
+        (mut msg).push(got[k])
+        k = k + 1
+    }
+    msg
+}
+
+/// A framed A answer echoing `q`'s id and question: one A record per
+/// quad in `ips` (space separated dotted quads), TTL `ttl`. Total.
+fn framed_answer(q: List[int], ips: List[str], ttl: int) -> List[int] {
+    var body = List[int]()
+    (mut body).push(q[0])
+    (mut body).push(q[1])
+    (mut body).push(129)
+    (mut body).push(128)
+    put16(mut body, 1)
+    put16(mut body, ips.len)
+    put16(mut body, 0)
+    put16(mut body, 0)
+    // echo the question: from 12 to the end of the query message
+    var i = 12
+    while i < q.len {
+        (mut body).push(q[i])
+        i = i + 1
+    }
+    var a: int = 0
+    while a < ips.len {
+        (mut body).push(192)
+        (mut body).push(12)
+        put16(mut body, 1)
+        put16(mut body, 1)
+        put16(mut body, ttl / 65536)
+        put16(mut body, ttl % 65536)
+        put16(mut body, 4)
+        var v: int = 0
+        for b in ips[a].bytes() {
+            if b == 46 {
+                (mut body).push(v)
+                v = 0
+            } else {
+                v = v * 10 + b - 48
+            }
+        }
+        (mut body).push(v)
+        a = a + 1
+    }
+    var out = List[int]()
+    put16(mut out, body.len)
+    var j: int = 0
+    while j < body.len {
+        (mut out).push(body[j])
+        j = j + 1
+    }
+    out
+}
+
+/// Tick until the pending query settles, bounded. Total.
+fn settle(mut rs: resolver.Resolver, host: str, now0: int) -> int {
+    var now = now0
+    var spins: int = 0
+    while resolver.is_pending(rs, host) && spins < 200 {
+        now = now + 5
+        resolver.tick(mut rs, now)
+        spins = spins + 1
+    }
+    now
+}
+
+fn main() -> !int {
+    let l = net_listen("127.0.0.1:0")?
+    let p = net_port(l)?
+    let addr = "127.0.0.1:{p}"
+    var rs = resolver.new()
+    var now = 1000000
+
+    assert(!resolver.is_fresh(rs, "app.test", now), "unasked is not fresh")
+    assert(!resolver.is_pending(rs, "app.test"), "unasked is not pending")
+    print("miss ok")
+
+    // --- one round trip
+    resolver.start(mut rs, "App.Test", addr, 30000, 0, now)
+    assert(resolver.is_pending(rs, "app.test"), "case-folded pending")
+    assert(resolver.pending(rs) == 1, "one query")
+    let c1 = net_accept(l)?
+    let q1 = read_query(c1)?
+    var ips = List[str]()
+    (mut ips).push("10.1.1.1")
+    (mut ips).push("10.1.1.2")
+    net_write_bytes(c1, framed_answer(q1, ips, 300))?
+    net_close(c1)?
+    now = settle(mut rs, "app.test", now)
+    assert(!resolver.is_pending(rs, "app.test"), "settled")
+    assert(resolver.is_fresh(rs, "app.test", now), "fresh after the answer")
+    assert(resolver.failure(rs, "app.test") == "", "no failure")
+    assert(
+        resolver.addr_set(rs, "app.test") == "10.1.1.1,10.1.1.2",
+        "the set: {resolver.addr_set(rs, "app.test")}",
+    )
+    let ev = resolver.take_events(mut rs)
+    assert(ev.len == 1, "one event")
+    assert(
+        ev[0].starts_with("upstream-resolved host=app.test addrs=2 ttl-ms=300000 took-ms="),
+        "event: {ev[0]}",
+    )
+    assert(resolver.take_events(mut rs).len == 0, "drained")
+    let r1 = resolver.rotate(mut rs, "app.test")
+    let r2 = resolver.rotate(mut rs, "app.test")
+    assert(r1[0] == "10.1.1.1" && r2[0] == "10.1.1.2", "round robin: {r1[0]} {r2[0]}")
+    print("answered ok")
+
+    // --- a second start inside the TTL is a no-op: nothing dials
+    resolver.start(mut rs, "app.test", addr, 30000, 0, now)
+    assert(resolver.pending(rs) == 0, "cache hit: no query")
+    assert(resolver.is_fresh(rs, "app.test", now + 299000), "fresh until the TTL")
+    assert(!resolver.is_fresh(rs, "app.test", now + 300001), "stale past the TTL")
+    print("cache ok")
+
+    // --- valid= overrides the record TTL; a tiny TTL floors at 1 s
+    resolver.start(mut rs, "short.test", addr, 30000, 5000, now)
+    let c2 = net_accept(l)?
+    let q2 = read_query(c2)?
+    var ips2 = List[str]()
+    (mut ips2).push("10.2.2.2")
+    net_write_bytes(c2, framed_answer(q2, ips2, 300))?
+    net_close(c2)?
+    now = settle(mut rs, "short.test", now)
+    assert(resolver.is_fresh(rs, "short.test", now + 4999), "valid= holds")
+    assert(!resolver.is_fresh(rs, "short.test", now + 5001), "valid= expires")
+    resolver.start(mut rs, "zero.test", addr, 30000, 0, now)
+    let c3 = net_accept(l)?
+    let q3 = read_query(c3)?
+    net_write_bytes(c3, framed_answer(q3, ips2, 0))?
+    net_close(c3)?
+    now = settle(mut rs, "zero.test", now)
+    assert(resolver.is_fresh(rs, "zero.test", now + 999), "a 0 TTL is held one second")
+    assert(!resolver.is_fresh(rs, "zero.test", now + 1001), "and no longer")
+    let ev2 = resolver.take_events(mut rs)
+    assert(ev2.len == 2 && ev2[1].contains("ttl-ms=1000 "), "floor named in the event: {ev2[1]}")
+    print("valid ok")
+
+    // --- timeout: nobody answers; the deadline settles it as a HELD failure
+    resolver.start(mut rs, "slow.test", addr, 50, 0, now)
+    let c4 = net_accept(l)?
+    let q4 = read_query(c4)?
+    assert(q4.len > 12, "the query arrived")
+    now = now + 60
+    resolver.tick(mut rs, now)
+    assert(!resolver.is_pending(rs, "slow.test"), "timed out")
+    assert(
+        resolver.failure(rs, "slow.test") == "timeout",
+        "reason: {resolver.failure(rs, "slow.test")}",
+    )
+    assert(resolver.is_fresh(rs, "slow.test", now + 999), "failure held one second")
+    assert(!resolver.is_fresh(rs, "slow.test", now + 1001), "then re-askable")
+    let ev3 = resolver.take_events(mut rs)
+    assert(
+        ev3.len == 1 &&
+            ev3[0].starts_with("upstream-resolve-failed host=slow.test reason=timeout took-ms="),
+        "event: {ev3[0]}",
+    )
+    net_close(c4)?
+    print("timeout ok")
+
+    // --- the resolver closes without answering
+    resolver.start(mut rs, "mute.test", addr, 30000, 0, now)
+    let c5 = net_accept(l)?
+    net_close(c5)?
+    now = settle(mut rs, "mute.test", now)
+    assert(
+        resolver.failure(rs, "mute.test") == "io",
+        "closed early: {resolver.failure(rs, "mute.test")}",
+    )
+    print("io ok")
+
+    // --- a resolver nobody listens on
+    let dead = net_listen("127.0.0.1:0")?
+    let dp = net_port(dead)?
+    net_close(dead)?
+    resolver.start(mut rs, "nores.test", "127.0.0.1:{dp}", 30000, 0, now)
+    assert(!resolver.is_pending(rs, "nores.test"), "settled at once")
+    assert(
+        resolver.failure(rs, "nores.test") == "dial",
+        "reason: {resolver.failure(rs, "nores.test")}",
+    )
+    assert(resolver.cached(rs) == 6, "six names cached: {resolver.cached(rs)}")
+    net_close(l)?
+    print("dial ok")
+    0
+}
