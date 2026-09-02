@@ -1,0 +1,115 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked
+//! conforms: err.propagate
+//!
+//! reloadhold — rig DRIVER (the corpus lane runs it bare, which
+//! exercises exactly the no-argument usage path: exit 2). The CONTROL
+//! DIFFERENTIAL's keepalive probe (ws15): argv is `<port> <hold_ms>`;
+//! dial 127.0.0.1:<port>, send one keep-alive GET and print the served
+//! body's first line as `pre=<line>`, HOLD the connection open for
+//! `hold_ms` — long enough for the harness to reload the server under
+//! it, by signal or by control verb — then send a SECOND keep-alive
+//! GET on the SAME connection and print `post=<line>`.
+//!
+//! What it measures: which configuration generation an ALREADY-OPEN
+//! connection is served by after a reload. nginx answers from the old
+//! worker (which keeps its old config until its connections finish);
+//! lobo answers from the draining generation (which keeps its frozen
+//! model for exactly the same reason). The differential compares those
+//! two answers — docs/CONTROL.md's "workers drained" row.
+//! Loopback only, forever. Failures ride out of `main` as their own
+//! tags (the rig convention: the toolchain names the tag).
+
+/// Parse a decimal port from argv — `io` on anything not 1..65535 (a
+/// driver argument error, not a case outcome).
+fn to_port(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 {
+            return io
+        }
+        if b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 65535 {
+            return io
+        }
+    }
+    if n == 0 {
+        return io
+    }
+    n
+}
+
+/// Parse a nonnegative decimal ms count — `io` past ~60s (the rig's
+/// per-test ceiling; a longer hold is a harness bug).
+fn to_ms(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b in s.bytes() {
+        if b < 48 {
+            return io
+        }
+        if b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 60000 {
+            return io
+        }
+    }
+    n
+}
+
+/// The first line of the body after the header block, trimmed — the
+/// marker each root writes into index.html. "" when the reply carries
+/// no body separator (a closed or truncated answer).
+fn body_line(reply: str) -> str {
+    let at = reply.find("\r\n\r\n") else -1
+    if at < 0 {
+        return ""
+    }
+    let body = reply[at + 4..reply.len]
+    let nl = body.find("\n") else -1
+    if nl >= 0 {
+        return body[0..nl].trim()
+    }
+    body.trim()
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len != 2 {
+        eprint("usage: reloadhold <port> <hold_ms>")
+        return 2
+    }
+    let port = to_port(args[0])?
+    let hold = to_ms(args[1])?
+    let get = "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n"
+    let c = net_connect("127.0.0.1:{port}")?
+    net_deadline(c, 5000)?
+    net_write(c, get)?
+    let first = net_read(c, 8192)?
+    print("pre={body_line(first)}")
+    time_sleep_ms(hold)
+    net_write(c, get) else |_| {
+        print("post=<write failed>")
+        net_close(c) else |_| {}
+        return 0
+    }
+    let second = net_read(c, 8192) else |_| {
+        print("post=<read failed>")
+        net_close(c) else |_| {}
+        return 0
+    }
+    print("post={body_line(second)}")
+    net_close(c)?
+    0
+}

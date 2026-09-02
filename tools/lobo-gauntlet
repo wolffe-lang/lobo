@@ -103,6 +103,12 @@ if ! tools/lobo-proxy-differential; then
     exit 1
 fi
 
+step "control differential (ws15: nginx -s reload beside lobo -s reload — the reload semantics that carry, the transport/parse-locus/narration deltas measured)"
+if ! tools/lobo-control-differential; then
+    echo "lobo-gauntlet: FAILED at control-differential — the reload semantics diverged (ws15)" >&2
+    exit 1
+fi
+
 step "log differential (ws09: same log_format, same requests, byte-compared modulo timestamps)"
 if ! tools/lobo-logdiff; then
     echo "lobo-gauntlet: FAILED at logdiff" >&2

@@ -108,6 +108,36 @@ probe "-s bogus signal"   1 1 "" -- -s bogus
 # exit 1 (lobo: open() failed; nginx: open() failed — same shape)
 probe "-s reload no master" 1 1 "" -- -s reload -p "$scratch" -c n.conf
 
+# ws15: the endpoint is how a running lobo is reached, so a config
+# with no `control` directive REFUSES by name instead of dialling the
+# http port. The exit code keeps parity with the oracle (both 1); the
+# diagnostic is lobo's own and is checked here rather than left to
+# folklore. n.conf above is valid and has no control directive.
+"$LOBO" -s reload -p "$scratch" -c n.conf >/dev/null 2>"$scratch/noctl.err"
+noctl=$?
+total=$((total + 1))
+if [ "$noctl" = 1 ] && grep -q 'no "control" directive' "$scratch/noctl.err"; then
+    parity=$((parity + 1))
+    echo "lobo-shell: ok — [-s reload with no control directive] exit 1 and the diagnostic names the directive (ws15: a running lobo is reached only over its endpoint)"
+else
+    echo "lobo-shell: FAILED — [-s reload with no control directive] exit $noctl, stderr: $(head -1 "$scratch/noctl.err")" >&2
+    red=$((red + 1))
+fi
+
+# the lobo-native `control` subcommand: an invented verb is a named
+# error before any socket is touched (nginx has no such subcommand, so
+# this is a lobo-only probe, not a parity row)
+"$LOBO" control shutdown -p "$scratch" -c n.conf >/dev/null 2>"$scratch/badverb.err"
+badverb=$?
+total=$((total + 1))
+if [ "$badverb" = 1 ] && grep -q 'invalid "control" verb' "$scratch/badverb.err"; then
+    named=$((named + 1))
+    echo "lobo-shell: ok — [control shutdown] lobo-native verb set refuses an invented verb by name, exit 1 (named: nginx has no control subcommand — its -s takes exactly four words, and so does lobo's)"
+else
+    echo "lobo-shell: FAILED — [control shutdown] exit $badverb, stderr: $(head -1 "$scratch/badverb.err")" >&2
+    red=$((red + 1))
+fi
+
 # assert the error diagnostics land on STDERR (nginx's stream), not stdout
 "$LOBO" -Z >/tmp/lobo-shell-stdout 2>/dev/null
 if [ -s /tmp/lobo-shell-stdout ]; then
