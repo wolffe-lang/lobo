@@ -1,0 +1,31 @@
+module pkg :: resolver
+  wolfi v0 · toolchain 0.2.2 · edition v1
+  export_hash 21442f70c4a638339a1ecaab43480b37355aed3d33ebdacbaefb4e95c8e5f4c6
+  pkg_hash    21442f70c4a638339a1ecaab43480b37355aed3d33ebdacbaefb4e95c8e5f4c6
+  deps:
+    std.hex  928a445821828018e1c03a2e7753ca515b0e6eb79e22a00e0b51d9c13ef0a5eb
+  items:
+    [0] pub addr_set — fn addr_set(rs: self.Resolver, host: str) -> str · regions (ρ1, -) -> -
+    [1] pub build_query — fn build_query(id: int, name: str) -> prelude.List[int] · regions (-, -) -> ρ_caller
+    [2] pub cached — fn cached(rs: self.Resolver) -> int · regions (ρ1) -> -
+    [3] pub ev_resolve_failed — fn ev_resolve_failed(host: str, reason: str, took_ms: int) -> str
+    [4] pub ev_resolved — fn ev_resolved(host: str, addrs: int, ttl_ms: int, took_ms: int) -> str
+    [5] pub failure — fn failure(rs: self.Resolver, host: str) -> str · regions (ρ1, -) -> -
+    [6] pub failure_hold_ms — fn failure_hold_ms() -> int
+    [7] pub is_fresh — fn is_fresh(rs: self.Resolver, host: str, now: int) -> bool · regions (ρ1, -, -) -> -
+    [8] pub is_ip_literal — fn is_ip_literal(host: str) -> bool
+    [9] pub is_pending — fn is_pending(rs: self.Resolver, host: str) -> bool · regions (ρ1, -) -> -
+    [10] pub min_ttl_ms — fn min_ttl_ms() -> int
+    [11] pub new — fn new() -> self.Resolver · regions () -> ρ_caller
+    [12] pub parse_answer — fn parse_answer(id: int, msg: prelude.List[int]) -> self.Answer · regions (-, ρ1) -> ρ_caller
+    [13] pub pending — fn pending(rs: self.Resolver) -> int · regions (ρ1) -> -
+    [14] pub resolve_now — fn resolve_now(mut rs: self.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int) · regions (ρ1, -, -, -, -) -> -
+    [15] pub rotate — fn rotate(mut rs: self.Resolver, host: str) -> prelude.List[str] · regions (ρ1, -) -> ρ_caller
+    [16] pub split_set — fn split_set(set: str) -> prelude.List[str] · regions (-) -> ρ_caller
+    [17] pub start — fn start(mut rs: self.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int, now: int) · regions (ρ1, -, -, -, -, -) -> -
+    [18] pub take_events — fn take_events(mut rs: self.Resolver) -> prelude.List[str] · regions (ρ1) -> ρ_caller
+    [19] pub tick — fn tick(mut rs: self.Resolver, now: int) · regions (ρ1, -) -> -
+    [20] pub version — fn version() -> str
+    [21] pub Answer — struct Answer { ok: bool, reason: str, addrs: prelude.List[str], ttl_ms: int }
+    [22] pub Resolver — struct Resolver { hosts: prelude.List[str], addrs: prelude.List[str], fails: prelude.List[str], expires: prelude.List[int], rr: prelude.List[int], q_hosts: prelude.List[str], q_fds: prelude.List[int], q_ids: prelude.List[int], q_bufs: prelude.List[str], q_deadline: prelude.List[int], q_started: prelude.List[int], q_valid: prelude.List[int], events: prelude.List[str], next_id: int }
+
