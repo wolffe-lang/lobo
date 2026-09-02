@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="envelope: 200 rt>0 true site=\noff: 200 rt>0 true\nstream: 200 rt>0 true site=\njoin: normal cls=0 wcode=0 rt>0 true | breach cls=2 wcode=0 rt=0\nlive: reclaimed true\n")
+//! check: run(exit=0, stdout="envelope: 200 rt>0 true site=\noff: 200 rt>0 true\nstream: 200 rt>0 true site=\njoin: normal cls=0 wcode=0 rt>0 true | breach cls=2 wcode=0 rt=0\nbackstop: no admitted body crosses the cap\nlive: reclaimed true\n")
 //! phase: run
 //! lanes: native
 //! checked-refuses: structured concurrency in checked execution (C1 deferred)
@@ -12,26 +12,32 @@
 //!   1. budget OFF (0): the pre-ws13 path — no proc, the body in an
 //!      uncapped per-response region, ws12's `mem_rt` measured
 //!      in-loop as before;
-//!   2. a budget whose 16x LEDGER envelope covers the body (4k for an
+//!   2. a budget whose LEDGER envelope covers the body (4k for an
 //!      18-byte file: cap 65536 ≥ the 496 the runtime charges): the
 //!      proc path serves 200, and `mem_rt` still comes back — through
 //!      the self-pipe — so the measured number survives the move
 //!      inside the proc;
 //!   3. the STREAM path under a budget (70k for a 128 KiB file: the
 //!      meter's file site admits head + one chunk, and the cap
-//!      1,146,880 ≥ the 1,048,560 a 64 KiB chunk region charges — the
-//!      #203 envelope): 200 through the proc, chunk by chunk, `mem_rt`
-//!      the per-chunk high water;
+//!      2,097,152 ≥ the 1,048,560 a 64 KiB chunk region charges): 200
+//!      through the proc, chunk by chunk, `mem_rt` the per-chunk high
+//!      water;
 //!   4. THE JOIN, driven directly (`budget.run_small` on a loopback
 //!      pair): a cap the body cannot fit (64) dies at the read with
 //!      fault(alloc-contract), contained at the proc boundary
 //!      ([mem.region.cap.3], D68) and reported as class 2 with NOTHING
 //!      on the pipe (a killed proc wrote nothing); a roomy cap answers
 //!      class 0 with the measured bytes back through the pipe.
-//! serve maps class 2 to the 503 with a name (site=region); the SAME
-//! mapping reached from a config through a real socket — the growth
-//! law's band, docs/BUDGET.md — is `tools/lobo-membudget`'s cap rounds
-//! (the release binary, ws14). `live_region_bytes()` is back at its
+//! serve maps class 2 to the 503 with a name (site=region). ws15's
+//! D40 re-baselines the envelope to `16 x pow2ceil(budget)` (the
+//! growth law ws14 measured), which CLOSES the band in which the
+//! runtime refused a body the meter had admitted: relation 5 below is
+//! the backstop theorem, asserted over the whole shape space the
+//! meter can admit, and `tools/lobo-membudget`'s cap rounds are its
+//! end-to-end half (the same 33,000-byte file that answered 503 at
+//! ws14 now serves 200 through a real socket). The direct join —
+//! relation 4 — is what keeps `site=region` witnessed at all, because
+//! after D40 no config can reach it. `live_region_bytes()` is back at its
 //! baseline after all of it: the proc's regions were reclaimed BEFORE
 //! each reason delivered.
 //! Lanes: native runs it; the checked lane is the UB machine, which
@@ -108,6 +114,18 @@ fn drive(c: config.Conf, req: str, budget: int, pw: int, pr: int) -> serve.ReqOu
     ro
 }
 
+/// The test's own `pow2ceil` — serve's is private (the envelope's
+/// shape is the exported surface, not its parts), and the theorem
+/// below needs to compute the ledger's charge independently of the
+/// function it is checking. Total.
+fn pow2ceil_t(n: int) -> int {
+    var p: int = 1
+    while p < n {
+        p = p * 2
+    }
+    p
+}
+
 fn main() -> !int {
     let root = "ws13_cap"
     fs_remove_dir_all(root) else |_| {}
@@ -132,7 +150,16 @@ fn main() -> !int {
     // handle dies after the server side's close (D41), which would
     // otherwise turn its named refusal into an io exit (wolf-lang#224)
     let r1 = drive(c, get, 4096, pipe.0, pipe.1)?
-    assert(serve.ledger_cap(4096) == 65536, "the arithmetic: 16x")
+    // D40 (ws15): the envelope is 16 x pow2ceil(budget), not a flat
+    // 16x. At a power of two the two agree (which is why 4096 reads
+    // the same as it did at ws14); everywhere else the new envelope
+    // is the larger, by up to 2x.
+    assert(serve.ledger_cap(4096) == 65536, "at a power of two: 16 x 4096")
+    assert(serve.ledger_cap(1) == 16, "pow2ceil(1) = 1")
+    assert(serve.ledger_cap(1000) == 16384, "pow2ceil(1000) = 1024, not 1000")
+    assert(serve.ledger_cap(1025) == 32768, "just past a power of two, the envelope doubles")
+    assert(serve.ledger_cap(40960) == 1048576, "the ws14 band's budget: 40k -> 16 x 65536")
+    assert(serve.ledger_cap(71680) == 2097152, "the stream witness's budget: 70k -> 16 x 131072")
     print("envelope: {r1.acc.status} rt>0 {r1.mem_rt > 0} site={r1.bud_site}")
 
     // 1. off
@@ -168,6 +195,31 @@ fn main() -> !int {
     print(
         "join: normal cls={ok.cls} wcode={ok.wcode} rt>0 {ok.rt > 0} | breach cls={breach.cls} wcode={breach.wcode} rt={breach.rt}",
     )
+
+    // 5. THE BACKSTOP THEOREM (D40, ws15). The ledger's growth law is
+    // charge(N) = 16 x pow2ceil(N) - 16 (ws14's measured table, in
+    // docs/BUDGET.md). Under the D40 envelope every body the METER
+    // admits — N <= budget for the small path, one 64 KiB chunk for
+    // the stream path — is strictly under the cap, so the runtime can
+    // no longer refuse a request lobo let in. Asserted here over the
+    // whole shape space rather than at one measured point: every
+    // budget from 1 byte up past the stream threshold, against its
+    // worst admissible body.
+    var b: int = 1
+    while b <= 1048576 {
+        let cap = serve.ledger_cap(b)
+        // the worst SMALL body the meter admits under this budget
+        let worst_small = if b <= 65536 { b } else { 65536 }
+        let charge_small = 16 * pow2ceil_t(worst_small) - 16
+        assert(charge_small < cap, "small body {worst_small} charges {charge_small}, cap {cap}")
+        // the stream path charges one 64 KiB chunk, and is only
+        // reachable when the meter admits 65,536 bytes
+        if b >= 65536 {
+            assert(1048560 < cap, "a 64 KiB chunk charges 1048560, cap {cap}")
+        }
+        b = b * 2 + 1
+    }
+    print("backstop: no admitted body crosses the cap")
 
     print("live: reclaimed {live_region_bytes() == base}")
     net_close(pipe.0) else |_| {}

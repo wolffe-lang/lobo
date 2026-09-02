@@ -45,22 +45,31 @@
 # THE CAP, ENFORCED (ws14 — the ws13 adoption landed at the 5f99b9f
 # pin, wolf-lang#219 closed): a SECOND server runs under
 # `memory_budget 40k`, so every budgeted response's body work runs
-# inside a proc under `region r(cap: 16 x 40960)` (docs/BUDGET.md's
-# arithmetic), and the suite RE-BASELINES the same rounds through
-# that path — round A'/B' under the same two gates as A/B — then
-# drives the breach THROUGH A REAL SOCKET against the release
-# binary: the ledger's growth law charges 16 x pow2ceil(N) − 16 for
-# an N-byte body (measured at the bump: 4,097 bytes → 131,056), so a
-# 33,000-byte file under a 40k budget is ADMITTED by the meter
-# (head + 33,000 < 40,960) and REFUSED by the runtime (1,048,560 >
-# 655,360): `fault(alloc-contract)` at the join → 503 with a name,
-# `site=region … cap=655360` in the log — while the 32,768-byte file
-# beside it (a power of two: 524,272) serves 200 in full, the server
-# keeps serving keepalive requests afterwards (the proc died, the
-# server lived), and `lobo status` counts exactly one budget-503
-# with `mem-rt-hw` non-zero (the measured bytes came back through the
-# self-pipe). The band where the cap fires on an admitted request —
-# budget < pow2ceil(body) — is the finding BUDGET.md carries.
+# inside a proc under `region r(cap: ledger_cap(40960))` — docs/
+# BUDGET.md's arithmetic — and the suite RE-BASELINES the same rounds
+# through that path: round A'/B' under the same two gates as A/B.
+#
+# ws15 RE-BASELINES THE BREACH ITSELF (D40). ws14 measured the
+# ledger's growth law — charge(N) = 16 x pow2ceil(N) - 16 — and found
+# a BAND in which the runtime refused a request the meter had
+# admitted: under the flat 16x envelope (cap 655,360) a 33,000-byte
+# file charged 1,048,560 and died at the join — 503 `site=region`,
+# through a real socket. D40 makes the envelope follow the law
+# (`16 x pow2ceil(budget)`, so 40k caps at 1,048,576) and the band
+# CLOSES. This suite measures the closure end to end: the same
+# 33,000-byte file, the same config, serves 200 in full and the log
+# carries NO site=region event — while a 50,000-byte file beside it
+# is still refused by the METER (503 `site=file`, before any proc
+# runs). So the operator-visible refusal is the meter's alone and the
+# cap is the backstop it was meant to be. The server keeps serving
+# keepalive requests afterwards, and `lobo status` counts exactly one
+# budget-503 with `mem-rt-hw` non-zero (the measured bytes came back
+# through the self-pipe, so the capped proc really ran).
+#
+# The `site=region` mapping keeps its witness where a config can no
+# longer reach it: tests/serve/budget_cap.lu drives the join directly
+# and asserts the backstop theorem over the whole shape space the
+# meter can admit.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
@@ -182,11 +191,15 @@ fi
 # ---------------------------------------------------------------
 # ws14: THE CAP, ENFORCED — the second server, under a budget
 # ---------------------------------------------------------------
-# breach.bin: 33,000 bytes — pow2ceil 65,536 → the ledger charges
-# 1,048,560 against a cap of 16 x 40,960 = 655,360. fits.bin: 32,768
-# bytes — a power of two → 524,272, under the cap.
-head -c 33000 /dev/zero | tr '\0' 'B' > "$scratch/w/breach.bin"
+# band.bin: 33,000 bytes — pow2ceil 65,536 → the ledger charges
+# 1,048,560. Under ws14's flat envelope (655,360) that was a breach;
+# under D40's (16 x pow2ceil(40,960) = 1,048,576) it fits by sixteen
+# bytes, which is the closure this round measures. fits.bin: 32,768
+# bytes — a power of two → 524,272. over.bin: 50,000 bytes — over the
+# DIRECTIVE, so the meter refuses it before any proc is spawned.
+head -c 33000 /dev/zero | tr '\0' 'B' > "$scratch/w/band.bin"
 head -c 32768 /dev/zero | tr '\0' 'F' > "$scratch/w/fits.bin"
+head -c 50000 /dev/zero | tr '\0' 'O' > "$scratch/w/over.bin"
 hp2=$("$WOLF" run ./tests/rig/freeport.lu)
 ctp=$("$WOLF" run ./tests/rig/freeport.lu)
 conf2="$scratch/lobo-cap.conf"
@@ -225,33 +238,58 @@ else
     fi
 fi
 
-# the breach, through a real socket: admitted by the meter, refused
-# by the runtime at the join
+# D40 re-baseline, through a real socket: the band closed. The file
+# ws14 measured as a runtime refusal is admitted by the meter AND
+# fits the envelope now; the meter is the only refusal a config can
+# still reach.
 ask() { # ask <path> — one raw GET, the whole reply on stdout
     printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$1" | nc 127.0.0.1 "$hp2" 2>/dev/null
 }
-r503=$(ask /breach.bin | tr -d '\r')
-if printf '%s\n' "$r503" | head -1 | grep -q '^HTTP/1.1 503 Service Temporarily Unavailable$' \
-    && printf '%s\n' "$r503" | grep -q '^Connection: close$'; then
-    check "cap breach: 33,000 bytes under memory_budget 40k (admitted: head + 33,000 < 40,960) is refused at the join — 503 Service Temporarily Unavailable, Connection: close, through a real socket" 0
+body_of() { # body_of <reply> — the byte length after the header block
+    printf '%s' "$1" | awk 'BEGIN{RS="\r\n\r\n"} NR==2{printf "%d", length($0)}'
+}
+len_of() { # len_of <reply> — the Content-Length header value
+    printf '%s' "$1" | sed -n 's/^Content-Length: \([0-9]*\).*/\1/p' | head -1
+}
+
+rband=$(ask /band.bin)
+got_len=$(len_of "$rband")
+body_len=$(body_of "$rband")
+if printf '%s' "$rband" | head -1 | grep -q '^HTTP/1.1 200 OK' && [ "$got_len" = 33000 ] && [ "$body_len" = 33000 ]; then
+    check "D40 band closed: 33,000 bytes under memory_budget 40k — the ws14 BREACH (charge 1,048,560 against the old 655,360 cap) — serves 200 in full through the proc under the new envelope, 16 x pow2ceil(40960) = 1,048,576" 0
 else
-    check "cap breach: expected a 503 through the socket, got: $(printf '%s' "$r503" | head -1)" 1
-fi
-sleep 0.2
-if grep -q 'budget-exceeded gen=1 site=region budget=40960 would=40961 cap=655360' "$scratch/lobo-cap.log"; then
-    check "cap breach: the event names the runtime's refusal — budget-exceeded site=region budget=40960 would=40961 cap=655360 (16 x the directive, ledger units)" 0
-else
-    check "cap breach: the site=region event is missing from the log: $(grep budget-exceeded "$scratch/lobo-cap.log" | head -1)" 1
+    check "D40 band closed: expected 200 with 33000 body bytes, got status '$(printf '%s' "$rband" | head -1)' len=$got_len body=$body_len" 1
 fi
 r200=$(ask /fits.bin)
-got_len=$(printf '%s' "$r200" | sed -n 's/^Content-Length: \([0-9]*\).*/\1/p' | head -1)
-body_len=$(printf '%s' "$r200" | awk 'BEGIN{RS="\r\n\r\n"} NR==2{printf "%d", length($0)}')
+got_len=$(len_of "$r200")
+body_len=$(body_of "$r200")
 if printf '%s' "$r200" | head -1 | grep -q '^HTTP/1.1 200 OK' && [ "$got_len" = 32768 ] && [ "$body_len" = 32768 ]; then
-    check "cap fits: the 32,768-byte file beside it (a power of two: 524,272 ledger units under the 655,360 cap) serves 200 in full through the proc" 0
+    check "cap fits: the 32,768-byte file beside it (a power of two: 524,272 ledger units) serves 200 in full through the proc" 0
 else
     check "cap fits: expected 200 with 32768 body bytes, got status '$(printf '%s' "$r200" | head -1)' len=$got_len body=$body_len" 1
 fi
-drive 50 /small.html "the server lives: 50 keepalive requests after the contained breach"
+
+# the meter still refuses — and after D40 it is the ONLY refusal a
+# config can reach (the cap is the backstop, not a second meter)
+r503=$(ask /over.bin | tr -d '\r')
+if printf '%s\n' "$r503" | head -1 | grep -q '^HTTP/1.1 503 Service Temporarily Unavailable$' \
+    && printf '%s\n' "$r503" | grep -q '^Connection: close$'; then
+    check "the meter still refuses: 50,000 bytes over memory_budget 40k is a 503 Service Temporarily Unavailable with Connection: close, through a real socket" 0
+else
+    check "the meter still refuses: expected a 503 through the socket, got: $(printf '%s' "$r503" | head -1)" 1
+fi
+sleep 0.2
+if grep -q 'budget-exceeded gen=1 site=file budget=40960 ' "$scratch/lobo-cap.log"; then
+    check "the meter still refuses: the event names the ADMISSION site — budget-exceeded site=file budget=40960, refused before any proc was spawned" 0
+else
+    check "the meter still refuses: the site=file event is missing from the log: $(grep budget-exceeded "$scratch/lobo-cap.log" | head -1)" 1
+fi
+if grep -q 'site=region' "$scratch/lobo-cap.log"; then
+    check "D40: NO site=region event in the whole run (got: $(grep -o 'site=region.*' "$scratch/lobo-cap.log" | head -1))" 1
+else
+    check "D40: NO site=region event in the whole run — after the re-baseline no config reaches the runtime's refusal, and the join keeps its witness in tests/serve/budget_cap.lu" 0
+fi
+drive 50 /small.html "the server lives: 50 keepalive requests after the meter's refusal"
 st=$("$LOBO" status -p . -c "$conf2" 2>/dev/null)
 g1=$(printf '%s\n' "$st" | grep 'generation 1:' | head -1)
 if printf '%s' "$g1" | grep -q 'budget-503s=1' && printf '%s' "$g1" | grep -q 'mem-rt-hw=' && ! printf '%s' "$g1" | grep -q 'mem-rt-hw=0 '; then
@@ -267,4 +305,4 @@ if [ "$red" != 0 ]; then
     echo "lobo-membudget: RED — $red of $total checks failed (logs under $scratch/)" >&2
     exit 1
 fi
-echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; the breach → 503 site=region through a real socket; the str half is wolf-lang#191's, named above)"
+echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; the str half is wolf-lang#191's, named above)"
