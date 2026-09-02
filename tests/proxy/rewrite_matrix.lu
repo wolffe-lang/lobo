@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: proxy http config
+//! stage-src: proxy http config resolver
 //!
 //! The proxy_pass rewrite PROBE MATRIX — ≥12 cells, each pinned
 //! against the pinned oracle (nginx/1.30.4) FIRST, then asserted here.

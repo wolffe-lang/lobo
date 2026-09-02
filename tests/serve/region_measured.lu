@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate, mem.region.account.1, mem.region.account.2
-//! stage-src: serve conn tls proxy http config obs metrics
+//! stage-src: serve conn tls proxy http config obs metrics resolver
 //!
 //! THE NUMBERS ARE MEASURED (ws12): `serve.ReqOut.mem_rt` is not
 //! lobo's estimate of what a response cost — it is `region_bytes` read
@@ -38,6 +38,7 @@
 
 use config
 use http
+use resolver
 use serve
 
 fn read_reply(cli: int) -> str ! {io} {
@@ -90,7 +91,8 @@ fn drive(c: config.Conf, req: str) -> serve.ReqOut ! {io} {
     }
     let cut = req.find("\r\n\r\n") else req.len
     let head = req[0..cut]
-    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0)
+    var rs = resolver.new()
+    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, mut rs)
     net_close(conn) else |_| {}
     let _ = read_reply(cli) else ""
     net_close(cli) else |_| {}

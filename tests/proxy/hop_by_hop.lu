@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: proxy http config
+//! stage-src: proxy http config resolver
 //!
 //! The hop-by-hop strip list (RFC 9110 §7.6.1) as behavior. Every name
 //! lobo removes on BOTH legs is asserted stripped; representative end-

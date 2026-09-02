@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: proxy http config
+//! stage-src: proxy http config resolver
 //!
 //! Passive health as a PURE state machine — the clock is a parameter,
 //! so every down/up transition is pinned WITHOUT wall time (the

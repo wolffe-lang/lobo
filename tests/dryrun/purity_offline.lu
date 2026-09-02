@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: dryrun http proxy config
+//! stage-src: dryrun http proxy config resolver
 //!
 //! PURITY, ENFORCED (contract target 2): the WHOLE dry-run pipeline —
 //! probe parse, decide, why-it-lost trace, effective directives,

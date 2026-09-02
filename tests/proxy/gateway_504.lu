@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked
 //! conforms: err.union, err.propagate
-//! stage-src: proxy http config obs serve conn tls metrics
+//! stage-src: proxy http config obs serve conn tls metrics resolver
 //!
 //! The 504 path, live: lobo proxies to an upstream that ACCEPTS but
 //! never replies (a listener left un-accepted — the kernel completes
@@ -18,6 +18,7 @@
 use config
 use http
 use proxy
+use resolver
 
 fn status_line(reply: str) -> str {
     let eol = reply.find("\r\n") else reply.len
@@ -48,7 +49,9 @@ fn main() -> !int {
 
     let date = "Thu, 01 Jan 2026 00:00:00 GMT"
     var pacc = proxy.run_acc()
-    let close = proxy.run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false, mut pacc) else |_| {
+    var rs = resolver.new()
+    let close = proxy.
+        run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false, mut rs, mut pacc) else |_| {
         assert(false, "proxy.run should not raise on a read timeout")
         return 1
     }

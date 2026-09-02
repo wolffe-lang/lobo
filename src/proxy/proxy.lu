@@ -24,6 +24,7 @@
 
 use config
 use http
+use resolver
 use std.net
 use std.x.tls.cert
 use std.x.tls.client as tlsc
@@ -57,6 +58,7 @@ pub struct UpPool {
     max_fails: List[int],
     fail_ms: List[int],
     backup: List[bool],
+    rows: List[int],
 }
 
 /// The number of peers in the pool. Total.
@@ -160,6 +162,7 @@ pub fn pool_named(c: config.Conf, name: str) -> UpPool {
         max_fails: List[int](),
         fail_ms: List[int](),
         backup: List[bool](),
+        rows: List[int](),
     }
     var blk: int = -1
     var i: int = 0
@@ -211,6 +214,7 @@ pub fn pool_named(c: config.Conf, name: str) -> UpPool {
             (mut p.max_fails).push(mf)
             (mut p.fail_ms).push(ft)
             (mut p.backup).push(bak)
+            (mut p.rows).push(j)
         }
         j = j + 1
     }
@@ -677,6 +681,9 @@ pub struct Plan {
     read_ms: int,
     trust_path: str,
     ssl_name: str,
+    resolver: str,
+    resolver_valid_ms: int,
+    resolver_timeout_ms: int,
 }
 
 /// The index of the first `http` block, or -1. Total.
@@ -774,6 +781,9 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         read_ms: 60000,
         trust_path: "",
         ssl_name: "",
+        resolver: "",
+        resolver_valid_ms: 0,
+        resolver_timeout_ms: 30000,
     }
     let srv = first_server(c)
     if srv < 0 {
@@ -836,7 +846,139 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     pl.read_ms = timeout_ms(c, loc, srv, pl.http_blk, "proxy_read_timeout", 60000)
     pl.trust_path = str_setting(c, loc, srv, pl.http_blk, "proxy_ssl_trusted_certificate")
     pl.ssl_name = str_setting(c, loc, srv, pl.http_blk, "proxy_ssl_name")
+    // ws13: the resolver in effect at the proxy_pass row (nearest
+    // enclosing block that holds one), its `valid=` override and the
+    // innermost `resolver_timeout`
+    let prow = child_row(c, loc, "proxy_pass")
+    if prow >= 0 {
+        let rr = config.resolver_row_for(c, prow)
+        if rr >= 0 {
+            pl.resolver = config.resolver_address(c, rr)
+            pl.resolver_valid_ms = config.resolver_valid_ms(c, rr)
+        }
+        pl.resolver_timeout_ms = config.resolver_timeout_for(c, prow)
+    }
     pl
+}
+
+/// The row index of the first `name` directive directly under block
+/// `blk`, or -1. Total.
+fn child_row(c: config.Conf, blk: int, name: str) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == name && c.parent[i] == blk && c.args_n[i] >= 1 {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+// ------------------------------------------------------------------
+// the resolver seam (ws13) — which name a request must wait for, and
+// what a cached name expands to
+// ------------------------------------------------------------------
+
+/// What a request needs resolved before it can dial: `host` is the
+/// name (or "" when nothing needs waiting for — an IP literal, a
+/// pool of literals, a fresh cache entry, or no `resolver` in effect,
+/// in which case the dial resolves synchronously as before and L012
+/// said so at load); `addr`/`timeout_ms`/`valid_ms` are the resolver
+/// settings in effect for that name — what the loop hands
+/// `resolver.start`. PURE over the model and the cache.
+pub struct Need {
+    host: str,
+    addr: str,
+    timeout_ms: int,
+    valid_ms: int,
+}
+
+fn no_need() -> Need {
+    Need { host: "", addr: "", timeout_ms: 0, valid_ms: 0 }
+}
+
+/// The resolver settings in effect for pool peer row `row`: (addr,
+/// valid_ms, timeout_ms); addr "" when no resolver governs it. Total.
+fn peer_resolver(c: config.Conf, row: int) -> (str, int, int) {
+    let rr = config.resolver_row_for(c, row)
+    if rr < 0 {
+        return ("", 0, 0)
+    }
+    (
+        config.resolver_address(c, rr),
+        config.resolver_valid_ms(c, rr),
+        config.resolver_timeout_for(c, row),
+    )
+}
+
+/// The first name this request's upstream needs resolved and does
+/// not have fresh in `rs` — the loop PARKS the connection on it. A
+/// request whose path does not route to a proxy, or whose target is
+/// literal, or whose names are all fresh, needs nothing. Total.
+pub fn resolve_need(c: config.Conf, path: str, rs: resolver.Resolver, now: int) -> Need {
+    let decoded = http.percent_decode(path) else |_| {
+        return no_need()
+    }
+    let norm = http.normalize_path(decoded) else {
+        return no_need()
+    }
+    let pl = plan(c, norm)
+    if !pl.is_proxy || !pl.pt.err.is_empty() {
+        return no_need()
+    }
+    if pl.pt.is_pool {
+        let pool = pool_named(c, pl.pt.authority)
+        var i: int = 0
+        while i < pool.hosts.len {
+            let h = pool.hosts[i]
+            if !resolver.is_ip_literal(h) {
+                let pr = peer_resolver(c, pool.rows[i])
+                if !pr.0.is_empty() && !resolver.is_fresh(rs, h, now) {
+                    return Need { host: h, addr: pr.0, timeout_ms: pr.2, valid_ms: pr.1 }
+                }
+            }
+            i = i + 1
+        }
+        return no_need()
+    }
+    let hp = split_hostport(pl.pt.authority)
+    if resolver.is_ip_literal(hp.0) || pl.resolver.is_empty() {
+        return no_need()
+    }
+    if resolver.is_fresh(rs, hp.0, now) {
+        return no_need()
+    }
+    Need {
+        host: hp.0,
+        addr: pl.resolver,
+        timeout_ms: pl.resolver_timeout_ms,
+        valid_ms: pl.resolver_valid_ms,
+    }
+}
+
+/// Expand one peer through the cache: a literal is itself; a name
+/// with no resolver in effect is itself (the dial resolves it — the
+/// pre-ws13 path); a name under a resolver is its cached address set
+/// rotated round-robin — resolved INLINE first when the cache is not
+/// fresh (the blocking driver's path; the loop parks before it gets
+/// here). A held failure expands to NOTHING (the peer is skipped, or
+/// the request 502s when it was the only one). Total.
+fn expand_peer(mut rs: resolver.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int) -> List[
+    str,
+] {
+    var out = List[str]()
+    if resolver.is_ip_literal(host) || addr.is_empty() {
+        (mut out).push(host)
+        return out
+    }
+    if !resolver.is_fresh(rs, host, time_unix_ms()) {
+        resolver.resolve_now(mut rs, host, addr, timeout_ms, valid_ms)
+    }
+    if !resolver.failure(rs, host).is_empty() {
+        return out
+    }
+    resolver.rotate(mut rs, host)
 }
 
 /// A single-arg directive value from the innermost level (loc, else
@@ -1686,6 +1828,7 @@ pub fn run(
     token: str,
     date: str,
     keep: bool,
+    mut rs: resolver.Resolver,
     mut acc: RunAcc,
 ) -> bool ! {closed, io} {
     if !pl.pt.err.is_empty() {
@@ -1741,17 +1884,67 @@ pub fn run(
         }
         var rot = swrr_new(peer_count(pool))
         let ord = selection_order(pool, mut rot)
-        hosts = ord.0
-        ports = ord.1
+        // ws13: each selected peer expands through the resolver cache
+        // under ITS OWN block's resolver settings (a name with none
+        // stays a name and the dial resolves it, as before)
+        var oi: int = 0
+        while oi < ord.0.len {
+            let h = ord.0[oi]
+            let pt0 = ord.1[oi]
+            var pr = ("", 0, 0)
+            var pi: int = 0
+            while pi < pool.hosts.len {
+                if pool.hosts[pi] == h && pool.ports[pi] == pt0 {
+                    pr = peer_resolver(c, pool.rows[pi])
+                }
+                pi = pi + 1
+            }
+            let ex = expand_peer(mut rs, h, pr.0, pr.2, pr.1)
+            var ei: int = 0
+            while ei < ex.len {
+                (mut hosts).push(ex[ei])
+                (mut ports).push(pt0)
+                ei = ei + 1
+            }
+            oi = oi + 1
+        }
+        if hosts.len == 0 {
+            acc.addr = pl.pt.authority
+            acc.status = 502
+            acc.body_bytes = gw_body(502, token).len
+            send_gateway_error(client, 502, date, token)
+            return true
+        }
     } else {
         let hp = split_hostport(pl.pt.authority)
-        (mut hosts).push(hp.0)
         var dport = hp.1
         if pl.pt.scheme == "https" && !pl.pt.authority.contains(":") {
             // split_hostport's no-colon default is 80; https defaults 443
             dport = 443
         }
-        (mut ports).push(dport)
+        // ws13: a NAME under a resolver dials its cached addresses in
+        // round-robin order (nginx's several-addresses rule); a held
+        // failure is a 502 naming the host, never a dial of the text
+        let ex = expand_peer(
+            mut rs,
+            hp.0,
+            pl.resolver,
+            pl.resolver_timeout_ms,
+            pl.resolver_valid_ms,
+        )
+        if ex.len == 0 {
+            acc.addr = "{hp.0}:{dport}"
+            acc.status = 502
+            acc.body_bytes = gw_body(502, token).len
+            send_gateway_error(client, 502, date, token)
+            return true
+        }
+        var ei: int = 0
+        while ei < ex.len {
+            (mut hosts).push(ex[ei])
+            (mut ports).push(dport)
+            ei = ei + 1
+        }
     }
 
     var last_status: int = 502

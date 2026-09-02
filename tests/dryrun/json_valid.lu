@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: checked
 //! conforms: err.union
-//! stage-src: dryrun http proxy config
+//! stage-src: dryrun http proxy config resolver
 //!
 //! The JSON twin is a public tooling surface (the ws08/ws12
 //! convention) — so it is validated by an INDEPENDENT reader:

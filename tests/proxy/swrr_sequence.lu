@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: proxy http config
+//! stage-src: proxy http config resolver
 //!
 //! Smooth weighted round-robin, PINNED against the pinned oracle. A
 //! 3-server pool with weights {s1=1, s2=2, s3=1} was probed against

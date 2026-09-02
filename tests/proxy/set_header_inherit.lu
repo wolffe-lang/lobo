@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: lupin
 //! conforms: err.union
-//! stage-src: proxy http config
+//! stage-src: proxy http config resolver
 //!
 //! proxy_set_header inheritance — LOBO-L002 as RUNTIME BEHAVIOR, and
 //! the lint co-firing beside it (the charter's carry-AND-warn posture).

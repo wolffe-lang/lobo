@@ -30,6 +30,7 @@ itself is below.
 | `lobo_request_admitted_bytes_high_water` | gauge | `gen` | Highest admitted-bytes total of any single request served under the generation — lobo's own ADMISSION METER, the number the budget rules on. |
 | `lobo_request_region_bytes_high_water` | gauge | `gen` | Highest MEASURED response-region charge of any single request served under the generation, read from the runtime's own ledger. A different unit from the admitted-bytes gauge and never to be subtracted from it. |
 | `lobo_live_region_bytes` | gauge | — | Process-wide bytes the runtime holds for live regions at scrape time. NOT an RSS proxy: the process-root arena, where every string materialization still lands, is not counted. |
+| `lobo_upstream_resolutions_total` | counter | `result` | Upstream names the resolver settled, by result (ok, failed). The failure reason is in the upstream-resolve-failed log event, not a label. |
 | `lobo_log_lines_dropped_total` | counter | — | Access-log lines dropped because a sink's bounded buffer was full (emit never blocks). |
 | `lobo_events_total` | counter | — | Vocabulary events emitted — the highest seq stamped. A log stream whose top seq matches this has no trailing hole. |
 

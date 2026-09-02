@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: dryrun http proxy config
+//! stage-src: dryrun http proxy config resolver
 //!
 //! The operator prose table (contract target 5): location precedence
 //! in nginx is folklore, and these are the sentences that teach it —

@@ -2,7 +2,7 @@
 //! phase: run
 //! lanes: native checked lupin
 //! conforms: err.union
-//! stage-src: dryrun http proxy config
+//! stage-src: dryrun http proxy config resolver
 //!
 //! The dry-run's static decisions, offline: probe parsing through the
 //! REAL ws02 target parser (absolute-form), the serve/refuse verdicts

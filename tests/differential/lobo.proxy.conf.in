@@ -2,6 +2,11 @@
 # Mirrors nginx.proxy.conf.in exactly: same locations, same proxy_pass
 # arithmetic, same header directives, @PORT@/@BACKEND@ substituted.
 http {
+    # ws13: both sides PARSE nginx's resolver directive; the cases dial
+    # literals, so neither consults it (the runtime semantics are lobo's
+    # own by design — docs/RESOLVER.md names every delta)
+    resolver 127.0.0.1:5353 valid=30s;
+    resolver_timeout 5s;
     server {
         listen 127.0.0.1:@PORT@;
         location /keep/ {

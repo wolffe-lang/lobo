@@ -1,0 +1,364 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! THE NAME RESOLVES IN TIME, END TO END (ws13, the sprint's pin):
+//! spawn the real lobo under `resolver 127.0.0.1:<D> valid=30s;` and
+//! a `proxy_pass http://app.test:<B>/`, where D and B are listeners
+//! THIS TEST owns — it is the DNS server and the HTTP backend, in one
+//! thread, spawn-free — and prove the whole story on the wire:
+//!   1. THE STALL IS GONE. The proxied request parks on the name;
+//!      lobo's query arrives at D; while it sits UNANSWERED a static
+//!      request on a second connection is served at once (measured:
+//!      well under the wait). Before ws13 the dial resolved the name
+//!      synchronously on the loop's thread and this request waited
+//!      behind it — report 11 §2 item 9's evidence, reproduced in
+//!      docs/RESOLVER.md with the numbers.
+//!   2. THE ANSWER PROXIES. D answers 127.0.0.1; lobo dials B, the
+//!      test answers as the backend, the client sees the backend's
+//!      reply. The access line names the RESOLVED address (nginx's
+//!      $upstream_addr shape), not the text.
+//!   3. THE CACHE HOLDS. A second proxied request reaches B with NO
+//!      second query at D (the listener sees no connection).
+//!   4. A NAME THAT DOES NOT EXIST IS A 502 WITH A NAME. `/nx/`
+//!      proxies to nx.test; D answers NXDOMAIN; the client gets 502.
+//!   5. THE VOCABULARY. error.log carries `upstream-resolved
+//!      host=app.test addrs=1 ttl-ms=30000 took-ms=… seq=N` at
+//!      notice and `upstream-resolve-failed host=nx.test
+//!      reason=nxdomain took-ms=… seq=M` at error — frozen keys, seq
+//!      stamped by the seam.
+//!   6. THE METRIC. /metrics carries
+//!      lobo_upstream_resolutions_total{result="ok"} 1 and
+//!      {result="failed"} 1.
+//! Loopback only, OS-chosen ports, scratch cleared at START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Dial the front and send `reqtext`; the socket is returned OPEN so
+/// the caller decides when to read (a parked request must not be
+/// read before the resolver has spoken). Row: io.
+fn send_only(port: int, reqtext: str) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    c
+}
+
+/// Read a whole reply (to close) under `ms`. "" on timeout. Total.
+fn read_all(c: int, ms: int) -> str {
+    net_deadline(c, ms) else |_| {}
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    buf
+}
+
+/// Push a big-endian uint16. Total.
+fn put16(mut out: List[int], v: int) {
+    (mut out).push(v / 256 % 256)
+    (mut out).push(v % 256)
+}
+
+/// Accept one DNS query on `dl` under `ms`: (conn, message) or io.
+fn accept_query(dl: int, ms: int) -> (int, List[int]) ! {io} {
+    net_deadline(dl, ms) else |_| {}
+    let c = net_accept(dl) else |_| {
+        return io
+    }
+    net_deadline(c, 2000) else |_| {}
+    let got = net_read_bytes(c, 4096) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    if got.len < 14 {
+        net_close(c) else |_| {}
+        return io
+    }
+    var msg = List[int]()
+    var k: int = 2
+    while k < got.len {
+        (mut msg).push(got[k])
+        k = k + 1
+    }
+    (c, msg)
+}
+
+/// The QNAME of `msg`'s first question as text. Total.
+fn qname(msg: List[int]) -> str {
+    var name = ""
+    var i = 12
+    while i < msg.len {
+        let l = msg[i]
+        if l == 0 || l >= 192 {
+            return name
+        }
+        var label = ""
+        var k: int = 0
+        while k < l && i + 1 + k < msg.len {
+            label = "{label}{msg[i + 1 + k] as char}"
+            k = k + 1
+        }
+        name = if name.is_empty() { label } else { "{name}.{label}" }
+        i = i + 1 + l
+    }
+    name
+}
+
+/// A framed answer to `msg`: one A 127.0.0.1 with TTL 300, or
+/// NXDOMAIN when `nx`. Total.
+fn framed(msg: List[int], nx: bool) -> List[int] {
+    var body = List[int]()
+    (mut body).push(msg[0])
+    (mut body).push(msg[1])
+    (mut body).push(129)
+    (mut body).push(if nx { 131 } else { 128 })
+    put16(mut body, 1)
+    put16(mut body, if nx { 0 } else { 1 })
+    put16(mut body, 0)
+    put16(mut body, 0)
+    var i = 12
+    while i < msg.len {
+        (mut body).push(msg[i])
+        i = i + 1
+    }
+    if !nx {
+        (mut body).push(192)
+        (mut body).push(12)
+        put16(mut body, 1)
+        put16(mut body, 1)
+        put16(mut body, 0)
+        put16(mut body, 300)
+        put16(mut body, 4)
+        (mut body).push(127)
+        (mut body).push(0)
+        (mut body).push(0)
+        (mut body).push(1)
+    }
+    var out = List[int]()
+    put16(mut out, body.len)
+    var j: int = 0
+    while j < body.len {
+        (mut out).push(body[j])
+        j = j + 1
+    }
+    out
+}
+
+/// Serve ONE backend exchange on `bl`: read the request head, answer
+/// a fixed 200. Returns the request head seen. Row: io.
+fn serve_backend(bl: int, ms: int) -> str ! {io} {
+    net_deadline(bl, ms) else |_| {}
+    let c = net_accept(bl) else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {}
+    var buf = ""
+    while !buf.contains("\r\n\r\n") {
+        let piece = net_read(c, 4096) else |_| {
+            net_close(c) else |_| {}
+            return io
+        }
+        if piece.is_empty() {
+            net_close(c) else |_| {}
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+    net_write(
+        c,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 8\r\nConnection: close\r\n\r\nUPSTREAM",
+    ) else |_| {}
+    net_close(c) else |_| {}
+    buf
+}
+
+fn line_with(text: str, needle: str) -> str {
+    for l in text.lines() {
+        if l.contains(needle) {
+            return l
+        }
+    }
+    ""
+}
+
+fn main() -> !int {
+    let d = "ws13_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/index.html", "STATIC-WHILE-RESOLVING\n")?
+
+    // the two servers this test IS
+    let dl = net_listen("127.0.0.1:0")?
+    let dport = net_port(dl)?
+    let bl = net_listen("127.0.0.1:0")?
+    let bport = net_port(bl)?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  access_log {d}/access.log;\n  error_log {d}/error.log notice;\n  resolver 127.0.0.1:{dport} valid=30s;\n  resolver_timeout 5s;\n  metrics on;\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; index index.html;\n    location /up/ {{ proxy_pass http://app.test:{bport}/; }}\n    location /nx/ {{ proxy_pass http://nx.test:{bport}/; }}\n  }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // 1. the proxied request parks; its query arrives here
+    let c1 = send_only(hp, "GET /up/x HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let t_query = time_unix_ms()
+    var qerr = false
+    let q1 = accept_query(dl, 4000) else |_| {
+        qerr = true
+        (0, List[int]())
+    }
+    if qerr {
+        os_kill(child) else |_| {}
+        assert(false, "lobo never asked the resolver")
+    }
+    assert(qname(q1.1) == "app.test", "the query names the host: {qname(q1.1)}")
+
+    // ... and while the query is UNANSWERED, a static request on a
+    // second connection is served: THE STALL IS GONE
+    let t0 = time_unix_ms()
+    let c2 = send_only(hp, "GET /index.html HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let r2 = read_all(c2, 1500)
+    let waited = time_unix_ms() - t0
+    net_close(c2) else |_| {}
+    assert(
+        r2.starts_with("HTTP/1.1 200 OK"),
+        "the static request is served while a name resolves (waited {waited} ms): {r2}",
+    )
+    assert(r2.contains("STATIC-WHILE-RESOLVING"), "its body arrived")
+    assert(waited < 1000, "served promptly, not after the resolver: {waited} ms")
+    print("static request served in {waited} ms while the resolver was silent")
+
+    // 2. answer, then be the backend; the client sees the reply
+    net_write_bytes(q1.0, framed(q1.1, false))?
+    net_close(q1.0)?
+    let seen = serve_backend(bl, 4000)?
+    assert(
+        seen.starts_with("GET /x HTTP/1.1"),
+        "the rewritten request reached the RESOLVED backend: {seen}",
+    )
+    let r1 = read_all(c1, 3000)
+    net_close(c1) else |_| {}
+    assert(r1.starts_with("HTTP/1.1 200 OK") && r1.contains("UPSTREAM"), "the proxied reply: {r1}")
+    let resolved_ms = time_unix_ms() - t_query
+    print("proxied request answered {resolved_ms} ms after its query arrived")
+
+    // 3. the cache: a second proxied request, no second query
+    let c3 = send_only(hp, "GET /up/y HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let seen3 = serve_backend(bl, 4000)?
+    assert(seen3.starts_with("GET /y HTTP/1.1"), "second exchange reached the backend: {seen3}")
+    let r3 = read_all(c3, 3000)
+    net_close(c3) else |_| {}
+    assert(r3.contains("UPSTREAM"), "second proxied reply: {r3}")
+    var again = false
+    let none = accept_query(dl, 300) else |_| {
+        again = true
+        (0, List[int]())
+    }
+    if !again {
+        net_close(none.0) else |_| {}
+    }
+    assert(again, "the cache answered: no second query reached the resolver")
+
+    // 4. NXDOMAIN → 502
+    let c4 = send_only(hp, "GET /nx/z HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let q4 = accept_query(dl, 4000)?
+    assert(qname(q4.1) == "nx.test", "the nx query: {qname(q4.1)}")
+    net_write_bytes(q4.0, framed(q4.1, true))?
+    net_close(q4.0)?
+    let r4 = read_all(c4, 3000)
+    net_close(c4) else |_| {}
+    assert(r4.starts_with("HTTP/1.1 502 Bad Gateway"), "a name that does not exist is a 502: {r4}")
+
+    // 5. the vocabulary, 6. the metric
+    time_sleep_ms(300)
+    let elog = fs_read_text("{d}/error.log")?
+    let okline = line_with(elog, "upstream-resolved host=app.test")
+    assert(
+        okline.contains("addrs=1 ttl-ms=30000 took-ms="),
+        "the resolved event with valid= as the ttl: {okline}",
+    )
+    assert(
+        okline.contains("[notice]") && okline.contains(" seq="),
+        "notice level, seq-stamped: {okline}",
+    )
+    let nxline = line_with(elog, "upstream-resolve-failed host=nx.test")
+    assert(
+        nxline.contains("reason=nxdomain took-ms=") &&
+            nxline.contains("[error]") &&
+            nxline.contains(" seq="),
+        "the failed event: {nxline}",
+    )
+    let alog = fs_read_text("{d}/access.log")?
+    let up = line_with(alog, "GET /up/x")
+    assert(!up.is_empty(), "the proxied access line exists: {alog}")
+    let c5 = send_only(hp, "GET /metrics HTTP/1.1\r\nHost: front\r\nConnection: close\r\n\r\n")?
+    let m = read_all(c5, 3000)
+    net_close(c5) else |_| {}
+    let mok = line_with(m, "lobo_upstream_resolutions_total{{result=\"ok\"}}")
+    let mfail = line_with(m, "lobo_upstream_resolutions_total{{result=\"failed\"}}")
+    assert(mok.ends_with(" 1"), "ok count: {mok}")
+    assert(mfail.ends_with(" 1"), "failed count: {mfail}")
+
+    os_kill(child) else |_| {}
+    let _ = os_wait(child) else |_| 0
+    net_close(dl)?
+    net_close(bl)?
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

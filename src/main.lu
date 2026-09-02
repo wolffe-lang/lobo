@@ -55,6 +55,7 @@ use http
 use metrics
 use obs
 use proxy
+use resolver
 use serve
 use shell
 use tls
@@ -492,6 +493,8 @@ struct Counters {
     tls_timeout: int,
     tls_io: int,
     dropped: int,
+    res_ok: int,
+    res_failed: int,
     rdur: metrics.Hist,
     udur: metrics.Hist,
 }
@@ -517,6 +520,8 @@ fn counters_new() -> Counters {
         tls_timeout: 0,
         tls_io: 0,
         dropped: 0,
+        res_ok: 0,
+        res_failed: 0,
         rdur: metrics.hist_new(),
         udur: metrics.hist_new(),
     }
@@ -676,6 +681,11 @@ fn render_metrics(ct: Counters, gens: List[GenRow], shutdown_ms: int, events: in
     }
     out = "{out}{metrics.header("lobo_live_region_bytes")}"
     out = "{out}{metrics.sample0("lobo_live_region_bytes", live_region_bytes())}"
+    // ws13: the resolver — both series always present (a fixed
+    // two-value label set; the reason lives in the log event)
+    out = "{out}{metrics.header("lobo_upstream_resolutions_total")}"
+    out = "{out}{metrics.sample1("lobo_upstream_resolutions_total", "result", "ok", ct.res_ok)}"
+    out = "{out}{metrics.sample1("lobo_upstream_resolutions_total", "result", "failed", ct.res_failed)}"
 
     out = "{out}{metrics.header("lobo_log_lines_dropped_total")}"
     out = "{out}{metrics.sample0("lobo_log_lines_dropped_total", ct.dropped)}"
@@ -1200,11 +1210,37 @@ fn serve_main(prefix: str, conf: str) -> int {
     var cserved = List[int]()
     var cidle = List[int]()
     var cstart = List[int]()
+    // ws13: the name a connection is PARKED on ("" = not parked): the
+    // loop skips its step until the resolver settles that name
+    var cwait = List[str]()
+
+    // ws13: the resolver — the cache and the pending query table the
+    // loop ticks once per pass like every other socket it owns
+    var rs = resolver.new()
 
     var running = true
     var quitting = false
     while running {
         let now = time_unix_ms()
+
+        // 0. ws13: one resolver pass — every pending query socket
+        // gets a 1 ms read under its deadline; settled names become
+        // vocabulary events through the ws09 seam (stamped seq=) and
+        // counter movement
+        resolver.tick(mut rs, now)
+        let revs = resolver.take_events(mut rs)
+        var ri: int = 0
+        while ri < revs.len {
+            let body = revs[ri]
+            if body.starts_with("upstream-resolved ") {
+                counters.res_ok = counters.res_ok + 1
+                ev_event(mut elog, "notice", body)
+            } else {
+                counters.res_failed = counters.res_failed + 1
+                ev_event(mut elog, "error", body)
+            }
+            ri = ri + 1
+        }
 
         // 1. collect ONE trigger for the verb dispatch: a control-
         // channel line (with a reply socket) or a received signal
@@ -1343,6 +1379,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                 (mut cserved).push(0)
                 (mut cidle).push(now)
                 (mut cstart).push(now)
+                (mut cwait).push("")
             }
         }
 
@@ -1391,7 +1428,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                 } else {
                     counters.tls_ok = counters.tls_ok + 1
                     var tcn = conn.tls_conn(tconn, z)
-                    serve.serve_conn_cn(mut tcn, tconf, opts, lim_for(gens, tgen), hport)
+                    serve.serve_conn_cn(mut tcn, tconf, opts, lim_for(gens, tgen), hport, mut rs)
                 }
                 gens = on_conn_close(gens, tgen, false, mut elog)
             }
@@ -1407,6 +1444,7 @@ fn serve_main(prefix: str, conf: str) -> int {
         var nserved = List[int]()
         var nidle = List[int]()
         var ncstart = List[int]()
+        var nwait = List[str]()
         var pass_accs = List[AccRow]()
         var k: int = 0
         let ktot = cfds.len
@@ -1417,12 +1455,45 @@ fn serve_main(prefix: str, conf: str) -> int {
             let sv = cserved[k]
             let idle0 = cidle[k]
             let cs0 = cstart[k]
+            let waiting = cwait[k]
+            // ws13: a PARKED connection is not stepped while its name
+            // is still in flight — the row rides forward untouched
+            // (its idle clock too: waiting on the resolver is work,
+            // not idleness; resolver_timeout bounds it)
+            if !waiting.is_empty() && resolver.is_pending(rs, waiting) {
+                (mut nfds).push(fd)
+                (mut ngens).push(cg)
+                (mut ncarry).push(car)
+                (mut nserved).push(sv)
+                (mut nidle).push(now)
+                (mut ncstart).push(cs0)
+                (mut nwait).push(waiting)
+                k = k + 1
+                continue
+            }
             let cconf = conf_for(gens, cg)
-            let st = serve.conn_step(fd, cconf, opts, lim_for(gens, cg), hport, car, sv, 12)
+            let st = serve.conn_step(fd, cconf, opts, lim_for(gens, cg), hport, car, sv, 12, mut rs)
             var close_it = st.close
             var new_idle = idle0
             if st.active {
                 new_idle = now
+            }
+            // ws13: serve asked to WAIT on a name — park the row and
+            // make sure a query is in flight (start is a no-op while
+            // one is, or while the cache is fresh)
+            var new_wait = ""
+            if !st.resolve.is_empty() {
+                new_wait = st.resolve
+                new_idle = now
+                resolver.
+                    start(
+                    mut rs,
+                    st.resolve,
+                    st.resolve_addr,
+                    st.resolve_timeout_ms,
+                    st.resolve_valid_ms,
+                    now,
+                )
             }
             // ws12: the admin endpoint's SECOND PHASE. serve
             // recognised /metrics or /status.json and handed the
@@ -1542,6 +1613,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                 (mut nserved).push(st.served)
                 (mut nidle).push(new_idle)
                 (mut ncstart).push(new_start)
+                (mut nwait).push(new_wait)
             }
             k = k + 1
         }
@@ -1551,6 +1623,7 @@ fn serve_main(prefix: str, conf: str) -> int {
         cserved = nserved
         cidle = nidle
         cstart = ncstart
+        cwait = nwait
 
         // ws09: pump the pass's records through every access output
         // (ONE bounded append per sink per pass — emit never blocked

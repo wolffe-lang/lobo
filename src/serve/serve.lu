@@ -22,6 +22,7 @@ use http
 use metrics
 use obs
 use proxy
+use resolver
 
 /// This module's interface version. Total; never traps.
 pub fn version() -> str {
@@ -1176,7 +1177,12 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
 /// close; the socket is always closed before return.
 pub fn serve_conn(conn: int, c: config.Conf, opts: ServerOpts, limits: http.Limits, local_port: int) {
     var cn = conn_mod_plain(conn)
-    serve_conn_cn(mut cn, c, opts, limits, local_port)
+    // ws13: the blocking driver owns a resolver of its own — a name
+    // it meets resolves INLINE (bounded by resolver_timeout) because
+    // there is no loop here to park on; the rig and the differential
+    // dial literals, so this cache stays empty in every gauntlet run
+    var rs0 = resolver.new()
+    serve_conn_cn(mut cn, c, opts, limits, local_port, mut rs0)
 }
 
 /// A plaintext Conn over `fd` (the wrapper avoids importing `conn` as
@@ -1199,6 +1205,7 @@ pub fn serve_conn_cn(
     opts: ServerOpts,
     limits: http.Limits,
     local_port: int,
+    mut rs: resolver.Resolver,
 ) {
     var carry = ""
     var served: int = 0
@@ -1370,6 +1377,7 @@ pub fn serve_conn_cn(
                 opts.token,
                 now_date(),
                 keep,
+                mut rs,
                 mut pacc0,
             ) else |_| {
                 conn.conn_close(mut cn)
@@ -1439,6 +1447,10 @@ pub struct ReqOut {
     mem_hw: int,
     mem_rt: int,
     admin: str,
+    resolve: str,
+    resolve_addr: str,
+    resolve_timeout_ms: int,
+    resolve_valid_ms: int,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -1456,6 +1468,34 @@ fn req_out(close: bool, carry: str, acc: obs.Access, chg: Charge) -> ReqOut {
         mem_hw: chg.used,
         mem_rt: chg.rt,
         admin: "",
+        resolve: "",
+        resolve_addr: "",
+        resolve_timeout_ms: 0,
+        resolve_valid_ms: 0,
+    }
+}
+
+/// A ReqOut that asks the loop to WAIT (ws13): nothing has been
+/// written, no byte past the head has been read, and `resolve` names
+/// the upstream host the request cannot dial until the resolver
+/// answers. The loop parks the connection (its whole buffer carried
+/// back) and steps it again once the name settles. Total.
+fn req_out_wait(acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
+    ReqOut {
+        close: false,
+        carry: "",
+        logged: false,
+        acc: acc,
+        bud_site: "",
+        bud_limit: chg.limit,
+        bud_would: 0,
+        mem_hw: 0,
+        mem_rt: 0,
+        admin: "",
+        resolve: need.host,
+        resolve_addr: need.addr,
+        resolve_timeout_ms: need.timeout_ms,
+        resolve_valid_ms: need.valid_ms,
     }
 }
 
@@ -1475,6 +1515,10 @@ fn req_out_admin(close: bool, carry: str, acc: obs.Access, chg: Charge, kind: st
         mem_hw: chg.used,
         mem_rt: chg.rt,
         admin: kind,
+        resolve: "",
+        resolve_addr: "",
+        resolve_timeout_ms: 0,
+        resolve_valid_ms: 0,
     }
 }
 
@@ -1497,6 +1541,7 @@ pub fn serve_request(
     head: str,
     rest0: str,
     served: int,
+    mut rs: resolver.Resolver,
 ) -> ReqOut {
     var cn = conn_mod_plain(conn)
     var acc = obs.access_new()
@@ -1541,6 +1586,19 @@ pub fn serve_request(
         acc.body_bytes = err_len(503, false, opts.token)
         send_err(mut cn, 503, false, opts.token)
         return req_out(true, "", acc, chg)
+    }
+
+    // ws13: THE WAIT — before a byte past the head is consumed, ask
+    // whether the route's upstream is a name the resolver has not
+    // answered yet. If so the loop parks this connection with its
+    // whole buffer and steps it again when the name settles; the
+    // request is then served from the top with the cache warm. The
+    // check is pure over the model and the cache, and it runs
+    // before the body read on purpose: nothing consumed, nothing to
+    // replay.
+    let need = proxy.resolve_need(c, req.path, rs, time_unix_ms())
+    if !need.host.is_empty() {
+        return req_out_wait(acc, chg, need)
     }
 
     var rest = rest0
@@ -1645,7 +1703,19 @@ pub fn serve_request(
         var pacc = proxy.run_acc()
         var raised = false
         should_close = proxy.
-            run(conn, c, req, body, pplan, "127.0.0.1", opts.token, now_date(), keep, mut pacc) else |_| {
+            run(
+            conn,
+            c,
+            req,
+            body,
+            pplan,
+            "127.0.0.1",
+            opts.token,
+            now_date(),
+            keep,
+            mut rs,
+            mut pacc,
+        ) else |_| {
             raised = true
             true
         }
@@ -1731,6 +1801,10 @@ pub struct ConnStep {
     mem_hw: int,
     mem_rt: int,
     admin: str,
+    resolve: str,
+    resolve_addr: str,
+    resolve_timeout_ms: int,
+    resolve_valid_ms: int,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -1750,6 +1824,10 @@ fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, ac
         mem_hw: 0,
         mem_rt: 0,
         admin: "",
+        resolve: "",
+        resolve_addr: "",
+        resolve_timeout_ms: 0,
+        resolve_valid_ms: 0,
     }
 }
 
@@ -1764,11 +1842,24 @@ fn step_serve(
     buf: str,
     cut: HeadCut,
     served: int,
+    mut rs: resolver.Resolver,
 ) -> ConnStep {
     let head = buf[0..cut.marker]
     let rest = buf[cut.marker + cut.mlen..buf.len]
     net_deadline(conn, opts.read_timeout_ms) else |_| {}
-    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served)
+    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served, mut rs)
+    if !ro.resolve.is_empty() {
+        // ws13: parked — the WHOLE buffer rides back as the carry
+        // (the head is unconsumed as far as the loop is concerned),
+        // nothing was served, and the loop steps this connection
+        // again once `resolve` settles
+        var w = step_out(false, false, buf, served, false, obs.access_new())
+        w.resolve = ro.resolve
+        w.resolve_addr = ro.resolve_addr
+        w.resolve_timeout_ms = ro.resolve_timeout_ms
+        w.resolve_valid_ms = ro.resolve_valid_ms
+        return w
+    }
     let ns = served + 1
     ConnStep {
         active: true,
@@ -1783,6 +1874,10 @@ fn step_serve(
         mem_hw: ro.mem_hw,
         mem_rt: ro.mem_rt,
         admin: ro.admin,
+        resolve: "",
+        resolve_addr: "",
+        resolve_timeout_ms: 0,
+        resolve_valid_ms: 0,
     }
 }
 
@@ -1804,12 +1899,13 @@ pub fn conn_step(
     carry: str,
     served: int,
     poll_ms: int,
+    mut rs: resolver.Resolver,
 ) -> ConnStep {
     var cn = conn_mod_plain(conn)
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, pre, served)
+        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, mut rs)
     }
     if buf.len > limits.max_header_total {
         send_err(mut cn, 400, true, opts.token)
@@ -1847,7 +1943,7 @@ pub fn conn_step(
     buf = "{buf}{piece}"
     let cut = head_cut(buf)
     if cut.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, cut, served)
+        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, mut rs)
     }
     step_out(true, false, buf, served, false, obs.access_new())
 }
