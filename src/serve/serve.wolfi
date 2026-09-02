@@ -1,15 +1,15 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.3 · edition v1
-  export_hash bb5428b05851b211acab22d8eb5afbcdc3985c2184a8f3a5cef55f9e9c904d8c
-  pkg_hash    bb5428b05851b211acab22d8eb5afbcdc3985c2184a8f3a5cef55f9e9c904d8c
+  export_hash 18e30eaf0658e1c09f7931d434d96ea5657dc62f4e95ef53ab80535744ea3511
+  pkg_hash    18e30eaf0658e1c09f7931d434d96ea5657dc62f4e95ef53ab80535744ea3511
   deps:
     budget  e9419042d06548f1a523738ead044d657fbe591539b2ec1c9e9d01598c5d8d22
-    config  4ca8619eed493da02f2439b1eef73db3a5b7b2b39a30e5caaf716938200531ed
-    conn  0c954129062114b97cbe662f65c32f66f263fb6189e4a650adce1f050c0142d7
-    http  6e18c1b349576e6c7acf4b757cfceb8543558460150de261f1d511946166219e
+    config  28a6fc3b9315c6cad4ffeb13ea70e61eef8d92bb900e6c557e6c6ae395d97c2d
+    conn  a76e9235b609e9c0f2245a59f50daed0d37422b706ccd86902934275d342e8f4
+    http  3e2c2b5c24156fc355b09618e21dea664d0b4cbcb21c0dd0b1d18bcd598cab6d
     metrics  3fa3431c8c908c1e104348f727d2af16668bfcf3de371ed93962b5e029b0ac9d
     obs  5634b6ed2d5b23cd8b20b3c11a1e5ca4a225b1aed8c63d0e3e84136b42fadfe3
-    proxy  6fa3467d0251a913446bc6aa7ed6303246c3c420eed2a7a66c1c8ee3692e8b47
+    proxy  6931eb1dc7647a50bfe86e9a2359b270a848986efc6db9fd2c0b37258c83b252
     resolver  335a608ed8a1bcaebc89315ca204485dd53b25c5cc15e7b78fd88a4e99e07f2e
   items:
     [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
