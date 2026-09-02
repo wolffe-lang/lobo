@@ -142,7 +142,7 @@ vibes):
 | `connection-retired` | notice | `gen`, `remaining` | one connection on a draining generation closed; `remaining` still held |
 | `generation-retired` | notice | `gen`, `drained`, `aborted`, `age-ms` | a draining generation reached zero (or timed out): `drained` closed cleanly, `aborted` force-closed by the timeout |
 | `signal-received` | notice | `sig`, `verb` | a real OS signal arrived and was mapped to an operator verb (wsm01): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb — the line that tells a signal-driven reload from a control-channel one |
-| `budget-exceeded` | error | `gen`, `site`, `budget`, `would` | a request was refused by its `memory_budget` (ws10): `site` the deterministic exceed-site (`head`\|`body`\|`body-chunked`\|`file`), `budget` the configured bytes, `would` what admitting it would have charged; the request also writes an ordinary 503 access line (docs/BUDGET.md) |
+| `budget-exceeded` | error | `gen`, `site`, `budget`, `would` (+ `cap`, ws14, only at `site=region`) | a request was refused by its `memory_budget` (ws10): `site` the deterministic exceed-site (`head`\|`body`\|`body-chunked`\|`file`\|`admin`\|`region` — the last is the RUNTIME's refusal, ws14, and carries `cap`, the region cap in ledger units), `budget` the configured bytes, `would` what admitting it would have charged (`budget+1` at `region`: a killed proc's charge is unobservable); the request also writes an ordinary 503 access line (docs/BUDGET.md) |
 | `upstream-resolved` | notice | `host`, `addrs`, `ttl-ms`, `took-ms` | the resolver answered an upstream name (ws13): `addrs` how many addresses, `ttl-ms` how long the cache holds them (the record TTL or `valid=`, floored at 1 s), `took-ms` the query's wall time (docs/RESOLVER.md) |
 | `upstream-resolve-failed` | error | `host`, `reason`, `took-ms` | an upstream name did not resolve (ws13): `reason` one of `nxdomain`\|`servfail`\|`refused`\|`noaddr`\|`malformed`\|`rcode`\|`timeout`\|`io`\|`dial`; the failure is held 1 s and the requests parked on the name answer 502 |
 
@@ -199,6 +199,54 @@ ws04 built:
   needs the pid from the process table.
 - **The control channel** (ws04) STAYS: the portable trigger, the
   Windows reload story, and the transport for `status`.
+
+### Windows: what lobo promises for `reload` and `upgrade` (ws14)
+
+s60b landed `[os.signal.platform]`'s windows row in the 5f99b9f pin:
+the console handler is the delivery — `CTRL_C` and `CTRL_CLOSE` are
+`terminate` (lobo's `stop`), `CTRL_BREAK` is `quit` (the graceful
+drain) — and **`RELOAD` and `UPGRADE` have no windows analog**; an
+`os_signal_raise` there is in-process only, so lobo's own probe
+self-raise (the spawn-free poll) works, and nothing outside the
+process can raise `reload`. ws04's control-channel question is
+therefore answered in one sentence, and this is the sentence lobo
+promises:
+
+> **On windows, `lobo -s reload` reaches a running lobo over its
+> `control` endpoint or not at all; there is no signal that reloads
+> it, and a config without a `control` directive cannot be reloaded
+> without a restart.** `upgrade` (the binary-swap verb, unclaimed on
+> every platform at this pin) will be a control-channel verb when it
+> exists, and the only trigger for it on windows.
+
+What that means in the running server: `os_signal_listen` SUCCEEDS
+on windows (unlike the hosts where delivery is unwired), so the
+startup notice cannot use the listen's answer to tell the operator
+which meanings will actually arrive — and the language has no
+platform query to ask. The notice therefore names the MEANINGS and
+the two platform maps in one line
+(`signal reception armed by meaning … windows CTRL_C/CTRL_CLOSE=
+terminate, CTRL_BREAK=quit, no external reload — the control channel
+is reload's only trigger there`); an operator reads the line, not a
+platform-detected variant of it. `lobo -s reload` already sends over
+the channel on every platform (there is no getpid surface, so it
+never did anything else — the wsm01 residue), which is why the
+seam falls out small: nothing in lobo's dispatch changes, and the
+control channel's tests (`tests/shell/control_e2e.lu`, `-s` against
+a running master) are the reload witness windows would run.
+
+**Measured versus claimed.** lobo's CI is linux-only and the local
+gauntlet runs on linux+macOS; the windows-native tier at this pin
+runs spawn/procs/select/net deadlines (s60b) but refuses `wolf build
+--release` by name (the LLVM tier is s60c's), and lobo's gauntlet
+builds the release tier on every commit — so **nothing on this page
+about windows is measured by lobo**. The mapping is CLAIMED from
+`[os.signal.platform]`'s normative table and wolf-lang's own
+windows floor (261/278 rows, zero refused by construct name at s60b);
+the control-channel path is measured on linux and macOS only. A
+windows lane for lobo is a ws16-class decision (the CI matrix grows
+when the repo goes public), and the first thing it would run is
+`tools/lobo-signal`'s skip line and `control_e2e.lu`.
 
 The real-signal witness is `tools/lobo-signal` (a gauntlet step): a
 held connection, a real `kill -HUP`, the observable drain, retirement,

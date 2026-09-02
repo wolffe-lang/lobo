@@ -23,6 +23,13 @@
 //! Signal delivery is Linux+macOS at the wsm03 pin (s114/s59; other
 //! hosts follow the ports); where the listen refuses, the server says
 //! so and runs control-channel-only — a named gap, never a fake.
+//! ws14, against s60b's landed windows table: there the listen
+//! SUCCEEDS (a console handler), CTRL_C/CTRL_CLOSE deliver terminate
+//! and CTRL_BREAK quit, and RELOAD never arrives from outside — so
+//! the startup notice below names the meanings, not unix signal
+//! names, and docs/DRAIN.md carries lobo's windows promise: reload
+//! is the control channel's, or nothing (the language has no
+//! platform query, so the sentence is documented, not detected).
 //!
 //! Serve stays SPAWN-FREE (D7, ws04's shape): ONE poll loop
 //! multiplexes the http listener, the control channel, the signal
@@ -1189,7 +1196,11 @@ fn serve_main(prefix: str, conf: str) -> int {
         sig_on = false
     }
     if sig_on {
-        ev_log(mut elog, "notice", "signal reception armed (HUP=reload, TERM=stop, QUIT=quit)")
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])",
+        )
     } else {
         ev_log(
             mut elog,
