@@ -811,9 +811,9 @@ pub fn table() -> Table {
         "main",
         "",
         1,
-        1,
+        3,
         "implemented",
-        "lobo-native: loopback reload channel for -s (off by default; NOT an nginx directive — the oracle -t rejects it, a named delta; ws14 audits the surface)",
+        "lobo-native (ws04, widened at ws15): the loopback endpoint a running lobo takes orders on — reload/quit/stop/reopen/status/upgrade/ping, the SAME dispatch a real signal drives. `control <addr>` or `control <addr> token <file>`; off by default. The listener is loopback TCP on EVERY host: wolf has no unix-domain socket at this pin (measured, wolf-lang#227), so the filesystem-permissioned socket every comparable server uses is unavailable and the optional token file is the auth arm instead — lobo READS it, never writes it (std has no permission surface, wolf-std#5). NOT an nginx directive (the oracle -t rejects it, a named delta); nginx's own trigger is kill(pid, SIGHUP) and the kernel authorizes it — docs/CONTROL.md's delta table",
     )
     // ---- implemented at ws05: the certs-carry campaign's serving set
     row(

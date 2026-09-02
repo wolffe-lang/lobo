@@ -1,0 +1,151 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! THE ORDER DESK, PURE (ws15). Everything about the control endpoint
+//! that is a decision rather than a socket: the directive's two arms,
+//! the wire line a client sends, the authorization rule, the verb set,
+//! and the verb→signal-meaning map that makes ONE emission site serve
+//! both triggers. All three lanes (no net, no fs — just string work
+//! over a parsed model), so the auth shape is checked on the UB
+//! machine and the interpreter too, not only where a socket exists.
+//! The live half is tests/shell/control_e2e.lu (a real binary, a real
+//! token file) and tools/lobo-signal (the two triggers' logs compared
+//! line by line). docs/CONTROL.md is the page.
+
+use config
+use shell
+
+fn main() -> !int {
+    // ---- the directive's two arms
+    let bare = config.parse_str("control 127.0.0.1:9001;\nhttp {{ }}\n", "x")
+    assert(shell.control_addr(bare) == "127.0.0.1:9001", "the address arm")
+    assert(shell.control_token_path(bare, "/p").is_empty(), "no token arm → no token file")
+    let port_only = config.parse_str("control 9001;\nhttp {{ }}\n", "x")
+    assert(
+        shell.control_addr(port_only) == "127.0.0.1:9001",
+        "a bare port is a LOOPBACK bind, forever",
+    )
+    let tokd = config.parse_str("control 127.0.0.1:9001 token secrets/ctl;\nhttp {{ }}\n", "x")
+    assert(shell.control_addr(tokd) == "127.0.0.1:9001", "the address arm survives the token arm")
+    assert(
+        shell.control_token_path(tokd, "/p") == "/p/secrets/ctl",
+        "a relative token path resolves under the prefix",
+    )
+    let abst = config.parse_str("control 127.0.0.1:9001 token /etc/lobo/ctl;\nhttp {{ }}\n", "x")
+    assert(
+        shell.control_token_path(abst, "/p") == "/etc/lobo/ctl",
+        "an absolute token path is honoured verbatim",
+    )
+    let none = config.parse_str("http {{ }}\n", "x")
+    assert(shell.control_addr(none).is_empty(), "no directive → the channel is OFF by default")
+
+    // ---- the -t half: the token arm is spelled `token <file>`
+    assert(config.control_check(bare).is_empty(), "the bare arm checks clean")
+    assert(config.control_check(tokd).is_empty(), "the token arm checks clean")
+    let half = config.parse_str("control 127.0.0.1:9001 token;\nhttp {{ }}\n", "x")
+    let herr = config.control_check(half)
+    assert(herr.contains("token <file>"), "the keyword with no file is NAMED: {herr}")
+    let wrong = config.parse_str("control 127.0.0.1:9001 secret f;\nhttp {{ }}\n", "x")
+    let werr = config.control_check(wrong)
+    assert(werr.contains("expected \"token\""), "an unknown keyword is NAMED: {werr}")
+
+    // ---- the wire line
+    assert(shell.control_line("", "reload") == "reload", "no token → the verb alone")
+    assert(shell.control_line("s3cr3t", "reload") == "s3cr3t reload", "a token prefixes the verb")
+    assert(
+        shell.control_line("s3cr3t", "status json") == "s3cr3t status json",
+        "the two-word verb survives the prefix",
+    )
+
+    // ---- the authorization rule
+    assert(shell.control_authorized("reload", ""), "no token configured → loopback is the boundary")
+    assert(!shell.control_authorized("reload", "s3cr3t"), "a bare verb under a token is refused")
+    assert(!shell.control_authorized("wrong reload", "s3cr3t"), "a wrong secret is refused")
+    assert(!shell.control_authorized("s3cr3treload", "s3cr3t"), "the secret is a WHOLE field")
+    assert(shell.control_authorized("s3cr3t reload", "s3cr3t"), "the right secret is admitted")
+    assert(
+        shell.control_authorized("ping", "s3cr3t"),
+        "ping is ALWAYS authorized — the liveness probe -s and the stale-pid check use (a rotated token must never make a live master look dead)",
+    )
+
+    // ---- the verb inside the line
+    assert(shell.control_verb_of("reload", "") == "reload", "no token → the line is the verb")
+    assert(
+        shell.control_verb_of("s3cr3t reload", "s3cr3t") == "reload",
+        "the verb after the secret",
+    )
+    assert(
+        shell.control_verb_of("s3cr3t status json", "s3cr3t") == "status json",
+        "the two-word verb comes back whole",
+    )
+    assert(shell.control_verb_of("ping", "s3cr3t") == "ping", "ping needs no secret")
+    assert(
+        shell.control_verb_of("wrong reload", "s3cr3t").is_empty(),
+        "an unauthorized line yields NO verb, so a caller dispatches nothing",
+    )
+
+    // ---- the verb set
+    assert(shell.control_verb_ok("reload"), "reload")
+    assert(shell.control_verb_ok("quit"), "quit")
+    assert(shell.control_verb_ok("stop"), "stop")
+    assert(shell.control_verb_ok("reopen"), "reopen")
+    assert(shell.control_verb_ok("status"), "status")
+    assert(shell.control_verb_ok("status json"), "status takes an argument")
+    assert(shell.control_verb_ok("upgrade"), "upgrade — named at this pin, dispatched all the same")
+    assert(shell.control_verb_ok("ping"), "ping")
+    assert(!shell.control_verb_ok("shutdown"), "an invented verb is not in the set")
+
+    // ---- the verb → meaning map: what makes ONE emission site serve
+    // both doors (the inverse of signal_verb)
+    assert(shell.signal_meaning("reload") == shell.sig_reload(), "reload ↔ RELOAD")
+    assert(shell.signal_meaning("stop") == shell.sig_terminate(), "stop ↔ TERMINATE")
+    assert(shell.signal_meaning("quit") == shell.sig_quit(), "quit ↔ QUIT")
+    assert(shell.signal_meaning("status") == 0, "status has no signal twin")
+    assert(shell.signal_meaning("reopen") == 0, "reopen has no listened meaning at this pin")
+    assert(shell.signal_meaning("ping") == 0, "ping has no signal twin")
+    assert(
+        shell.signal_meaning("upgrade") == 0,
+        "upgrade has NO signal twin: UPGRADE's bit is lobo's own poll probe on unix and has no windows analog at all — the one verb the endpoint reaches and no signal does",
+    )
+    // the round trip: every meaning's verb maps back to it
+    assert(
+        shell.signal_meaning(shell.signal_verb(shell.sig_reload())) == shell.sig_reload(),
+        "reload round-trips",
+    )
+    assert(
+        shell.signal_meaning(shell.signal_verb(shell.sig_terminate())) == shell.sig_terminate(),
+        "terminate round-trips",
+    )
+    assert(
+        shell.signal_meaning(shell.signal_verb(shell.sig_quit())) == shell.sig_quit(),
+        "quit round-trips",
+    )
+
+    // ---- the event: ONE builder, both sources, the same bytes but
+    // for the `source` field (the ws15 vocabulary extension)
+    let from_sig = shell.ev_signal_received(shell.sig_reload(), "signal")
+    let from_ctl = shell.ev_signal_received(shell.signal_meaning("reload"), "control")
+    assert(
+        from_sig == "signal-received sig=reload verb=reload source=signal",
+        "the signal door's line: {from_sig}",
+    )
+    assert(
+        from_ctl == "signal-received sig=reload verb=reload source=control",
+        "the control door's line: {from_ctl}",
+    )
+    let cut = from_sig.len - "signal".len
+    assert(
+        from_sig[0..cut] == from_ctl[0..from_ctl.len - "control".len],
+        "the two lines are byte-identical up to the source VALUE — the whole of the difference",
+    )
+    assert(
+        shell.ev_signal_received(shell.sig_terminate(), "control") ==
+            "signal-received sig=terminate verb=stop source=control",
+        "a control `stop` is the TERMINATE meaning, said in the frozen vocabulary",
+    )
+
+    print("control verbs: the order desk is one dispatch")
+    0
+}

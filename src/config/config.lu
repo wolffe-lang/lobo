@@ -118,6 +118,16 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws15: the control half of -t — the endpoint's optional auth arm
+    // is spelled `token <file>` and nothing else. One named [emerg],
+    // first failure wins.
+    if verdict == 0 {
+        let cerr = control_check(c)
+        if !cerr.is_empty() {
+            eprint("lobo: [emerg] {cerr}")
+            verdict = 1
+        }
+    }
     // wsm04: the upstream-TLS half of -t — an https proxy_pass names
     // its trust anchors (the client verifies always) and the file
     // loads. One named [emerg], first failure wins.

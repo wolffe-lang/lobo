@@ -4,17 +4,24 @@
 //! platform-independent reload path — a loopback CONTROL CHANNEL the
 //! running server listens on. ws04's territory.
 //!
-//! The split (ws04 contract §3). Signal RECEPTION is the wolf-lang
-//! ask #126 (s114), open at the pin this repo is built for — so the
-//! four verbs are reached through the control channel here, and the
-//! signal receiver is the campaign's one named deferral. The pin also
-//! exposes neither a getpid nor an arbitrary-pid signal SEND (os_kill
+//! The split (ws04 contract §3, settled at wsm01/ws15). Signal
+//! RECEPTION landed (s114, wolf-lang#126's first half), so a real
+//! SIGHUP/SIGTERM/SIGQUIT reaches the same verb dispatch the control
+//! channel drives. What did NOT land is the SEND side: the pin
+//! exposes neither a getpid nor an arbitrary-pid signal send (os_kill
 //! terminates a CHILD by handle only), so `-s` drives the control
-//! channel too and the pid file records the control ENDPOINT, not an
-//! os pid — the whole signal/pid family is #126, and each half flips
-//! to the unix path the sprint after #126 lands. All three are one
-//! gate; the control channel is the working path AND the Windows
-//! reload story (contract §3).
+//! channel and the pid file records the control ENDPOINT, not an os
+//! pid — the named residue, flipping the sprint after #126's second
+//! half lands. The control channel is therefore the working path AND
+//! the Windows reload story, and ws15 makes it the SERVER'S ORDER
+//! DESK rather than a reload pipe: the whole verb set
+//! (`reload`/`quit`/`stop`/`reopen`/`status`/`upgrade`/`ping`) is
+//! reachable over it, `lobo control <verb>` is its CLI door, and an
+//! optional shared secret read from an operator-owned token file is
+//! its second auth arm beside the loopback bind. docs/CONTROL.md is
+//! the page; wolf has no unix-domain socket at this pin (measured;
+//! wolf-lang#227), which is why the listener is loopback TCP on
+//! every host and why the token arm exists at all.
 //!
 //! Design (contract §3 sketch): every trigger — a control command
 //! today, a real signal when #126 lands — flows through the SAME verb
@@ -56,8 +63,13 @@ pub fn version() -> str {
 
 /// The parsed command line. `mode` is the verb the entry dispatches:
 /// banner | version | version_verbose | help | check | dump | docs |
-/// serve | signal | status | error. `signal` carries the validated
-/// verb when `mode == "signal"`. `format` is the `--format` value
+/// serve | signal | status | control | error. `signal` carries the
+/// validated verb when `mode == "signal"` — and, when `mode ==
+/// "control"`, the control-endpoint verb `lobo control <verb>` names
+/// (ws15: the whole verb set, `status`/`upgrade`/`ping` included,
+/// reachable from the CLI without widening nginx's `-s`, whose four
+/// words stay exactly four — the parity the shell differential
+/// probes). `format` is the `--format` value
 /// (default "text", "json" for the machine-readable `lobo status`).
 /// `err_msg` is the nginx-shaped diagnostic (own identity: "lobo: …" for
 /// "nginx: …") and `exit_code` the code to return when `mode ==
@@ -162,6 +174,14 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 sni = a
             } else if want == "client" {
                 client = a
+            } else if want == "control" {
+                if control_verb_ok(a) {
+                    mode = "control"
+                    signal = a
+                } else {
+                    errored = true
+                    err_msg = "invalid \"control\" verb: \"{a}\" (expected: reload, quit, stop, reopen, status, upgrade, ping)"
+                }
             } else if want == "cert" {
                 if a == "status" {
                     mode = "cert_status"
@@ -225,6 +245,9 @@ pub fn parse_cli(args: List[str]) -> Cli {
             mode = "serve"
         } else if a == "status" {
             mode = "status"
+        } else if a == "control" {
+            want = "control"
+            want_kind = "verb"
         } else if a == "cert" {
             want = "cert"
             want_kind = "subcommand"
@@ -334,6 +357,9 @@ pub fn usage_text() -> str {
     s = "{s}           (the config dry-run: what would this config DO — ws07)\n"
     s = "{s}       lobo [serve | directives-md | logvars-md | metrics-md]\n"
     s = "{s}           (lobo-native verbs)\n"
+    s = "{s}       lobo status [--format json] | cert status\n"
+    s = "{s}       lobo control <reload|quit|stop|reopen|status|upgrade|ping>\n"
+    s = "{s}           (the control endpoint's verbs — docs/CONTROL.md)\n"
     s
 }
 
@@ -437,6 +463,113 @@ pub fn control_addr(c: config.Conf) -> str {
         i = i + 1
     }
     ""
+}
+
+/// The control endpoint's TOKEN FILE: the `control` directive's
+/// `token <file>` argument, resolved against the prefix like every
+/// other configured path, or "" when the directive names none (the
+/// channel is then loopback-only, ws04's posture). Total.
+pub fn control_token_path(c: config.Conf, prefix: str) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "control" && c.args_n[i] >= 3 {
+            let kw = c.argp[c.args_at[i] + 1]
+            if kw == "token" {
+                let p = c.argp[c.args_at[i] + 2]
+                if p.starts_with("/") {
+                    return p
+                }
+                return "{prefix}/{p}"
+            }
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// Read the shared secret from the token file: its first line,
+/// trimmed. lobo READS this file and never writes it — std has no
+/// file-permission surface at this pin (wolf-std#5), so a token lobo
+/// generated would land at whatever the umask says, and a
+/// world-readable secret is worse than no secret at all. The operator
+/// creates the file with the mode they want; docs/CONTROL.md says so
+/// out loud. Rows: `none` when the file is absent (a config error the
+/// startup path names), `io` on a read failure (allow w0602: two tags
+/// a caller acts on differently).
+#[allow(w0602)]
+pub fn control_token_read(path: str) -> str ! {none, io} {
+    if !fs_exists(path) {
+        return none
+    }
+    let raw = fs_read_text(path) else |_| {
+        return io
+    }
+    let nl = raw.find("\n") else -1
+    if nl >= 0 {
+        return raw[0..nl].trim()
+    }
+    raw.trim()
+}
+
+/// The wire line a control client sends: the verb, prefixed with the
+/// shared secret when one is configured. PURE, so the whole auth
+/// shape is testable off the socket on every lane. Total.
+pub fn control_line(token: str, verb: str) -> str {
+    if token.is_empty() {
+        return verb
+    }
+    "{token} {verb}"
+}
+
+/// Whether a received command line carries the configured secret.
+/// With no token configured every line is authorized — loopback is
+/// the boundary, ws04's posture, kept. `ping` is ALWAYS authorized:
+/// it is the liveness probe `-s` and the startup stale-pid check
+/// use, it reveals nothing but existence, and gating it would let a
+/// rotated token make a LIVE master look dead — which would replace
+/// a running server's pid file. The named delta lives in
+/// docs/CONTROL.md. Total.
+pub fn control_authorized(line: str, token: str) -> bool {
+    if token.is_empty() {
+        return true
+    }
+    if line.trim() == "ping" {
+        return true
+    }
+    line.starts_with("{token} ")
+}
+
+/// The verb inside a received command line: the line itself when no
+/// token is configured, the text after the secret when one is.
+/// Answers "" for a line that is not authorized, so a caller that
+/// forgets `control_authorized` still dispatches nothing. Total.
+pub fn control_verb_of(line: str, token: str) -> str {
+    if token.is_empty() {
+        return line.trim()
+    }
+    if line.trim() == "ping" {
+        return "ping"
+    }
+    if line.starts_with("{token} ") {
+        return line[token.len + 1..line.len].trim()
+    }
+    ""
+}
+
+/// The control endpoint's VERB SET: nginx's four signal words
+/// (`stop`, `quit`, `reload`, `reopen`) plus lobo's own three —
+/// `status` (the ws08 drain surface, which also takes the `json`
+/// argument), `upgrade` (the binary-swap verb, unclaimed at this pin
+/// and answering a named refusal) and `ping` (the liveness probe).
+/// Reads the FIRST word, so `status json` passes. Total.
+pub fn control_verb_ok(verb: str) -> bool {
+    let sp = verb.find(" ") else -1
+    let head = if sp > 0 { verb[0..sp] } else { verb }
+    if signal_ok(head) {
+        return true
+    }
+    head == "status" || head == "upgrade" || head == "ping"
 }
 
 /// Send one command line to the control endpoint and read the one-line
@@ -793,6 +926,29 @@ pub fn signal_verb(m: int) -> str {
     ""
 }
 
+/// The signal MEANING a control verb corresponds to — the inverse of
+/// `signal_verb`, so ONE emission site can stamp the same
+/// `signal-received` event whichever trigger arrived and a verb and a
+/// signal are indistinguishable in the log but for their `source`
+/// field (ws15). 0 for a verb with no signal twin: `status`, `reopen`
+/// and `ping` never had one, and `upgrade` has none at this pin —
+/// UPGRADE's bit is lobo's own poll probe on unix and has no windows
+/// analog at all ([os.signal.platform]), which is why it is the one
+/// verb the control channel reaches and no signal does
+/// (docs/CONTROL.md). Total.
+pub fn signal_meaning(verb: str) -> int {
+    if verb == "reload" {
+        return sig_reload()
+    }
+    if verb == "stop" {
+        return sig_terminate()
+    }
+    if verb == "quit" {
+        return sig_quit()
+    }
+    0
+}
+
 // ---- the log-event vocabulary (FROZEN; documented in docs/) ---------
 // Each builder returns the event BODY: a stable name then space-
 // separated key=value fields. The entry prefixes "lobo: [notice] " and
@@ -829,13 +985,18 @@ pub fn ev_generation_retired(gen: int, drained: int, aborted: int, age_ms: int) 
     "generation-retired gen={gen} drained={drained} aborted={aborted} age-ms={age_ms}"
 }
 
-/// A real OS signal was received and mapped to an operator verb (the
-/// wsm01 vocabulary EXTENSION — appended, nothing renamed): `sig` is
-/// the meaning's name (reload|terminate|quit), `verb` the dispatched
-/// verb. The event that lets an operator (and the signal witness
-/// harness) tell a signal-driven reload from a control-channel one.
-pub fn ev_signal_received(m: int) -> str {
-    "signal-received sig={signal_name(m)} verb={signal_verb(m)}"
+/// An operator TRIGGER was received and mapped to a verb (the wsm01
+/// vocabulary extension; ws15 appends `source`, nothing renamed):
+/// `sig` is the meaning's name (reload|terminate|quit), `verb` the
+/// dispatched verb, `source` which door it came through — `signal`
+/// for a real OS signal, `control` for a verb on the control
+/// endpoint. The two triggers run the SAME dispatch and emit through
+/// this ONE builder, so the line — and every generation event that
+/// follows it — is byte-identical but for that field: `source` is
+/// the whole of the difference, which is the point (docs/CONTROL.md
+/// carries the paired logs). Every earlier prefix pin still matches.
+pub fn ev_signal_received(m: int, source: str) -> str {
+    "signal-received sig={signal_name(m)} verb={signal_verb(m)} source={source}"
 }
 
 /// A request was refused by its vhost's `memory_budget` (ws10 — the

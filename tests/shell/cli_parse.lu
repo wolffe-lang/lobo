@@ -94,6 +94,33 @@ fn main() -> int {
     assert(shell.parse_cli(two("-s", "quit")).signal == "quit", "-s quit")
     assert(shell.parse_cli(two("-s", "reopen")).signal == "reopen", "-s reopen")
 
+    // ws15: `-s` keeps EXACTLY nginx's four words — the parity
+    // tools/lobo-shell probes against the oracle — and the verbs
+    // nginx has no word for ride a lobo-native subcommand instead of
+    // a widened `-s`.
+    assert(shell.parse_cli(two("-s", "status")).mode == "error", "-s status is NOT a signal word")
+    assert(shell.parse_cli(two("-s", "upgrade")).mode == "error", "-s upgrade is NOT a signal word")
+    let cs = shell.parse_cli(two("control", "status"))
+    assert(cs.mode == "control", "control status → the control mode")
+    assert(cs.signal == "status", "the control verb rides the signal field")
+    assert(
+        shell.parse_cli(two("control", "status json")).signal == "status json",
+        "status takes its argument",
+    )
+    assert(shell.parse_cli(two("control", "upgrade")).signal == "upgrade", "control upgrade")
+    assert(shell.parse_cli(two("control", "ping")).signal == "ping", "control ping")
+    assert(shell.parse_cli(two("control", "reload")).signal == "reload", "control reload")
+    let bad_v = shell.parse_cli(two("control", "shutdown"))
+    assert(bad_v.mode == "error", "an invented control verb → error")
+    assert(bad_v.exit_code == 1, "an invented control verb exits 1")
+    assert(
+        bad_v.err_msg.starts_with("invalid \"control\" verb: \"shutdown\""),
+        "the invented verb is NAMED: {bad_v.err_msg}",
+    )
+    let need_v = shell.parse_cli(one("control"))
+    assert(need_v.exit_code == 1, "control with no verb exits 1")
+    assert(need_v.err_msg == "option \"--control\" requires verb", "control need: {need_v.err_msg}")
+
     // errors: exit 1, oracle-shaped messages
     let bad_s = shell.parse_cli(two("-s", "bogus"))
     assert(bad_s.mode == "error", "-s bogus → error")
