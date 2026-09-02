@@ -1,5 +1,97 @@
 # Changelog
 
+## ws13 — 2026-09-02 — the name resolves in time (wsc05 opens)
+
+The finally-list's last STRONG item ships: `proxy_pass http://name`
+resolves without stalling the loop, and the pin names a release.
+
+Pins advance first, gauntlet green at the trio before a line changed
+(suite counts IDENTICAL: corpus 213/213, differential 3/3, proxy
+8/8, membudget 5/5): wolf → **the v0.2.2 TAG** (8cda3aa) — the bare
+stamp at last, because s132's cap and D68's fault merged BEFORE the
+tag this time — lupin → **v0.1.22** (is33: the contained trap is
+`fault(alloc-contract)` at the join; the two tags name each other),
+wolf-std held at a62a5d4 (its trunk had not moved). #146 re-probed a
+SIXTH time at the tag: the same ICE at the same site, `WOLF_MIDEND=0`
+stays. The interface re-record moves every header with zero item
+motion. GitHub CI's first real run on this branch refused the tag
+pin as identity drift (`+dev.8cda3aa` vs the bare `0.2.2` the pin
+names) — the workflow now grants xtask's own `WOLF_RELEASE` stamp
+when the pinned rev is a tag, and the branch is green on GitHub.
+
+**Async upstream DNS.** report 11 §2 item 9, the one STRONG item
+wsc03 left unshipped, measured first: with a loopback resolver
+holding its answer 800 ms, a static request on a SECOND connection
+waited **805 ms** behind a proxied request's name — the dial
+resolved the name synchronously on the one poll loop's thread, with
+no deadline. There was no blocking call to wrap: std.net says in its
+own header that `dns`/`resolve` is not a function it has, and the
+runtime's `net_connect` hands a name to getaddrinfo (its
+`connect_timeout` resolves first and reaches no lane). Both FILED
+(**wolf-std#4**, **wolf-lang#217**), neither absorbed: lobo now
+carries a DNS-over-TCP stub client (`resolver`, a leaf module — the
+wire half pure over `List[int]`, the TTL cache with nginx's `valid=`
+override and round-robin, a pending-query table the loop TICKS under
+a 1 ms deadline like any other socket) and a PARK: serve asks which
+name a request needs before it reads a byte past the head, the loop
+skips that connection until the query settles, then steps it from
+the top with the cache warm. After: **static-ms=1**, proxied 836,
+cached 0 with exactly one query recorded (`tools/lobo-resolver`, a
+gauntlet step; `tests/rig/dnssrv` is the resolver, in wolf). nginx's
+`resolver … valid=` and `resolver_timeout` carry as directives, `-t`
+answers nginx's own `invalid parameter` wording, the two parameters
+lobo cannot honour refuse by name (`ipv4=off`, `status_zone=`);
+LOBO-L012 names a hostname with no resolver in effect (the stall),
+LOBO-L013 names the delta in lobo's favour — nginx resolves a static
+`proxy_pass` name once at load and ignores `resolver` for it (trac
+#1064); lobo re-resolves under the TTL. Every other delta (TCP-only,
+A-only, first address, failures held 1 s, a 0-TTL held 1 s) is a
+row in docs/RESOLVER.md's table; both proxy-differential confs carry
+the directive so the oracle and lobo prove they parse the same line
+(8/8). Two vocabulary events appended (`upstream-resolved`,
+`upstream-resolve-failed`, seq-stamped), one metric family
+(`lobo_upstream_resolutions_total{result}`, 22 families), the
+`$upstream_addr` log variable names the resolved address.
+
+**The cap adoption — built, witnessed, and gated by codegen.** s132's
+`region r(cap: n)` and D68's proc-boundary fault are in the pin, and
+ws13 consumed them: a budgeted request's regioned body work runs
+inside a `spawn proc` under `cap: 16 × memory_budget` — the #203
+ledger envelope, and the directive documents the arithmetic — and
+the join maps the reason to 200 / close / **503 `site=region`** /
+500; ws12's measured `region_bytes` comes back out of the proc
+through a loopback self-pipe, because a proc's `normal(value)` is
+unreadable at the join and a channel cannot be a proc argument on
+wolfc. Green on the native tier, and the RELEASE tier refuses to
+emit it: any proc spawned from a non-entry module lands its entry
+shim outside its object (`func.addr of @budget.run_small.task0.entry
+outside this object's subset` — #136's shape for a PROC), a 30-line
+reproducer filed as **wolf-lang#219** with a second finding
+(`conform-run --checked` answers `unsupported@mem` with an empty
+diagnostic for every proc spawn, wolf-lang's own conformance files
+included, while `run --checked` runs them). A proc the release tier
+cannot emit is not a proc lobo can ship, so the adoption lives whole
+on branch **`ws13-cap`** (the flip is a merge the day #219 closes),
+and trunk carries `tests/serve/cap_shape.lu` — the exact program a
+budgeted request runs, in one module, on native and lupin — plus
+BUDGET.md's theorem that at this pin the cap cannot fire on any
+request the meter admits (the head site's charge puts every cap
+above every ledger reading lobo's shapes produce), which is the
+property the contract asked for stated as an inequality rather than
+a hope. The membudget suite holds its marks unchanged (the trunk
+binary has no proc in it).
+
+**#197's Tier-2 shapes, stated.** Four, re-read against s132 and
+posted upstream: a capture is written on the JOIN side (a killed
+proc runs no writer); the reason class is a stable key (a closed
+set); the record boundary is the proc argument record (s87 copies
+it at spawn — record at the proc boundary, replay the proc); and
+what a proc can say back bounds what a capture can carry (a token
+made inside a proc cannot leave it). docs/REPLAY.md has the text.
+
+Corpus 213 → 228 (+13 resolver lane-runs, +2 cap shape). wsc05 opens
+with this sprint; its campaign file sits beside the contract.
+
 ## ws12 — 2026-09-01 — the numbers speak
 
 lobo stops guessing at its own memory and starts reporting it, and
