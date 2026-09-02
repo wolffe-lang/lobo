@@ -28,6 +28,35 @@
 #   //! explore: N                            (ws11: lupin lane only —
 #                                              the file's WHOLE schedule
 #                                              space, explored)
+#   //! checked-refuses: <construct>          (ws14: the checked lane of
+#                                              this runner is `wolf
+#                                              conform-run --checked`, the
+#                                              s23 UB machine — an
+#                                              interpreter that refuses
+#                                              structured concurrency BY
+#                                              NAME at the expression it
+#                                              reaches (`spawn`, scopes,
+#                                              `select`; C1 deferred) —
+#                                              NOT `wolf run --checked`,
+#                                              which is the native build
+#                                              under the checked profile
+#                                              and runs procs. A file
+#                                              whose run reaches a proc
+#                                              therefore does not
+#                                              declare `checked`; it
+#                                              declares the exact
+#                                              construct string the
+#                                              machine's record must
+#                                              carry in
+#                                              `x-unsupported-construct`
+#                                              (s134 named the refusal;
+#                                              wolf-lang#219), and the
+#                                              runner ASSERTS that
+#                                              refusal as a lane-run —
+#                                              a refusal by the wrong
+#                                              name, a run, or a crash
+#                                              is red. Never a blanket
+#                                              skip: the lane is stated.)
 # An explore-marked file runs `lupin conform-run --explore=N` after its
 # lanes: every reachable interleaving must agree AND the frontier must
 # CLOSE — an open frontier is red even on agreement (a verdict
@@ -177,6 +206,36 @@ for f in $(find $roots -name '*.lu' | sort); do
         fi
         echo "corpus: ok — $f [$lane] $verdict"
     done
+
+    # ws14: the checked-refuses directive — the UB machine's refusal,
+    # asserted by name (see the runner header). Contradicting a declared
+    # `checked` lane is a header error, not a skip.
+    refuses=$(grep -m1 '^//! checked-refuses: ' "$f" | sed 's|^//! checked-refuses: ||')
+    if [ -n "$refuses" ]; then
+        total=$((total + 1))
+        case " $lanes " in
+        *" checked "*)
+            echo "corpus: FAILED — $f: declares the checked lane AND \`checked-refuses:\` — one or the other" >&2
+            red=$((red + 1))
+            ;;
+        *)
+            rec=$(run_lane checked "$entry")
+            if [ -z "$rec" ]; then
+                echo "corpus: FAILED — $f [checked-refuses]: no observation record (crash or 60s ceiling)" >&2
+                red=$((red + 1))
+            else
+                verdict=$(printf '%s' "$rec" | jq -r .verdict)
+                construct=$(printf '%s' "$rec" | jq -r '.["x-unsupported-construct"] // ""')
+                if [ "$verdict" = unsupported ] && [ "$construct" = "$refuses" ]; then
+                    echo "corpus: ok — $f [checked-refuses] unsupported by name: $construct"
+                else
+                    echo "corpus: FAILED — $f [checked-refuses]: wanted \`unsupported\` naming \`$refuses\`, got verdict \`$verdict\` construct \`$construct\`" >&2
+                    red=$((red + 1))
+                fi
+            fi
+            ;;
+        esac
+    fi
 
     # ws11: the explore directive — search the file's whole schedule
     # space on the lupin lane. Agreement with a CLOSED frontier is the

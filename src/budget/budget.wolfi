@@ -1,0 +1,11 @@
+module pkg :: budget
+  wolfi v0 · toolchain 0.2.2 · edition v1
+  export_hash ad20002bff0dfd060457796870d3c2c7a67e0d79f1959323f4b4056350ad74d4
+  pkg_hash    ad20002bff0dfd060457796870d3c2c7a67e0d79f1959323f4b4056350ad74d4
+  deps: (none)
+  items:
+    [0] pub run_small — fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -, -) -> ρ_caller
+    [1] pub run_stream — fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -) -> ρ_caller
+    [2] pub version — fn version() -> str
+    [3] pub Outcome — struct Outcome { cls: int, wcode: int, rt: int }
+

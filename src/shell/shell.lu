@@ -841,12 +841,25 @@ pub fn ev_signal_received(m: int) -> str {
 /// A request was refused by its vhost's `memory_budget` (ws10 — the
 /// vocabulary's seventh event, appended, nothing renamed): `gen` the
 /// generation that served it, `site` the deterministic exceed-site
-/// (head|body|body-chunked|file), `budget` the configured bytes,
+/// (head|body|body-chunked|file|admin; `region` rides the ws13/ws14
+/// twin below with its `cap`), `budget` the configured bytes,
 /// `would` what admitting the request would have charged. Level
 /// `error` (a shed request is an operator's signal, not a notice).
 /// The refused request also writes an ordinary 503 access line.
 pub fn ev_budget_exceeded(gen: int, site: str, budget: int, would: int) -> str {
     "budget-exceeded gen={gen} site={site} budget={budget} would={would}"
+}
+
+/// The same event for the ws13 `region` site — the RUNTIME refused
+/// the body (the region cap, s132/D68) — with one more trailing
+/// field, `cap`: the cap in LEDGER units the breach crossed
+/// (docs/BUDGET.md's arithmetic: 16× the directive). Appended,
+/// nothing renamed; every prefix pin on the seven-field shape still
+/// matches. `would` reports `budget+1` — the crossing point — because
+/// a killed proc's charge is unobservable at the join
+/// ([mem.region.cap.3]: free-then-deliver). Total.
+pub fn ev_budget_exceeded_cap(gen: int, site: str, budget: int, would: int, cap: int) -> str {
+    "budget-exceeded gen={gen} site={site} budget={budget} would={would} cap={cap}"
 }
 
 /// The ws11 sequence stamp: every vocabulary event the server emits

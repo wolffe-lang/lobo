@@ -23,6 +23,13 @@
 //! Signal delivery is Linux+macOS at the wsm03 pin (s114/s59; other
 //! hosts follow the ports); where the listen refuses, the server says
 //! so and runs control-channel-only — a named gap, never a fake.
+//! ws14, against s60b's landed windows table: there the listen
+//! SUCCEEDS (a console handler), CTRL_C/CTRL_CLOSE deliver terminate
+//! and CTRL_BREAK quit, and RELOAD never arrives from outside — so
+//! the startup notice below names the meanings, not unix signal
+//! names, and docs/DRAIN.md carries lobo's windows promise: reload
+//! is the control channel's, or nothing (the language has no
+//! platform query, so the sentence is documented, not detected).
 //!
 //! Serve stays SPAWN-FREE (D7, ws04's shape): ONE poll loop
 //! multiplexes the http listener, the control channel, the signal
@@ -1092,6 +1099,19 @@ fn serve_main(prefix: str, conf: str) -> int {
     // is routed as such in the wsc03 closeout; nothing here pretends
     // otherwise.
     let d0 = serve.default_opts()
+    // ws13: the self-pipe a budgeted request's body proc reports
+    // through (docs/BUDGET.md, "what comes back"); a host that
+    // refuses a loopback pair runs without one, said out loud
+    var pipe_w = -1
+    var pipe_r = -1
+    let sp = serve.open_self_pipe() else |_| {
+        eprint(
+            "lobo: [warn] no loopback self-pipe: budgeted requests still enforce the cap, but the measured region bytes stay inside the body proc (mem-rt-hw reads 0 for them)",
+        )
+        (-1, -1)
+    }
+    pipe_w = sp.0
+    pipe_r = sp.1
     var opts = serve.ServerOpts {
         token: d0.token,
         keepalive_timeout_ms: d0.keepalive_timeout_ms,
@@ -1099,6 +1119,8 @@ fn serve_main(prefix: str, conf: str) -> int {
         read_timeout_ms: d0.read_timeout_ms,
         challenge_dir: d0.challenge_dir,
         metrics_on: config.metrics_on(c0),
+        pipe_w: pipe_w,
+        pipe_r: pipe_r,
     }
     // ws10: the effective Limits (fence + budget) freeze PER
     // GENERATION beside the model — resolved here for gen 1, by
@@ -1138,6 +1160,8 @@ fn serve_main(prefix: str, conf: str) -> int {
             read_timeout_ms: opts.read_timeout_ms,
             challenge_dir: chall_dir,
             metrics_on: opts.metrics_on,
+            pipe_w: opts.pipe_w,
+            pipe_r: opts.pipe_r,
         }
     }
     let auto_primary = config.auto_primary(c0)
@@ -1172,7 +1196,11 @@ fn serve_main(prefix: str, conf: str) -> int {
         sig_on = false
     }
     if sig_on {
-        ev_log(mut elog, "notice", "signal reception armed (HUP=reload, TERM=stop, QUIT=quit)")
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])",
+        )
     } else {
         ev_log(
             mut elog,
@@ -1562,7 +1590,22 @@ fn serve_main(prefix: str, conf: str) -> int {
                 // counters move; every served request feeds the
                 // high-water aggregate
                 let hit = !st.bud_site.is_empty() || adm_hit
-                if !st.bud_site.is_empty() {
+                if st.bud_site == "region" {
+                    // ws13: the runtime's own refusal — the cap in
+                    // ledger units rides as the appended field
+                    ev_event(
+                        mut elog,
+                        "error",
+                        shell.
+                            ev_budget_exceeded_cap(
+                            cg,
+                            st.bud_site,
+                            st.bud_limit,
+                            st.bud_would,
+                            st.bud_cap,
+                        ),
+                    )
+                } else if !st.bud_site.is_empty() {
                     ev_event(
                         mut elog,
                         "error",

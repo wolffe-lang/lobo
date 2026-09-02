@@ -1,0 +1,177 @@
+//! check: run(exit=0, stdout="envelope: 200 rt>0 true site=\noff: 200 rt>0 true\nstream: 200 rt>0 true site=\njoin: normal cls=0 wcode=0 rt>0 true | breach cls=2 wcode=0 rt=0\nlive: reclaimed true\n")
+//! phase: run
+//! lanes: native
+//! checked-refuses: structured concurrency in checked execution (C1 deferred)
+//! conforms: err.union, err.propagate, mem.region.cap.1, mem.region.cap.3, conc.proc.exit
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! THE CAP IS ENFORCED BY THE RUNTIME (ws13 built it on a side branch;
+//! ws14 lands it at the 5f99b9f pin, wolf-lang#219 closed): a budgeted
+//! request's body work runs inside a proc under `region r(cap: n)`,
+//! and the four relations this witness pins are the whole adoption:
+//!   1. budget OFF (0): the pre-ws13 path — no proc, the body in an
+//!      uncapped per-response region, ws12's `mem_rt` measured
+//!      in-loop as before;
+//!   2. a budget whose 16x LEDGER envelope covers the body (4k for an
+//!      18-byte file: cap 65536 ≥ the 496 the runtime charges): the
+//!      proc path serves 200, and `mem_rt` still comes back — through
+//!      the self-pipe — so the measured number survives the move
+//!      inside the proc;
+//!   3. the STREAM path under a budget (70k for a 128 KiB file: the
+//!      meter's file site admits head + one chunk, and the cap
+//!      1,146,880 ≥ the 1,048,560 a 64 KiB chunk region charges — the
+//!      #203 envelope): 200 through the proc, chunk by chunk, `mem_rt`
+//!      the per-chunk high water;
+//!   4. THE JOIN, driven directly (`budget.run_small` on a loopback
+//!      pair): a cap the body cannot fit (64) dies at the read with
+//!      fault(alloc-contract), contained at the proc boundary
+//!      ([mem.region.cap.3], D68) and reported as class 2 with NOTHING
+//!      on the pipe (a killed proc wrote nothing); a roomy cap answers
+//!      class 0 with the measured bytes back through the pipe.
+//! serve maps class 2 to the 503 with a name (site=region); the SAME
+//! mapping reached from a config through a real socket — the growth
+//! law's band, docs/BUDGET.md — is `tools/lobo-membudget`'s cap rounds
+//! (the release binary, ws14). `live_region_bytes()` is back at its
+//! baseline after all of it: the proc's regions were reclaimed BEFORE
+//! each reason delivered.
+//! Lanes: native runs it; the checked lane is the UB machine, which
+//! refuses every proc spawn BY NAME — asserted above, not skipped
+//! (#219's record fix); lupin has no fs (the serve suite's posture).
+
+use budget
+use config
+use http
+use resolver
+use serve
+
+fn read_reply(cli: int) -> str ! {io} {
+    net_deadline(cli, 4000) else |_| {
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 65536) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                return io
+            },
+            utf8 => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    out
+}
+
+/// One request through serve_request under `budget`, with the
+/// self-pipe `pw`/`pr` (or -1/-1). Row: io.
+fn drive(c: config.Conf, req: str, budget: int, pw: int, pr: int) -> serve.ReqOut ! {io} {
+    var opts = serve.default_opts()
+    opts.pipe_w = pw
+    opts.pipe_r = pr
+    var lim = http.default_limits()
+    lim.memory_budget = budget
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let port = net_port(l) else |_| {
+        return io
+    }
+    let cli = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_write(cli, req) else |_| {
+        return io
+    }
+    let conn = net_accept(l) else |_| {
+        return io
+    }
+    let cut = req.find("\r\n\r\n") else req.len
+    let head = req[0..cut]
+    var rs = resolver.new()
+    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, mut rs)
+    net_close(conn) else |_| {}
+    let reply = read_reply(cli)?
+    net_close(cli) else |_| {}
+    net_close(l) else |_| {}
+    if reply.is_empty() && ro.acc.status != 503 {
+        return io
+    }
+    ro
+}
+
+fn main() -> !int {
+    let root = "ws13_cap"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all(root)?
+    fs_write_text("{root}/small.html", "<html>\nhi\n</html>\n")?
+    var big = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    var i: int = 0
+    while i < 11 {
+        big = "{big}{big}"
+        i = i + 1
+    }
+    fs_write_text("{root}/big.bin", big)?
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws13_cap; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let pipe = serve.open_self_pipe()?
+    let base = live_region_bytes()
+    let get = "GET /small.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+
+    // 2. the envelope holds: the proc path, the number comes back.
+    // FIRST, so the checked lane (the UB machine) reaches the spawn
+    // before anything else can fail there — the machine's client
+    // handle dies after the server side's close (D41), which would
+    // otherwise turn its named refusal into an io exit (wolf-lang#224)
+    let r1 = drive(c, get, 4096, pipe.0, pipe.1)?
+    assert(serve.ledger_cap(4096) == 65536, "the arithmetic: 16x")
+    print("envelope: {r1.acc.status} rt>0 {r1.mem_rt > 0} site={r1.bud_site}")
+
+    // 1. off
+    let r0 = drive(c, get, 0, pipe.0, pipe.1)?
+    print("off: {r0.acc.status} rt>0 {r0.mem_rt > 0}")
+
+    // 3. the stream path under a budget
+    let r3 = drive(
+        c,
+        "GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+        71680,
+        pipe.0,
+        pipe.1,
+    )?
+    print("stream: {r3.acc.status} rt>0 {r3.mem_rt > 0} site={r3.bud_site}")
+
+    // 4. the join, driven directly
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    let sock = net_accept(l)?
+    let head = "HTTP/1.1 200 OK\r\nContent-Length: 19\r\n\r\n"
+    let ok = budget.run_small(sock, "{root}/small.html", head, 1000000, pipe.0, pipe.1)
+    net_deadline(cli, 2000) else |_| {}
+    let got = net_read(cli, 4096) else |_| {
+        ""
+    }
+    assert(got.starts_with("HTTP/1.1 200 OK"), "the proc wrote the response: {got}")
+    let breach = budget.run_small(sock, "{root}/small.html", head, 64, pipe.0, pipe.1)
+    net_close(cli)?
+    net_close(l)?
+    net_close(sock) else |_| {}
+    print(
+        "join: normal cls={ok.cls} wcode={ok.wcode} rt>0 {ok.rt > 0} | breach cls={breach.cls} wcode={breach.wcode} rt={breach.rt}",
+    )
+
+    print("live: reclaimed {live_region_bytes() == base}")
+    net_close(pipe.0) else |_| {}
+    net_close(pipe.1) else |_| {}
+    fs_remove_dir_all(root) else |_| {}
+    0
+}

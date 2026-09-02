@@ -1,0 +1,232 @@
+//! budget — the proc boundary the cap needs (ws13, wsc05). s132's
+//! region cap traps at the allocating site; D68 contains that trap
+//! only at a PROC boundary ([mem.region.cap.3]): so a budgeted
+//! request's regioned body work runs inside `spawn proc`, here, and
+//! the join maps the exit reason for serve. Why a module of its own
+//! and not a corner of serve/: the release tier's s43 cluster
+//! partition refused the proc's entry shim when the spawn sat inside
+//! serve.serve_file (`func.addr of @serve.serve_file.task0.entry
+//! outside this object's subset` — the #136 shape, for a PROC; filed
+//! from ws13), and a leaf module whose spawner and body share one
+//! small cluster is the placement that builds. The seam is honest
+//! either way: serve decides the status, this module runs the body
+//! and reports (class, write outcome, measured region bytes).
+//! docs/BUDGET.md carries the arithmetic and the self-pipe story.
+
+/// The module's interface version. Total.
+pub fn version() -> str {
+    "0.1.0"
+}
+
+/// A body proc's outcome at the join: `cls` 0 normal / 1 error (the
+/// socket broke) / 2 fault(alloc-contract) — THE CAP REFUSED / 3
+/// another contained fault / 4 the join timed out; `wcode` the
+/// pipe's write outcome (0 clean, 1 closed, 2 io, 3 the read failed);
+/// `rt` the measured region bytes the proc reported (0 without a
+/// pipe, or after a fault — a killed proc wrote nothing).
+pub struct Outcome {
+    cls: int,
+    wcode: int,
+    rt: int,
+}
+
+/// The self-pipe line a body proc wrote: (wcode, rt). (0, 0) when
+/// there is no pipe; (2, 0) when the pipe is silent (an error exit
+/// with nothing written reads as an io break). Total.
+fn read_pipe(pipe_r: int, errored: bool) -> (int, int) {
+    if pipe_r < 0 {
+        return (if errored { 2 } else { 0 }, 0)
+    }
+    net_deadline(pipe_r, 1000) else |_| {}
+    let line = net_read(pipe_r, 64) else |_| {
+        ""
+    }
+    let sp = line.find(" ") else -1
+    if sp < 0 {
+        return (if errored { 2 } else { 0 }, 0)
+    }
+    var w: int = 0
+    for b in line[0..sp].bytes() {
+        if b >= 48 && b <= 57 {
+            w = w * 10 + b - 48
+        }
+    }
+    var rt: int = 0
+    for b in line[sp + 1..line.len].bytes() {
+        if b >= 48 && b <= 57 {
+            rt = rt * 10 + b - 48
+        }
+    }
+    (w, rt)
+}
+
+/// The regioned body work of a budgeted SMALL response (≤ 64 KiB),
+/// inside a proc: read the file into a CAPPED region, write head then
+/// body to the bare socket, report `<wcode> <rt>` on the pipe (0
+/// clean, 1 closed, 2 io, 3 the read failed). A cap breach traps at
+/// the read — before any byte is on the wire — and is contained at
+/// this proc's boundary. Row: io on any non-clean outcome (the join
+/// reads the pipe for which).
+fn body_small(sock: int, path: str, head: str, cap: int, pipe: int) -> int ! {io} {
+    var failed = false
+    var wcode = 0
+    var rt = 0
+    region resp(cap: cap) {
+        let body = fs_read_bytes(path) else |_| {
+            failed = true
+            List[int]()
+        }
+        rt = region_bytes(resp)
+        if !failed {
+            net_write(sock, head) else |e| match e {
+                closed => {
+                    wcode = 1
+                },
+                io => {
+                    wcode = 2
+                },
+            }
+            if wcode == 0 {
+                net_write_bytes(sock, body) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    invalid => {
+                        wcode = 2
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+            }
+        }
+        wcode = wcode
+    }
+    if failed {
+        wcode = 3
+    }
+    if pipe >= 0 {
+        net_write(pipe, "{wcode} {rt}\n") else |_| {}
+    }
+    if wcode != 0 {
+        return io
+    }
+    0
+}
+
+/// The regioned body work of a budgeted STREAMED response (> 64 KiB;
+/// the head is already on the wire), inside a proc: open the file,
+/// stream it in 64 KiB chunks each in its own CAPPED region, report
+/// `<wcode> <rt>` (rt = the per-chunk HIGH WATER, ws12's number). A
+/// cap breach traps at the first chunk read and is contained here;
+/// the join can only close (nginx cannot un-send a head either).
+/// Row: io on any non-clean outcome.
+fn body_stream(sock: int, path: str, cap: int, pipe: int) -> int ! {io} {
+    var rt = 0
+    var wcode = 0
+    let fd = fs_open(path) else |_| {
+        if pipe >= 0 {
+            net_write(pipe, "3 0\n") else |_| {}
+        }
+        return io
+    }
+    var streaming = true
+    while streaming && wcode == 0 {
+        region chunkr(cap: cap) {
+            let chunk = fs_read_chunk(fd, 65536) else |e| match e {
+                eof => {
+                    streaming = false
+                    List[int]()
+                },
+                io => {
+                    wcode = 3
+                    List[int]()
+                },
+            }
+            if wcode == 0 && chunk.len > 0 {
+                net_write_bytes(sock, chunk) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    invalid => {
+                        wcode = 2
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+            }
+            let crt = region_bytes(chunkr)
+            if crt > rt {
+                rt = crt
+            }
+            wcode = wcode
+        }
+    }
+    fs_close(fd) else |_| {}
+    if pipe >= 0 {
+        net_write(pipe, "{wcode} {rt}\n") else |_| {}
+    }
+    if wcode != 0 {
+        return io
+    }
+    0
+}
+
+/// Run a budgeted SMALL response's body inside a capped proc and
+/// join it. Total (every outcome is a value).
+pub fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r: int) -> Outcome {
+    let w = spawn proc body_small(sock, path, head, cap, pipe_w)
+    let m = w.monitor()
+    var cls = 3
+    select {
+        exit(reason) from m => {
+            if reason.is_normal() {
+                cls = 0
+            } else if reason.is_error() {
+                cls = 1
+            } else if reason.is_alloc_contract() {
+                cls = 2
+            } else {
+                cls = 3
+            }
+        },
+        timeout(600.s) => {
+            cls = 4
+        },
+    }
+    if cls >= 2 {
+        return Outcome { cls: cls, wcode: 0, rt: 0 }
+    }
+    let rep = read_pipe(pipe_r, cls == 1)
+    Outcome { cls: cls, wcode: rep.0, rt: rep.1 }
+}
+
+/// Run a budgeted STREAMED response's body (the head already on the
+/// wire) inside a capped proc and join it. Total.
+pub fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> Outcome {
+    let w = spawn proc body_stream(sock, path, cap, pipe_w)
+    let m = w.monitor()
+    var cls = 3
+    select {
+        exit(reason) from m => {
+            if reason.is_normal() {
+                cls = 0
+            } else if reason.is_error() {
+                cls = 1
+            } else if reason.is_alloc_contract() {
+                cls = 2
+            } else {
+                cls = 3
+            }
+        },
+        timeout(600.s) => {
+            cls = 4
+        },
+    }
+    if cls >= 2 {
+        return Outcome { cls: cls, wcode: 0, rt: 0 }
+    }
+    let rep = read_pipe(pipe_r, cls == 1)
+    Outcome { cls: cls, wcode: rep.0, rt: rep.1 }
+}
