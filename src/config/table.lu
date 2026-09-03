@@ -717,14 +717,14 @@ pub fn table() -> Table {
         "planned(ws03)",
         "conditional block — see LOBO-L001 before using inside location",
     )
-    // ---- ws04: process/shell tier. The process-model DECISION: v0 is
-    // ONE os process — a master task supervising N worker task-groups,
-    // so worker_processes maps to the worker task-group count and the
-    // delta from nginx's process-per-worker is this note. Foreground is
-    // the only v0 mode (systemd/container reality; the oracle runs
-    // daemon off in every harness case), so daemon/master_process are
-    // named_error. privilege drop (user) is ws14's (run as the target
-    // user for now). control is lobo-native: the loopback reload channel.
+    // ---- ws04: process/shell tier. The process-model DECISION at ws04
+    // was ONE os process; D73 (ws16) REVERSED it: worker_processes is
+    // nginx's — N os processes started by a master through os.process,
+    // each one spawn-free inside (D7 kept). Foreground is the only
+    // mode (systemd/container reality; the oracle runs daemon off in
+    // every harness case), so daemon/master_process are named_error.
+    // privilege drop (user) is unclaimed (run as the target user for
+    // now). control is lobo-native: the loopback order desk.
     row(
         mut t,
         "worker_processes",
@@ -733,7 +733,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "worker task-group count (delta: lobo maps workers to supervised task-groups in ONE process, not process-per-worker — crash isolation is the supervision tree; ws14 revisits process isolation)",
+        "nginx's directive and grammar (`N` or `auto`), nginx's meaning since D73 (ws16): N os processes — a MASTER starts them through os.process and supervises them over per-worker control endpoints (restart a dead hand; reload/quit/stop/reopen fan out; `lobo status` shows a row per hand; every hand's log line carries `worker=N`). Named deltas, MEASURED at this pin (docs/WORKERS.md): the kernel cannot distribute accepts — the runtime sets no SO_REUSEPORT and a hand inherits no listener (wolf-lang#234/#235) — so one hand serves and the others STAND BY and take the listener when it dies; `auto` reads /proc/cpuinfo on linux and is 1 with a notice on macOS (no cpu query, wolf-lang#233); `0` serves as 1",
     )
     row(
         mut t,

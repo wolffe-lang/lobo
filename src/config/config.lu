@@ -128,6 +128,16 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws16: the worker half of -t — `worker_processes` is `auto` or a
+    // number, the oracle's own diagnostic otherwise. One named
+    // [emerg], first failure wins.
+    if verdict == 0 {
+        let werr = worker_check(c)
+        if !werr.is_empty() {
+            eprint("lobo: [emerg] {werr}")
+            verdict = 1
+        }
+    }
     // wsm04: the upstream-TLS half of -t — an https proxy_pass names
     // its trust anchors (the client verifies always) and the file
     // loads. One named [emerg], first failure wins.

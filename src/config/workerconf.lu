@@ -1,0 +1,40 @@
+//! member: true
+//! config/workerconf — the ws16 `worker_processes` directive's `-t`
+//! half. The directive is nginx's, grammar and all (`N` or `auto`),
+//! and since D73 it means what nginx means: N os processes accepting
+//! on the configured listeners, started and supervised by a master.
+//! The reader lives in shell/ (`worker_processes`, `cpu_count`); the
+//! VALIDATION lives here, because `-t` is config's verb. The
+//! diagnostic is the oracle's, probed 2026-09-03 against nginx/1.30.4:
+//! `"worker_processes" directive invalid value` for a word that is
+//! neither a number nor `auto` (and for a negative number); the
+//! argument-count error is the table's generic one.
+//! docs/WORKERS.md carries the design and the measured posture.
+
+/// The `worker_processes` directive's `-t` check: the one argument is
+/// `auto` or a run of digits, and nothing else — `foo`, `-1`, `4x`
+/// are each the oracle's named error rather than a silently ignored
+/// value (nginx accepts `0` and so does this check; the READER maps
+/// it to 1, a named delta). "" when the config is clean. Total.
+pub fn worker_check(c: Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "worker_processes" && c.args_n[i] >= 1 {
+            let raw = c.argp[c.args_at[i]].trim()
+            if !(raw == "auto") {
+                var digits = !raw.is_empty()
+                for b in raw.bytes() {
+                    if b < 48 || b > 57 {
+                        digits = false
+                    }
+                }
+                if !digits {
+                    return "\"worker_processes\" directive invalid value in {c.files[i]}:{c.lines[i]}"
+                }
+            }
+        }
+        i = i + 1
+    }
+    ""
+}
