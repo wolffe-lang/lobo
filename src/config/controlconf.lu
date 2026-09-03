@@ -1,0 +1,47 @@
+//! member: true
+//! config/controlconf — the ws15 `control` directive's `-t` half. The
+//! directive is lobo-NATIVE (nginx has no control endpoint at all: its
+//! trigger is `kill(pid, SIGHUP)` and the kernel does the authorizing)
+//! and it took one argument until this sprint. It now takes an
+//! optional second arm — `control <addr> token <file>` — so the
+//! endpoint has an authorization story on a multi-user host, where a
+//! loopback port is reachable by every local user and is therefore NOT
+//! a uid boundary. The reader lives in shell/ (control_addr,
+//! control_token_path); the VALIDATION lives here, because `-t` is
+//! config's verb and a config that names a token lobo cannot read must
+//! fail at the check, not at the first reload.
+//! docs/CONTROL.md carries the design and the nginx deltas.
+
+/// The `control` directive's `-t` check: the optional second arm is
+/// spelled exactly `token <file>`, and nothing else is accepted — a
+/// two-argument `control` (the keyword with no file), an unknown
+/// keyword, or an empty path is a NAMED error rather than a silently
+/// ignored one. The token file's EXISTENCE is not checked here: `-t`
+/// runs where the server may not, and a missing file is the startup
+/// path's refusal (which names it). "" when the config is clean.
+/// Total.
+pub fn control_check(c: Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "control" {
+            let n = c.args_n[i]
+            if n == 2 {
+                let kw = c.argp[c.args_at[i] + 1]
+                return "invalid parameter \"{kw}\" in \"control\" directive, the token arm is spelled \"token <file>\" in {c.files[i]}:{c.lines[i]}"
+            }
+            if n >= 3 {
+                let kw = c.argp[c.args_at[i] + 1]
+                if !(kw == "token") {
+                    return "invalid parameter \"{kw}\" in \"control\" directive, expected \"token\" in {c.files[i]}:{c.lines[i]}"
+                }
+                let path = c.argp[c.args_at[i] + 2]
+                if path.is_empty() {
+                    return "\"control ... token\" names an empty file path in {c.files[i]}:{c.lines[i]}"
+                }
+            }
+        }
+        i = i + 1
+    }
+    ""
+}

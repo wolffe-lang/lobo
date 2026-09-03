@@ -11,8 +11,21 @@
 //! which is also the LISTENER-SURVIVAL proof (the http listener fd is
 //! reused across the reload; every connect after the reload succeeds,
 //! zero refusals). Then `stop` and confirm the pid file is removed.
-//! The four verbs reach the SAME dispatch a real signal will when #126
-//! lands; this test is what the signal path will join.
+//! The verbs reach the SAME dispatch a real signal drives (wsm01
+//! landed reception; `tools/lobo-signal` is that half's witness).
+//!
+//! ws15 arms the endpoint's SECOND auth arm here, because it is the
+//! arm that only exists live: the config names `token <file>`, the
+//! server READS it at startup (never writes it — std has no
+//! permission surface, wolf-std#5), and this test drives all four
+//! cases through a real socket — a verb with the right secret works,
+//! a verb with none and a verb with the wrong one are `unauthorized`
+//! AND CHANGE NOTHING, and `ping` answers without a secret at all
+//! (the liveness probe the stale-pid check needs; a rotated token
+//! must never make a live master look dead). `upgrade` is dispatched
+//! and answers by name. The listener is loopback TCP on every host:
+//! wolf has no unix-domain socket at this pin (wolf-lang#227), which
+//! is exactly why the token arm exists — docs/CONTROL.md.
 //!
 //! Loopback only, OS-chosen ports (bind :0, learn, close, hand to the
 //! child). Idempotent: the scratch tree is cleared at the START.
@@ -81,8 +94,32 @@ fn free_port() -> int ! {io} {
 }
 
 fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
-    let text = "pid ws04_e2e/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    let text = "pid ws04_e2e/lobo.pid;\ncontrol 127.0.0.1:{cp} token ws04_e2e/token;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
     fs_write_text(path, text)?
+}
+
+/// The current generation number off the status stanza — the way to
+/// prove a refused verb changed NOTHING. -1 when unreadable.
+fn current_gen_of(ep: str, tok: str) -> int {
+    let body = shell.control_fetch(ep, shell.control_line(tok, "status")) else |_| {
+        return -1
+    }
+    let key = "current generation: "
+    let at = body.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    var n: int = 0
+    var seen = false
+    for b in body[at + key.len..body.len].bytes() {
+        if b >= 48 && b <= 57 {
+            n = n * 10 + b - 48
+            seen = true
+        } else if seen {
+            return n
+        }
+    }
+    if seen { n } else { -1 }
 }
 
 fn main() -> !int {
@@ -97,6 +134,10 @@ fn main() -> !int {
     let cp = free_port()?
     let ep = "127.0.0.1:{cp}"
     let confp = "{scratch}/lobo.conf"
+    // the operator creates the token file with the mode they want;
+    // lobo reads it and never writes one (wolf-std#5)
+    let tok = "ws15-e2e-shared-secret"
+    fs_write_text("{scratch}/token", "{tok}\n")?
     write_conf(confp, hp, cp, "ws04_e2e/A")?
 
     // spawn the real server: target/lobo-debug serve -p . -c <conf>
@@ -132,7 +173,7 @@ fn main() -> !int {
 
     // rewrite the config to route into B, reload through the channel
     write_conf(confp, hp, cp, "ws04_e2e/B")?
-    let r = shell.control_send(ep, "reload") else |_| {
+    let r = shell.control_send(ep, shell.control_line(tok, "reload")) else |_| {
         os_kill(child) else |_| {}
         assert(false, "control reload failed")
         ""
@@ -150,7 +191,7 @@ fn main() -> !int {
 
     // reload back to A (a second swap on the surviving listener)
     write_conf(confp, hp, cp, "ws04_e2e/A")?
-    let r2 = shell.control_send(ep, "reload") else |_| {
+    let r2 = shell.control_send(ep, shell.control_line(tok, "reload")) else |_| {
         os_kill(child) else |_| {}
         assert(false, "second control reload failed")
         ""
@@ -160,15 +201,51 @@ fn main() -> !int {
     assert(b3.contains("generation-A-body"), "gen3 serves A again: {b3}")
 
     // reopen is reachable and answers
-    let ro = shell.control_send(ep, "reopen") else |_| {
+    let ro = shell.control_send(ep, shell.control_line(tok, "reopen")) else |_| {
         os_kill(child) else |_| {}
         assert(false, "control reopen failed")
         ""
     }
     assert(ro.contains("reopen"), "reopen reply: {ro}")
 
+    // ---- the auth arm, through a real socket (ws15) ----
+    // `ping` answered with NO secret before any of this: wait_alive
+    // above is the assertion, and it is the exemption the stale-pid
+    // check depends on.
+    let g_before = current_gen_of(ep, tok)
+    assert(g_before == 3, "the stanza reads the generation: {g_before}")
+    let no_tok = shell.control_send(ep, "reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "the unauthorized send never answered")
+        ""
+    }
+    assert(no_tok == "unauthorized", "a verb with NO secret is refused: {no_tok}")
+    let bad_tok = shell.control_send(ep, "not-the-secret reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "the wrong-secret send never answered")
+        ""
+    }
+    assert(bad_tok == "unauthorized", "a verb with the WRONG secret is refused: {bad_tok}")
+    let g_after = current_gen_of(ep, tok)
+    assert(
+        g_after == g_before,
+        "two refused reloads changed NOTHING: generation {g_before} -> {g_after}",
+    )
+    assert(shell.control_alive(ep), "ping still answers without a secret while a token is armed")
+
+    // upgrade: dispatched, and answers by name (the binary-swap verb
+    // is unclaimed on every platform at this pin — and it is the one
+    // verb the endpoint reaches that no signal does)
+    let up = shell.control_send(ep, shell.control_line(tok, "upgrade")) else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "upgrade never answered")
+        ""
+    }
+    assert(up.starts_with("upgrade: not implemented at this pin"), "upgrade answers by name: {up}")
+    assert(up.contains("control endpoint"), "upgrade names where it will land: {up}")
+
     // stop: the loop ends, the pid file is removed
-    let rs = shell.control_send(ep, "stop") else |_| {
+    let rs = shell.control_send(ep, shell.control_line(tok, "stop")) else |_| {
         os_kill(child) else |_| {}
         assert(false, "control stop failed")
         ""

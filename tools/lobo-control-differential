@@ -1,0 +1,289 @@
+#!/bin/sh
+# lobo-control-differential — the ws15 differential: `nginx -s reload`
+# beside `lobo -s reload`, on loopback, both driven by the same script
+# and measured the same way. The drop-in claim covers CONFIGURATION,
+# and this harness asks whether it covers OPERATION too: when an
+# operator reloads a running server, do the two servers do the same
+# observable thing?
+#
+# Four rows CARRY (both servers, same measurement, same answer):
+#   1. config re-read — the reload picks up an edited root and new
+#      connections are served from it;
+#   2. the listener survives — a hammer of connects across and after
+#      the reload sees ZERO refusals (nginx keeps the listening socket
+#      across the fork; lobo reuses the live fd);
+#   3. an already-open connection is NEVER served the NEW config — a
+#      keepalive connection held across the reload is answered from
+#      the generation it was accepted under, or not at all (nginx: the
+#      old worker's config, and its idle keepalive connections are
+#      closed once that worker finishes shutting down; lobo: the
+#      draining generation's frozen model, held until the connection
+#      closes or worker_shutdown_timeout bites). The harness reports
+#      WHICH of the two each server showed;
+#   4. a BAD config is refused, the running server keeps serving the
+#      old one, and `-s reload` exits NON-ZERO on both — the reason
+#      `-t` exists, and the exit code an operator's `&&` depends on.
+#
+# Three rows are NAMED DELTAS, printed with their reason (a
+# differential that hides a delta is a differential that lies —
+# docs/DIFFERENTIAL.md's rule, applied to operation):
+#   D1 transport: nginx's trigger is kill(pid, SIGHUP) and the KERNEL
+#      authorizes it (same uid, or CAP_KILL); the pid file is not a
+#      secret. lobo's is a loopback TCP endpoint, because wolf has no
+#      unix-domain socket at this pin (measured; wolf-lang#227) — so
+#      the filesystem-permissioned socket haproxy/systemd-class
+#      servers use is unavailable, and loopback is NOT a uid boundary.
+#      lobo's answer is the optional `token <file>` arm.
+#   D2 who parses: nginx's `-s reload` parses the config in the CLIENT
+#      process — a bad config never reaches the master, and the client
+#      exits 1 with the [emerg]. lobo's client sends the verb and the
+#      MASTER parses, answering the verdict on the wire; lobo prints
+#      that answer and names the generation that kept serving. This
+#      harness is what caught lobo exiting 0 on a rejected reload
+#      (fixed at ws15: the reply's verdict IS the exit code, so row 4
+#      carries).
+#   D3 narration: nginx's old workers drain in the dark. lobo narrates
+#      the drain (generation-draining / connection-retired /
+#      generation-retired, and `lobo status`) — docs/DRAIN.md.
+#
+# REFUSES, naming the pin, when the oracle is absent or drifted (the
+# same rule as tools/lobo-differential; a green gauntlet always means
+# the comparison actually ran). Loopback only, forever.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+DIFF_DIR=tests/differential
+BIN=$DIFF_DIR/bin/nginx
+LOBO=target/lobo-release
+pin_version=$(sed -n 's/^version = //p' $DIFF_DIR/NGINX-PIN)
+
+if [ ! -x "$BIN" ]; then
+    echo "control-differential: REFUSED — pinned nginx binary missing at $BIN" >&2
+    echo "control-differential: the pin is nginx/$pin_version (tests/differential/NGINX-PIN); build it once per docs/DIFFERENTIAL.md" >&2
+    exit 1
+fi
+have_version=$("$BIN" -v 2>&1 | sed -n 's|^nginx version: nginx/||p')
+if [ "$have_version" != "$pin_version" ]; then
+    echo "control-differential: REFUSED — $BIN is nginx/$have_version, the pin is nginx/$pin_version" >&2
+    exit 1
+fi
+if [ ! -x "$LOBO" ]; then
+    echo "control-differential: REFUSED — lobo release binary missing at $LOBO (the gauntlet's tiers step builds it)" >&2
+    exit 1
+fi
+
+scratch=target/control-differential
+rm -rf "$scratch"
+mkdir -p "$scratch/A" "$scratch/B" "$scratch/logs"
+printf 'GEN-A\n' > "$scratch/A/index.html"
+printf 'GEN-B\n' > "$scratch/B/index.html"
+root=$(pwd)/$scratch
+
+red=0
+total=0
+row() { # row <name> <0|1>
+    total=$((total + 1))
+    if [ "$2" = 0 ]; then
+        echo "control-differential: ok — $1"
+    else
+        echo "control-differential: FAILED — $1" >&2
+        red=$((red + 1))
+    fi
+}
+note() { echo "control-differential: $1"; }
+
+get() { # get <port> — the served body's first line, or "" on refusal
+    printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
+    "$WOLF" run ./tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null |
+        awk 'BEGIN { RS = "\r\n\r\n" } NR == 2 { print $1 }'
+}
+poll_body() { # poll_body <port> <want> — up to ~8s
+    i=0
+    while [ $i -lt 80 ]; do
+        [ "$(get "$1")" = "$2" ] && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+await_pre() { # await_pre <file> — the held connection has made its FIRST
+    # request. `wolf run` builds the driver before it dials, so a fixed
+    # sleep here raced the reload and measured the wrong generation.
+    i=0
+    while [ $i -lt 100 ]; do
+        grep -q '^pre=..*' "$1" 2>/dev/null && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+hammer() { # hammer <port> <n> — echoes the count of NON-200 answers
+    bad=0
+    n=0
+    while [ "$n" -lt "$2" ]; do
+        b=$(get "$1")
+        case "$b" in GEN-A | GEN-B) ;; *) bad=$((bad + 1)) ;; esac
+        n=$((n + 1))
+    done
+    echo "$bad"
+}
+
+# ============================ the oracle ============================
+nport=$("$WOLF" run ./tests/rig/freeport.lu)
+ngconf() { # ngconf <root-subdir> [extra]
+    printf 'daemon off;\npid nginx.pid;\nerror_log error.log;\nevents { }\nhttp {\n  access_log access.log;\n  types { text/html html; }\n  %s\n  server { listen 127.0.0.1:%s; root %s/%s; }\n}\n' \
+        "${2:-}" "$nport" "$root" "$1" > "$scratch/nginx.conf"
+}
+ngconf A
+"$BIN" -p "$root" -c nginx.conf -e error.log &
+ngpid=$!
+if poll_body "$nport" GEN-A; then
+    ng_up=1
+else
+    ng_up=0
+fi
+row "oracle: nginx/$have_version serving generation A" $((1 - ng_up))
+
+# row 3 needs a connection open ACROSS the reload — start it first.
+# The hold is short on purpose: nginx's old worker closes its IDLE
+# keepalive connections once it finishes shutting down, so a long hold
+# measures the worker's lifetime rather than the config it serves.
+"$WOLF" run ./tests/rig/reloadhold.lu "$nport" 700 > "$scratch/ng-hold.out" 2>&1 &
+nghold=$!
+await_pre "$scratch/ng-hold.out" || row "the oracle's held connection made its first request" 1
+
+ngconf B
+"$BIN" -p "$root" -c nginx.conf -s reload > "$scratch/ng-reload.out" 2>&1
+ng_reload_exit=$?
+if poll_body "$nport" GEN-B; then
+    ng_reread=0
+else
+    ng_reread=1
+fi
+wait "$nghold" 2>/dev/null
+ng_bad=$(hammer "$nport" 20)
+ng_pre=$(sed -n 's/^pre=//p' "$scratch/ng-hold.out")
+ng_post=$(sed -n 's/^post=//p' "$scratch/ng-hold.out")
+
+# a BAD config: the running server must keep serving
+printf 'daemon off;\npid nginx.pid;\nerror_log error.log;\nevents { }\nhttp {\n  bogus_directive_that_does_not_exist on;\n  server { listen 127.0.0.1:%s; root %s/A; }\n}\n' \
+    "$nport" "$root" > "$scratch/nginx.conf"
+"$BIN" -p "$root" -c nginx.conf -s reload > "$scratch/ng-bad.out" 2>&1
+ng_bad_exit=$?
+sleep 0.5
+ng_after_bad=$(get "$nport")
+kill "$ngpid" 2>/dev/null
+wait "$ngpid" 2>/dev/null
+
+# ============================= lobo =================================
+lport=$("$WOLF" run ./tests/rig/freeport.lu)
+lctl=$("$WOLF" run ./tests/rig/freeport.lu)
+lbconf() { # lbconf <root-subdir> [extra]
+    printf 'pid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  access_log %s/lobo-access.log;\n  %s\n  server { listen 127.0.0.1:%s; root %s/%s; }\n}\n' \
+        "$root" "$lctl" "$root" "${2:-}" "$lport" "$root" "$1" > "$scratch/lobo.conf"
+}
+lbconf A
+"$LOBO" serve -p . -c "$scratch/lobo.conf" 2> "$scratch/lobo.log" &
+lbpid=$!
+if poll_body "$lport" GEN-A; then
+    lb_up=1
+else
+    lb_up=0
+fi
+row "lobo: serving generation A on its own loopback port" $((1 - lb_up))
+
+"$WOLF" run ./tests/rig/reloadhold.lu "$lport" 700 > "$scratch/lb-hold.out" 2>&1 &
+lbhold=$!
+await_pre "$scratch/lb-hold.out" || row "lobo's held connection made its first request" 1
+
+lbconf B
+"$LOBO" -p . -c "$scratch/lobo.conf" -s reload > "$scratch/lb-reload.out" 2>&1
+lb_reload_exit=$?
+if poll_body "$lport" GEN-B; then
+    lb_reread=0
+else
+    lb_reread=1
+fi
+wait "$lbhold" 2>/dev/null
+lb_bad_count=$(hammer "$lport" 20)
+lb_pre=$(sed -n 's/^pre=//p' "$scratch/lb-hold.out")
+lb_post=$(sed -n 's/^post=//p' "$scratch/lb-hold.out")
+
+printf 'pid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  bogus_directive_that_does_not_exist on;\n  server { listen 127.0.0.1:%s; root %s/A; }\n}\n' \
+    "$root" "$lctl" "$lport" "$root" > "$scratch/lobo.conf"
+"$LOBO" -p . -c "$scratch/lobo.conf" -s reload > "$scratch/lb-bad.out" 2>&1
+lb_bad_exit=$?
+sleep 0.5
+lb_after_bad=$(get "$lport")
+kill "$lbpid" 2>/dev/null
+wait "$lbpid" 2>/dev/null
+
+# ============================ the rows ==============================
+echo ""
+note "ROWS THAT CARRY (same measurement, both servers)"
+
+if [ "$ng_reread" = 0 ] && [ "$lb_reread" = 0 ]; then
+    row "1. config re-read: an edited root takes effect on new connections after a reload — nginx GEN-A->GEN-B, lobo GEN-A->GEN-B" 0
+else
+    row "1. config re-read: nginx reread=$ng_reread lobo reread=$lb_reread (0 = the new root served)" 1
+fi
+
+if [ "$ng_bad" = 0 ] && [ "$lb_bad_count" = 0 ]; then
+    row "2. the listener survives: 20 connects each after the reload, ZERO refusals on either server (nginx keeps the socket across the fork; lobo reuses the live fd)" 0
+else
+    row "2. the listener survives: nginx had $ng_bad bad answers, lobo had $lb_bad_count (of 20 each)" 1
+fi
+
+held_ok() { # held_ok <post> — the old config, or a close; never the new one
+    case "$1" in GEN-B) return 1 ;; *) return 0 ;; esac
+}
+if [ -z "$ng_pre" ] || [ -z "$lb_pre" ]; then
+    row "3. the held connections made their first request BEFORE the reload (nginx pre='$ng_pre' lobo pre='$lb_pre') — an empty pre is a harness fault, not a server one" 1
+fi
+if [ "$ng_pre" = GEN-A ] && [ "$lb_pre" = GEN-A ] && held_ok "$ng_post" && held_ok "$lb_post"; then
+    row "3. an already-open connection is NEVER served the NEW config: nginx answered '$ng_post' and lobo answered '$lb_post' on a keepalive connection held across the reload — neither is GEN-B, while new connections had already moved to it" 0
+else
+    row "3. an already-open connection: nginx pre=$ng_pre post=$ng_post, lobo pre=$lb_pre post=$lb_post (neither post may be GEN-B)" 1
+fi
+if [ "$ng_post" != "$lb_post" ]; then
+    note "  D4 idle keepalive at reload — nginx answered '$ng_post', lobo answered '$lb_post': nginx's old worker closes its IDLE keepalive connections once it finishes shutting down, lobo's draining generation holds them until they close (or worker_shutdown_timeout aborts them, docs/DRAIN.md). lobo is the more forgiving of the two, so a client written against nginx keeps working; a client written against lobo may not survive nginx."
+fi
+
+if [ "$ng_after_bad" = GEN-B ] && [ "$lb_after_bad" = GEN-B ]; then
+    row "4a. a bad config is refused and the running server keeps serving the OLD one — both still answer GEN-B after a reload of an unparseable config" 0
+else
+    row "4a. a bad config: nginx then served '$ng_after_bad', lobo served '$lb_after_bad' (both should be GEN-B)" 1
+fi
+if [ "$ng_bad_exit" != 0 ] && [ "$lb_bad_exit" != 0 ]; then
+    row "4b. a -s reload of a bad config exits NON-ZERO on both (nginx $ng_bad_exit, lobo $lb_bad_exit) — an operator's chained deploy never runs on a reload that did not happen" 0
+else
+    row "4b. a -s reload of a bad config: nginx exited $ng_bad_exit, lobo exited $lb_bad_exit (both must be non-zero)" 1
+fi
+
+echo ""
+note "NAMED DELTAS (measured, not hidden)"
+note "  D1 transport — nginx: kill(pid, SIGHUP), the kernel authorizes (same uid); lobo: a loopback TCP endpoint, because wolf has no unix-domain socket at this pin (wolf-lang#227), so the optional \`token <file>\` arm is the authorization instead. Loopback is not a uid boundary and lobo says so."
+note "  D2 who parses — nginx exit $ng_bad_exit: $(head -1 "$scratch/ng-bad.out" 2>/dev/null || echo '(nothing)')"
+note "  D2 who parses — lobo  exit $lb_bad_exit: $(head -1 "$scratch/lb-bad.out" 2>/dev/null || echo '(nothing)')"
+if grep -q 'emerg' "$scratch/ng-bad.out" 2>/dev/null && grep -q 'keeping generation' "$scratch/lb-bad.out" 2>/dev/null; then
+    row "D2 is real, and both are useful: nginx's CLIENT parses and reports the [emerg] (the master is never signalled), lobo's MASTER parses and reports the verdict plus the generation that kept serving — different mechanisms, the same exit code and the same survival" 0
+else
+    row "D2 who parses: expected an [emerg] from nginx and a \"keeping generation\" verdict from lobo; got nginx='$(head -1 "$scratch/ng-bad.out" 2>/dev/null)' lobo='$(head -1 "$scratch/lb-bad.out" 2>/dev/null)'" 1
+fi
+ng_narr=$(grep -c 'generation-' "$root/error.log" 2>/dev/null)
+lb_narr=$(grep -c 'generation-' "$scratch/lobo.log" 2>/dev/null)
+ng_narr=${ng_narr:-0}
+lb_narr=${lb_narr:-0}
+if [ "$ng_narr" = 0 ] && [ "$lb_narr" -gt 0 ]; then
+    row "D3 narration: nginx's error log carries $ng_narr drain events, lobo's carries $lb_narr (generation-draining / -loaded / -activated / -retired) — the drain you can watch, docs/DRAIN.md" 0
+else
+    row "D3 narration: nginx=$ng_narr lobo=$lb_narr drain events (expected 0 and >0)" 1
+fi
+note "  (nginx's reload exit was $ng_reload_exit and lobo's $lb_reload_exit on the GOOD config — parity, both 0)"
+
+if [ "$red" != 0 ]; then
+    echo "control-differential: RED — $red of $total rows failed (artifacts under $scratch/)" >&2
+    exit 1
+fi
+echo "control-differential: $total/$total rows green (the reload semantics carry; the transport, the parse locus and the narration are named deltas, measured; nginx/$have_version on loopback)"

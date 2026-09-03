@@ -13,9 +13,14 @@
 #   5. a REAL `kill -TERM` is the fast shutdown — witnessed on a
 #      server with NO control directive at all, which is the point:
 #      signals need no channel.
-# The log-event trail (`signal-received sig=… verb=…`, the wsm01
-# vocabulary extension) is asserted so a signal-driven reload is
-# distinguishable from a control-channel one.
+# The log-event trail (`signal-received sig=… verb=… source=…`, the
+# wsm01 vocabulary extension with ws15's appended field) is asserted
+# both ways — and step 6 is ws15's own claim, MEASURED: a control verb
+# and a real signal drive the SAME dispatch, so the two reloads' event
+# blocks are byte-identical once the generation numbers and the seq
+# stamps are normalized away, and `source` is the whole of the
+# difference. That is what "a verb and a signal are indistinguishable
+# in the log" means, stated as a diff rather than a promise.
 #
 # Linux + macOS at this pin ([os.signal.platform]: s114 was
 # Linux-full; macOS joined at s59 via the task-layer port — the wsm03
@@ -168,8 +173,94 @@ else
     check "log event: signal-received sig=terminate verb=stop" 1
 fi
 
+# 6. THE INDISTINGUISHABILITY WITNESS (ws15). One server, two
+# reloads: the first over the control endpoint, the second by a real
+# SIGHUP. Both flow through the ONE verb dispatch, so their event
+# blocks differ only in the generation numbers, the seq stamps — and
+# `source`. Normalize the first two away and the blocks must be
+# IDENTICAL; leave `source` alone and it must be the only line that
+# differs.
+hp3=$("$WOLF" run ./tests/rig/freeport.lu)
+ctp3=$("$WOLF" run ./tests/rig/freeport.lu)
+conf3="$scratch/lobo3.conf"
+printf 'pid %s/lobo3.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+    "$scratch" "$ctp3" "$hp3" "$scratch/A" > "$conf3"
+"$LOBO" serve -p . -c "$conf3" 2> "$scratch/lobo3.log" &
+pid3=$!
+status3() { "$LOBO" status -p . -c "$conf3" 2>/dev/null; }
+wait_gen() { # wait_gen <n>
+    i=0
+    while [ $i -lt 80 ]; do
+        if status3 | grep -q "generation $1: current"; then return 0; fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+wait_gen 1 || check "the third server came up" 1
+
+# door 1: the control endpoint (what `lobo -s reload` sends)
+"$LOBO" -p . -c "$conf3" -s reload > /dev/null 2>&1
+wait_gen 2 || check "the control-channel reload advanced the generation" 1
+# door 2: a real SIGHUP
+kill -HUP "$pid3"
+wait_gen 3 || check "the signal reload advanced the generation" 1
+kill -TERM "$pid3"
+wait "$pid3" 2>/dev/null
+
+# each reload emits five lines: the trigger event then the four
+# generation events it drives
+block() { # block <ordinal> — the nth reload's five-line event block
+    awk -v want="$1" '
+        /signal-received sig=reload/ { c++; if (c == want) n = 5 }
+        n > 0 { print; n-- }' "$scratch/lobo3.log"
+}
+# gen numbers, seq stamps, the content hash and the age are the
+# per-run facts; everything else is the shape under test
+norm() { sed -e 's/gen=[0-9][0-9]*/gen=G/g' -e 's/seq=[0-9][0-9]*/seq=S/g' \
+    -e 's/id=[0-9a-f][0-9a-f]*/id=I/g' -e 's/age-ms=[0-9][0-9]*/age-ms=A/g'; }
+
+block 1 > "$scratch/door-control.log"
+block 2 > "$scratch/door-signal.log"
+lines_c=$(wc -l < "$scratch/door-control.log" | tr -d ' ')
+lines_s=$(wc -l < "$scratch/door-signal.log" | tr -d ' ')
+if [ "$lines_c" = 5 ] && [ "$lines_s" = 5 ]; then
+    check "both doors emitted the same five-event block (trigger + draining + loaded + activated + retired)" 0
+else
+    check "expected a five-line block from each door, got control=$lines_c signal=$lines_s" 1
+fi
+if grep -q 'signal-received sig=reload verb=reload source=control' "$scratch/door-control.log"; then
+    check "the control door names itself: signal-received sig=reload verb=reload source=control" 0
+else
+    check "the control door's trigger line is wrong: $(head -1 "$scratch/door-control.log")" 1
+fi
+if grep -q 'signal-received sig=reload verb=reload source=signal' "$scratch/door-signal.log"; then
+    check "the signal door names itself: signal-received sig=reload verb=reload source=signal" 0
+else
+    check "the signal door's trigger line is wrong: $(head -1 "$scratch/door-signal.log")" 1
+fi
+norm < "$scratch/door-control.log" > "$scratch/door-control.norm"
+norm < "$scratch/door-signal.log" > "$scratch/door-signal.norm"
+ndiff=$(diff "$scratch/door-control.norm" "$scratch/door-signal.norm" | grep -c '^[<>]' || true)
+if [ "$ndiff" = 2 ]; then
+    check "INDISTINGUISHABLE: the two blocks differ on exactly ONE line, and only in its source field — a control verb and a real signal are the same code path (docs/CONTROL.md)" 0
+else
+    say "diff of the two normalized blocks:" >&2
+    diff "$scratch/door-control.norm" "$scratch/door-signal.norm" >&2
+    check "expected exactly one differing line between the doors, got $ndiff diff lines" 1
+fi
+sdiff=$(sed 's/source=[a-z][a-z]*/source=X/' "$scratch/door-control.norm" > "$scratch/dc.x"; \
+    sed 's/source=[a-z][a-z]*/source=X/' "$scratch/door-signal.norm" > "$scratch/ds.x"; \
+    diff "$scratch/dc.x" "$scratch/ds.x" | grep -c '^[<>]' || true)
+if [ "$sdiff" = 0 ]; then
+    check "with source normalized too the blocks are BYTE-IDENTICAL: source is the whole of the difference" 0
+else
+    diff "$scratch/dc.x" "$scratch/ds.x" >&2
+    check "the blocks still differ with source normalized ($sdiff lines) — the doors are NOT one dispatch" 1
+fi
+
 if [ "$red" != 0 ]; then
     echo "lobo-signal: RED — $red of $total checks failed (logs under $scratch/)" >&2
     exit 1
 fi
-echo "lobo-signal: $total/$total checks green (a real SIGHUP drove the observable drain)"
+echo "lobo-signal: $total/$total checks green (a real SIGHUP drove the observable drain; and a control verb's event block is byte-identical to a signal's but for source=)"

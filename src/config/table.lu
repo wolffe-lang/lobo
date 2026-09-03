@@ -326,7 +326,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "lobo-native (ws10, linted L008): per-request admitted-bytes budget -> 503 with a name (nginx's answer to memory pressure is the OOM killer); 0/absent = off. Admission metering AND the runtime's own region cap (ws14, wolf-lang#219 closed): a budgeted body runs inside a per-request proc under a cap of 16x the directive in LEDGER units; a breach is a 503 site=region. The ledger charges 16 x pow2ceil(body) per small body, so a budget below the next power of two above a served file trips the cap on an admitted request — docs/BUDGET.md's growth-law band",
+        "lobo-native (ws10, linted L008): per-request admitted-bytes budget -> 503 with a name (nginx's answer to memory pressure is the OOM killer); 0/absent = off. Admission metering AND the runtime's own region cap (ws14, wolf-lang#219 closed): a budgeted body runs inside a per-request proc under a cap of 16 x pow2ceil(the directive) in LEDGER units (D40, ws15 — the envelope follows the ledger's doubling growth), and a breach is a 503 site=region. Set it to the bytes you will admit: since D40 no body the meter admits can cross the cap, so the cap is a BACKSTOP and there is no second arithmetic — docs/BUDGET.md carries the law, the theorem and the measurement",
     )
     row(
         mut t,
@@ -811,9 +811,9 @@ pub fn table() -> Table {
         "main",
         "",
         1,
-        1,
+        3,
         "implemented",
-        "lobo-native: loopback reload channel for -s (off by default; NOT an nginx directive — the oracle -t rejects it, a named delta; ws14 audits the surface)",
+        "lobo-native (ws04, widened at ws15): the loopback endpoint a running lobo takes orders on — reload/quit/stop/reopen/status/upgrade/ping, the SAME dispatch a real signal drives. `control <addr>` or `control <addr> token <file>`; off by default. The listener is loopback TCP on EVERY host: wolf has no unix-domain socket at this pin (measured, wolf-lang#227), so the filesystem-permissioned socket every comparable server uses is unavailable and the optional token file is the auth arm instead — lobo READS it, never writes it (std has no permission surface, wolf-std#5). NOT an nginx directive (the oracle -t rejects it, a named delta); nginx's own trigger is kill(pid, SIGHUP) and the kernel authorizes it — docs/CONTROL.md's delta table",
     )
     // ---- implemented at ws05: the certs-carry campaign's serving set
     row(

@@ -360,13 +360,25 @@ fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
 // the tier's own units, cumulative and high-water — and #203 measured
 // lobo's streaming shape at 16× the payload (8× because a byte buffer
 // is a List[int], 2× because growth's abandoned buffers stay
-// charged). `ledger_cap` is that envelope: sixteen times the
-// directive's bytes, so the cap agrees with the meter on every shape
-// the meter models and fires exactly where the meter's payload
-// arithmetic is WRONG — a body under ~44 bytes carries a fixed
-// container overhead the envelope does not cover, which is the
-// witness's shape and no operating budget's. When #203 lands the
-// constant changes with the pin, in one place.
+// charged). ws14 measured the whole CURVE and falsified ws13's
+// theorem with it: the ledger charges `16 × pow2ceil(N) − 16` for an
+// N-byte body, because the buffer grows by doubling and every
+// abandoned buffer stays charged — 16× exactly AT a power of two and
+// up to 32× just past one. Under a flat 16× envelope that opened a
+// BAND in which the runtime refused a request the meter had
+// admitted (a 33,000-byte body under `memory_budget 40k`).
+//
+// D40 (ws15) closes the band by making the envelope follow the law:
+// `ledger_cap(budget) = 16 × pow2ceil(budget)`. The cap is then a
+// BACKSTOP, not a second meter — for any body the meter admits,
+// N ≤ budget, so pow2ceil(N) ≤ pow2ceil(budget) and the charge
+// 16 × pow2ceil(N) − 16 is strictly under the cap; the stream path's
+// one 64 KiB chunk (1,048,560) sits under it too, because admitting a
+// streamed body needs budget ≥ 65,536 and therefore a cap ≥
+// 2,097,152. What still fires it is the shape the meter does NOT
+// model — a runtime charge that is not this file's body — which is
+// exactly what a backstop is for. When #203 changes the growth law
+// the exponent changes with the pin, in one place.
 //
 // WHAT COMES BACK. A proc's `normal(value)` is unreadable at the
 // join and a channel cannot be a proc argument on wolfc (filed from
@@ -379,12 +391,27 @@ fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
 // tests) the fault path still works and `rt` reads 0.
 // ------------------------------------------------------------------
 
+/// The smallest power of two at or above `n` (`pow2ceil`), the shape
+/// the runtime's doubling growth charges at. `n <= 1` answers 1.
+/// Total: the loop is bounded by the width of an int.
+fn pow2ceil(n: int) -> int {
+    var p: int = 1
+    while p < n {
+        p = p * 2
+    }
+    p
+}
+
 /// The region cap, in LEDGER units, for a `memory_budget` of
-/// `budget` request bytes: 16× — the #203 envelope for lobo's body
-/// shapes at this pin (8× List[int] storage × 2× cumulative growth
-/// history). Total.
+/// `budget` request bytes: `16 × pow2ceil(budget)` — the envelope
+/// D40 (ws15) derived from ws14's measured growth law, replacing the
+/// flat 16× #203 estimate. 16 is the per-byte factor (8× List[int]
+/// storage × 2× cumulative growth history); `pow2ceil` is the
+/// doubling the ledger charges for. The pair makes the cap a
+/// BACKSTOP: no body the meter admits can cross it (docs/BUDGET.md
+/// carries the proof and the numbers). Total.
 pub fn ledger_cap(budget: int) -> int {
-    budget * 16
+    16 * pow2ceil(budget)
 }
 
 /// The loopback self-pipe a body proc reports through: (write end,

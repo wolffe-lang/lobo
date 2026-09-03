@@ -1071,7 +1071,33 @@ fn serve_main(prefix: str, conf: str) -> int {
     var have_ctrl = false
     var cl: int = 0
     var ctrl_ep = addr
+    // ws15: the endpoint's optional second auth arm — a shared secret
+    // READ from an operator-owned file (never written: std has no
+    // permission surface at this pin, wolf-std#5, so a token lobo
+    // generated would land at the umask's mode). A config that names
+    // a token file lobo cannot read refuses HERE, at startup, rather
+    // than serving an endpoint whose auth silently does nothing.
+    var ctok = ""
     if !ctrl.is_empty() {
+        let tokp = shell.control_token_path(c0, prefix)
+        if !tokp.is_empty() {
+            ctok = shell.control_token_read(tokp) else |e| match e {
+                none => {
+                    eprint(
+                        "lobo: [emerg] control token file \"{tokp}\" does not exist (create it with the mode you want — lobo reads it, never writes it)",
+                    )
+                    return 1
+                },
+                io => {
+                    eprint("lobo: [emerg] control token file \"{tokp}\" could not be read")
+                    return 1
+                },
+            }
+            if ctok.is_empty() {
+                eprint("lobo: [emerg] control token file \"{tokp}\" is empty")
+                return 1
+            }
+        }
         cl = net_listen(ctrl) else |_| {
             eprint("lobo: [emerg] bind() to control {ctrl} failed")
             return 1
@@ -1182,7 +1208,16 @@ fn serve_main(prefix: str, conf: str) -> int {
     let where = if have_http { "127.0.0.1:{hport} (port {hport})" } else {
         "(no plaintext listener)"
     }
-    ev_log(mut elog, "notice", "serving on {where}, control {ctrl_ep}, pid file {pidp}")
+    let ctrl_auth = if !have_ctrl { "off" } else if ctok.is_empty() {
+        "loopback only"
+    } else {
+        "loopback + token"
+    }
+    ev_log(
+        mut elog,
+        "notice",
+        "serving on {where}, control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}",
+    )
 
     // signal reception (wsm01, s114 in the pin): register interest in
     // RELOAD|TERMINATE|QUIT by MEANING, plus the probe bit (UPGRADE —
@@ -1279,6 +1314,7 @@ fn serve_main(prefix: str, conf: str) -> int {
         // lost.
         var verb = ""
         var cc = -1
+        var denied = false
         if have_ctrl {
             net_deadline(cl, 25) else |_| {}
             var got_ctrl = true
@@ -1289,8 +1325,23 @@ fn serve_main(prefix: str, conf: str) -> int {
             if got_ctrl {
                 cc = cand
                 net_deadline(cc, 2000) else |_| {}
-                verb = read_command(cc)
+                let line = read_command(cc)
+                if shell.control_authorized(line, ctok) {
+                    verb = shell.control_verb_of(line, ctok)
+                } else {
+                    denied = true
+                }
             }
+        }
+        // an unauthorized line dispatches NOTHING and emits no
+        // vocabulary event — the refusal is a prose notice at `warn`,
+        // so the frozen event stream stays the stream of decisions the
+        // loop actually took (docs/CONTROL.md)
+        if denied {
+            ev_log(mut elog, "warn", "control: unauthorized command rejected")
+            reply(cc, "unauthorized\n")
+            net_close(cc) else |_| {}
+            cc = -1
         }
         if sig_on && cc < 0 {
             // The self-raise poll: enqueue the probe meaning, then
@@ -1310,11 +1361,22 @@ fn serve_main(prefix: str, conf: str) -> int {
             }
             if m > 0 && m != sprobe {
                 verb = shell.signal_verb(m)
-                ev_event(mut elog, "notice", shell.ev_signal_received(m))
             }
         }
         if cc >= 0 || !verb.is_empty() {
             let curgen = current_gen(gens)
+            // ws15: ONE emission site for the trigger event, reached
+            // by BOTH doors. A control verb and a real signal run the
+            // same dispatch below, so the vocabulary line — and every
+            // generation event that follows it — is byte-identical
+            // but for `source`. The verbs with no signal twin
+            // (status, reopen, ping, upgrade) emit nothing: `sig`'s
+            // value set stays the frozen reload|terminate|quit.
+            let mtrig = shell.signal_meaning(verb)
+            if mtrig > 0 {
+                let src = if cc >= 0 { "control" } else { "signal" }
+                ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
+            }
             if verb == "ping" {
                 reply(cc, "pong\n")
             } else if verb == "status" {
@@ -1380,6 +1442,20 @@ fn serve_main(prefix: str, conf: str) -> int {
                     optin = config.log_headers_join(ng.conf)
                 }
                 reply(cc, "{ng.note}\n")
+            } else if verb == "upgrade" {
+                // ws15: the binary-swap verb EXISTS on the endpoint
+                // and answers by name. It is unclaimed on every
+                // platform at this pin — and it is the one verb the
+                // control channel reaches that no signal does: on
+                // unix UPGRADE's bit is lobo's own poll probe (an
+                // outside SIGUSR2 is indistinguishable from it), and
+                // on windows RELOAD/UPGRADE have no analog at all
+                // ([os.signal.platform]). Naming it here is what
+                // makes the endpoint the place it will land.
+                reply(
+                    cc,
+                    "upgrade: not implemented at this pin — the binary-swap verb is unclaimed on every platform; when it lands it lands HERE, on the control endpoint (docs/CONTROL.md)\n",
+                )
             } else {
                 reply(cc, "unknown verb \"{verb}\"\n")
             }
@@ -1761,30 +1837,108 @@ fn held_of(gens: List[GenRow], gen: int) -> int {
 // control channel (the pin has no arbitrary-pid signal send; #126)
 // ------------------------------------------------------------------
 
+/// The client half of the endpoint, shared by `-s`, `status` and
+/// `control` (ws15): resolve the running master's endpoint from the
+/// pid file and the secret to address it with from the configured
+/// token file. Answers ("", "") after printing the diagnostic — the
+/// caller returns 1.
+///
+/// This is where "`-s` PREFERS the endpoint when configured" is
+/// expressed. At this pin the preference has nothing to fall back TO:
+/// there is no getpid and no arbitrary-pid signal send (wolf-lang#126's
+/// unlanded half), so a config with no `control` directive cannot be
+/// reached by any means and lobo says exactly that instead of dialling
+/// the http port and printing a 400 at the operator. That refusal is
+/// the windows sentence made operational on EVERY host
+/// (docs/CONTROL.md, docs/DRAIN.md).
+fn control_target(cli: shell.Cli) -> (str, str) {
+    let c = config.load(cli.prefix, cli.conf)
+    // a config that did not load keeps nginx's shape: the pid path
+    // falls back to the default and the missing file is the alert
+    if config.ok(c) && shell.control_addr(c).is_empty() {
+        eprint(
+            "lobo: [error] no \"control\" directive in {cli.conf}: a running lobo is reached ONLY over its control endpoint at this pin (there is no arbitrary-pid signal send — wolf-lang#126), so add `control 127.0.0.1:<port>;` and restart",
+        )
+        return ("", "")
+    }
+    let pidp = shell.pid_path(c, cli.prefix)
+    let ep = shell.pid_read(pidp) else |e| match e {
+        none => {
+            eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
+            return ("", "")
+        },
+        io => {
+            eprint("lobo: [alert] could not read pid file \"{pidp}\"")
+            return ("", "")
+        },
+    }
+    var tok = ""
+    let tokp = shell.control_token_path(c, cli.prefix)
+    if !tokp.is_empty() {
+        tok = shell.control_token_read(tokp) else |e| match e {
+            none => {
+                eprint(
+                    "lobo: [error] control token file \"{tokp}\" does not exist — the running master expects it",
+                )
+                return ("", "")
+            },
+            io => {
+                eprint("lobo: [error] control token file \"{tokp}\" could not be read")
+                return ("", "")
+            },
+        }
+    }
+    (ep, tok)
+}
+
+/// The exit code a control reply earns. nginx's `-s reload` parses
+/// the config in the CLIENT and exits 1 when it does not load, so an
+/// operator's `&&` never runs on a reload that did not happen; lobo
+/// parses in the MASTER (which is what lets it answer the verdict and
+/// name the generation that kept serving), and this is where that
+/// answer becomes the same exit code — the ws15 control differential
+/// found the gap. A refusal, a rejection, an unknown verb and the
+/// named `upgrade` answer are all exit 1; everything else is 0.
+/// Total.
+fn control_exit(reply: str) -> int {
+    if reply == "unauthorized" {
+        return 1
+    }
+    if reply.starts_with("reload rejected") {
+        return 1
+    }
+    if reply.starts_with("unknown verb") {
+        return 1
+    }
+    if reply.starts_with("upgrade: not implemented") {
+        return 1
+    }
+    0
+}
+
+/// The one diagnostic for a dead or unreachable endpoint, shared by
+/// the three client paths. Total.
+fn control_dead(ep: str) {
+    eprint(
+        "lobo: [error] the master at {ep} is not responding (stale pid file, or no lobo is running there)",
+    )
+}
+
 /// `-s <verb>`: read the pid file for the running master's control
 /// endpoint (nginx reads it for the pid), connect, send the verb, and
 /// print the reply. nginx exit codes: a missing pid file is exit 1
 /// with the open() diagnostic; a refused endpoint (stale file, dead
 /// master) is exit 1. Loads the config first, as nginx does, to
-/// resolve the pid path.
+/// resolve the pid path — and, since ws15, the token file too.
 fn signal_main(cli: shell.Cli) -> int {
-    let c = config.load(cli.prefix, cli.conf)
-    let pidp = shell.pid_path(c, cli.prefix)
-    let ep = shell.pid_read(pidp) else |e| match e {
-        none => {
-            eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
-            return 1
-        },
-        io => {
-            eprint("lobo: [alert] could not read pid file \"{pidp}\"")
-            return 1
-        },
+    let t = control_target(cli)
+    if t.0.is_empty() {
+        return 1
     }
-    let reply = shell.control_send(ep, cli.signal) else |e| match e {
+    let ep = t.0
+    let reply = shell.control_send(ep, shell.control_line(t.1, cli.signal)) else |e| match e {
         refused => {
-            eprint(
-                "lobo: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
-            )
+            control_dead(ep)
             return 1
         },
         io => {
@@ -1793,7 +1947,36 @@ fn signal_main(cli: shell.Cli) -> int {
         },
     }
     print(reply)
-    0
+    control_exit(reply)
+}
+
+/// `lobo control <verb>`: the endpoint's own CLI door (ws15). nginx's
+/// `-s` takes exactly four words and lobo's takes exactly the same
+/// four — the parity `tools/lobo-shell` probes against the oracle — so
+/// the verbs nginx has no word for (`status`, `upgrade`, `ping`) get a
+/// lobo-native subcommand rather than a widened `-s`. Sends one verb,
+/// prints the reply, exits 1 on a refusal so a script can gate.
+fn control_main(cli: shell.Cli) -> int {
+    let t = control_target(cli)
+    if t.0.is_empty() {
+        return 1
+    }
+    let ep = t.0
+    let line = shell.control_line(t.1, cli.signal)
+    // `status` answers a multi-line stanza; every other verb answers
+    // one line. `control_fetch` reads to close, so it serves both.
+    let reply = shell.control_fetch(ep, line) else |e| match e {
+        refused => {
+            control_dead(ep)
+            return 1
+        },
+        io => {
+            eprint("lobo: [error] control channel error to {ep}")
+            return 1
+        },
+    }
+    print_raw("{reply}\n")
+    control_exit(reply)
 }
 
 // ------------------------------------------------------------------
@@ -1808,28 +1991,19 @@ fn signal_main(cli: shell.Cli) -> int {
 /// drain's operator surface. Exit codes mirror `-s`: a missing pid file
 /// or a refused/dead endpoint is exit 1 with an nginx-shaped alert.
 fn status_main(cli: shell.Cli) -> int {
-    let c = config.load(cli.prefix, cli.conf)
-    let pidp = shell.pid_path(c, cli.prefix)
-    let ep = shell.pid_read(pidp) else |e| match e {
-        none => {
-            eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
-            return 1
-        },
-        io => {
-            eprint("lobo: [alert] could not read pid file \"{pidp}\"")
-            return 1
-        },
+    let t = control_target(cli)
+    if t.0.is_empty() {
+        return 1
     }
+    let ep = t.0
     let verb = if cli.format == "json" {
         "status json"
     } else {
         "status"
     }
-    let reply = shell.control_fetch(ep, verb) else |e| match e {
+    let reply = shell.control_fetch(ep, shell.control_line(t.1, verb)) else |e| match e {
         refused => {
-            eprint(
-                "lobo: [error] the master at {ep} is not responding (stale pid file, or signal reception awaits wolf-lang #126)",
-            )
+            control_dead(ep)
             return 1
         },
         io => {
@@ -1838,7 +2012,7 @@ fn status_main(cli: shell.Cli) -> int {
         },
     }
     print_raw("{reply}\n")
-    0
+    control_exit(reply)
 }
 
 // ------------------------------------------------------------------
@@ -2048,6 +2222,9 @@ fn main() -> int {
     }
     if cli.mode == "status" {
         return status_main(cli)
+    }
+    if cli.mode == "control" {
+        return control_main(cli)
     }
     if cli.mode == "cert_status" {
         return cert_status_main(cli)

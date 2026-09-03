@@ -133,10 +133,19 @@ fn main() -> !int {
     assert(shell.signal_name(2) == "terminate", "meaning 2 names terminate")
     assert(shell.signal_name(4) == "quit", "meaning 4 names quit")
     assert(shell.signal_name(9) == "unknown", "a non-meaning names unknown")
-    let sev = shell.ev_signal_received(1)
+    // ws15 appends `source` — the door the trigger came through
+    // (the vocabulary's extension discipline: appended, nothing
+    // renamed, every earlier prefix pin still matching). The verb
+    // half of the surface — the whole order desk — is pinned in
+    // tests/shell/control_verbs.lu.
+    let sev = shell.ev_signal_received(1, "signal")
     assert(
-        sev == "signal-received sig=reload verb=reload",
+        sev == "signal-received sig=reload verb=reload source=signal",
         "the signal-received event shape: {sev}",
+    )
+    assert(
+        sev.starts_with("signal-received sig=reload verb=reload"),
+        "the wsm01 prefix still matches byte for byte",
     )
 
     0

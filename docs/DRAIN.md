@@ -141,7 +141,7 @@ vibes):
 | `generation-draining` | notice | `gen`, `held` | a generation stops accepting and begins draining, still holding `held` connections |
 | `connection-retired` | notice | `gen`, `remaining` | one connection on a draining generation closed; `remaining` still held |
 | `generation-retired` | notice | `gen`, `drained`, `aborted`, `age-ms` | a draining generation reached zero (or timed out): `drained` closed cleanly, `aborted` force-closed by the timeout |
-| `signal-received` | notice | `sig`, `verb` | a real OS signal arrived and was mapped to an operator verb (wsm01): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb — the line that tells a signal-driven reload from a control-channel one |
+| `signal-received` | notice | `sig`, `verb` (+ `source`, ws15) | an operator TRIGGER arrived and was mapped to a verb (wsm01; ws15 appends `source`, nothing renamed): `sig` is the meaning name (`reload`\|`terminate`\|`quit`), `verb` the dispatched verb, `source` the door it came through — `signal` for a real OS signal, `control` for a verb on the control endpoint. Both doors run the SAME dispatch and emit through the same builder, so this line and every generation event after it are byte-identical but for `source`; the verbs with no signal twin (`status`, `reopen`, `ping`, `upgrade`) emit nothing, which is what keeps `sig`'s value set frozen. docs/CONTROL.md carries the paired logs and the diff that asserts them |
 | `budget-exceeded` | error | `gen`, `site`, `budget`, `would` (+ `cap`, ws14, only at `site=region`) | a request was refused by its `memory_budget` (ws10): `site` the deterministic exceed-site (`head`\|`body`\|`body-chunked`\|`file`\|`admin`\|`region` — the last is the RUNTIME's refusal, ws14, and carries `cap`, the region cap in ledger units), `budget` the configured bytes, `would` what admitting it would have charged (`budget+1` at `region`: a killed proc's charge is unobservable); the request also writes an ordinary 503 access line (docs/BUDGET.md) |
 | `upstream-resolved` | notice | `host`, `addrs`, `ttl-ms`, `took-ms` | the resolver answered an upstream name (ws13): `addrs` how many addresses, `ttl-ms` how long the cache holds them (the record TTL or `valid=`, floored at 1 s), `took-ms` the query's wall time (docs/RESOLVER.md) |
 | `upstream-resolve-failed` | error | `host`, `reason`, `took-ms` | an upstream name did not resolve (ws13): `reason` one of `nxdomain`\|`servfail`\|`refused`\|`noaddr`\|`malformed`\|`rcode`\|`timeout`\|`io`\|`dial`; the failure is held 1 s and the requests parked on the name answer 502 |
@@ -177,6 +177,12 @@ lobo: [notice] connection-retired gen=1 remaining=0 seq=7
 lobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840 seq=8
 ```
 
+Nine events, and `signal-received`'s `source` is the ONLY thing in this
+vocabulary that says which door an order came through. That is
+deliberate: docs/CONTROL.md is the page, and its claim — a control verb
+and a real signal are indistinguishable in the log but for that field —
+is asserted as a diff by `tools/lobo-signal`, not left as prose.
+
 ## Trigger disposition (control channel AND signals — the wsm01 flip)
 
 Both triggers are REAL now and flow through the ONE verb dispatch
@@ -197,8 +203,18 @@ ws04 built:
   surface yet, the pid FILE still records the control endpoint, so
   `lobo -s reload` still sends over the channel while `kill -HUP`
   needs the pid from the process table.
-- **The control channel** (ws04) STAYS: the portable trigger, the
-  Windows reload story, and the transport for `status`.
+- **The control channel** (ws04, made the ORDER DESK at ws15) STAYS:
+  the portable trigger, the Windows reload story, and the transport
+  for `status` — and now the whole verb set
+  (`reload`/`quit`/`stop`/`reopen`/`status`/`upgrade`/`ping`), an
+  optional shared-secret arm, and `lobo control <verb>` as its CLI
+  door. **docs/CONTROL.md is that page**: the measured per-host
+  listener posture (loopback TCP everywhere — wolf has no
+  unix-domain socket at this pin, wolf-lang#227), the auth story and
+  why lobo reads its token file rather than writing one
+  (wolf-std#5), and the nginx differential's rows. Both triggers
+  emit through one site, so a verb and a signal write the same log
+  but for `source`.
 
 ### Windows: what lobo promises for `reload` and `upgrade` (ws14)
 
@@ -218,6 +234,28 @@ promises:
 > without a restart.** `upgrade` (the binary-swap verb, unclaimed on
 > every platform at this pin) will be a control-channel verb when it
 > exists, and the only trigger for it on windows.
+
+**ws15 flips this sentence from a windows promise to a MEASURED rule
+on every host.** Two things changed, and both are witnessed on linux
+and macOS rather than claimed:
+
+1. `lobo -s reload` against a config with NO `control` directive now
+   REFUSES BY NAME instead of dialling the http port — "a running lobo
+   is reached ONLY over its control endpoint at this pin (there is no
+   arbitrary-pid signal send — wolf-lang#126)". The second half of the
+   windows sentence is therefore true everywhere, for the same reason,
+   and `tools/lobo-shell` probes it.
+2. `upgrade` EXISTS on the endpoint. It is dispatched, it answers by
+   name (unclaimed at this pin), and it is the one verb the endpoint
+   reaches that no signal does — on unix because UPGRADE's bit is
+   lobo's own poll probe, on windows because there is no external
+   UPGRADE at all. "It will be a control-channel verb when it exists"
+   is now "it is a control-channel verb, and it says what it is."
+
+What is still CLAIMED and not measured is the windows half itself: the
+console-handler mapping, and that no external RELOAD arrives there. The
+measured-versus-claimed paragraph below is unchanged by ws15 — lobo's
+CI is still linux, and a windows lane is still a ws16-class decision.
 
 What that means in the running server: `os_signal_listen` SUCCEEDS
 on windows (unlike the hosts where delivery is unwired), so the
@@ -268,4 +306,14 @@ server with NO control directive, because signals need no channel.
   the hash, the timeout parse, the event vocabulary, the stanza
   builders, and the signal meaning/verb map.
 - `tools/lobo-signal` — the REAL-SIGNAL witness (wsm01): `kill -HUP`
-  drives the observable drain end-to-end; Linux, named skip elsewhere.
+  drives the observable drain end-to-end; Linux+macOS, named skip
+  elsewhere. ws15 adds the INDISTINGUISHABILITY witness: one server
+  reloaded twice, once by verb and once by signal, and the two event
+  blocks diffed line by line (one differing line, and none once
+  `source` is normalized too).
+- `tools/lobo-control-differential` — `nginx -s reload` beside `lobo -s
+  reload` (ws15): the reload semantics that carry, and the transport /
+  parse-locus / narration / idle-keepalive deltas measured rather than
+  asserted. docs/CONTROL.md carries the table.
+- `tests/shell/control_verbs.lu`, `tests/shell/control_e2e.lu` — the
+  endpoint's pure surface and its live auth arm (ws15).
