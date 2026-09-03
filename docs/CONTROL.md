@@ -148,6 +148,24 @@ refusal is a prose notice at `warn`
 (`lobo: [warn] control: unauthorized command rejected`), so the seq
 stream remains the stream of decisions the loop actually took.
 
+## Under `worker_processes N`: the verbs fan out (ws16)
+
+With N >= 2 hands (docs/WORKERS.md) the endpoint above is the
+MASTER's, and every verb it takes reaches each hand over that hand's
+own loopback endpoint, in ordinal order: `reload` is parsed by the
+master first (D2 holds — a rejected config reaches no hand) and then
+rolled through the hands one at a time, each swapping and draining
+in place; `quit`/`stop`/`reopen` fan out; `status` folds a row per
+hand. The replies keep ws15's prefixes and gain a suffix naming the
+fan-out — `reload complete (generation 2) workers=3/3` — so every
+script and every control-differential row that reads the prefix
+still reads it. A hand's endpoint is an order desk too: it is
+printed in its status row, it is authorized by the same `token
+<file>` (each hand reads the file itself; no secret crosses an
+argv), and a verb sent to ONE hand acts on that hand alone — which
+is how the witness stops a serving hand and watches a standby take
+the listener.
+
 ## Authorization
 
 Two arms, and the honest posture of each.

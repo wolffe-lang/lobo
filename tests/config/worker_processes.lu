@@ -1,0 +1,76 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config shell
+//!
+//! The ws16 `worker_processes` directive (docs/WORKERS.md): nginx's
+//! grammar (`N` or `auto`), the reader's value table, the -t half's
+//! oracle-shaped diagnostic (probed 2026-09-03 against nginx/1.30.4:
+//! `"worker_processes" directive invalid value` for a word that is
+//! neither a number nor `auto`; `0` accepted by both — lobo READS it
+//! as 1, a named delta), and the pure cpu-count reader `auto`
+//! resolves through on linux. All three lanes: no socket, no process.
+
+use config
+use shell
+
+fn conf_of(main: str) -> config.Conf {
+    config.parse_str("{main}\nhttp {{\n  server {{ listen 8080; }}\n}}\n", "t.conf")
+}
+
+fn main() -> !int {
+    // ---- the reader: absent, a number, auto (the sentinel), 0
+    let c0 = conf_of("")
+    assert(config.ok(c0), "a config without the directive parses")
+    assert(shell.worker_processes(c0) == 1, "absent -> 1 (nginx's default)")
+    let c4 = conf_of("worker_processes 4;")
+    assert(shell.worker_processes(c4) == 4, "4 -> 4")
+    let ca = conf_of("worker_processes auto;")
+    assert(
+        shell.worker_processes(ca) == 0,
+        "auto -> 0, the sentinel the entry resolves through cpu_count",
+    )
+    let cz = conf_of("worker_processes 0;")
+    assert(
+        shell.worker_processes(cz) == 1,
+        "0 -> 1 (a named delta: nginx would run a master with no hands)",
+    )
+    let c1 = conf_of("worker_processes 1;")
+    assert(shell.worker_processes(c1) == 1, "1 -> 1: the single process, today's loop untouched")
+
+    // ---- the -t half: the oracle's diagnostic for a word
+    assert(config.worker_check(c0).is_empty(), "absent passes -t")
+    assert(config.worker_check(c4).is_empty(), "4 passes -t")
+    assert(config.worker_check(ca).is_empty(), "auto passes -t")
+    assert(config.worker_check(cz).is_empty(), "0 passes -t (the oracle accepts it)")
+    let cf = conf_of("worker_processes foo;")
+    let ef = config.worker_check(cf)
+    assert(
+        ef.starts_with("\"worker_processes\" directive invalid value in t.conf:1"),
+        "a word is the oracle's named error: {ef}",
+    )
+    let cn = conf_of("worker_processes -1;")
+    assert(
+        config.worker_check(cn).starts_with("\"worker_processes\" directive invalid value"),
+        "-1 is the oracle's named error (probed)",
+    )
+    let cx = conf_of("worker_processes 4x;")
+    assert(
+        config.worker_check(cx).starts_with("\"worker_processes\" directive invalid value"),
+        "4x is not a number",
+    )
+    // two arguments are the TABLE's generic count error (the oracle's
+    // `invalid number of arguments`), refused at parse
+    let c2 = conf_of("worker_processes 4 5;")
+    assert(!config.ok(c2), "two arguments are refused by the arg-count table")
+    assert(c2.err.contains("invalid number of arguments"), "…with the oracle's words: {c2.err}")
+
+    // ---- the pure cpu-count reader (the linux answer, off a text)
+    let info = "processor\t: 0\nvendor_id\t: x\nprocessor\t: 1\nprocessor\t: 2\n\n"
+    assert(shell.cpu_count_of(info) == 3, "three processor rows -> 3")
+    assert(shell.cpu_count_of("") == 0, "an empty text -> 0 (unknown)")
+    assert(shell.cpu_count_of("model name : x\n") == 0, "no processor row -> 0")
+
+    print("worker_processes: ok")
+    0
+}

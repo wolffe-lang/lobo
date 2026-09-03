@@ -145,10 +145,15 @@ fn main() -> !int {
     let get = "GET /small.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
 
     // 2. the envelope holds: the proc path, the number comes back.
-    // FIRST, so the checked lane (the UB machine) reaches the spawn
-    // before anything else can fail there — the machine's client
-    // handle dies after the server side's close (D41), which would
-    // otherwise turn its named refusal into an io exit (wolf-lang#224)
+    // FIRST — an order that was load-bearing from ws14 to ws15 (the
+    // checked machine answered `io` at net_deadline on a socket the
+    // server had reset-closed, wolf-lang#224, so the named C1 refusal
+    // had to be reached before any client read) and is HISTORY at the
+    // 31170d1 pin: s135 arms the deadline on a reset socket, exactly
+    // as native's timer wheel does, and region_measured.lu now reads
+    // its reply through `?` on every lane. The order stays as it was
+    // so the drives' numbering below keeps reading against ws14's
+    // report; nothing depends on it any more (D41's residue retired).
     let r1 = drive(c, get, 4096, pipe.0, pipe.1)?
     // D40 (ws15): the envelope is 16 x pow2ceil(budget), not a flat
     // 16x. At a power of two the two agree (which is why 4096 reads

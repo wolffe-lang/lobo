@@ -1,0 +1,14 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//!
+//! nowms — rig DRIVER: print the wall clock in milliseconds since the
+//! epoch, so a shell witness can MEASURE a window (ws16's failover
+//! time) without leaning on a host `date` whose sub-second flag
+//! differs between BSD and GNU. Total; the corpus lane's exit 0 is
+//! the whole assertion (the value is the host's).
+
+fn main() -> int {
+    print("{time_unix_ms()}")
+    0
+}

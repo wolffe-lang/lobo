@@ -37,8 +37,13 @@ from a bug report.
 
 ## Status
 
-Pre-ws00: scaffolding. See the track plan (Track 6) in the planning
-repo; sprints are contracts. This is also, deliberately, a flagship
+ws16 (wsc06): `worker_processes N` is a master and N hands through
+`os.process` — supervised, fanned out to, a row per hand in `lobo
+status`, `worker=` on every hand's log line — with the
+accept-distribution posture at this pin MEASURED rather than assumed
+(docs/WORKERS.md: one hand serves, the rest stand by, wolf-lang#234/
+#235). See the track plan (Track 6) in the planning repo; sprints are
+contracts. This is also, deliberately, a flagship
 codebase for reading production wolf: many agents, frozen `.wolfi`
 interfaces between modules, and every language pothole filed
 upstream as an issue.

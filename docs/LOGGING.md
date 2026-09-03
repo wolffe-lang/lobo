@@ -154,6 +154,11 @@ unchanged; the error_log file is a level-gated mirror.
   joins `conn_step`.
 - **Reload**: lobo's one process logs through the LIVE generation's
   outputs (nginx's old workers keep old-config logs).
+- **`worker=N`** (ws16): under `worker_processes N` every line a hand
+  writes to the error log ends in that trailing field (a number
+  member in the JSON door; the k=v decode is unchanged) — nginx's
+  error lines carry `pid#tid:` instead, which lobo cannot (no getpid).
+  Access lines carry no worker id on either server.
 - **`$upstream_status`/`$upstream_response_time`** report the final
   attempt (nginx lists every tried peer's); `$upstream_addr` does
   list every tried peer, comma-joined.

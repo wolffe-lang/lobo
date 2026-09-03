@@ -1,7 +1,7 @@
 module pkg :: config
   wolfi v0 · toolchain 0.2.3 · edition v1
-  export_hash 28a6fc3b9315c6cad4ffeb13ea70e61eef8d92bb900e6c557e6c6ae395d97c2d
-  pkg_hash    28a6fc3b9315c6cad4ffeb13ea70e61eef8d92bb900e6c557e6c6ae395d97c2d
+  export_hash 18c9249938d54b2e1752ffc349e61fcb768a6dc06a70807a0efe66b3f7a22aef
+  pkg_hash    18c9249938d54b2e1752ffc349e61fcb768a6dc06a70807a0efe66b3f7a22aef
   deps:
     std.x.crypto.curve25519  01a215032a171eb1b9366f168a23d78b3e7b6d3c975d37627d3b7ebd9f35ad3a
     std.x.tls.cert  869655ab09c4766bcc4957a31b0d738cbb9870c829ec2918c879d863d3556442
@@ -84,10 +84,11 @@ module pkg :: config
     [75] pub upstream_exists — fn upstream_exists(c: self.Conf, name: str) -> bool · regions (ρ1, -) -> -
     [76] pub version — fn version() -> str
     [77] pub word_segments — fn word_segments(text: str) -> str
-    [78] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int }
-    [79] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[int] }
-    [80] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
-    [81] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[int], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[int], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
-    [82] pub Table — struct Table { specs: prelude.List[self.Spec] }
-    [83] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
+    [78] pub worker_check — fn worker_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [79] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int }
+    [80] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[int] }
+    [81] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
+    [82] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[int], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[int], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
+    [83] pub Table — struct Table { specs: prelude.List[self.Spec] }
+    [84] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
 

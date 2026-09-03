@@ -35,7 +35,15 @@
 //! multiplexes the http listener, the control channel, the signal
 //! queue, and every open connection, each stepped a slice at a time
 //! under a short deadline (serve.conn_step) so no single connection
-//! blocks the loop. Signals are polled by SELF-RAISE: each pass
+//! blocks the loop. ws16 (D73): with `worker_processes N` (N >= 2)
+//! that loop runs N times over, one os process each — a MASTER
+//! starts the hands through `os_spawn` and supervises them over
+//! per-worker control endpoints (`master_main` below); a hand is
+//! `serve_main` with `worker > 0`: no pid file, the master's chosen
+//! endpoint, every log line stamped `worker=N`, and a listener it
+//! RETRIES rather than dies for (the measured accept-distribution
+//! posture at this pin — docs/WORKERS.md). D7 is KEPT inside every
+//! process. Signals are polled by SELF-RAISE: each pass
 //! raises the UPGRADE meaning as a probe and waits once — the
 //! runtime's queue is FIFO, so a real pending SIGHUP/TERM/QUIT comes
 //! back BEFORE the probe and the probe bounds the wait (never a
@@ -602,10 +610,16 @@ fn note_served(mut ct: Counters, a: obs.Access, admitted: int) {
 /// scrape is an ordinary request: it appears in these counters and in
 /// the access log on its NEXT scrape, one behind, which is the correct
 /// and only honest ordering for a counter that includes itself.
-fn render_metrics(ct: Counters, gens: List[GenRow], shutdown_ms: int, events: int) -> str {
+fn render_metrics(ct: Counters, gens: List[GenRow], shutdown_ms: int, events: int, worker: int) -> str {
     let now = time_unix_ms()
     var out = metrics.header("lobo_build_info")
     out = "{out}{metrics.sample1("lobo_build_info", "version", shell.version_token(), 1)}"
+    // ws16: WHICH process answered this scrape — 0 for the single
+    // process, the hand's ordinal under a master. A scrape reaches one
+    // hand at this pin (the one holding the listener); the master's
+    // `status` is the sum (docs/WORKERS.md)
+    out = "{out}{metrics.header("lobo_worker_id")}"
+    out = "{out}{metrics.sample0("lobo_worker_id", worker)}"
 
     out = "{out}{metrics.header("lobo_config_generation_current")}"
     out = "{out}{metrics.sample0("lobo_config_generation_current", current_gen(gens))}"
@@ -717,7 +731,15 @@ fn retired_row(g: GenRow, outcome: str, value: int) -> str {
     metrics.sample("lobo_connections_retired_total", ks, vs, value)
 }
 
-fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: bool, events: int) -> str {
+fn status_stanza(
+    gens: List[GenRow],
+    shutdown_ms: int,
+    quitting: bool,
+    json: bool,
+    events: int,
+    worker: int,
+    listening: bool,
+) -> str {
     let now = time_unix_ms()
     let cur = current_gen(gens)
     // ws12: the process-wide live-region total, read HERE — once per
@@ -726,7 +748,14 @@ fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: boo
     // estimate of lobo's.
     let live_bytes = live_region_bytes()
     if json {
-        var s = shell.status_json_open(cur, quitting, events, live_bytes)
+        // ws16: a hand's stanza carries `worker` and `listening` ahead
+        // of the generations (additive on schema 1); the single
+        // process's is unchanged
+        var s = if worker > 0 {
+            shell.status_json_open_worker(cur, quitting, events, live_bytes, worker, listening)
+        } else {
+            shell.status_json_open(cur, quitting, events, live_bytes)
+        }
         var first = true
         for g in gens {
             let sep = if first { "" } else { "," }
@@ -748,6 +777,9 @@ fn status_stanza(gens: List[GenRow], shutdown_ms: int, quitting: bool, json: boo
         return "{s}{shell.status_json_close()}"
     }
     var s = shell.status_head_text(cur, quitting, events, live_bytes)
+    if worker > 0 {
+        s = "{s}{shell.status_worker_head(worker, listening)}"
+    }
     for g in gens {
         s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now), g.mem_hw, g.bud_hits, g.mem_rt_hw)}"
     }
@@ -835,6 +867,7 @@ struct ELog {
     json: bool,
     level: str,
     seq: int,
+    worker: int,
 }
 
 /// A config log path against the prefix (absolute carries). Total.
@@ -870,10 +903,17 @@ fn build_sinks(c: config.Conf, prefix: str) -> List[SinkRow] {
 /// carries the caller's running event count across a rebuild (0 at
 /// start; a reload passes the live counter — the stamp never resets).
 /// Total.
-fn build_elog(c: config.Conf, prefix: str, seq: int) -> ELog {
+fn build_elog(c: config.Conf, prefix: str, seq: int, worker: int) -> ELog {
     let p = config.errlog_path(c)
     if p.is_empty() {
-        return ELog { s: obs.sink_new("", 0), have: false, json: false, level: "error", seq: seq }
+        return ELog {
+            s: obs.sink_new("", 0),
+            have: false,
+            json: false,
+            level: "error",
+            seq: seq,
+            worker: worker,
+        }
     }
     ELog {
         s: obs.sink_new(resolve_log_path(prefix, p), 0),
@@ -881,14 +921,21 @@ fn build_elog(c: config.Conf, prefix: str, seq: int) -> ELog {
         json: config.errlog_json(c),
         level: config.errlog_level(c),
         seq: seq,
+        worker: worker,
     }
 }
 
 /// The ws09 event seam: STDERR keeps every line exactly as before
 /// (the ws02 seam — the rig and the signal witness read it), and the
 /// configured error_log receives the level-gated copy in its door's
-/// shape (nginx text or JSON lines). Total (emit never blocks).
-fn ev_log(mut el: ELog, level: str, body: str) {
+/// shape (nginx text or JSON lines). ws16: a WORKER stamps every line
+/// with the trailing `worker=N` field here — one seam, vocabulary and
+/// prose alike, appended after everything (a vocabulary event's `seq`
+/// included), so every prefix pin still matches and N hands appending
+/// to one file stay separable; the single process stamps nothing.
+/// Total (emit never blocks).
+fn ev_log(mut el: ELog, level: str, rawbody: str) {
+    let body = if el.worker > 0 { shell.ev_worker_field(rawbody, el.worker) } else { rawbody }
     eprint("lobo: [{level}] {body}")
     if el.have && obs.level_passes(level, el.level) {
         let ms = time_unix_ms()
@@ -947,7 +994,7 @@ fn flush_elog(el: ELog) -> ELog {
             eprint("lobo: [warn] {note}")
         }
     }
-    ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq }
+    ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq, worker: el.worker }
 }
 
 /// Close every access output (flushing first) so the NEXT flush
@@ -969,22 +1016,25 @@ fn reopen_elog(el: ELog) -> ELog {
     if el.have {
         obs.sink_reopen(mut sk)
     }
-    ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq }
+    ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq, worker: el.worker }
 }
 
-fn serve_main(prefix: str, conf: str) -> int {
+fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
         eprint("lobo: [emerg] configuration file {conf} test failed")
         return 1
     }
-    let ctrl = shell.control_addr(c0)
+    // ws16: a HAND takes its control endpoint from the master's argv
+    // (the config's `control` is the master's) and never touches the
+    // pid file (the master's rendezvous)
+    let ctrl = if worker > 0 { wctrl } else { shell.control_addr(c0) }
     let pidp = shell.pid_path(c0, prefix)
 
     // stale-pid detection: an existing pid file whose endpoint is
     // alive means a master is already running (refuse, nginx-shaped);
     // a dead endpoint is a stale file (replace with a warning).
-    let existing = shell.pid_read(pidp) else |_| ""
+    let existing = if worker > 0 { "" } else { shell.pid_read(pidp) else |_| "" }
     if !existing.is_empty() {
         if shell.control_alive(existing) {
             eprint("lobo: [emerg] a lobo master is already running (control {existing})")
@@ -1001,19 +1051,36 @@ fn serve_main(prefix: str, conf: str) -> int {
     // absolute Location uses — the plaintext port when there is one,
     // else the TLS port (set below).
     let addr = serve.listen_addr_plain(c0)
+    let want_http = !addr.is_empty()
     var have_http = false
     var hl: int = 0
     var hport: int = 0
-    if !addr.is_empty() {
-        hl = net_listen(addr) else |_| {
+    // ws16: a hand whose bind FAILS stands by rather than dying — at
+    // this pin another hand holds the port (no SO_REUSEPORT, no
+    // inheritance: wolf-lang#234/#235) and the loop below retries
+    // every pass, taking the listener the moment its holder is gone.
+    // The single process keeps refusing at once (a bind that fails
+    // with no sibling is an operator's error, said out loud).
+    var standby_http = false
+    if want_http {
+        var bound = true
+        let cand = net_listen(addr) else |_| {
+            bound = false
+            0
+        }
+        if bound {
+            hl = cand
+            hport = net_port(hl) else |_| {
+                eprint("lobo: [emerg] could not read the listen port")
+                return 1
+            }
+            have_http = true
+        } else if worker > 0 {
+            standby_http = true
+        } else {
             eprint("lobo: [emerg] bind() to {addr} failed")
             return 1
         }
-        hport = net_port(hl) else |_| {
-            eprint("lobo: [emerg] could not read the listen port")
-            return 1
-        }
-        have_http = true
     }
 
     // ws05: the TLS listener. `listen ... ssl` opens a second socket;
@@ -1034,6 +1101,8 @@ fn serve_main(prefix: str, conf: str) -> int {
     var tls_l: int = 0
     var ssl0 = config.ssl_resolve(c0, prefix)
     let tls_addr = ssl_listen_addr(c0)
+    let want_tls = !tls_addr.is_empty()
+    var standby_tls = false
     if !tls_addr.is_empty() {
         if !config.ssl_ok(ssl0) {
             eprint("lobo: [emerg] TLS configuration invalid: {ssl0.err}")
@@ -1049,20 +1118,29 @@ fn serve_main(prefix: str, conf: str) -> int {
             eprint("lobo: [emerg] entropy probe short (impossible per [os.random])")
             return 1
         }
-        tls_l = net_listen(tls_addr) else |_| {
+        var tbound = true
+        let tcand = net_listen(tls_addr) else |_| {
+            tbound = false
+            0
+        }
+        if tbound {
+            tls_l = tcand
+            let tport = net_port(tls_l) else |_| {
+                return 1
+            }
+            if !have_http {
+                hport = tport
+            }
+            have_tls = true
+            eprint(
+                "lobo: [notice] TLS serving on {tls_addr} (port {tport}); TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, certificate entries loaded: {ssl0.names.len}",
+            )
+        } else if worker > 0 {
+            standby_tls = true
+        } else {
             eprint("lobo: [emerg] bind() to TLS {tls_addr} failed")
             return 1
         }
-        let tport = net_port(tls_l) else |_| {
-            return 1
-        }
-        if !have_http {
-            hport = tport
-        }
-        have_tls = true
-        eprint(
-            "lobo: [notice] TLS serving on {tls_addr} (port {tport}); TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, certificate entries loaded: {ssl0.names.len}",
-        )
     }
 
     // the control endpoint is what the pid file records (so -s and the
@@ -1109,9 +1187,11 @@ fn serve_main(prefix: str, conf: str) -> int {
         have_ctrl = true
     }
 
-    shell.pid_write(pidp, ctrl_ep) else |_| {
-        eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
-        return 1
+    if worker == 0 {
+        shell.pid_write(pidp, ctrl_ep) else |_| {
+            eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
+            return 1
+        }
     }
 
     // ws12: the metrics switch, resolved once at start with every
@@ -1161,7 +1241,7 @@ fn serve_main(prefix: str, conf: str) -> int {
     // mirror (stderr keeps every line — the ws02 seam the rig reads),
     // and the JSON door's header opt-in list.
     var asinks = build_sinks(c0, prefix)
-    var elog = build_elog(c0, prefix, 0)
+    var elog = build_elog(c0, prefix, 0, worker)
     // ws12: the counter block, allocated ONCE (the histograms' slot
     // lists are built here and never again — an observation is an
     // index write, never an allocation)
@@ -1205,7 +1285,9 @@ fn serve_main(prefix: str, conf: str) -> int {
     // which may carry :0) so a client — the ACME challenge dial-back
     // included — can find the http listener. The TLS notice already
     // prints its bound port.
-    let where = if have_http { "127.0.0.1:{hport} (port {hport})" } else {
+    let where = if have_http { "127.0.0.1:{hport} (port {hport})" } else if standby_http {
+        "STANDBY for {addr} (held by another worker — retrying each pass; wolf-lang#234/#235, docs/WORKERS.md)"
+    } else {
         "(no plaintext listener)"
     }
     let ctrl_auth = if !have_ctrl { "off" } else if ctok.is_empty() {
@@ -1285,6 +1367,47 @@ fn serve_main(prefix: str, conf: str) -> int {
     var quitting = false
     while running {
         let now = time_unix_ms()
+
+        // 0a. ws16: a standing-by hand retries its bind — the failover
+        // half of this pin's accept-distribution posture (the holder
+        // died: the port is free within its kernel teardown, and the
+        // first hand to retry serves)
+        if standby_http && running && !quitting {
+            var got = true
+            let cand = net_listen(addr) else |_| {
+                got = false
+                0
+            }
+            if got {
+                hl = cand
+                hport = net_port(hl) else |_| { 0 }
+                have_http = true
+                standby_http = false
+                ev_log(mut elog, "notice", "listener {addr} acquired (port {hport}) — serving")
+            }
+        }
+        if standby_tls && running && !quitting {
+            var tgot = true
+            let tcand = net_listen(tls_addr) else |_| {
+                tgot = false
+                0
+            }
+            if tgot {
+                tls_l = tcand
+                let tport = net_port(tls_l) else |_| { 0 }
+                if !have_http {
+                    hport = tport
+                }
+                have_tls = true
+                standby_tls = false
+                ev_log(
+                    mut elog,
+                    "notice",
+                    "TLS listener {tls_addr} acquired (port {tport}) — serving",
+                )
+            }
+        }
+        let listening = (!want_http || have_http) && (!want_tls || have_tls)
 
         // 0. ws13: one resolver pass — every pending query socket
         // gets a 1 ms read under its deadline; settled names become
@@ -1380,10 +1503,26 @@ fn serve_main(prefix: str, conf: str) -> int {
             if verb == "ping" {
                 reply(cc, "pong\n")
             } else if verb == "status" {
-                let body = status_stanza(gens, shutdown_ms, quitting, false, elog.seq)
+                let body = status_stanza(
+                    gens,
+                    shutdown_ms,
+                    quitting,
+                    false,
+                    elog.seq,
+                    worker,
+                    listening,
+                )
                 reply(cc, "{body}\n")
             } else if verb == "status json" {
-                let body = status_stanza(gens, shutdown_ms, quitting, true, elog.seq)
+                let body = status_stanza(
+                    gens,
+                    shutdown_ms,
+                    quitting,
+                    true,
+                    elog.seq,
+                    worker,
+                    listening,
+                )
                 reply(cc, "{body}\n")
             } else if verb == "stop" {
                 reply(cc, "stop: shutting down (generation {curgen})\n")
@@ -1438,7 +1577,7 @@ fn serve_main(prefix: str, conf: str) -> int {
                     asinks = reopen_sinks(asinks)
                     asinks = build_sinks(ng.conf, prefix)
                     elog = reopen_elog(elog)
-                    elog = build_elog(ng.conf, prefix, elog.seq)
+                    elog = build_elog(ng.conf, prefix, elog.seq, worker)
                     optin = config.log_headers_join(ng.conf)
                 }
                 reply(cc, "{ng.note}\n")
@@ -1616,9 +1755,9 @@ fn serve_main(prefix: str, conf: str) -> int {
             if !st.admin.is_empty() {
                 let alim = lim_for(gens, cg).memory_budget
                 let body = if st.admin == "metrics" {
-                    render_metrics(counters, gens, shutdown_ms, elog.seq)
+                    render_metrics(counters, gens, shutdown_ms, elog.seq, worker)
                 } else {
-                    status_stanza(gens, shutdown_ms, quitting, true, elog.seq)
+                    status_stanza(gens, shutdown_ms, quitting, true, elog.seq, worker, listening)
                 }
                 let would = st.mem_hw + body.len
                 if alim > 0 && would > alim {
@@ -1809,7 +1948,9 @@ fn serve_main(prefix: str, conf: str) -> int {
     if have_ctrl {
         net_close(cl) else |_| {}
     }
-    shell.pid_remove(pidp) else |_| {}
+    if worker == 0 {
+        shell.pid_remove(pidp) else |_| {}
+    }
     0
 }
 
@@ -1829,6 +1970,581 @@ fn held_of(gens: List[GenRow], gen: int) -> int {
             return g.live
         }
     }
+    0
+}
+
+// ------------------------------------------------------------------
+// ws16: the master — many hands (D73, D7 kept). With `worker_processes
+// N` (N >= 2) the process that ran `lobo serve` binds NO http listener:
+// it starts N workers through `os_spawn` (this executable, `serve`,
+// the same prefix and config, `--worker i --worker-control <ep>`),
+// each of which is today's one spawn-free poll loop in its own os
+// process, and it supervises them over their loopback control
+// endpoints — the ws15 order desk, one per hand. Every operator verb
+// the master takes FANS OUT: `reload` rolls through the hands one at
+// a time (each swaps its own generation and drains the old one in
+// place — the ws08 drain, per process), `quit` drains every hand then
+// exits, `stop` stops them fast, `reopen` cycles every hand's outputs,
+// `status` folds each hand's stanza into per-worker rows. A hand that
+// stops answering is reaped and replaced; the count is in its row.
+//
+// THE ACCEPT-DISTRIBUTION POSTURE AT THIS PIN IS MEASURED, NOT WISHED
+// (docs/WORKERS.md): the runtime binds `std::net::TcpListener` with
+// SO_REUSEADDR only and never SO_REUSEPORT, so two processes cannot
+// hold one port (measured: a child's bind of the parent's port
+// answers `io` on macOS; the same call on linux answers EADDRINUSE);
+// every socket the runtime opens is CLOEXEC and `os_spawn` passes no
+// descriptor, so a worker cannot inherit the master's listener
+// either (measured: a spawned child's descriptor table holds ZERO
+// TCP sockets); and std.net has no surface that adopts a descriptor
+// even if one arrived. Filed as wolf-lang#234 (SO_REUSEPORT / a
+// listener option) and wolf-lang#235 (descriptor inheritance and
+// adoption). So at this pin every worker RETRIES the bind each pass:
+// the first to win it serves, the others STAND BY and take the
+// listener the moment its holder dies — failover in one poll
+// interval, with the master's respawn behind it. The day #234 lands,
+// every hand's bind succeeds and the same loop distributes accepts
+// with no lobo change; until then `worker_processes N` is
+// supervision, not throughput, and the sprint's measurement says so
+// with a number rather than a promise.
+//
+// A master that is SIGKILLed leaves its hands serving (nginx's
+// workers notice a dead master through their channel; lobo's have
+// none at this pin — named delta). `kill -TERM` on the master is the
+// orderly path: TERMINATE is `stop`, and `stop` fans out first.
+// ------------------------------------------------------------------
+
+/// Rebuild `xs` with element `i` replaced by `v` (index assignment is
+/// a one-lane shape; a worker table holds a handful of rows). Total.
+fn replace_int(xs: List[int], i: int, v: int) -> List[int] {
+    var out = List[int]()
+    var k: int = 0
+    let n = xs.len
+    while k < n {
+        if k == i {
+            (mut out).push(v)
+        } else {
+            (mut out).push(xs[k])
+        }
+        k = k + 1
+    }
+    out
+}
+
+/// The `List[str]` twin of `replace_int`. Total.
+fn replace_str(xs: List[str], i: int, v: str) -> List[str] {
+    var out = List[str]()
+    var k: int = 0
+    let n = xs.len
+    while k < n {
+        if k == i {
+            (mut out).push(v)
+        } else {
+            (mut out).push(xs[k])
+        }
+        k = k + 1
+    }
+    out
+}
+
+/// The `List[bool]` twin of `replace_int`. Total.
+fn replace_bool(xs: List[bool], i: int, v: bool) -> List[bool] {
+    var out = List[bool]()
+    var k: int = 0
+    let n = xs.len
+    while k < n {
+        if k == i {
+            (mut out).push(v)
+        } else {
+            (mut out).push(xs[k])
+        }
+        k = k + 1
+    }
+    out
+}
+
+/// A free loopback endpoint for a worker's control listener: bind :0,
+/// read the port, release it. The release-to-rebind window is real
+/// (wolf-lang#121's lesson): a worker whose endpoint was taken in the
+/// gap fails its own bind and exits 1, and the master replaces it
+/// with a fresh endpoint — the supervision path IS the retry. "" when
+/// the host refuses the probe. Total.
+fn free_endpoint() -> str {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return ""
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return ""
+    }
+    net_close(l) else |_| {}
+    "127.0.0.1:{p}"
+}
+
+/// Start worker `i` (1-based): pick its endpoint, spawn this
+/// executable as a hand, log `worker-started`, and answer the child
+/// handle with the endpoint — or (-1, "") with the reason logged as an
+/// error (the loop retries on its next pass). Total.
+fn spawn_worker(exe: str, prefix: str, conf: str, i: int, restarts: int, mut el: ELog) -> (int, str) {
+    let ep = free_endpoint()
+    if ep.is_empty() {
+        ev_log(mut el, "error", "worker {i}: no free loopback endpoint for its control listener")
+        return (-1, "")
+    }
+    let argv = shell.worker_argv(exe, prefix, conf, i, ep)
+    let h = os_spawn(argv) else |e| match e {
+        not_found => {
+            ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
+            return (-1, "")
+        },
+        denied => {
+            ev_log(mut el, "error", "worker {i}: spawn failed — the host refused to execute {exe}")
+            return (-1, "")
+        },
+        io => {
+            ev_log(mut el, "error", "worker {i}: spawn failed (io)")
+            return (-1, "")
+        },
+    }
+    ev_event(mut el, "notice", shell.ev_worker_started(i, restarts))
+    (h, ep)
+}
+
+/// Reap a worker the master has decided is gone: kill (harmless on a
+/// child that already exited — `io`), then wait, which is what reaps
+/// on every unix, and log `worker-exited`. `reason` is the master's
+/// verdict (`unreachable` for a hand it killed for silence); a hand
+/// that died on its own reads `exit` or `signal` off the reap. Answers
+/// the exit code, -1 for a signal. Total.
+fn reap_worker(h: int, i: int, reason: str, mut el: ELog) -> int {
+    os_kill(h) else |_| {}
+    var sig = false
+    let code = os_wait(h) else |e| match e {
+        signal => {
+            sig = true
+            -1
+        },
+        io => {
+            -1
+        },
+    }
+    var r = reason
+    if r.is_empty() {
+        r = if sig { "signal" } else { "exit" }
+    }
+    ev_event(mut el, "notice", shell.ev_worker_exited(i, r, code))
+    code
+}
+
+/// Send `verb` to every reachable hand, in order (a `reload` is
+/// therefore ROLLING: hand 1 swaps and starts draining before hand 2
+/// is told), and answer how many replied with something other than
+/// a refusal or a rejection. A hand with no endpoint yet is skipped.
+/// Total.
+fn fan_out(verb: str, wctl: List[str], ctok: str) -> int {
+    var ok: int = 0
+    for ep in wctl {
+        if ep.is_empty() {
+            continue
+        }
+        let line = shell.control_line(ctok, verb)
+        let r = shell.control_send(ep, line) else |_| {
+            continue
+        }
+        if r == "unauthorized" || r.starts_with("reload rejected") || r.starts_with("unknown verb") {
+            continue
+        }
+        ok = ok + 1
+    }
+    ok
+}
+
+/// The master's status stanza: `status_head_text`'s facts with the
+/// master's own numbers (`live-region-bytes` is the SUM over the
+/// hands), the configured count, and one row per hand folded from
+/// that hand's own stanza over its endpoint — `serving` when it holds
+/// every listener the config asks for, `standby` when another hand
+/// does, `unreachable` when it answered nothing. Text or schema-1
+/// JSON (docs/DRAIN.md, docs/WORKERS.md). fs/net tier.
+fn master_stanza(
+    n: int,
+    wctl: List[str],
+    wrest: List[int],
+    mgen: int,
+    quitting: bool,
+    json: bool,
+    events: int,
+    ctok: str,
+) -> str {
+    var sum_bytes: int = 0
+    var rows = ""
+    var first = true
+    var i: int = 0
+    while i < n {
+        let ep = wctl[i]
+        var state = "unreachable"
+        var gen: int = -1
+        var live: int = 0
+        var ev: int = -1
+        var lb: int = 0
+        var b503: int = 0
+        if !ep.is_empty() {
+            let body = shell.control_fetch(ep, shell.control_line(ctok, "status")) else |_| { "" }
+            if !body.is_empty() {
+                let listening = shell.stanza_word(body, "listening")
+                state = if listening == "true" { "serving" } else { "standby" }
+                gen = shell.stanza_int(body, "current generation")
+                ev = shell.stanza_int(body, "events")
+                lb = shell.stanza_int(body, "live-region-bytes")
+                if lb < 0 {
+                    lb = 0
+                }
+                live = shell.stanza_field_sum(body, "live")
+                b503 = shell.stanza_field_sum(body, "budget-503s")
+            }
+        }
+        sum_bytes = sum_bytes + lb
+        if json {
+            let sep = if first { "" } else { "," }
+            rows = "{rows}{sep}{shell.status_worker_json(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i])}"
+        } else {
+            rows = "{rows}{shell.status_worker_text(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i])}"
+        }
+        first = false
+        i = i + 1
+    }
+    if json {
+        return "{shell.status_json_master_open(mgen, quitting, events, sum_bytes, n)}{rows}{shell.status_json_close()}"
+    }
+    "{shell.status_head_text(mgen, quitting, events, sum_bytes)}{shell.status_workers_line(n)}{rows}"
+}
+
+/// The master's serving verb (`worker_processes N`, N >= 2): load the
+/// config, refuse a second master, own the pid file and the config's
+/// control endpoint, start N hands, then run the SUPERVISION loop —
+/// the same trigger collection as `serve_main` (a control line or a
+/// real signal, one dispatch, one emission site for
+/// `signal-received`), every verb fanned out, every hand probed each
+/// pass and replaced when it is gone. Exits 0 after `stop`, or after
+/// `quit` has drained every hand; 1 on a config error, a failed bind
+/// or a refused start. Loopback only.
+fn master_main(prefix: str, conf: str, n: int) -> int {
+    let c0 = config.load(prefix, conf)
+    if !config.ok(c0) {
+        eprint("lobo: [emerg] configuration file {conf} test failed")
+        return 1
+    }
+    let exe = os_exe() else |_| {
+        eprint(
+            "lobo: [emerg] cannot learn this executable's path (os_exe), so no worker can be started",
+        )
+        return 1
+    }
+    let ctrl = shell.control_addr(c0)
+    let pidp = shell.pid_path(c0, prefix)
+    let existing = shell.pid_read(pidp) else |_| ""
+    if !existing.is_empty() {
+        if shell.control_alive(existing) {
+            eprint("lobo: [emerg] a lobo master is already running (control {existing})")
+            return 1
+        }
+        eprint(
+            "lobo: [warn] removing stale pid file \"{pidp}\" (control {existing} not responding)",
+        )
+    }
+    // the token arm is read HERE too: the master authorizes its own
+    // endpoint with it and addresses every hand with it (each hand
+    // reads the same file at its own start, so no secret ever crosses
+    // an argv)
+    var ctok = ""
+    let tokp = shell.control_token_path(c0, prefix)
+    if !tokp.is_empty() {
+        ctok = shell.control_token_read(tokp) else |e| match e {
+            none => {
+                eprint(
+                    "lobo: [emerg] control token file \"{tokp}\" does not exist (create it with the mode you want — lobo reads it, never writes it)",
+                )
+                return 1
+            },
+            io => {
+                eprint("lobo: [emerg] control token file \"{tokp}\" could not be read")
+                return 1
+            },
+        }
+        if ctok.is_empty() {
+            eprint("lobo: [emerg] control token file \"{tokp}\" is empty")
+            return 1
+        }
+    }
+    var have_ctrl = false
+    var cl: int = 0
+    var ctrl_ep = serve.listen_addr_plain(c0)
+    if !ctrl.is_empty() {
+        cl = net_listen(ctrl) else |_| {
+            eprint("lobo: [emerg] bind() to control {ctrl} failed")
+            return 1
+        }
+        let cport = net_port(cl) else |_| {
+            return 1
+        }
+        ctrl_ep = "127.0.0.1:{cport}"
+        have_ctrl = true
+    }
+    shell.pid_write(pidp, ctrl_ep) else |_| {
+        eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
+        return 1
+    }
+    var elog = build_elog(c0, prefix, 0, 0)
+    let ctrl_auth = if !have_ctrl { "off" } else if ctok.is_empty() {
+        "loopback only"
+    } else {
+        "loopback + token"
+    }
+    ev_log(
+        mut elog,
+        "notice",
+        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}; accept distribution at this pin: one hand serves, the others stand by (no SO_REUSEPORT, no listener inheritance — wolf-lang#234, #235; docs/WORKERS.md)",
+    )
+    let sprobe = shell.sig_probe()
+    var sig_on = true
+    os_signal_listen(shell.sig_mask() + sprobe) else |_| {
+        sig_on = false
+    }
+    if sig_on {
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception armed by meaning (reload, terminate=stop, quit): every meaning fans out to the workers",
+        )
+    } else {
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception unavailable on this platform; the control channel is the trigger",
+        )
+    }
+    var mgen = 1
+    var mconf = copy c0
+    ev_event(mut elog, "notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)))
+    ev_event(mut elog, "notice", shell.ev_generation_activated(1))
+
+    // the worker table (parallel primitive lists, rebuilt on change):
+    // child handle (-1 = none yet), control endpoint, replacements,
+    // start time, consecutive unreachable passes, reaped-under-quit
+    var wslot = List[int]()
+    var wctl = List[str]()
+    var wrest = List[int]()
+    var wup = List[int]()
+    var wfail = List[int]()
+    var wgone = List[bool]()
+    var i: int = 0
+    while i < n {
+        let s = spawn_worker(exe, prefix, conf, i + 1, 0, mut elog)
+        (mut wslot).push(s.0)
+        (mut wctl).push(s.1)
+        (mut wrest).push(0)
+        (mut wup).push(time_unix_ms())
+        (mut wfail).push(0)
+        (mut wgone).push(false)
+        i = i + 1
+    }
+
+    var running = true
+    var quitting = false
+    while running {
+        let now = time_unix_ms()
+        // 1. one trigger — the serve loop's collection, verbatim
+        var verb = ""
+        var cc = -1
+        var denied = false
+        if have_ctrl {
+            net_deadline(cl, 25) else |_| {}
+            var got_ctrl = true
+            let cand = net_accept(cl) else |_| {
+                got_ctrl = false
+                0
+            }
+            if got_ctrl {
+                cc = cand
+                net_deadline(cc, 2000) else |_| {}
+                let line = read_command(cc)
+                if shell.control_authorized(line, ctok) {
+                    verb = shell.control_verb_of(line, ctok)
+                } else {
+                    denied = true
+                }
+            }
+        }
+        if denied {
+            ev_log(mut elog, "warn", "control: unauthorized command rejected")
+            reply(cc, "unauthorized\n")
+            net_close(cc) else |_| {}
+            cc = -1
+        }
+        if sig_on && cc < 0 {
+            var m = 0
+            os_signal_raise(sprobe) else |_| {
+                m = -1
+            }
+            if m == 0 {
+                m = os_signal_wait(shell.sig_mask() + sprobe) else |_| { sprobe }
+            }
+            if m > 0 && m != sprobe {
+                verb = shell.signal_verb(m)
+            }
+        }
+        if !have_ctrl && !sig_on {
+            // nothing can ever reach this master: park a little so the
+            // supervision pass below does not spin
+            time_sleep_ms(25)
+        }
+        if cc >= 0 || !verb.is_empty() {
+            let mtrig = shell.signal_meaning(verb)
+            if mtrig > 0 {
+                let src = if cc >= 0 { "control" } else { "signal" }
+                ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
+            }
+            if verb == "ping" {
+                reply(cc, "pong\n")
+            } else if verb == "status" {
+                reply(
+                    cc,
+                    "{master_stanza(n, wctl, wrest, mgen, quitting, false, elog.seq, ctok)}\n",
+                )
+            } else if verb == "status json" {
+                reply(cc, "{master_stanza(n, wctl, wrest, mgen, quitting, true, elog.seq, ctok)}\n")
+            } else if verb == "stop" {
+                let k = fan_out("stop", wctl, ctok)
+                reply(cc, "stop: shutting down (generation {mgen}) workers={k}/{n}\n")
+                running = false
+            } else if verb == "quit" {
+                let k = fan_out("quit", wctl, ctok)
+                reply(cc, "quit: draining then exiting (generation {mgen}) workers={k}/{n}\n")
+                quitting = true
+            } else if verb == "reopen" {
+                let k = fan_out("reopen", wctl, ctok)
+                elog = reopen_elog(elog)
+                ev_log(mut elog, "notice", "reopening log files")
+                reply(cc, "reopen: log outputs cycled (generation {mgen}) workers={k}/{n}\n")
+            } else if verb == "reload" {
+                // the master parses FIRST (D2: the verdict is answered on
+                // the wire, and a rejected config reaches no hand), then
+                // rolls the verb through the hands one at a time
+                let prev = shell.Gen { conf: copy mconf, gen: mgen, ok: true, note: "" }
+                let ng = shell.reload(prefix, conf, prev)
+                if ng.ok && ng.gen > mgen {
+                    let nhash = shell.conf_hash(ng.conf)
+                    ev_event(mut elog, "notice", shell.ev_generation_draining(mgen, 0))
+                    ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
+                    ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
+                    ev_event(mut elog, "notice", shell.ev_generation_retired(mgen, 0, 0, 0))
+                    mgen = ng.gen
+                    mconf = copy ng.conf
+                    elog = reopen_elog(elog)
+                    elog = build_elog(ng.conf, prefix, elog.seq, 0)
+                    let k = fan_out("reload", wctl, ctok)
+                    reply(cc, "reload complete (generation {mgen}) workers={k}/{n}\n")
+                } else {
+                    reply(cc, "{ng.note}\n")
+                }
+            } else if verb == "upgrade" {
+                reply(
+                    cc,
+                    "upgrade: not implemented at this pin — the binary-swap verb is unclaimed on every platform; when it lands it lands HERE, on the control endpoint (docs/CONTROL.md)\n",
+                )
+            } else {
+                reply(cc, "unknown verb \"{verb}\"\n")
+            }
+            if cc >= 0 {
+                net_close(cc) else |_| {}
+            }
+        }
+
+        // 2. supervise: probe every hand's endpoint (a connect, never a
+        // round trip — a busy hand still answers from its backlog);
+        // three silent passes after a 3 s start grace is "gone" — reap
+        // and replace (a hand that dies inside a second of starting is
+        // replaced after a 250 ms pause, so a broken config cannot
+        // spin the master). Under a quit a gone hand is reaped and
+        // NOT replaced; the master exits once every hand is gone.
+        var alldone = quitting
+        var j: int = 0
+        while j < n {
+            if wgone[j] {
+                j = j + 1
+                continue
+            }
+            alldone = false
+            if wslot[j] < 0 {
+                if !quitting {
+                    let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j], mut elog)
+                    wslot = replace_int(wslot, j, s.0)
+                    wctl = replace_str(wctl, j, s.1)
+                    wup = replace_int(wup, j, now)
+                    wfail = replace_int(wfail, j, 0)
+                }
+                j = j + 1
+                continue
+            }
+            let ep = wctl[j]
+            if shell.control_reachable(ep) {
+                wfail = replace_int(wfail, j, 0)
+                j = j + 1
+                continue
+            }
+            // grace: a hand gets 3 s to come up; past that, three silent
+            // passes is gone
+            let fails = wfail[j] + 1
+            wfail = replace_int(wfail, j, fails)
+            if now - wup[j] < 3000 || fails < 3 {
+                j = j + 1
+                continue
+            }
+            let reason = if quitting { "" } else { "unreachable" }
+            let _code = reap_worker(wslot[j], j + 1, reason, mut elog)
+            if quitting {
+                wgone = replace_bool(wgone, j, true)
+                wslot = replace_int(wslot, j, -1)
+                j = j + 1
+                continue
+            }
+            if now - wup[j] < 1000 {
+                time_sleep_ms(250)
+            }
+            let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j] + 1, mut elog)
+            wslot = replace_int(wslot, j, s.0)
+            wctl = replace_str(wctl, j, s.1)
+            wrest = replace_int(wrest, j, wrest[j] + 1)
+            wup = replace_int(wup, j, time_unix_ms())
+            wfail = replace_int(wfail, j, 0)
+            j = j + 1
+        }
+        elog = flush_elog(elog)
+        if alldone {
+            running = false
+        }
+    }
+
+    // shutdown: after `stop` every hand was told; give each a moment,
+    // then reap what is left (kill first — a hand still draining under
+    // `stop` is stopped fast, nginx's meaning of the word)
+    var k: int = 0
+    while k < n {
+        if !wgone[k] && wslot[k] >= 0 {
+            var waited: int = 0
+            while waited < 20 && shell.control_reachable(wctl[k]) {
+                time_sleep_ms(50)
+                waited = waited + 1
+            }
+            let _c = reap_worker(wslot[k], k + 1, "", mut elog)
+        }
+        k = k + 1
+    }
+    elog = reopen_elog(elog)
+    if have_ctrl {
+        net_close(cl) else |_| {}
+    }
+    shell.pid_remove(pidp) else |_| {}
     0
 }
 
@@ -2230,7 +2946,30 @@ fn main() -> int {
         return cert_status_main(cli)
     }
     if cli.mode == "serve" {
-        return serve_main(cli.prefix, cli.conf)
+        if cli.worker > 0 {
+            return serve_main(cli.prefix, cli.conf, cli.worker, cli.worker_control)
+        }
+        // ws16: how many hands? `worker_processes` off the config —
+        // 1 (the default) is today's one process; `auto` resolves
+        // through the host's cpu count where this pin can read one
+        let c = config.load(cli.prefix, cli.conf)
+        var n = 1
+        if config.ok(c) {
+            n = shell.worker_processes(c)
+            if n == 0 {
+                n = shell.cpu_count()
+                if n == 0 {
+                    eprint(
+                        "lobo: [notice] worker_processes auto: this host offers no cpu count this pin can read (linux answers through /proc/cpuinfo; macOS keeps it behind sysctl(3) and wolf has no cpu query — wolf-lang#233); running 1 worker",
+                    )
+                    n = 1
+                }
+            }
+        }
+        if n > 1 {
+            return master_main(cli.prefix, cli.conf, n)
+        }
+        return serve_main(cli.prefix, cli.conf, 0, "")
     }
     banner()
     0
