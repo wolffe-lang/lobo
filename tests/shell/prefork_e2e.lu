@@ -1,0 +1,302 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! Many hands, end to end, against the REAL binary (os_spawn + net +
+//! fs → native+checked; lupin declines the process trio). Spawns
+//! `target/lobo-debug serve` with `worker_processes 2` and a control
+//! endpoint, then drives the MASTER as a client:
+//!   1. `status` shows `workers: 2`, one hand `serving` (it holds the
+//!      listener) and one `standby` (the measured accept-distribution
+//!      posture at this pin — no SO_REUSEPORT, no inheritance,
+//!      wolf-lang#234/#235 — docs/WORKERS.md), each with its own
+//!      control endpoint;
+//!   2. a GET is served — by the serving hand, whose own stanza says
+//!      `worker: N` and `listening: true`, and whose `/metrics` scrape
+//!      carries `lobo_worker_id N`;
+//!   3. the serving hand is told `stop` DIRECTLY (a hand's endpoint is
+//!      an order desk too): the standby takes the listener (a GET is
+//!      served again, by the OTHER ordinal), and the master REPLACES
+//!      the gone hand — `status` shows the slot back, `restarts=1`;
+//!   4. `reload` fans out: the reply names `workers=2/2`, every hand's
+//!      row advances to generation 2, the new root serves;
+//!   5. `quit` drains every hand and the master exits 0, pid file gone.
+//! Loopback only, OS-chosen ports (bind :0, learn, close, hand to the
+//! child). Idempotent: the scratch tree is cleared at the START.
+
+use shell
+
+/// A single HTTP/1.1 GET, Connection: close, returning the whole
+/// reply (head and body). Rows: net `io`.
+fn http_get(port: int, path: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// GET until the body carries `want`, up to ~6s (the failover window
+/// and a fresh hand's startup both live inside it). Total.
+fn poll_body(port: int, want: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let r = http_get(port, "/index.html") else ""
+        if r.contains(want) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Poll an endpoint until it answers `ping`, up to ~6s. Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
+    let text = "worker_processes 2;\npid ws16_e2e/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  metrics on;\n  server {{ listen 127.0.0.1:{hp}; root {root}; }}\n}}\n"
+    fs_write_text(path, text)?
+}
+
+/// The master's status stanza (text), or "". Total.
+fn master_status(ep: str) -> str {
+    shell.control_fetch(ep, "status") else |_| { "" }
+}
+
+/// The line for `worker N:` in a master stanza, or "". Total.
+fn worker_row(st: str, n: int) -> str {
+    for line in st.lines() {
+        if line.starts_with("worker {n}: ") {
+            return line
+        }
+    }
+    ""
+}
+
+/// The `key=value` word's value on a row, or "". Total.
+fn row_field(row: str, key: str) -> str {
+    let probe = "{key}="
+    for w in row.words() {
+        if w.starts_with(probe) {
+            return w[probe.len..w.len]
+        }
+    }
+    ""
+}
+
+/// The ordinal of the hand whose row says `serving`, or 0. Total.
+fn serving_worker(st: str) -> int {
+    if worker_row(st, 1).contains(": serving ") {
+        return 1
+    }
+    if worker_row(st, 2).contains(": serving ") {
+        return 2
+    }
+    0
+}
+
+/// Poll the master until exactly one hand serves and the other stands
+/// by, up to ~8s; answers the serving ordinal or 0. Total.
+fn wait_posture(ep: str) -> int {
+    var i: int = 0
+    while i < 160 {
+        let st = master_status(ep)
+        let s = serving_worker(st)
+        let other = if s == 1 { 2 } else { 1 }
+        if s > 0 && worker_row(st, other).contains(": standby ") {
+            return s
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    0
+}
+
+fn main() -> !int {
+    let scratch = "ws16_e2e"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/A")?
+    fs_create_dir_all("{scratch}/B")?
+    fs_write_text("{scratch}/A/index.html", "hands-A-body\n")?
+    fs_write_text("{scratch}/B/index.html", "hands-B-body\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let confp = "{scratch}/lobo.conf"
+    write_conf(confp, hp, cp, "ws16_e2e/A")?
+
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn of target/lobo-debug failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| {
+            0
+        }
+        assert(false, "the spawned master never became alive on {ep}")
+    }
+
+    // 1. the posture: two hands, one serving, one standing by
+    let s1 = wait_posture(ep)
+    if s1 == 0 {
+        os_kill(child) else |_| {}
+        assert(
+            false,
+            "the master never reported one serving + one standby hand: {master_status(ep)}",
+        )
+    }
+    let st1 = master_status(ep)
+    assert(st1.contains("workers: 2\n"), "the master stanza counts its hands: {st1}")
+    let o1 = if s1 == 1 { 2 } else { 1 }
+    let row_s = worker_row(st1, s1)
+    let row_o = worker_row(st1, o1)
+    assert(row_field(row_s, "generation") == "1", "the serving hand is at generation 1: {row_s}")
+    assert(row_field(row_s, "restarts") == "0", "no hand has been replaced yet: {row_s}")
+    let ep_s = row_field(row_s, "control")
+    let ep_o = row_field(row_o, "control")
+    assert(
+        ep_s.starts_with("127.0.0.1:") && ep_o.starts_with("127.0.0.1:"),
+        "each hand has its own loopback endpoint",
+    )
+    assert(!(ep_s == ep_o), "…and they differ")
+
+    // 2. served by the serving hand, which says so itself
+    let b1 = http_get(hp, "/index.html")?
+    assert(b1.contains("hands-A-body"), "a GET is served: {b1}")
+    let own = shell.control_fetch(ep_s, "status") else |_| { "" }
+    assert(
+        own.contains("worker: {s1}\nlistening: true\n"),
+        "the serving hand's own stanza names itself: {own}",
+    )
+    let standby = shell.control_fetch(ep_o, "status") else |_| { "" }
+    assert(
+        standby.contains("worker: {o1}\nlistening: false\n"),
+        "the standby's own stanza says it holds nothing: {standby}",
+    )
+    let m = http_get(hp, "/metrics")?
+    assert(m.contains("lobo_worker_id {s1}\n"), "/metrics names the hand that answered: {m}")
+
+    // 3. the serving hand is told to stop, directly: failover, then replacement
+    let rs = shell.control_send(ep_s, "stop") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "stop to the serving hand never answered")
+        ""
+    }
+    assert(rs.contains("shutting down"), "the hand takes the order: {rs}")
+    assert(poll_body(hp, "hands-A-body"), "the standby took the listener: a GET is served again")
+    let own2 = shell.control_fetch(ep_o, "status") else |_| { "" }
+    assert(own2.contains("worker: {o1}\nlistening: true\n"), "…by the OTHER ordinal: {own2}")
+    // the master replaces the gone hand (its slot returns as a standby,
+    // restarts=1) — the reap waits out the supervision grace
+    var replaced = false
+    var i: int = 0
+    while i < 200 && !replaced {
+        let st = master_status(ep)
+        let r = worker_row(st, s1)
+        if r.contains(": standby ") && row_field(r, "restarts") == "1" {
+            replaced = true
+        } else {
+            time_sleep_ms(50)
+            i = i + 1
+        }
+    }
+    assert(replaced, "the master replaced hand {s1} (restarts=1, standing by): {master_status(ep)}")
+
+    // 4. reload fans out — rolling, every hand advances
+    write_conf(confp, hp, cp, "ws16_e2e/B")?
+    let rr = shell.control_send(ep, "reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "reload never answered")
+        ""
+    }
+    assert(rr.starts_with("reload complete (generation 2)"), "the master answers the verdict: {rr}")
+    assert(rr.contains("workers=2/2"), "…and how many hands took it: {rr}")
+    assert(poll_body(hp, "hands-B-body"), "the new root serves")
+    let st4 = master_status(ep)
+    assert(st4.contains("current generation: 2\n"), "the master's own generation advanced: {st4}")
+    // the replacement hand started AFTER the reload? No — it started
+    // before, at generation 1 of ITS process, and the fan-out advanced
+    // it to 2 like its sibling
+    assert(row_field(worker_row(st4, 1), "generation") == "2", "hand 1 at generation 2: {st4}")
+    assert(row_field(worker_row(st4, 2), "generation") == "2", "hand 2 at generation 2: {st4}")
+    // the JSON twin carries the same rows
+    let js = shell.control_fetch(ep, "status json") else |_| { "" }
+    assert(js.contains("\"workers_configured\":2"), "json: workers_configured: {js}")
+    assert(
+        js.contains("\"generations\":[],\"workers\":[{{\"worker\":1,"),
+        "json: the workers array: {js}",
+    )
+
+    // 5. quit: every hand drains, the master exits, the pid file goes
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "quit never answered")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit reply: {rq}")
+    let code = os_wait(child) else |_| {
+        -1
+    }
+    assert(code == 0, "the master exits 0 after its hands are gone: {code}")
+    time_sleep_ms(100)
+    assert(!fs_exists("{scratch}/lobo.pid"), "pid file removed on quit")
+    let gone = shell.control_reachable(ep_o)
+    assert(!gone, "the hands are gone with the master")
+
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}
