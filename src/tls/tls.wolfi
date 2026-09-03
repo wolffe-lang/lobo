@@ -1,9 +1,9 @@
 module pkg :: tls
   wolfi v0 · toolchain 0.2.3 · edition v1
-  export_hash cff2ffcbce609f5a377ed68d1f85704c50cc247a41e160f381def950debe4a21
-  pkg_hash    cff2ffcbce609f5a377ed68d1f85704c50cc247a41e160f381def950debe4a21
+  export_hash b855cb89c560806f4dd324592dc1540a5160655fb5e02d54dc051ed80e3ee85b
+  pkg_hash    b855cb89c560806f4dd324592dc1540a5160655fb5e02d54dc051ed80e3ee85b
   deps:
-    config  28a6fc3b9315c6cad4ffeb13ea70e61eef8d92bb900e6c557e6c6ae395d97c2d
+    config  18c9249938d54b2e1752ffc349e61fcb768a6dc06a70807a0efe66b3f7a22aef
     std.x.crypto.curve25519  01a215032a171eb1b9366f168a23d78b3e7b6d3c975d37627d3b7ebd9f35ad3a
     std.x.tls.cert  869655ab09c4766bcc4957a31b0d738cbb9870c829ec2918c879d863d3556442
     std.x.tls.handshake  418f15ce5f6a3c47c404172faf1d86fa359802143a45cb1719f3dda5b90b75c0
