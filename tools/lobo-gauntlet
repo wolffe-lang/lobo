@@ -139,6 +139,12 @@ if ! tools/lobo-signal; then
     exit 1
 fi
 
+step "prefork (ws16: many hands — a real master with three hands: a kill -9 of the serving hand fails over to a standby and is replaced, a rolling reload drains per process, the budget is per hand, every hand's line carries worker=, SIGTERM at the master stops the tree)"
+if ! tools/lobo-prefork; then
+    echo "lobo-gauntlet: FAILED at prefork — the many-hands witness (ws16)" >&2
+    exit 1
+fi
+
 step "replay (ws11: the planted drain race explored to a finding, its .loborace artifact replayed byte-stable, the fix's frontier closed)"
 if ! tools/lobo-replay; then
     echo "lobo-gauntlet: FAILED at replay — the replay-the-race witness (ws11)" >&2

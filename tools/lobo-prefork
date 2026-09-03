@@ -1,0 +1,254 @@
+#!/bin/sh
+# lobo-prefork — the MANY-HANDS witness (ws16, D73): a real master with
+# `worker_processes 3`, driven the way an operator and a crash would:
+#   1. the posture at this pin — one hand SERVES (holds the listener),
+#      two STAND BY; `lobo status` shows a row per hand with its own
+#      control endpoint (docs/WORKERS.md: the kernel cannot distribute
+#      accepts at this pin — no SO_REUSEPORT, no listener inheritance,
+#      wolf-lang#234/#235 — so the hands take turns rather than share);
+#   2. a REAL `kill -9` of the serving hand: a standby takes the
+#      listener (the failover window is MEASURED and printed), and the
+#      master reaps the corpse and REPLACES it (`restarts=1`, the
+#      `worker-exited … reason=unreachable code=-1` /
+#      `worker-started … restarts=1` events in the master's log);
+#   3. rolling reload DRAINING: a keepalive connection held on the
+#      serving hand; `lobo -s reload` (the CLI door, through the pid
+#      file to the master) fans out; the serving hand's OWN stanza
+#      shows generation 1 draining live=1 beside generation 2 current;
+#      a new connection is served from the new root; the holder closes
+#      and generation 1 retires; every hand's master row is at
+#      generation 2;
+#   4. the PER-WORKER budget: `memory_budget` refuses a big file with
+#      503 on the hand that served it, and `lobo status` shows that
+#      hand's row at `budget-503s=1` with its siblings at 0 — the meter
+#      and the cap are per process, the master's row is the fold;
+#   5. the log shapes: the hands' lines carry the trailing `worker=N`
+#      (vocabulary events after `seq`, prose at the end), the master's
+#      carry none, and the fan-out's `signal-received … source=control`
+#      appears once per hand with its ordinal;
+#   6. a REAL `kill -TERM` of the master: TERMINATE is `stop`, `stop`
+#      fans out, every hand's endpoint refuses, the pid file is gone.
+# Linux + macOS (the hosts wolf delivers signals on at this pin); the
+# .lu twin `tests/shell/prefork_e2e.lu` gates the control-channel half
+# on every host the corpus runs.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+case "$(uname -s)" in
+Linux | Darwin) ;;
+*)
+    echo "lobo-prefork: SKIPPED — the kill(1) half needs a host wolf delivers signals on (Linux+macOS at this pin); prefork_e2e.lu is the portable witness"
+    exit 0
+    ;;
+esac
+
+LOBO="$(pwd)/target/lobo-release"
+if [ ! -x "$LOBO" ]; then
+    echo "lobo-prefork: FAILED — $LOBO missing; the gauntlet's build step makes it" >&2
+    exit 1
+fi
+
+scratch="target/lobo-prefork"
+rm -rf "$scratch"
+mkdir -p "$scratch/A" "$scratch/B"
+echo "HANDS-GEN-A" > "$scratch/A/index.html"
+echo "HANDS-GEN-B" > "$scratch/B/index.html"
+# a 24 KiB file: over a 4k memory_budget, refused at the `file` site
+awk 'BEGIN { for (i = 0; i < 512; i++) printf "%047d\n", i }' > "$scratch/A/big.bin"
+cp "$scratch/A/big.bin" "$scratch/B/big.bin"
+
+red=0
+total=0
+say() { echo "lobo-prefork: $1"; }
+check() { # check <desc> <ok(0/1)>
+    total=$((total + 1))
+    if [ "$2" = 0 ]; then
+        say "ok — $1"
+    else
+        say "FAILED — $1" >&2
+        red=$((red + 1))
+    fi
+}
+
+hp=$("$WOLF" run ./tests/rig/freeport.lu)
+ctp=$("$WOLF" run ./tests/rig/freeport.lu)
+conf="$scratch/lobo.conf"
+render() { # render <root>
+    printf 'worker_processes 3;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  memory_budget 4k;\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+        "$scratch" "$ctp" "$hp" "$1" > "$conf"
+}
+render "$scratch/A"
+
+"$LOBO" serve -p . -c "$conf" 2> "$scratch/lobo.log" &
+mpid=$!
+
+status_text() { "$LOBO" status -p . -c "$conf" 2>/dev/null; }
+hand_status() { # hand_status <endpoint> — a hand's own stanza, read to
+    # the close with the same nc the differential harness drives (a
+    # hand's endpoint is in the master's row, never in a pid file)
+    printf 'status\n' | nc 127.0.0.1 "${1##*:}" 2>/dev/null
+}
+hand_ping() { # hand_ping <endpoint> — pong or nothing
+    printf 'ping\n' | nc 127.0.0.1 "${1##*:}" 2>/dev/null
+}
+poll() { # poll <desc> <fn> <grep-pattern> — up to ~10s
+    i=0
+    while [ $i -lt 100 ]; do
+        if "$2" | grep -q "$3"; then
+            check "$1" 0
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    say "status at timeout: $("$2" | tr '\n' ' | ')" >&2
+    check "$1" 1
+    return 1
+}
+serving_ordinal() { status_text | sed -n 's/^worker \([0-9]*\): serving .*/\1/p' | head -1; }
+hand_ep() { status_text | sed -n "s/^worker $1: [a-z]* control=\([^ ]*\) .*/\1/p"; }
+row_field() { # row_field <ordinal> <key>
+    status_text | sed -n "s/^worker $1: .* $2=\([^ ]*\).*/\1/p"
+}
+get() { # get <path> — the served reply's body first line, or "" (nc:
+    # no compile per probe, so the failover window below is the
+    # server's, not the driver's)
+    printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$1" | nc 127.0.0.1 "$hp" 2>/dev/null |
+        awk 'BEGIN { RS = "\r\n\r\n" } NR == 2 { print $1 }'
+}
+get_status() { # get_status <path> — the status code
+    printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$1" | nc 127.0.0.1 "$hp" 2>/dev/null | head -1 | awk '{print $2}'
+}
+now_ms() { "$WOLF" run ./tests/rig/nowms.lu 2>/dev/null; }
+
+# 1. the posture
+poll "master up, 3 hands configured" status_text "^workers: 3"
+poll "one hand serves (holds the listener)" status_text "^worker [0-9]: serving "
+s1=$(serving_ordinal)
+standbys=$(status_text | grep -c "^worker [0-9]: standby ")
+check "the other two stand by (this pin's posture: no shared listener — wolf-lang#234/#235); standby rows: $standbys" $([ "$standbys" = 2 ] && echo 0 || echo 1)
+ep_s=$(hand_ep "$s1")
+check "the serving hand ($s1) has its own control endpoint: $ep_s" $([ -n "$ep_s" ] && echo 0 || echo 1)
+own=$(hand_status "$ep_s")
+case "$own" in
+*"worker: $s1"*"listening: true"*) check "the serving hand's own stanza says worker: $s1, listening: true" 0 ;;
+*) check "the serving hand's own stanza says worker: $s1, listening: true (got: $(printf '%s' "$own" | tr '\n' '|'))" 1 ;;
+esac
+body=$(get /index.html)
+check "a GET is served by the serving hand (body: $body)" $([ "$body" = "HANDS-GEN-A" ] && echo 0 || echo 1)
+
+# 2. a REAL crash of the serving hand
+hpid=$(pgrep -f -- "--worker $s1 --worker-control" | head -1)
+check "the serving hand's os pid is findable for kill(1): $hpid" $([ -n "$hpid" ] && echo 0 || echo 1)
+# the clock driver is `wolf run` (a compile per call): read its own
+# cost first and subtract it, so the window printed is the server's
+ta=$(now_ms)
+tb=$(now_ms)
+overhead=$((tb - ta))
+t0=$(now_ms)
+kill -9 "$hpid"
+i=0
+served=""
+while [ $i -lt 100 ]; do
+    served=$(get /index.html)
+    [ "$served" = "HANDS-GEN-A" ] && break
+    sleep 0.05
+    i=$((i + 1))
+done
+t1=$(now_ms)
+check "a standby took the listener after the crash (failover window: $((t1 - t0 - overhead)) ms, MEASURED — minus the clock driver's own $overhead ms)" $([ "$served" = "HANDS-GEN-A" ] && echo 0 || echo 1)
+s2=$(serving_ordinal)
+check "the serving ordinal changed ($s1 -> $s2)" $([ -n "$s2" ] && [ "$s2" != "$s1" ] && echo 0 || echo 1)
+poll "the master REPLACED the crashed hand (row $s1 back, restarts=1)" status_text "^worker $s1: standby .* restarts=1"
+if grep -q "worker-exited worker=$s1 reason=unreachable code=-1 seq=" "$scratch/lobo.log"; then
+    check "master log: worker-exited reason=unreachable code=-1 (a SIGKILL leaves no code)" 0
+else
+    check "master log: worker-exited reason=unreachable code=-1 ($(grep worker-exited "$scratch/lobo.log" | head -2 | tr '\n' '|'))" 1
+fi
+if grep -q "worker-started worker=$s1 restarts=1 seq=" "$scratch/lobo.log"; then
+    check "master log: worker-started restarts=1" 0
+else
+    check "master log: worker-started restarts=1" 1
+fi
+
+# 3. rolling reload, draining watched on the serving hand
+ep_s2=$(hand_ep "$s2")
+"$WOLF" run ./tests/rig/holdconn.lu "$hp" 4000 > "$scratch/hold.out" 2> "$scratch/hold.err" &
+holder=$!
+hs() { hand_status "$ep_s2"; }
+poll "held connection counted on hand $s2 (gen 1 live=1)" hs "generation 1: current live=1"
+render "$scratch/B"
+"$LOBO" -s reload -p . -c "$conf" > "$scratch/reload.out" 2>&1
+rc=$?
+check "lobo -s reload exits 0 through the master (reply: $(cat "$scratch/reload.out"))" $rc
+grep -q "workers=3/3" "$scratch/reload.out"
+check "the reply says how many hands took the reload (workers=3/3)" $?
+poll "hand $s2: generation 1 draining live=1 (the ws08 drain, per process)" hs "generation 1: draining live=1"
+poll "hand $s2: generation 2 current beside it" hs "generation 2: current"
+body=$(get /index.html)
+check "a new connection is served from the new root during the drain (body: $body)" $([ "$body" = "HANDS-GEN-B" ] && echo 0 || echo 1)
+wait "$holder"
+check "holder exited cleanly" $?
+i=0
+while [ $i -lt 80 ]; do
+    if hs | grep -q "generation 1:"; then sleep 0.1; i=$((i + 1)); else break; fi
+done
+if hs | grep -q "generation 1:"; then
+    check "generation 1 retired on hand $s2 after the held connection closed" 1
+else
+    check "generation 1 retired on hand $s2 after the held connection closed" 0
+fi
+gens=$(status_text | grep -c "^worker [0-9]: [a-z]* control=[^ ]* generation=2 ")
+check "every hand's master row is at generation 2 (rows: $gens)" $([ "$gens" = 3 ] && echo 0 || echo 1)
+
+# 4. the per-worker budget
+code=$(get_status /big.bin)
+check "a 24 KiB file under memory_budget 4k is refused with 503 (got $code)" $([ "$code" = 503 ] && echo 0 || echo 1)
+poll "the serving hand's row counts the refusal (budget-503s=1)" status_text "^worker $s2: serving .* budget-503s=1 "
+others=$(status_text | grep "^worker [0-9]: standby " | grep -c "budget-503s=0 ")
+check "the standbys' rows stay at budget-503s=0 (the meter is per process): $others" $([ "$others" = 2 ] && echo 0 || echo 1)
+status_text | grep -q "^live-region-bytes: [0-9]"
+check "the master's live-region-bytes is the fold over the hands" $?
+
+# 5. the log shapes
+if grep -q "signal-received sig=reload verb=reload source=control seq=[0-9]* worker=$s2$" "$scratch/lobo.log"; then
+    check "hand $s2's signal-received carries the trailing worker= field (after seq)" 0
+else
+    check "hand $s2's signal-received carries the trailing worker= field ($(grep signal-received "$scratch/lobo.log" | head -3 | tr '\n' '|'))" 1
+fi
+hands_reload=$(grep -c "signal-received sig=reload verb=reload source=control seq=[0-9]* worker=[0-9]*$" "$scratch/lobo.log")
+check "the fan-out reached three hands (three worker-stamped signal-received lines: $hands_reload)" $([ "$hands_reload" = 3 ] && echo 0 || echo 1)
+if grep -q "signal-received sig=reload verb=reload source=control seq=[0-9]*$" "$scratch/lobo.log"; then
+    check "the master's own signal-received carries NO worker= (the single-process shape, byte for byte)" 0
+else
+    check "the master's own signal-received carries NO worker=" 1
+fi
+if grep -q "^lobo: \[notice\] listener 127.0.0.1:$hp acquired (port $hp) — serving worker=$s2$" "$scratch/lobo.log"; then
+    check "prose notices are stamped too (the failover's 'listener acquired' line ends in worker=$s2)" 0
+else
+    check "prose notices are stamped too ($(grep acquired "$scratch/lobo.log" | head -2 | tr '\n' '|'))" 1
+fi
+
+# 6. a REAL SIGTERM at the master: stop fans out
+eps=$(status_text | sed -n 's/^worker [0-9]*: [a-z]* control=\([^ ]*\) .*/\1/p')
+kill -TERM "$mpid"
+wait "$mpid"
+check "SIGTERM at the master exits 0 (TERMINATE is stop; stop fans out)" $?
+alive=0
+for e in $eps; do
+    if hand_ping "$e" | grep -q pong; then alive=$((alive + 1)); fi
+done
+check "every hand's endpoint is gone with the master (still answering: $alive)" $([ "$alive" = 0 ] && echo 0 || echo 1)
+if [ -f "$scratch/lobo.pid" ]; then
+    check "pid file removed on stop" 1
+else
+    check "pid file removed on stop" 0
+fi
+
+if [ "$red" = 0 ]; then
+    say "GREEN — $total/$total"
+    exit 0
+fi
+say "RED — $red of $total failed (log: $scratch/lobo.log)" >&2
+exit 1
