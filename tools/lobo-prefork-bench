@@ -1,0 +1,143 @@
+#!/bin/sh
+# lobo-prefork-bench — THE MEASUREMENT (ws16, the charter's evidence
+# for W6: "lobo uses all the cores"). Requests per second and cores
+# used, 1 worker vs N on this box, lobo beside the pinned nginx at the
+# same N, same file, same load generator (ab(1) — Apache's bench, on
+# every macOS and in apache2-utils on linux). NOT a gauntlet gate: a
+# number depends on the box; the table it prints is what the sprint
+# report and docs/WORKERS.md carry, dated and named by host.
+#
+#   tools/lobo-prefork-bench [N] [requests] [concurrency]
+#     N            worker count for the "N" rows (default: this box's
+#                  cpu count — `nproc` / `sysctl -n hw.ncpu`)
+#     requests     ab -n (default 20000)
+#     concurrency  ab -c (default 32)
+#
+# "cores used" is Σ cpu time over the server's process tree ÷ the
+# run's wall time — read off ps(1) after each run, so it is the
+# host's accounting, not the server's claim. Two request shapes:
+# CLOSE (a connection per request — the accept path is the work) and
+# KEEPALIVE (`ab -k`, 32 connections reused — the read/serve path).
+#
+# What a 1.0x lobo row MEANS (docs/WORKERS.md): at this pin the kernel
+# cannot distribute accepts across lobo's hands (no SO_REUSEPORT, no
+# listener inheritance — wolf-lang#234/#235), so N hands are N-1
+# standbys and one server. That row is the finding, printed as a
+# number; nginx's row at the same N is the differential.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+
+if ! command -v ab > /dev/null 2>&1; then
+    echo "lobo-prefork-bench: REFUSED — ab(1) is not on PATH (macOS ships it; linux: apache2-utils)" >&2
+    exit 1
+fi
+LOBO="$(pwd)/target/lobo-release"
+NGINX="$(pwd)/tests/differential/bin/nginx"
+[ -x "$LOBO" ] || { echo "lobo-prefork-bench: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+[ -x "$NGINX" ] || { echo "lobo-prefork-bench: REFUSED — pinned nginx missing at $NGINX (docs/DIFFERENTIAL.md)" >&2; exit 1; }
+
+cores=$( (nproc 2>/dev/null || sysctl -n hw.ncpu) | head -1)
+N=${1:-$cores}
+REQS=${2:-20000}
+CONC=${3:-32}
+scratch="$(pwd)/target/prefork-bench"
+rm -rf "$scratch"
+mkdir -p "$scratch/www" "$scratch/logs"
+awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
+
+cpu_seconds() { # cpu_seconds <pids...> — Σ ps cputime, in seconds
+    ps -o time= -p "$(echo "$@" | tr ' ' ',')" 2>/dev/null | awk '
+        { n = split($1, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; t += s }
+        END { printf "%.2f", t }'
+}
+now_ms() { "$WOLF" run ./tests/rig/nowms.lu 2>/dev/null; }
+wait_port() { # wait_port <port> — up to ~8s
+    i=0
+    while [ $i -lt 80 ]; do
+        if printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt" &&
+            "$WOLF" run ./tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null | grep -q "200 OK"; then
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+run_ab() { # run_ab <port> <keepalive:0|1> — prints req/s
+    if [ "$2" = 1 ]; then
+        ab -q -k -n "$REQS" -c "$CONC" "http://127.0.0.1:$1/index.html" 2>/dev/null
+    else
+        ab -q -n "$REQS" -c "$CONC" "http://127.0.0.1:$1/index.html" 2>/dev/null
+    fi | awk '/^Requests per second/ { print $4 }'
+}
+rows=""
+
+bench_lobo() { # bench_lobo <workers>
+    hp=$("$WOLF" run ./tests/rig/freeport.lu)
+    cp=$("$WOLF" run ./tests/rig/freeport.lu)
+    conf="$scratch/lobo-$1.conf"
+    printf 'worker_processes %s;\npid %s/lobo-%s.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$1" "$scratch" "$1" "$cp" "$hp" "$scratch" > "$conf"
+    "$LOBO" serve -p . -c "$conf" 2> "$scratch/logs/lobo-$1.log" &
+    mpid=$!
+    wait_port "$hp" || { echo "lobo-prefork-bench: lobo ($1 workers) never served" >&2; kill "$mpid"; return 1; }
+    sleep 1
+    pids="$mpid $(pgrep -f -- "--worker [0-9]* --worker-control" | tr '\n' ' ')"
+    for k in 0 1; do
+        # each shape on a fresh process tree would zero the counters;
+        # instead read the delta: cpu before and after
+        before=$(cpu_seconds $pids)
+        t0=$(now_ms)
+        rps=$(run_ab "$hp" "$k")
+        t1=$(now_ms)
+        after=$(cpu_seconds $pids)
+        cpu=$(awk -v a="$before" -v b="$after" 'BEGIN { printf "%.2f", b - a }')
+        wall=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", (b - a) / 1000 }')
+        used=$(awk -v c="$cpu" -v w="$wall" 'BEGIN { if (w > 0) printf "%.2f", c / w; else print "?" }')
+        shape=$([ "$k" = 1 ] && echo keepalive || echo close)
+        rows="$rows| lobo worker_processes $1 | $shape | ${rps:-?} | $cpu | $wall | $used |
+"
+        echo "lobo-prefork-bench: lobo $1 $shape: ${rps:-?} req/s, cpu ${cpu}s over ${wall}s wall = $used cores"
+    done
+    "$LOBO" -s stop -p . -c "$conf" > /dev/null 2>&1
+    wait "$mpid" 2>/dev/null
+}
+
+bench_nginx() { # bench_nginx <workers>
+    np=$("$WOLF" run ./tests/rig/freeport.lu)
+    mkdir -p "$scratch/nginx-$1/logs"
+    printf 'daemon off;\nworker_processes %s;\npid nginx.pid;\nerror_log error.log;\nevents {\n}\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$1" "$np" "$scratch" > "$scratch/nginx-$1/nginx.conf"
+    "$NGINX" -p "$scratch/nginx-$1" -c nginx.conf > "$scratch/logs/nginx-$1.out" 2>&1 &
+    npid=$!
+    wait_port "$np" || { echo "lobo-prefork-bench: nginx ($1 workers) never served" >&2; kill "$npid"; return 1; }
+    sleep 1
+    pids="$npid $(pgrep -P "$npid" | tr '\n' ' ')"
+    for k in 0 1; do
+        before=$(cpu_seconds $pids)
+        t0=$(now_ms)
+        rps=$(run_ab "$np" "$k")
+        t1=$(now_ms)
+        after=$(cpu_seconds $pids)
+        cpu=$(awk -v a="$before" -v b="$after" 'BEGIN { printf "%.2f", b - a }')
+        wall=$(awk -v a="$t0" -v b="$t1" 'BEGIN { printf "%.2f", (b - a) / 1000 }')
+        used=$(awk -v c="$cpu" -v w="$wall" 'BEGIN { if (w > 0) printf "%.2f", c / w; else print "?" }')
+        shape=$([ "$k" = 1 ] && echo keepalive || echo close)
+        rows="$rows| nginx worker_processes $1 | $shape | ${rps:-?} | $cpu | $wall | $used |
+"
+        echo "lobo-prefork-bench: nginx $1 $shape: ${rps:-?} req/s, cpu ${cpu}s over ${wall}s wall = $used cores"
+    done
+    kill -QUIT "$npid" 2>/dev/null
+    wait "$npid" 2>/dev/null
+}
+
+echo "lobo-prefork-bench: host $(uname -sm), $cores cpus; N=$N; ab -n $REQS -c $CONC; file $(wc -c < "$scratch/www/index.html") bytes"
+bench_lobo 1
+bench_lobo "$N"
+bench_nginx 1
+bench_nginx "$N"
+echo ""
+echo "| server | shape | req/s | cpu s | wall s | cores used |"
+echo "|---|---|---|---|---|---|"
+printf '%s' "$rows"
