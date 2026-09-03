@@ -112,6 +112,21 @@ endpoint serves this same object.
 configs across a reload share an id — an operator can see a reload
 changed nothing — and any content change changes it.
 
+### Under `worker_processes N` (ws16)
+
+The stanza above is ONE process's. With N hands the master answers
+`lobo status` instead: the same head with the master's numbers
+(`live-region-bytes` summed over the hands), `workers: N` appended,
+and one `worker i: serving|standby|unreachable control=… generation=…
+live=… events=… live-region-bytes=… budget-503s=… restarts=…` row per
+hand, folded from each hand's own stanza over its endpoint; the JSON
+twin carries `workers_configured`, an empty `generations` array and a
+`workers` array (schema stays 1 — additive). A hand's OWN stanza is
+the one above plus `worker: N` and `listening: true|false`. Every
+shape is pinned in `tests/shell/worker_surface.lu`; docs/WORKERS.md
+is the page, and it says why one hand serves while the others stand
+by at this pin.
+
 ### Snapshot semantics (documented, by design)
 
 A status read races the generation swap on purpose. The stanza is one
@@ -145,6 +160,8 @@ vibes):
 | `budget-exceeded` | error | `gen`, `site`, `budget`, `would` (+ `cap`, ws14, only at `site=region`) | a request was refused by its `memory_budget` (ws10): `site` the deterministic exceed-site (`head`\|`body`\|`body-chunked`\|`file`\|`admin`\|`region` — the last is the RUNTIME's refusal, ws14, and carries `cap`, the region cap in ledger units), `budget` the configured bytes, `would` what admitting it would have charged (`budget+1` at `region`: a killed proc's charge is unobservable); the request also writes an ordinary 503 access line (docs/BUDGET.md) |
 | `upstream-resolved` | notice | `host`, `addrs`, `ttl-ms`, `took-ms` | the resolver answered an upstream name (ws13): `addrs` how many addresses, `ttl-ms` how long the cache holds them (the record TTL or `valid=`, floored at 1 s), `took-ms` the query's wall time (docs/RESOLVER.md) |
 | `upstream-resolve-failed` | error | `host`, `reason`, `took-ms` | an upstream name did not resolve (ws13): `reason` one of `nxdomain`\|`servfail`\|`refused`\|`noaddr`\|`malformed`\|`rcode`\|`timeout`\|`io`\|`dial`; the failure is held 1 s and the requests parked on the name answer 502 |
+| `worker-started` | notice | `worker`, `restarts` | the MASTER started a hand (ws16, docs/WORKERS.md): `worker` its ordinal, `restarts` how many times this slot has been replaced (0 at the first start) |
+| `worker-exited` | notice | `worker`, `reason`, `code` | the master reaped a hand (ws16): `reason` is `exit` (it returned `code`), `signal` (it died without a code — crashed, or killed; `code` is -1) or `unreachable` (its endpoint refused past the supervision grace and the master killed it; `code` is what the reap answered) |
 
 **The seq stamp (ws11, appended — nothing renamed).** Every vocabulary
 event above carries one more trailing field, `seq=N`: the event's
@@ -177,7 +194,19 @@ lobo: [notice] connection-retired gen=1 remaining=0 seq=7
 lobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840 seq=8
 ```
 
-Nine events, and `signal-received`'s `source` is the ONLY thing in this
+**The `worker=` stamp (ws16, appended after `seq` — nothing renamed).**
+Under `worker_processes N` every line a HAND emits — the events above
+and the prose notices alike — ends in one more trailing field,
+`worker=N`, its ordinal; the master's own lines carry none, and
+neither do a single-process lobo's (the default: byte-identical to
+ws15). `seq` stays per PROCESS: a hand's stream is its own total
+order, the master's is another, and a merged file holds N+1 streams
+separable by the stamp and orderable across each other only by the
+wall clock (docs/REPLAY.md states the consequence; docs/WORKERS.md
+is the page). The two `worker-*` events are the master's.
+
+Eleven events (nine through ws15, two appended at ws16), and
+`signal-received`'s `source` is the ONLY thing in this
 vocabulary that says which door an order came through. That is
 deliberate: docs/CONTROL.md is the page, and its claim — a control verb
 and a real signal are indistinguishable in the log but for that field —
@@ -317,3 +346,7 @@ server with NO control directive, because signals need no channel.
   asserted. docs/CONTROL.md carries the table.
 - `tests/shell/control_verbs.lu`, `tests/shell/control_e2e.lu` — the
   endpoint's pure surface and its live auth arm (ws15).
+- `tests/shell/worker_surface.lu`, `tests/shell/prefork_e2e.lu`,
+  `tools/lobo-prefork` — the many-hands surface, the real master with
+  its hands, and the crash/reload/budget/log witness (ws16,
+  docs/WORKERS.md).

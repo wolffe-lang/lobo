@@ -372,6 +372,13 @@ is no longer gated on anything upstream).
   and the exposition's `lobo_request_admitted_bytes_high_water` /
   `lobo_request_region_bytes_high_water` / `lobo_live_region_bytes`
   carry the same three numbers for a scraper (docs/metrics.md).
+- **Per hand under `worker_processes N`** (ws16, docs/WORKERS.md):
+  the meter, the cap, `live_region_bytes()` and every number above
+  live inside the process that served the request, so a
+  `memory_budget` of 64k is 64k in EACH of N hands, never 64k across
+  them. The master's `lobo status` sums `live-region-bytes` over the
+  hands and shows each hand's `budget-503s`; a `/metrics` scrape is
+  ONE hand's numbers (`lobo_worker_id` names which).
 
 ## Witnesses
 

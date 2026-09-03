@@ -58,6 +58,25 @@ What lobo's own surfaces honestly carry instead:
   decisive order in the rig's model, which is exactly what the
   workflow below automates for the drain shapes.
 
+**The multi-process boundary (ws16).** Under `worker_processes N`
+(docs/WORKERS.md) there are N+1 processes and therefore N+1 seq
+streams: each hand stamps its own `seq` from 1 and ends every line
+in `worker=N`; the master stamps its own and ends its lines in
+nothing. A merged `error_log` is N+1 total orders interleaved at
+line granularity (`O_APPEND`), and NOTHING in it orders one hand's
+`seq=9` against another's `seq=9` except the wall clock — millisecond
+precision, not a total order. So the completeness anchor is per
+stream: a hand's row in `lobo status` carries ITS `events`, and a
+bug report against a hand attaches that hand's lines (filter on the
+stamp) with that row; the master's `events` bounds the master's
+stream (the `worker-started`/`worker-exited` events, the fan-out's
+`signal-received`) and nothing else. What crosses processes — the
+order in which the master's fan-out reached the hands — is
+reconstructible from the master's stream alone (it sends in ordinal
+order, one reply at a time) and never from the hands' seqs. A
+cross-process schedule is a different mechanism this repo does not
+have, exactly as a production flight recorder is.
+
 One sentence, both halves load-bearing: **exploration proves ordering
 properties over the events it can see and permute — and the events it
 can see are the rig's model programs' channel operations, selects,
