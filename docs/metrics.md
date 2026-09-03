@@ -33,6 +33,7 @@ itself is below.
 | `lobo_upstream_resolutions_total` | counter | `result` | Upstream names the resolver settled, by result (ok, failed). The failure reason is in the upstream-resolve-failed log event, not a label. |
 | `lobo_log_lines_dropped_total` | counter | — | Access-log lines dropped because a sink's bounded buffer was full (emit never blocks). |
 | `lobo_events_total` | counter | — | Vocabulary events emitted — the highest seq stamped. A log stream whose top seq matches this has no trailing hole. |
+| `lobo_worker_id` | gauge | — | Which process answered this scrape: 0 for a single-process lobo, the worker's ordinal under a master. A scrape reaches ONE worker; the master's status is the sum across workers. |
 
 ## The endpoint
 

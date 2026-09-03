@@ -219,6 +219,13 @@ pub fn registry() -> List[Spec] {
         labels: "",
         help: "Vocabulary events emitted — the highest seq stamped. A log stream whose top seq matches this has no trailing hole.",
     })
+    // --- many hands (ws16) ---
+    (mut r).push(Spec {
+        name: "lobo_worker_id",
+        kind: "gauge",
+        labels: "",
+        help: "Which process answered this scrape: 0 for a single-process lobo, the worker's ordinal under a master. A scrape reaches ONE worker; the master's status is the sum across workers.",
+    })
     r
 }
 
