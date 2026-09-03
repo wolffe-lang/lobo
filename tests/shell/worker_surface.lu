@@ -1,0 +1,145 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! The ws16 prefork surface, PURE, on all three lanes: the hand's argv
+//! (one value per element — no shell, ever), the two vocabulary
+//! events appended at ws16 (nothing renamed), the `worker=` trailing
+//! field, the master's status rows (text and JSON), the worker's two
+//! extra head lines, and the stanza readers the master folds a hand's
+//! stanza back with. The live half — hands started, probed, replaced
+//! — is `prefork_e2e.lu` and `tools/lobo-prefork`.
+
+use config
+use shell
+
+fn main() -> !int {
+    // ---- the worker argv: exe serve -p P -c C --worker N --worker-control EP
+    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001")
+    assert(a.len == 10, "ten elements: {a.len}")
+    assert(a[0] == "/opt/lobo" && a[1] == "serve", "the executable, then serve")
+    assert(a[2] == "-p" && a[3] == "/etc/lobo", "the prefix rides")
+    assert(a[4] == "-c" && a[5] == "nginx.conf", "the config rides")
+    assert(a[6] == "--worker" && a[7] == "3", "the ordinal")
+    assert(a[8] == "--worker-control" && a[9] == "127.0.0.1:40001", "the endpoint")
+    // a path with a space is ONE argument (no quoting layer exists)
+    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1")
+    assert(b[0] == "/opt/my lobo" && b[3] == "/etc/x y" && b[5] == "a b.conf", "spaces are bytes")
+
+    // ---- the CLI half of the same flags: a pair, only with serve
+    var argv = List[str]()
+    (mut argv).push("serve")
+    (mut argv).push("--worker")
+    (mut argv).push("2")
+    (mut argv).push("--worker-control")
+    (mut argv).push("127.0.0.1:4242")
+    let cli = shell.parse_cli(argv)
+    assert(
+        cli.mode == "serve" && cli.worker == 2 && cli.worker_control == "127.0.0.1:4242",
+        "the hand's flags parse",
+    )
+    var half = List[str]()
+    (mut half).push("serve")
+    (mut half).push("--worker")
+    (mut half).push("2")
+    let ch = shell.parse_cli(half)
+    assert(ch.mode == "error" && ch.exit_code == 1, "--worker without --worker-control is an error")
+    var wrong = List[str]()
+    (mut wrong).push("-t")
+    (mut wrong).push("--worker")
+    (mut wrong).push("1")
+    (mut wrong).push("--worker-control")
+    (mut wrong).push("127.0.0.1:1")
+    let cw = shell.parse_cli(wrong)
+    assert(cw.mode == "error", "the flags mean nothing outside serve: refused by name")
+    var zero = List[str]()
+    (mut zero).push("serve")
+    (mut zero).push("--worker")
+    (mut zero).push("0")
+    (mut zero).push("--worker-control")
+    (mut zero).push("127.0.0.1:1")
+    assert(shell.parse_cli(zero).mode == "error", "ordinal 0 is the master, never a hand")
+    var plain = List[str]()
+    (mut plain).push("serve")
+    let cp = shell.parse_cli(plain)
+    assert(cp.worker == 0 && cp.worker_control.is_empty(), "plain serve: no hand flags")
+
+    // ---- the vocabulary: two events appended (the tenth and eleventh)
+    assert(
+        shell.ev_worker_started(2, 0) == "worker-started worker=2 restarts=0",
+        "worker-started shape",
+    )
+    assert(
+        shell.ev_worker_exited(2, "signal", -1) == "worker-exited worker=2 reason=signal code=-1",
+        "worker-exited shape (signal)",
+    )
+    assert(
+        shell.ev_worker_exited(1, "exit", 1) == "worker-exited worker=1 reason=exit code=1",
+        "worker-exited shape (exit)",
+    )
+    // the trailing field: after seq, so every prefix pin still matches
+    let stamped = shell.ev_seq(shell.ev_generation_activated(2), 7)
+    assert(
+        shell.ev_worker_field(stamped, 3) == "generation-activated gen=2 seq=7 worker=3",
+        "worker= rides LAST, after seq",
+    )
+    assert(
+        shell.ev_worker_field(stamped, 3).starts_with(stamped),
+        "…so the ws15 line is a prefix of the ws16 line",
+    )
+
+    // ---- the master's stanza pieces
+    assert(shell.status_workers_line(4) == "workers: 4\n", "the workers: line")
+    let row = shell.status_worker_text(2, "standby", "127.0.0.1:40002", 3, 0, 12, 4096, 1, 1)
+    assert(
+        row ==
+            "worker 2: standby control=127.0.0.1:40002 generation=3 live=0 events=12 live-region-bytes=4096 budget-503s=1 restarts=1\n",
+        "the worker row (text): {row}",
+    )
+    let obj = shell.status_worker_json(1, "serving", "127.0.0.1:40001", 2, 5, 41, 65536, 0, 0)
+    assert(
+        obj ==
+            "{{\"worker\":1,\"state\":\"serving\",\"control\":\"127.0.0.1:40001\",\"generation\":2,\"live\":5,\"events\":41,\"live_region_bytes\":65536,\"budget_503s\":0,\"restarts\":0}}",
+        "the worker object (json): {obj}",
+    )
+    let mo = shell.status_json_master_open(2, false, 9, 70000, 3)
+    assert(
+        mo ==
+            "{{\"schema\":1,\"current\":2,\"quitting\":false,\"events\":9,\"live_region_bytes\":70000,\"workers_configured\":3,\"generations\":[],\"workers\":[",
+        "the master's json open: {mo}",
+    )
+    assert(
+        shell.status_worker_head(2, true) == "worker: 2\nlistening: true\n",
+        "the hand's two head lines",
+    )
+    let wo = shell.status_json_open_worker(1, false, 3, 100, 2, false)
+    assert(
+        wo ==
+            "{{\"schema\":1,\"current\":1,\"quitting\":false,\"events\":3,\"live_region_bytes\":100,\"worker\":2,\"listening\":false,\"generations\":[",
+        "the hand's json open: {wo}",
+    )
+
+    // ---- the readers, over a hand's real stanza shape
+    var st = shell.status_head_text(3, false, 41, 65536)
+    st = "{st}{shell.status_worker_head(1, true)}"
+    st = "{st}{shell.status_line_text(2, 2, "draining", 500, "abcd", -1, 100, 1, 200)}"
+    st = "{st}{shell.status_line_text(3, 5, "current", 10, "efgh", -1, 300, 2, 400)}"
+    assert(shell.stanza_int(st, "current generation") == 3, "current generation reads")
+    assert(shell.stanza_int(st, "events") == 41, "events reads")
+    assert(shell.stanza_int(st, "live-region-bytes") == 65536, "live-region-bytes reads")
+    assert(shell.stanza_word(st, "listening") == "true", "listening reads")
+    assert(shell.stanza_word(st, "quitting") == "false", "quitting reads")
+    assert(shell.stanza_int(st, "no-such-key") == -1, "an absent key is -1")
+    assert(shell.stanza_int(st, "quitting") == -1, "a non-numeric value is -1")
+    assert(shell.stanza_field_sum(st, "live") == 7, "live= sums over the generation lines (2+5)")
+    assert(shell.stanza_field_sum(st, "budget-503s") == 3, "budget-503s= sums (1+2)")
+    assert(shell.stanza_field_sum(st, "nothing") == 0, "an absent field sums to 0")
+
+    // ---- the config-side reader is the single-process default
+    let c = config.parse_str("http {{ server {{ listen 8080; }} }}\n", "t")
+    assert(shell.worker_processes(c) == 1, "no directive: one process (ws15's lobo, untouched)")
+
+    print("worker surface: ok")
+    0
+}

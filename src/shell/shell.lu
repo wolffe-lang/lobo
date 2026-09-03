@@ -95,6 +95,8 @@ pub struct Cli {
     sni: str,
     client: str,
     stat: bool,
+    worker: int,
+    worker_control: str,
 }
 
 /// True when `name` is one of nginx's four signal words. Total.
@@ -142,6 +144,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var sni = ""
     var client = ""
     var stat = false
+    var worker: int = 0
+    var worker_control = ""
     var want = ""
     var want_kind = ""
     var err_msg = ""
@@ -174,6 +178,17 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 sni = a
             } else if want == "client" {
                 client = a
+            } else if want == "worker" {
+                // ws16: the master's internal flags — a hand's ordinal
+                // (digits, >= 1) and the endpoint it must listen on.
+                // Not on the usage page: an operator never types them
+                worker = digits_val(a)
+                if worker < 1 {
+                    errored = true
+                    err_msg = "option \"--worker\" requires a positive ordinal (internal: the master's flag)"
+                }
+            } else if want == "worker-control" {
+                worker_control = a
             } else if want == "control" {
                 if control_verb_ok(a) {
                     mode = "control"
@@ -235,6 +250,12 @@ pub fn parse_cli(args: List[str]) -> Cli {
             want_kind = "parameter"
         } else if a == "--stat" {
             stat = true
+        } else if a == "--worker" {
+            want = "worker"
+            want_kind = "parameter"
+        } else if a == "--worker-control" {
+            want = "worker-control"
+            want_kind = "parameter"
         } else if a == "directives-md" {
             mode = "docs"
         } else if a == "logvars-md" {
@@ -294,6 +315,16 @@ pub fn parse_cli(args: List[str]) -> Cli {
             err_msg = "options \"--sni\"/\"--client\"/\"--stat\" shape --request probes; add --request"
         }
     }
+    // the worker flags come as a PAIR, and only with `serve`
+    if !errored && (worker > 0 || !worker_control.is_empty()) {
+        if mode != "serve" {
+            errored = true
+            err_msg = "options \"--worker\"/\"--worker-control\" are the master's flags for `serve` (internal)"
+        } else if worker == 0 || worker_control.is_empty() {
+            errored = true
+            err_msg = "options \"--worker\" and \"--worker-control\" come together (internal: the master's flags)"
+        }
+    }
     if errored {
         mode = "error"
     }
@@ -313,6 +344,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
         sni: sni,
         client: client,
         stat: stat,
+        worker: worker,
+        worker_control: worker_control,
     }
 }
 
@@ -1200,4 +1233,286 @@ pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
     }
     net_close(c) else |_| {}
     buf.trim()
+}
+
+// ------------------------------------------------------------------
+// ws16: many hands — the prefork surface (D73, D7 kept). A running
+// lobo with `worker_processes N` (N >= 2) is a MASTER that starts N
+// workers through `os.process` — each worker is today's one poll
+// loop in its own os process, spawn-free inside — and supervises
+// them over per-worker loopback control endpoints (the ws15 order
+// desk, one per hand). The pure half lives here: the directive's
+// value, the cpu count `auto` resolves through, the worker argv, the
+// worker events (appended to the frozen vocabulary, nothing
+// renamed), the `worker=` trailing field, the master's status rows
+// and the readers that fold a worker's stanza back into them.
+// docs/WORKERS.md is the page; the accept-distribution posture at
+// this pin is MEASURED there, not assumed.
+// ------------------------------------------------------------------
+
+/// The `worker_processes` directive's value: absent → 1 (nginx's
+/// default); `auto` → 0, the sentinel the entry resolves through
+/// `cpu_count`; a digit run → its value, with `0` read as 1 — a NAMED
+/// delta: nginx accepts `worker_processes 0` (a master with no hands,
+/// serving nothing), which lobo declines to imitate. Total.
+pub fn worker_processes(c: config.Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "worker_processes" && c.args_n[i] >= 1 {
+            let raw = c.argp[c.args_at[i]].trim()
+            if raw == "auto" {
+                return 0
+            }
+            let v = digits_val(raw)
+            if v < 1 {
+                return 1
+            }
+            return v
+        }
+        i = i + 1
+    }
+    1
+}
+
+/// The cpu count a linux `/proc/cpuinfo` text reports: one `processor`
+/// row per logical cpu. 0 for a text with none (or an empty one).
+/// Pure and total — the lupin-lane twin of `cpu_count`.
+pub fn cpu_count_of(cpuinfo: str) -> int {
+    var n: int = 0
+    for line in cpuinfo.lines() {
+        if line.starts_with("processor") {
+            n = n + 1
+        }
+    }
+    n
+}
+
+/// The host's logical cpu count, or 0 when this pin can read none:
+/// linux answers through `/proc/cpuinfo`, windows through the
+/// `NUMBER_OF_PROCESSORS` variable (claimed, not measured — lobo has
+/// no windows lane), and macOS through NOTHING — the count lives
+/// behind `sysctl(3)`, wolf has no cpu query and no way to read a
+/// child's stdout (std.process F-0065), so `auto` there is 1 with a
+/// startup notice naming this sentence (wolf-lang#233 asks for the
+/// query). fs/env tier; total (every miss reads as 0).
+pub fn cpu_count() -> int {
+    let txt = fs_read_text("/proc/cpuinfo") else |_| ""
+    let n = cpu_count_of(txt)
+    if n > 0 {
+        return n
+    }
+    let w = env_get("NUMBER_OF_PROCESSORS") else |_| ""
+    digits_val(w.trim())
+}
+
+/// The argv a master starts worker `worker` with: this executable,
+/// `serve`, the same prefix and config, and the two internal flags
+/// that make the child a hand rather than a master — its ordinal and
+/// the loopback control endpoint the master will reach it on. One
+/// value per element, no quoting anywhere (`os_spawn` takes a vector;
+/// std.process's whole reason there is no shell). Pure and total.
+pub fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str) -> List[str] {
+    var a = List[str]()
+    (mut a).push(exe)
+    (mut a).push("serve")
+    (mut a).push("-p")
+    (mut a).push(prefix)
+    (mut a).push("-c")
+    (mut a).push(conf)
+    (mut a).push("--worker")
+    (mut a).push("{worker}")
+    (mut a).push("--worker-control")
+    (mut a).push(ctrl)
+    a
+}
+
+/// `worker-started worker=N restarts=R` — the master started (or
+/// restarted: `restarts` counts the replacements of this slot) a
+/// worker. The tenth vocabulary event (ws16, appended). Total.
+pub fn ev_worker_started(worker: int, restarts: int) -> str {
+    "worker-started worker={worker} restarts={restarts}"
+}
+
+/// `worker-exited worker=N reason=R code=C` — the master reaped a
+/// worker: `reason` is `exit` (it returned a code, in `code`),
+/// `signal` (it died without one — killed, or crashed; `code` is -1)
+/// or `unreachable` (its control endpoint refused for longer than the
+/// supervision grace and the master killed it; `code` is what the
+/// reap then answered, -1 for a signal). The eleventh vocabulary
+/// event (ws16, appended). Total.
+pub fn ev_worker_exited(worker: int, reason: str, code: int) -> str {
+    "worker-exited worker={worker} reason={reason} code={code}"
+}
+
+/// The `worker=N` trailing field a WORKER stamps on every line it
+/// emits — vocabulary events after their `seq`, prose notices at
+/// their end — so N processes appending to one error log stay
+/// separable. Appended, nothing renamed: every prefix pin ws02
+/// through ws15 wrote still matches, and the JSON door types it as a
+/// number member through the same k=v decode. A single-process lobo
+/// (the default) stamps nothing — its lines are byte-identical to
+/// ws15's. Total.
+pub fn ev_worker_field(body: str, worker: int) -> str {
+    "{body} worker={worker}"
+}
+
+/// The master stanza's `workers:` line — the configured count,
+/// appended to `status_head_text`'s facts (every earlier fact keeps
+/// its place). Includes the trailing newline. Total.
+pub fn status_workers_line(n: int) -> str {
+    "workers: {n}\n"
+}
+
+/// One worker's row in the master's human stanza: its ordinal, its
+/// posture (`serving` holds every listener the config asks for,
+/// `standby` is waiting for one another worker holds — this pin's
+/// accept-distribution posture, docs/WORKERS.md — `unreachable`
+/// answered nothing), its control endpoint (so an operator can reach
+/// ONE hand), its current generation, the connections it holds, its
+/// own event count (its seq stream's top — seq is per PROCESS), its
+/// live region bytes, its budget refusals and how many times the
+/// master has replaced it. Includes the trailing newline. Total.
+pub fn status_worker_text(
+    worker: int,
+    state: str,
+    ctrl: str,
+    gen: int,
+    live: int,
+    events: int,
+    live_bytes: int,
+    budget_503s: int,
+    restarts: int,
+) -> str {
+    "worker {worker}: {state} control={ctrl} generation={gen} live={live} events={events} live-region-bytes={live_bytes} budget-503s={budget_503s} restarts={restarts}\n"
+}
+
+/// One worker as a JSON object in the master's stanza (no leading
+/// comma, no newline) — the same facts as `status_worker_text`, the
+/// same key spellings as the generation objects (`live_region_bytes`,
+/// `budget_503s`). Total.
+pub fn status_worker_json(
+    worker: int,
+    state: str,
+    ctrl: str,
+    gen: int,
+    live: int,
+    events: int,
+    live_bytes: int,
+    budget_503s: int,
+    restarts: int,
+) -> str {
+    "{{\"worker\":{worker},\"state\":\"{state}\",\"control\":\"{ctrl}\",\"generation\":{gen},\"live\":{live},\"events\":{events},\"live_region_bytes\":{live_bytes},\"budget_503s\":{budget_503s},\"restarts\":{restarts}}}"
+}
+
+/// The MASTER's JSON stanza open: schema 1's members with the master's
+/// own numbers (`current` its configuration generation, `events` its
+/// own seq top, `live_region_bytes` the SUM over its workers), an
+/// EMPTY `generations` array (a master serves nothing and holds no
+/// generation table — the array is kept so a schema-1 reader never
+/// branches), `workers_configured`, and the `workers` array the entry
+/// fills with `status_worker_json` objects and closes with
+/// `status_json_close`. Additive on schema 1 (nothing renamed or
+/// moved). Total.
+pub fn status_json_master_open(current: int, quitting: bool, events: int, live_bytes: int, n: int) -> str {
+    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"live_region_bytes\":{live_bytes},\"workers_configured\":{n},\"generations\":[],\"workers\":["
+}
+
+/// A WORKER's two extra head lines — `worker: N` and `listening:
+/// true|false` — appended after `status_head_text`'s facts, so the
+/// master (and an operator dialling one hand) can read which process
+/// answered and whether it holds the listeners. Only a worker prints
+/// them; the single-process stanza is unchanged. Total.
+pub fn status_worker_head(worker: int, listening: bool) -> str {
+    "worker: {worker}\nlistening: {bool_word(listening)}\n"
+}
+
+/// A WORKER's JSON stanza open: `status_json_open`'s members plus
+/// `worker` and `listening`, ahead of the `generations` array.
+/// Additive on schema 1. Total.
+pub fn status_json_open_worker(
+    current: int,
+    quitting: bool,
+    events: int,
+    live_bytes: int,
+    worker: int,
+    listening: bool,
+) -> str {
+    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"live_region_bytes\":{live_bytes},\"worker\":{worker},\"listening\":{bool_word(listening)},\"generations\":["
+}
+
+/// The value after `{key}: ` on the line that starts with it, as a
+/// non-negative int; -1 when no such line exists or its value does not
+/// start with a digit. The master folds a worker's HUMAN stanza with
+/// this (the JSON builtins are one lane at this pin; the text stanza
+/// is the one wire both master and worker already speak). Total.
+pub fn stanza_int(body: str, key: str) -> int {
+    let w = stanza_word(body, key)
+    if w.is_empty() {
+        return -1
+    }
+    for b in w.bytes() {
+        if b < 48 || b > 57 {
+            return -1
+        }
+    }
+    digits_val(w)
+}
+
+/// The first whitespace-delimited word after `{key}: ` on the line
+/// that starts with it; "" when absent. Total.
+pub fn stanza_word(body: str, key: str) -> str {
+    let probe = "{key}: "
+    for line in body.lines() {
+        if line.starts_with(probe) {
+            let rest = line[probe.len..line.len].trim()
+            let sp = rest.find(" ") else rest.len
+            return rest[0..sp]
+        }
+    }
+    ""
+}
+
+/// The sum of every `{field}=N` occurrence across `body`'s lines — how
+/// the master reads `live=` (held connections over every generation a
+/// worker holds) and `budget-503s=` off a worker's stanza. A value
+/// that is not a digit run counts 0. Total.
+pub fn stanza_field_sum(body: str, field: str) -> int {
+    let probe = "{field}="
+    var sum: int = 0
+    for line in body.lines() {
+        for w in line.words() {
+            if w.starts_with(probe) {
+                let v = w[probe.len..w.len]
+                var ok = !v.is_empty()
+                for b in v.bytes() {
+                    if b < 48 || b > 57 {
+                        ok = false
+                    }
+                }
+                if ok {
+                    sum = sum + digits_val(v)
+                }
+            }
+        }
+    }
+    sum
+}
+
+/// True when something ACCEPTS on `addr` — a connect that succeeds,
+/// closed at once. The master's liveness probe for a worker: a dead
+/// process's endpoint refuses immediately, a live-but-busy one still
+/// completes the handshake from its backlog, so the probe never
+/// parks on a hand that is serving a long connection (which `ping`,
+/// a round trip under a deadline, would). Total: any failure reads
+/// as "not reachable".
+pub fn control_reachable(addr: str) -> bool {
+    if addr.is_empty() {
+        return false
+    }
+    let c = net_connect(addr) else |_| {
+        return false
+    }
+    net_close(c) else |_| {}
+    true
 }
