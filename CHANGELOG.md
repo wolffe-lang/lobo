@@ -1,5 +1,183 @@
 # Changelog
 
+## ws16 — 2026-09-03 — many hands (prefork workers, D7 kept)
+
+wsc06's second sprint, the first half of D73's sentence: *lobo uses
+all the cores*. It ships the MACHINERY of nginx's `worker_processes`
+— a master, N hands through `os.process`, supervision, fan-out, a
+row per hand, a field per line — and it ships the MEASUREMENT that
+says the cores are not used yet, with the two upstream filings that
+name why. A prefork that does not scale is a finding; this entry is
+that finding, with its number.
+
+Pins advance first, gauntlet green at the trio before a line changed
+(suite counts IDENTICAL: corpus 238/238, differential 3/3, proxy 8/8,
+control 9/9, logdiff 4/4, signal 20/20, membudget 17/17, resolver
+9/9): wolf → **trunk `31170d1` dev-stamped** (`0.2.3+dev.31170d1` —
+r07 had not tagged v0.2.4 at the pin step; the either/or takes the
+sha), lupin → **v0.1.24** (is35, the byte in the mirror — one release
+ahead of wolf's declared 0.1.23 pairing, forward-only), std →
+**trunk `f016303`** (sc34: the byte tier is bytes, refused with
+numbers; upstream's binary pin == data pin == 31170d1, so the
+compiler pins agree exactly for the first time). **Deltas classed:
+one BEHAVIORAL, zero mechanical, zero refused-by-name.** The
+behavioral one is #224's: the checked machine now arms a deadline on
+a reset socket (s135), so the rig residue D41 carried since ws14 —
+`region_measured.lu`'s swallow, `budget_cap.lu`'s drive order —
+comes out. Retiring the swallow went red 1 in ~17 native runs and
+taught the lesson: the rig closed the accepted socket over UNREAD
+request bytes (an RST close), and the client's read raced the
+reset; it now drains the request first (a FIN close on every host)
+and reads its reply through `?` on both lanes. [type.byte] is zero
+motion, measured (lobo's byte paths stay `List[int]` until sc35 lands
+the producers — wolf-lang#231's numbers); no `.wolfi` moved for the
+bump (the stamp reads the version, 0.2.3, not the dev suffix); the
+`checked-refuses:` rows are UNTOUCHED (they name C1, not #224).
+#146 re-probed a NINTH time — still the sc_muladd dominance ICE,
+`WOLF_MIDEND=0` stays.
+
+**The measurement first, because it is the charter's evidence
+(docs/WORKERS.md, `tools/lobo-prefork-bench`, this box: macOS 15
+arm64, 18 cpus, N = 18, `ab -n 4000 -c 32`, a 1 KiB file, the pinned
+nginx/1.30.4 beside lobo).**
+
+| server | shape | req/s | cpu s | wall s | cores used |
+|---|---|---|---|---|---|
+| lobo worker_processes 1 | close | 37.37 | 1.11 | 107.38 | 0.01 |
+| lobo worker_processes 1 | keepalive | 576.21 | 0.35 | 7.18 | 0.05 |
+| lobo worker_processes 18 | close | 69.60 | 11.90 | 57.77 | 0.21 |
+| lobo worker_processes 18 | keepalive | 1117.68 | 1.06 | 3.82 | 0.28 |
+| nginx worker_processes 1 | close | 38123.20 | 0.07 | 0.36 | 0.19 |
+| nginx worker_processes 1 | keepalive | 73607.89 | 0.05 | 0.31 | 0.16 |
+| nginx worker_processes 18 | close | 24158.09 | 0.80 | 0.47 | 1.70 |
+| nginx worker_processes 18 | keepalive | 111383.38 | 0.28 | 0.34 | 0.82 |
+
+Read the lobo rows twice. **Cores used: 0.01 at one hand, 0.21 at
+eighteen** — lobo is not CPU-bound at all. The serving loop is
+DEADLINE-bound: each idle pass blocks 25 ms in the control
+listener's accept and 12 ms per open connection's read step (the
+ws04 shape every hand inherits), so a connection-per-request load
+gets about one accept per pass. And the 1.9x from 1 to 18 hands is
+NOT a second core: exactly one hand holds the listener at N=18
+(`lsof` shows one LISTEN socket; one row says `serving`) — the
+master's per-pass CONNECT probe lands on the serving hand's control
+listener and wakes its accept, removing the 25 ms idle stall, which
+doubles that one hand's pass rate. The other 0.20 cores are seventeen
+standbys retrying a bind and answering probes. nginx at 1 worker
+does 1000x the close-shape rate on 0.19 cores; at 18 it spends 1.70
+cores because the kernel spreads the accepts.
+
+lobo at 18 hands serves what lobo at 1 hand serves, on one core,
+because the kernel is distributing nothing: the runtime binds
+`std::net::TcpListener` with `SO_REUSEADDR` only (a second process's
+bind of the same port is `io` — measured with a self-spawned child),
+every runtime socket is CLOEXEC and `os_spawn` passes only stdio (a
+spawned child's descriptor table holds ZERO TCP sockets — measured
+with `lsof`), and `std.net.Listener` is a table index with nothing to
+adopt. Filed **wolf-lang#234** (SO_REUSEPORT / a listener option),
+**wolf-lang#235** (descriptor inheritance and adoption — the pair
+`upgrade` needs too) and **wolf-std#6** (the std half). nginx at the
+same N scales because its workers share the inherited socket. The
+number the bench ALSO produced, and routes: lobo is not CPU-bound —
+0.01 of a core at one hand — because a spawn-free loop with no
+readiness surface time-slices with deadlines (25 ms in the control
+accept, 12 ms per connection step, every idle pass), so the
+connection-per-request rate sits near one accept per pass; the 1.9x
+at 18 hands is that stall removed by the master's own probe waking
+the serving hand's accept, not a second core. wolf-lang#127 (the
+reactor) gets the table as its customer report; the stall itself is
+a maintenance row in the closeout, not ws16's.
+
+**The machinery, shipped.** `worker_processes N | auto` carries with
+nginx's grammar and nginx's `-t` diagnostic (probed); `auto` reads
+`/proc/cpuinfo` on linux and is 1 with a notice on macOS (no cpu
+query — **wolf-lang#233**); `0` serves as 1, a named delta. With
+N >= 2 the process that ran `lobo serve` is a MASTER: it owns the
+pid file and the config's `control` endpoint, binds no http listener,
+starts N hands (`os_exe()` + `os_spawn`: this executable, `serve`,
+the same prefix and config, `--worker i --worker-control <ep>` — no
+secret crosses the argv; a hand reads the `token <file>` itself), and
+supervises them over their endpoints with a CONNECT probe (never a
+round trip: `os_wait` blocks and there is no `try_wait`, so a hand's
+socket is the liveness surface; a busy hand still answers from its
+backlog). Three silent passes after a 3 s grace is gone: `os_kill`,
+`os_wait`, `worker-exited worker=N reason=… code=…`, a fresh hand in
+the slot, `worker-started … restarts=R`. **Accept distribution at
+this pin is the honest shape the measurement forces:** every hand
+RETRIES its bind each pass; the first to win serves, the others
+stand by and take the listener the moment its holder dies —
+`tools/lobo-prefork` kills the serving hand with a real `kill -9`
+and measures the window: **78 ms** (minus the clock driver's own 223
+ms — a `wolf run` compiles per call, and the first reading of 718 ms
+was the driver's, not the server's). The day #234 lands every hand's
+bind succeeds and the same loop distributes accepts, no lobo change.
+
+**The verbs fan out** (docs/CONTROL.md): `reload` is parsed by the
+master first (D2 holds: a rejected config reaches no hand) and rolled
+through the hands one at a time — each swaps and DRAINS in place, the
+ws08 drain per process, watchable on that hand's own stanza;
+`quit`/`stop`/`reopen` fan out; replies keep ws15's prefixes and gain
+`workers=K/N`. Rolling PROCESS replacement is a named delta: lobo
+cannot hand a socket to a new process (#235), so a spawn-new-retire-
+old reload would refuse connections in the gap, and row 2 of the
+control differential (zero refusals) is a row lobo keeps. The hands
+are long-lived. A SIGKILLed master orphans its hands (no channel —
+named delta; `kill -TERM` is the orderly path, TERMINATE is `stop`
+and `stop` fans out first).
+
+**A row per hand** (docs/DRAIN.md, docs/WORKERS.md): `lobo status`
+answers the master's head (`live-region-bytes` SUMMED over the
+hands), `workers: N`, and `worker i: serving|standby|unreachable
+control=… generation=… live=… events=… live-region-bytes=…
+budget-503s=… restarts=…` folded from each hand's own stanza (a hand
+prints `worker: N` / `listening: true|false` under its head); JSON
+schema 1 stays, additive (`workers_configured`, an empty
+`generations`, a `workers` array). **The meter and the cap are per
+hand** (docs/BUDGET.md): the witness refuses a 24 KiB file under
+`memory_budget 4k` on the serving hand, whose row reads
+`budget-503s=1` beside siblings at 0. `/metrics` is one hand's
+numbers and says which (`lobo_worker_id`, a new gauge; the
+aggregation question is routed to the pin that carries #234).
+
+**A field per line** (docs/LOGGING.md, docs/REPLAY.md): a hand ends
+every line it emits in ` worker=N` — after `seq` on a vocabulary
+event, at the end of a prose notice — appended, nothing renamed
+(the ws15 line is a PREFIX of the ws16 line, asserted); the master's
+lines and a single-process lobo's carry none, byte for byte. Two
+events join the frozen vocabulary (`worker-started`,
+`worker-exited`; nine → eleven). **REPLAY.md's multi-process
+boundary:** `seq` is per PROCESS, so a merged log is N+1 total orders
+separable by the stamp and orderable across each other only by the
+wall clock; the completeness anchor is per stream (a hand's row
+carries ITS `events`); the fan-out's order is reconstructible from
+the master's stream alone.
+
+**The either/or on #227: the ELSE arm.** s136 had not merged at Act-2
+start (01:12 EDT: the issue OPEN, the worktree at 31170d1 with three
+uncommitted corpus edits, no PR). Named-gate deferred to ws17, with
+what lands then written down (the `unix:` address form, the token
+arm demoted to windows, the hands' endpoints as unix sockets under
+the prefix).
+
+**Windows:** claimed, not measured — no lane. `os_spawn` runs there
+and the runtime's sockets are non-inheritable there too, so the
+posture would be the standby posture; stated as such in
+docs/WORKERS.md.
+
+**Findings filed.** wolf-lang#233 (no cpu-count query —
+`worker_processes auto` cannot ask the host), wolf-lang#234 (no
+SO_REUSEPORT and no listener option — N processes cannot accept on
+one port), wolf-lang#235 (a spawned child inherits no listening
+socket and std.net adopts no descriptor — the shared-listener shape
+and `upgrade` both need the pair), wolf-std#6 (`listen_with` /
+`adopt_listener` at the std tier). #146 probed a ninth time.
+
+Corpus 238 → **249** lane-runs (`worker_processes.lu` ×3,
+`worker_surface.lu` ×3, `prefork_e2e.lu` ×2, `nowms.lu` ×3); a new
+gauntlet step, `tools/lobo-prefork` (32/32); `tools/lobo-prefork-
+bench` (not gated — the table above); metrics registry +1 series
+(`lobo_worker_id`). Branch `ws16`, unmerged.
+
 ## ws15 — 2026-09-02 — the server takes orders (and pays four small debts)
 
 wsc06 "many hands" opens (D73: *lobo uses all the cores, and a
