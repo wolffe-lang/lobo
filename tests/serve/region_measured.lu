@@ -89,12 +89,25 @@ fn drive(c: config.Conf, req: str) -> serve.ReqOut ! {io} {
     let conn = net_accept(l) else |_| {
         return io
     }
+    // drain the request off the accepted socket BEFORE serving it: the
+    // head is handed to serve_request as a value, and a close over
+    // unread receive data is an RST close on every host (wolf-lang
+    // #224's finding) — with the bytes consumed the close below is a
+    // FIN close, the client reads the reply then `closed`, and the
+    // swallow this rig carried from ws12 to ws15 is retired at the
+    // 31170d1 pin (`?` below, on both lanes)
+    net_deadline(conn, 2000) else |_| {
+        return io
+    }
+    let _drained = net_read(conn, 65536) else |_| {
+        return io
+    }
     let cut = req.find("\r\n\r\n") else req.len
     let head = req[0..cut]
     var rs = resolver.new()
     let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, mut rs)
     net_close(conn) else |_| {}
-    let _ = read_reply(cli) else ""
+    let _reply = read_reply(cli)?
     net_close(cli) else |_| {}
     net_close(l) else |_| {}
     ro
