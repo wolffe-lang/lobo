@@ -1,5 +1,167 @@
 # Changelog
 
+## ws17 — 2026-09-04 — many hands, FOR REAL (the cores, and the order desk on a socket)
+
+wsc06's closing sprint, and the one where D73's sentence — *lobo uses
+all the cores, and a running lobo takes orders on every host* — stops
+being a plan. ws16 built the many-hands machinery and MEASURED that
+the cores stayed idle, filing four issues that named why. All four
+landed upstream in one wave (s137 for #127/#233/#234/#235, s136 for
+#227), and this sprint is lobo consuming them — plus the mechanical
+tail the pin could not be separated from, plus one new upstream
+finding the shape immediately produced.
+
+**THE HEADLINE, first, because it is the charter's evidence**
+(docs/WORKERS.md, `tools/lobo-prefork-bench`, this box: macOS 15
+arm64, 18 cpus, N=18, `ab -n 20000 -c 32`, a 1 KiB file, the pinned
+nginx/1.30.4 beside it — ws16's column last):
+
+| server | shape | req/s | cores | ws16 req/s |
+|---|---|---|---|---|
+| lobo, 1 process | close | **11,277.81** | 0.69 | 37.37 |
+| lobo, 1 process | keepalive | **10,324.18** | 0.67 | 576.21 |
+| lobo, 18 hands | close | **12,329.98** | 0.84 | 69.60 |
+| lobo, 18 hands | keepalive | **9,934.98** | 0.68 | 1,117.68 |
+| nginx, 1 worker | close | 23,488.10 | 0.47 | 38,123.20 |
+| nginx, 18 workers | keepalive | 83,831.08 | 2.18 | 111,383.38 |
+
+Read three times. **(1) The reactor gate is gone and it was the whole
+story**: one lobo process went 37 → 11,278 req/s on the
+connection-per-request shape, about **300x**, from `net_wait` alone —
+ws16's loop blocked 25 ms in the control accept, 25 in the listener's
+and 12 per open connection every pass, so it got roughly one accept
+per 62 ms. lobo at one process is now **within 2x of nginx at one
+worker** on that shape, a sentence this repo has never written.
+**(2) The kernel distributes**: 90 connections over three hands as
+**28/32/31**, every hand `serving` on ONE socket, `accepted=` on every
+status row. **(3) And N is still not N×** — 12,330 against 11,278 —
+because of the accept turn below, whose cost was measured directly
+(11,622 with the turn against 17,347 free-for-all, three hands).
+
+**Pins.** wolf → **trunk `d6aeaca` dev-stamped** (`0.2.4+dev.d6aeaca`;
+r08 had not tagged v0.2.5 at the pin step — checked, `git tag` tops
+out at v0.2.4 — so the either/or takes the sha), lupin → **v0.1.25**
+(is36, the byte arrives), std → **trunk `c0f75e8`** (sc36's
+`std.net.unix`). Sixty-three commits across three trains. **Deltas
+classed: one MECHANICAL-WITH-SOURCE-MOTION, one mechanical-only, five
+ADDITIVE surfaces consumed on purpose, zero refused-by-name.** The
+source motion is s136's #231 — the eight byte producers answer
+`List[byte]` now — and ws16's prediction that lobo would stay on
+`List[int]` expires with it: **306 E0401s at the first build over 21
+files, closed over 51 `.lu` files (381 `List[int]` declarations become
+`List[byte]`, 201 reads widen with `b as int`, 221 writes narrow with
+`x as byte`; `byte as char` is E0805 and bridges through `int`)**, and
+47 `.wolfi` signatures re-record with ZERO item motion in any of the
+fourteen. The int lists that are NOT bytes stayed int, one by one: OID
+arcs, PEM block lengths, the resolver's expiry and fd tables,
+sslcert's `der_at`/`der_n`/`leaf_n`, acmeca's index tables. The
+mechanical-only delta is the toolchain stamp, 0.2.3 → 0.2.4. **The pin
+and the tail are ONE commit** because neither compiles without the
+other, and the `.wolfi` re-record rides the next one alone (the
+repo's interface law forbids mixing); the gauntlet is green across the
+pair. #146 re-probed a TENTH time — still the sc_muladd dominance ICE,
+`WOLF_MIDEND=0` stays. A LANE GAP is named in the pin file: lupin
+0.1.25 predates s137, so none of the five new builtins exist there and
+every test that names one declares `lanes: native checked`.
+
+**Distribution: two shapes, both measured, one shipped.**
+`net_listen_with(addr, reuse_port, backlog)` (#234) is **refused**,
+and the witness says why rather than the page: `tests/serve/
+reuse_port_posture.lu` builds a live three-member group, dials it
+thirty times and prints which member the kernel woke — `0/0/30`, every
+SYN to the newest bound socket on macOS, so a prefork built that way
+is ws16's posture with a different cause (on linux it would work, and
+a server that picks its architecture per host is a server with two
+architectures). What ships is **inheritance** (#235): the master binds
+the http and TLS listeners and never accepts on them, `os_spawn_with`
+hands them to every child as descriptors 3 and 4 in the config's own
+order, and a hand adopts by POSITION — the numbering is the contract,
+so the argv carries a count (`--inherit K`) and never a descriptor.
+Replacements inherit the same socket, which is why the master holds it
+for life, and why a `kill -9` no longer needs ws16's 78 ms failover:
+the survivors are already accepting.
+
+**THE NEW FINDING, and it is the front gate now: wolf-lang#242.**
+`net_accept` awaits readiness with the socket's deadline and then runs
+a **blocking** `accept(2)`. With N hands on one listener a single
+connection wakes all N; one wins and **the losers park in the syscall
+until the next connection arrives** — a hand alive at 0.0% CPU
+answering no control verb and running no timer, which its master then
+reaps and replaces. Found with two hands and ONE GET, isolated three
+ways (the non-blocking ask does not park, the blocking one does, and
+removing the connection handles from the wait set does not help).
+Invisible under load, fatal on a quiet server. **lobo's answer is
+nginx's `accept_mutex` without a mutex**: hands take 10 ms turns off
+the wall clock, so exactly one hand has the listener in its wait set
+at any instant and there is no race to lose. Two halves make it a
+mechanism rather than a decoration — the wait is CAPPED at the turn
+boundary (without it a hand blocks 25 ms through its own 10 ms slice:
+**2,725 → 11,622 req/s** when that landed) and a turn DRAINS up to 64
+accepts, each after the first guarded by a zero-deadline `net_wait`.
+It retires the day #242 lands: one pure function, its twin, and the
+`--hands` flag come out.
+
+**Readiness (#127), and an honest correction to its number.** One
+`net_wait` over the control listener, both http listeners and every
+open connection replaces the deadline ws16 armed on each; a connection
+is STEPPED only when the wait names it. The floor is the SIGNAL
+poll's, named rather than hidden: signals have no readiness handle, so
+while reception is armed the wait cannot outlast a `kill -HUP`'s
+latency — 25 ms, which is BETTER than ws16, where one pass was three
+stacked accepts. **Idle cost was measured, the same binary built twice
+with only the wait swapped, 120 s idle holding one keepalive
+connection: 0.32 s of cpu the ws16 way against 0.26 s — about 19%,
+not upstream's 37x.** lobo's idle loop was never busy; it was asleep
+in a timer. What the deadline cost was WAKE LATENCY, and that is the
+whole of the 300x. Quoting someone else's 37x here would have been
+quoting someone else's workload.
+
+**Cores (#233).** `worker_processes auto` reads `os_cpus()` — and the
+number is SCHEDULABLE cores, quota- and affinity-aware, so a two-cpu
+quota on a sixty-four-core host answers 2 where ws16's `/proc/cpuinfo`
+row count answered 64 and started sixty-two hands that would never get
+a core. The `io` row is not swallowed into a default. `shell.cpu_count`
+and its pure twin RETIRE (they could not live there: shell is on the
+lupin lane and lupin predates s137), and ws16's macOS notice with
+them.
+
+**The order desk on a socket (#227) — ws15's filing, ws16's
+deferral.** `control unix:<path>` (nginx's spelling) is now the
+RECOMMENDED form, because file permissions are the boundary a loopback
+port cannot be: every local user on a host can dial 127.0.0.1, which
+is the whole reason ws15 grew the token arm. Under `worker_processes
+N` each hand gets the sibling `<path>.wN`, so **a HAND's order desk is
+a uid boundary too** — ws16's residue, closed. Every row is named
+rather than swallowed: `unsupported` refuses at startup BY NAME (the
+distinction #227 was filed to get), `exists` refuses without
+clobbering a path lobo did not bind, and a path too long for
+`sun_path` says so with the ~100-byte limit spelled out — measured
+with a 126-byte scratch path, which is what a real prefix looks like.
+`net_close` unlinks; a hand's socket is the MASTER's to remove before
+a replacement, because the process that BOUND a path owns it. lobo
+calls the builtins directly and says so: std wraps neither
+`listen_with` nor `adopt_listener` (**wolf-std#6** stands, sc37's).
+
+**Also.** The master probes each hand at most every 200 ms — its probe
+is a fresh connection every time, and at 25 ms that is ephemeral-port
+pressure the master makes for itself; three transient failures reaped
+a HEALTHY hand in an e2e run before the interval existed. `accepted=`
+joins a hand's stanza head and the master's row (appended, nothing
+renamed) because with one shared socket the only way to SEE
+distribution is to ask each hand what it took. `/metrics` now lands on
+a random hand, and the aggregation decision ws16 routed is re-routed
+with the numbers that decide it: a `worker` label would multiply a
+61-series exposition by N (1,098 series for one server on this box)
+against the cardinality fence, while the master already folds two
+facts on the control path and could fold the rest.
+
+**Witnesses.** corpus 249 → **253** lane-runs
+(`reuse_port_posture.lu` and `control_unix_e2e.lu` are new, native +
+checked); `tools/lobo-prefork` **35/35** with the distribution counts
+printed; every other suite count identical (differential 3/3, proxy
+8/8, control 9/9, logdiff 4/4, signal 20/20, membudget 17/17,
+resolver 9/9).
+
 ## ws16 — 2026-09-03 — many hands (prefork workers, D7 kept)
 
 wsc06's second sprint, the first half of D73's sentence: *lobo uses

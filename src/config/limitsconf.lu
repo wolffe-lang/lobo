@@ -82,7 +82,8 @@ fn digits_of(s: str) -> int {
         return -1
     }
     var n: int = 0
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return -1
         }

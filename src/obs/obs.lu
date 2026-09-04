@@ -179,7 +179,8 @@ pub fn esc_default(v: str) -> str {
     var out = ""
     var start: int = 0
     var i: int = 0
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         let unsafe_b = b < 32 || b == 34 || b == 92 || b >= 127
         if unsafe_b {
             if i > start {
@@ -205,7 +206,8 @@ pub fn esc_json(v: str) -> str {
     var out = ""
     var start: int = 0
     var i: int = 0
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         let unsafe_b = b < 32 || b == 34 || b == 92
         if unsafe_b {
             if i > start {
@@ -493,21 +495,21 @@ pub fn compile(f: str) -> Fmt {
     let bs = f.bytes()
     let n = bs.len
     while i < n {
-        if bs[i] == 36 {
+        if bs[i] as int == 36 {
             var j = i + 1
             var braced = false
-            if j < n && bs[j] == 123 {
+            if j < n && bs[j] as int == 123 {
                 braced = true
                 j = j + 1
             }
             var k = j
-            while k < n && is_var_byte(bs[k]) {
+            while k < n && is_var_byte(bs[k] as int) {
                 k = k + 1
             }
             var vend = k
             var consumed = k
             if braced {
-                if k < n && bs[k] == 125 {
+                if k < n && bs[k] as int == 125 {
                     consumed = k + 1
                 } else {
                     vend = j
@@ -691,7 +693,8 @@ fn http_var_header(v: str) -> str {
     var out = ""
     var start: int = 0
     var i: int = 0
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         if b == 95 {
             out = "{out}{v[start..i]}-"
             start = i + 1
@@ -883,7 +886,8 @@ fn all_digits(s: str) -> bool {
     if s.is_empty() {
         return false
     }
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return false
         }

@@ -1,10 +1,10 @@
 module pkg :: config
-  wolfi v0 · toolchain 0.2.3 · edition v1
-  export_hash 18c9249938d54b2e1752ffc349e61fcb768a6dc06a70807a0efe66b3f7a22aef
-  pkg_hash    18c9249938d54b2e1752ffc349e61fcb768a6dc06a70807a0efe66b3f7a22aef
+  wolfi v0 · toolchain 0.2.4 · edition v1
+  export_hash 3d50fcca115ab0b30944c8188afa2c07d073ef03055a30cbc5b5cc18d17b98a7
+  pkg_hash    3d50fcca115ab0b30944c8188afa2c07d073ef03055a30cbc5b5cc18d17b98a7
   deps:
-    std.x.crypto.curve25519  01a215032a171eb1b9366f168a23d78b3e7b6d3c975d37627d3b7ebd9f35ad3a
-    std.x.tls.cert  869655ab09c4766bcc4957a31b0d738cbb9870c829ec2918c879d863d3556442
+    std.x.crypto.curve25519  f5ed55bf76e3dc69e08a3aee0093b290678accf26dbdd935bb40503d923ee48b
+    std.x.tls.cert  b82c9426ed25d39e7dc9c00c49f70822de40a913eeb3eadf634cbf1728fd1d78
   items:
     [0] pub access_out_buffer — fn access_out_buffer(c: self.Conf, i: int) -> int · regions (ρ1, -) -> -
     [1] pub access_out_count — fn access_out_count(c: self.Conf) -> int · regions (ρ1) -> -
@@ -56,9 +56,9 @@ module pkg :: config
     [47] pub nearest — fn nearest(t: self.Table, name: str) -> str · regions (ρ1, -) -> -
     [48] pub ok — fn ok(c: self.Conf) -> bool · regions (ρ1) -> -
     [49] pub parse_str — fn parse_str(src: str, file: str) -> self.Conf · regions (-, -) -> ρ_caller
-    [50] pub pem_certs — fn pem_certs(text: str) -> prelude.List[int] ! {bad} · regions (-) -> ρ_caller
+    [50] pub pem_certs — fn pem_certs(text: str) -> prelude.List[byte] ! {bad} · regions (-) -> ρ_caller
     [51] pub pem_first_label — fn pem_first_label(text: str) -> str
-    [52] pub pkcs8_parse — fn pkcs8_parse(der_bytes: prelude.List[int]) -> self.KeyInfo · regions (ρ1) -> ρ_caller
+    [52] pub pkcs8_parse — fn pkcs8_parse(der_bytes: prelude.List[byte]) -> self.KeyInfo · regions (ρ1) -> ρ_caller
     [53] pub proxy_tls_check — fn proxy_tls_check(c: self.Conf) -> str · regions (ρ1) -> -
     [54] pub proxy_tls_probe — fn proxy_tls_probe(c: self.Conf) -> str · regions (ρ1) -> -
     [55] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
@@ -86,9 +86,9 @@ module pkg :: config
     [77] pub word_segments — fn word_segments(text: str) -> str
     [78] pub worker_check — fn worker_check(c: self.Conf) -> str · regions (ρ1) -> -
     [79] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int }
-    [80] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[int] }
+    [80] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[byte] }
     [81] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
-    [82] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[int], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[int], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
+    [82] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[byte], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[byte], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
     [83] pub Table — struct Table { specs: prelude.List[self.Spec] }
     [84] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
 

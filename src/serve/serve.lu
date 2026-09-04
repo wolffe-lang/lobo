@@ -449,7 +449,8 @@ pub fn open_self_pipe() -> (int, int) ! {io} {
 /// rather than splitting the response. Traps `assert` on violation —
 /// a server bug, caught in-process, never a corrupt wire.
 fn safe_value(v: str) -> str {
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         assert(b != 13, "header value carries CR — response-splitting refused")
         assert(b != 10, "header value carries LF — response-splitting refused")
     }
@@ -475,7 +476,7 @@ fn write_all(mut cn: conn.Conn, s: str) -> () ! {closed, io} {
 /// byte tier, which yields only 0..255 — so it folds to `io` (a
 /// truthful coarsening should a future pin reach it). The sentinel
 /// shape is the W0305 dodge (see shell.control_send).
-fn write_bytes_all(mut cn: conn.Conn, body: List[int]) -> () ! {closed, io} {
+fn write_bytes_all(mut cn: conn.Conn, body: List[byte]) -> () ! {closed, io} {
     conn.conn_write_bytes(mut cn, body)?
 }
 
@@ -510,7 +511,8 @@ pub fn error_response(code: int, special_header_body: bool, date: str, token: st
 /// probed). Total.
 pub fn raw_line(head: str) -> str {
     var i: int = 0
-    for b in head.bytes() {
+    for b_raw in head.bytes() {
+        let b = b_raw as int
         if b == 13 || b == 10 {
             return head[0..i]
         }
@@ -850,7 +852,7 @@ fn serve_file(
         region resp {
             let body = fs_read_bytes(path) else |_| {
                 failed = true
-                List[int]()
+                List[byte]()
             }
             // ws12: the runtime's OWN number for this response's body.
             // Read after the read that charges it and before the block
@@ -951,11 +953,11 @@ fn serve_file(
             let chunk = fs_read_chunk(fd, 65536) else |e| match e {
                 eof => {
                     streaming = false
-                    List[int]()
+                    List[byte]()
                 },
                 io => {
                     bad = true
-                    List[int]()
+                    List[byte]()
                 },
             }
             if bad {
@@ -996,11 +998,11 @@ fn serve_file(
             let chunk = fs_read_chunk(fd, 65536) else |e| match e {
                 eof => {
                     streaming = false
-                    List[int]()
+                    List[byte]()
                 },
                 io => {
                     bad = true
-                    List[int]()
+                    List[byte]()
                 },
             }
             if !bad && chunk.len > 0 {
@@ -2018,6 +2020,27 @@ fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, ac
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
     }
+}
+
+/// Does `carry` already hold a complete request head? (ws17)
+///
+/// A serving loop with readiness steps a connection when the poll
+/// names it — but a connection whose CARRY already holds a whole head
+/// has work to do with no new byte arriving, and a poll will never
+/// name it again until the client speaks. That is the pipelined
+/// request, and skipping it is a hang rather than a slowdown. Pure and
+/// total; the same cut `conn_step` makes.
+pub fn carry_has_head(carry: str) -> bool {
+    head_cut(carry).ready
+}
+
+/// The step a connection takes when `net_wait` said it has nothing to
+/// read (ws17): nothing happened, nothing closed, the carry rides. It
+/// exists so a serving loop with readiness never has to ARM a deadline
+/// and attempt a read just to learn what the poll already told it —
+/// which is the whole of wolf-lang#127's cost. Pure and total.
+pub fn conn_idle(carry: str, served: int) -> ConnStep {
+    step_out(false, false, carry, served, false, obs.access_new())
 }
 
 /// A full head is present in `buf` at `cut`: split it, arm the

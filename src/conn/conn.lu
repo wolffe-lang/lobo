@@ -94,15 +94,15 @@ pub fn conn_read(mut cn: Conn, max: int) -> str ! {closed, timeout, utf8, io} {
         let bytes = tls.sess_read(mut cn.sess, max) else |e| match e {
             closed => {
                 code = 1
-                List[int]()
+                List[byte]()
             },
             timeout => {
                 code = 2
-                List[int]()
+                List[byte]()
             },
             io => {
                 code = 3
-                List[int]()
+                List[byte]()
             },
         }
         if code == 1 {
@@ -124,21 +124,21 @@ pub fn conn_read(mut cn: Conn, max: int) -> str ! {closed, timeout, utf8, io} {
 /// row). Rows: `closed`, `timeout`, `io`.
 /// (W0602 allowed: the row mirrors net_read_bytes (closed/timeout/io).)
 #[allow(w0602)]
-pub fn conn_read_bytes(mut cn: Conn, max: int) -> List[int] ! {closed, timeout, io} {
+pub fn conn_read_bytes(mut cn: Conn, max: int) -> List[byte] ! {closed, timeout, io} {
     if cn.kind == 0 {
         var code = 0
         let b = net_read_bytes(cn.fd, max) else |e| match e {
             closed => {
                 code = 1
-                List[int]()
+                List[byte]()
             },
             timeout => {
                 code = 2
-                List[int]()
+                List[byte]()
             },
             io => {
                 code = 3
-                List[int]()
+                List[byte]()
             },
         }
         if code == 1 {
@@ -163,7 +163,7 @@ pub fn conn_write(mut cn: Conn, s: str) -> () ! {closed, io} {
     if cn.kind == 0 {
         net_write(cn.fd, s)?
     } else {
-        var body = List[int]()
+        var body = List[byte]()
         for b in s.bytes() {
             (mut body).push(b)
         }
@@ -174,7 +174,7 @@ pub fn conn_write(mut cn: Conn, s: str) -> () ! {closed, io} {
 /// Write a raw byte body (binary static files). Rows: `closed`, `io`.
 /// (W0602 allowed: the net writer's vocabulary, carried.)
 #[allow(w0602)]
-pub fn conn_write_bytes(mut cn: Conn, body: List[int]) -> () ! {closed, io} {
+pub fn conn_write_bytes(mut cn: Conn, body: List[byte]) -> () ! {closed, io} {
     if cn.kind == 0 {
         var code = 0
         net_write_bytes(cn.fd, body) else |e| match e {

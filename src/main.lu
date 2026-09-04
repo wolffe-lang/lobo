@@ -739,6 +739,7 @@ fn status_stanza(
     events: int,
     worker: int,
     listening: bool,
+    accepted: int,
 ) -> str {
     let now = time_unix_ms()
     let cur = current_gen(gens)
@@ -752,7 +753,16 @@ fn status_stanza(
         // of the generations (additive on schema 1); the single
         // process's is unchanged
         var s = if worker > 0 {
-            shell.status_json_open_worker(cur, quitting, events, live_bytes, worker, listening)
+            shell.
+                status_json_open_worker(
+                cur,
+                quitting,
+                events,
+                live_bytes,
+                worker,
+                listening,
+                accepted,
+            )
         } else {
             shell.status_json_open(cur, quitting, events, live_bytes)
         }
@@ -778,7 +788,7 @@ fn status_stanza(
     }
     var s = shell.status_head_text(cur, quitting, events, live_bytes)
     if worker > 0 {
-        s = "{s}{shell.status_worker_head(worker, listening)}"
+        s = "{s}{shell.status_worker_head(worker, listening, accepted)}"
     }
     for g in gens {
         s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now), g.mem_hw, g.bud_hits, g.mem_rt_hw)}"
@@ -1019,7 +1029,7 @@ fn reopen_elog(el: ELog) -> ELog {
     ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq, worker: el.worker }
 }
 
-fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
+fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, hands: int) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
         eprint("lobo: [emerg] configuration file {conf} test failed")
@@ -1062,20 +1072,55 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
     // The single process keeps refusing at once (a bind that fails
     // with no sibling is an operator's error, said out loud).
     var standby_http = false
+    // ws17: a hand with `--inherit N` does not BIND — the master bound
+    // the socket and `os_spawn_with` handed it down as descriptor 3
+    // (then 4), in the config's own order: plaintext first, then TLS.
+    // The numbering is `[os.proc.inherit]`'s contract, so the ordinal
+    // is derived, never told. Every hand accepting on ONE socket is
+    // what makes the kernel's accept queue distribute the work — the
+    // nginx shape, reachable at this pin for the first time.
+    // `next_fd` walks the positions the master actually handed.
+    var next_fd = 3
+    let adopting = inherit > 0
     if want_http {
         var bound = true
-        let cand = net_listen(addr) else |_| {
-            bound = false
-            0
+        var cand: int = 0
+        if adopting {
+            cand = net_adopt_listener(next_fd) else |e| match e {
+                unsupported => {
+                    bound = false
+                    0
+                },
+                io => {
+                    bound = false
+                    0
+                },
+            }
+            next_fd = next_fd + 1
+        } else {
+            cand = net_listen(addr) else |_| {
+                bound = false
+                0
+            }
         }
         if bound {
             hl = cand
+            arm_accept(hl)
             hport = net_port(hl) else |_| {
                 eprint("lobo: [emerg] could not read the listen port")
                 return 1
             }
             have_http = true
         } else if worker > 0 {
+            // the adopt failed (a host that refuses it by name, or a
+            // number the kernel did not answer for) — fall back to
+            // ws16's bind-and-stand-by shape rather than die, and say
+            // which posture this hand is in
+            if adopting {
+                eprint(
+                    "lobo: [notice] worker {worker}: net_adopt_listener refused the inherited plaintext listener — standing by on a bind of {addr} instead (docs/WORKERS.md)",
+                )
+            }
             standby_http = true
         } else {
             eprint("lobo: [emerg] bind() to {addr} failed")
@@ -1119,12 +1164,28 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
             return 1
         }
         var tbound = true
-        let tcand = net_listen(tls_addr) else |_| {
-            tbound = false
-            0
+        var tcand: int = 0
+        if adopting {
+            tcand = net_adopt_listener(next_fd) else |e| match e {
+                unsupported => {
+                    tbound = false
+                    0
+                },
+                io => {
+                    tbound = false
+                    0
+                },
+            }
+            next_fd = next_fd + 1
+        } else {
+            tcand = net_listen(tls_addr) else |_| {
+                tbound = false
+                0
+            }
         }
         if tbound {
             tls_l = tcand
+            arm_accept(tls_l)
             let tport = net_port(tls_l) else |_| {
                 return 1
             }
@@ -1136,6 +1197,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
                 "lobo: [notice] TLS serving on {tls_addr} (port {tport}); TLS 1.3, TLS_CHACHA20_POLY1305_SHA256, certificate entries loaded: {ssl0.names.len}",
             )
         } else if worker > 0 {
+            if adopting {
+                eprint(
+                    "lobo: [notice] worker {worker}: net_adopt_listener refused the inherited TLS listener — standing by on a bind of {tls_addr} instead (docs/WORKERS.md)",
+                )
+            }
             standby_tls = true
         } else {
             eprint("lobo: [emerg] bind() to TLS {tls_addr} failed")
@@ -1176,14 +1242,13 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
                 return 1
             }
         }
-        cl = net_listen(ctrl) else |_| {
-            eprint("lobo: [emerg] bind() to control {ctrl} failed")
+        let cb = bind_control(ctrl)
+        if cb.0 < 0 {
+            eprint("lobo: [emerg] {cb.1}")
             return 1
         }
-        let cport = net_port(cl) else |_| {
-            return 1
-        }
-        ctrl_ep = "127.0.0.1:{cport}"
+        cl = cb.0
+        ctrl_ep = cb.1
         have_ctrl = true
     }
 
@@ -1290,7 +1355,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
     } else {
         "(no plaintext listener)"
     }
-    let ctrl_auth = if !have_ctrl { "off" } else if ctok.is_empty() {
+    // ws17: what actually authorizes this endpoint. A unix socket is a
+    // uid boundary by its directory's permissions; a loopback port is
+    // not one at all, and the notice has always said which.
+    let ctrl_auth = if !have_ctrl { "off" } else if shell.is_unix_addr(ctrl_ep) {
+        if ctok.is_empty() { "socket permissions" } else { "socket permissions + token" }
+    } else if ctok.is_empty() {
         "loopback only"
     } else {
         "loopback + token"
@@ -1372,7 +1442,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
         // half of this pin's accept-distribution posture (the holder
         // died: the port is free within its kernel teardown, and the
         // first hand to retry serves)
-        if standby_http && running && !quitting {
+        if standby_http && running && !quitting && !adopting {
             var got = true
             let cand = net_listen(addr) else |_| {
                 got = false
@@ -1380,13 +1450,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
             }
             if got {
                 hl = cand
+                arm_accept(hl)
                 hport = net_port(hl) else |_| { 0 }
                 have_http = true
                 standby_http = false
                 ev_log(mut elog, "notice", "listener {addr} acquired (port {hport}) — serving")
             }
         }
-        if standby_tls && running && !quitting {
+        if standby_tls && running && !quitting && !adopting {
             var tgot = true
             let tcand = net_listen(tls_addr) else |_| {
                 tgot = false
@@ -1394,6 +1465,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
             }
             if tgot {
                 tls_l = tcand
+                arm_accept(tls_l)
                 let tport = net_port(tls_l) else |_| { 0 }
                 if !have_http {
                     hport = tport
@@ -1408,6 +1480,64 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
             }
         }
         let listening = (!want_http || have_http) && (!want_tls || have_tls)
+
+        // 0a2. ws17: THE WAIT. One `net_wait` over every socket this
+        // process owns — the control listener, the http listener, the
+        // TLS listener and every open connection that is not parked on
+        // a name — replaces the deadline ws16 armed on each of them
+        // (25 ms in the control accept, 25 in each listener's, 12 per
+        // connection, every idle pass: wolf-lang#127's customer report
+        // was this loop). Readiness is level-triggered, so asking
+        // consumes nothing and a socket this pass declines to service
+        // is still ready next pass; an EMPTY answer is the deadline
+        // expiring with nothing ready, which is an ANSWER and not a
+        // failure ([os.net.wait]) — the loop falls through and does
+        // its timer work. A peer that closed reads as READY: the
+        // `net_read` behind it is what reports `closed`, which is how
+        // a connection leaves the table instead of being parked on.
+        var wfds = List[int]()
+        if have_ctrl {
+            (mut wfds).push(cl)
+        }
+        // ws17: the listener joins the wait set only on this hand's
+        // ACCEPT TURN (shell.accept_turn — nginx's accept_mutex without
+        // a mutex; the clause there carries the measured reason). A
+        // single process and a hand whose siblings are gone always
+        // have the turn.
+        let myturn = shell.accept_turn(worker, hands, now)
+        if have_http && running && !quitting && myturn {
+            (mut wfds).push(hl)
+        }
+        if have_tls && running && !quitting && myturn {
+            (mut wfds).push(tls_l)
+        }
+        var wi: int = 0
+        var parked = false
+        while wi < cfds.len {
+            if cwait[wi].is_empty() {
+                (mut wfds).push(cfds[wi])
+            } else {
+                parked = true
+            }
+            wi = wi + 1
+        }
+        var wms = wait_budget(sig_on, parked)
+        if have_http || have_tls {
+            wms = shell.accept_wait_ms(worker, hands, now, wms)
+        }
+        var ready = List[int]()
+        if wfds.len > 0 {
+            ready = net_wait(wfds, wms) else |_| {
+                List[int]()
+            }
+        } else {
+            // nothing to wait ON (a standing-by hand with no endpoint,
+            // or a wound-down loop): the pass still has to end, and
+            // `net_wait` refuses an empty set with an unbounded
+            // deadline by name — `time_sleep_ms` is the call that
+            // means to sleep, and the clause says so.
+            time_sleep_ms(wms)
+        }
 
         // 0. ws13: one resolver pass — every pending query socket
         // gets a 1 ms read under its deadline; settled names become
@@ -1438,8 +1568,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
         var verb = ""
         var cc = -1
         var denied = false
-        if have_ctrl {
-            net_deadline(cl, 25) else |_| {}
+        if have_ctrl && ready_has(ready, cl) {
             var got_ctrl = true
             let cand = net_accept(cl) else |_| {
                 got_ctrl = false
@@ -1511,6 +1640,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
                     elog.seq,
                     worker,
                     listening,
+                    counters.accepted,
                 )
                 reply(cc, "{body}\n")
             } else if verb == "status json" {
@@ -1522,6 +1652,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
                     elog.seq,
                     worker,
                     listening,
+                    counters.accepted,
                 )
                 reply(cc, "{body}\n")
             } else if verb == "stop" {
@@ -1605,14 +1736,46 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
 
         // 2. accept a new http connection (unless winding down) — it is
         // tagged with the CURRENT generation and bumps that counter
-        if have_http && running && !quitting {
-            net_deadline(hl, 25) else |_| {}
-            var got_conn = true
-            let conn = net_accept(hl) else |_| {
-                got_conn = false
-                0
-            }
-            if got_conn {
+        if have_http &&
+            running &&
+            !quitting &&
+            myturn &&
+            shell.accept_turn(worker, hands, time_unix_ms()) &&
+            ready_has(ready, hl) {
+            // ws17: DRAIN the accept queue while the turn is ours,
+            // bounded. One accept per pass was ws16's shape and it is
+            // what held a connection-per-request load to one accept
+            // per poll; with the turn in hand no sibling can take the
+            // queue out from under us, so the honest thing is to take
+            // what is there. Every accept after the first is guarded
+            // by a ZERO-deadline `net_wait` on the listener alone —
+            // the ask that cannot block ([os.net.wait]) — so the loop
+            // never reaches an accept the kernel has nothing for,
+            // which is the syscall that would park
+            // (shell.accept_turn's note).
+            var burst: int = 0
+            var draining = true
+            var probe = List[int]()
+            (mut probe).push(hl)
+            while draining && burst < 64 {
+                if burst > 0 {
+                    let again = net_wait(probe, 0) else |_| {
+                        List[int]()
+                    }
+                    if again.len == 0 {
+                        draining = false
+                        continue
+                    }
+                }
+                var got_conn = true
+                let conn = net_accept(hl) else |_| {
+                    got_conn = false
+                    0
+                }
+                if !got_conn {
+                    draining = false
+                    continue
+                }
                 let curgen = current_gen(gens)
                 counters.accepted = counters.accepted + 1
                 gens = bump_live(gens, curgen, 1)
@@ -1623,6 +1786,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
                 (mut cidle).push(now)
                 (mut cstart).push(now)
                 (mut cwait).push("")
+                burst = burst + 1
             }
         }
 
@@ -1636,8 +1800,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
         // the NAMED D24 rider (see the listener comment above). A
         // stalled handshake is bounded by the read deadline, never a
         // hang.
-        if have_tls && running && !quitting {
-            net_deadline(tls_l, 25) else |_| {}
+        if have_tls &&
+            running &&
+            !quitting &&
+            myturn &&
+            shell.accept_turn(worker, hands, time_unix_ms()) &&
+            ready_has(ready, tls_l) {
             var got_tls = true
             let tconn = net_accept(tls_l) else |_| {
                 got_tls = false
@@ -1715,7 +1883,36 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
                 continue
             }
             let cconf = conf_for(gens, cg)
-            let st = serve.conn_step(fd, cconf, opts, lim_for(gens, cg), hport, car, sv, 12, mut rs)
+            // ws17: a connection is STEPPED only when the wait named
+            // it. A socket the poll did not name has nothing to read,
+            // so ws16's 12 ms deadline-and-read on it was the loop
+            // paying to learn what it already knew — a hand holding
+            // twelve idle keepalive connections spent 144 ms of every
+            // pass on them. The row still rides the idle and drain
+            // clocks below, which is the work a timer, not a socket,
+            // has to do.
+            // ws17: a connection is stepped when the wait named it —
+            // OR when it has work that no incoming byte will announce.
+            // Two such rows, and BOTH were hangs before they were
+            // measured (tests/resolver/proxy_e2e.lu found the first
+            // inside an hour):
+            //   * a connection coming OUT of a resolver park was never
+            //     in the wait set while it was parked, so it could not
+            //     be in the answer either — it would have ridden
+            //     forward forever with its name settled and nobody to
+            //     write the response;
+            //   * a connection whose CARRY already holds a whole head
+            //     (the pipelined request) is waiting on lobo, not on
+            //     its client, and a poll will never name it again.
+            // ws16 never met either, because ws16 stepped every
+            // connection every pass and paid 12 ms each for the
+            // privilege.
+            let must_step = !waiting.is_empty() || serve.carry_has_head(car)
+            let st = if must_step || ready_has(ready, fd) {
+                serve.conn_step(fd, cconf, opts, lim_for(gens, cg), hport, car, sv, 12, mut rs)
+            } else {
+                serve.conn_idle(car, sv)
+            }
             var close_it = st.close
             var new_idle = idle0
             if st.active {
@@ -1757,7 +1954,16 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
                 let body = if st.admin == "metrics" {
                     render_metrics(counters, gens, shutdown_ms, elog.seq, worker)
                 } else {
-                    status_stanza(gens, shutdown_ms, quitting, true, elog.seq, worker, listening)
+                    status_stanza(
+                        gens,
+                        shutdown_ms,
+                        quitting,
+                        true,
+                        elog.seq,
+                        worker,
+                        listening,
+                        counters.accepted,
+                    )
                 }
                 let would = st.mem_hw + body.len
                 if alim > 0 && would > alim {
@@ -1954,6 +2160,150 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str) -> int {
     0
 }
 
+// ------------------------------------------------------------------
+// ws17: readiness. The loop stops time-slicing (wolf-lang#127 landed
+// `net_wait` at this pin) — one wait over every socket the process
+// owns replaces a deadline on each. Two small helpers say what a
+// wait answered and how long the next one may last.
+// ------------------------------------------------------------------
+
+/// Arm the bounded accept every listener in a many-hands lobo needs
+/// (ws17), and say nothing when the host declines — a listener whose
+/// deadline could not be armed still works, it just blocks longer on a
+/// lost race.
+///
+/// THE REASON, and it is the first thing a shared listener teaches:
+/// **readiness is not exclusivity.** `net_wait` says a socket CAN be
+/// accepted without blocking; with N hands polling ONE inherited
+/// listener, one SYN wakes all N and exactly one wins the `accept(2)`.
+/// The other N-1 then call `net_accept` on a queue that is empty
+/// again, and an accept with no deadline armed PARKS THERE — a hand
+/// that stops answering its own control endpoint until the next
+/// connection arrives, which the master reads as gone and reaps. That
+/// is the thundering herd, and it is not a bug in `net_wait`
+/// ([os.net.wait] is level-triggered and says exactly what it saw);
+/// it is the thing a program that shares a listener owes the kernel.
+/// ws16 never met it because ws16's listener had one holder and the
+/// loop re-armed 25 ms on it every pass.
+///
+/// 5 ms, not 25: a losing accept is the common case under load, so it
+/// is the cost of every contended pass. The deadline is armed ONCE, at
+/// acquisition — the socket keeps it.
+fn arm_accept(l: int) {
+    net_deadline(l, 5) else |_| {}
+}
+
+/// Bind a control endpoint, TCP or unix, by the shape of its address
+/// (ws17, wolf-lang#227). The answer is an ordinary net listener
+/// either way; `net_port` is `io` on the unix one, which is why the
+/// caller takes the ENDPOINT STRING back rather than a port.
+///
+/// A unix bind that finds something already at the path is `exists`
+/// and lobo REFUSES rather than unlinking: the path may be another
+/// master's live socket, or an operator's own file, and a library
+/// cannot make that call ([os.net.unix]'s own note; the stale-socket
+/// case is handled one layer up, where the pid file already says
+/// whether a master is alive). A host with no unix family refuses BY
+/// NAME here — that is the whole reason the row is `unsupported` and
+/// not a bare `io` (ws15 filed #227 because it could not tell the two
+/// apart).
+///
+/// Answers (fd, endpoint-string) or (-1, reason) — the caller prints
+/// the reason as an `emerg` and exits 1.
+fn bind_control(addr: str) -> (int, str) {
+    if shell.is_unix_addr(addr) {
+        let path = shell.unix_path_of(addr)
+        if path.is_empty() {
+            return (-1, "the \"control\" address \"{addr}\" names an empty socket path")
+        }
+        let l = net_listen_unix(path) else |e| match e {
+            unsupported => {
+                return (
+                    -1,
+                    "this host has no unix-domain sockets, so \"control {addr}\" cannot be served (refused by name, not by silence — [os.net.unix]); use a loopback address with the token arm instead",
+                )
+            },
+            exists => {
+                return (
+                    -1,
+                    "something already exists at \"{path}\" — lobo never clobbers a path it did not bind (a live master, a stale socket, or an ordinary file: remove it yourself if you know which)",
+                )
+            },
+            not_found => {
+                return (-1, "the directory holding \"{path}\" does not exist")
+            },
+            denied => {
+                return (-1, "permission denied creating the control socket \"{path}\"")
+            },
+            io => {
+                // the row is coarse by design ([os.net.unix] keeps the
+                // NAMED rows for the conditions a program can act on),
+                // so lobo names the one cause an operator hits and
+                // cannot see: `sun_path` is about a hundred bytes on
+                // every unix — 104 on macOS, 108 on linux — and a
+                // control socket under a long prefix silently exceeds
+                // it. MEASURED at ws17 with a 126-byte scratch path.
+                if path.len > 100 {
+                    return (
+                        -1,
+                        "bind() to control {addr} failed — the path is {path.len} bytes and a unix socket address holds about a hundred (sun_path: 104 on macOS, 108 on linux); put the socket somewhere shorter",
+                    )
+                }
+                return (-1, "bind() to control {addr} failed")
+            },
+        }
+        arm_accept(l)
+        return (l, addr)
+    }
+    let l = net_listen(addr) else |_| {
+        return (-1, "bind() to control {addr} failed")
+    }
+    arm_accept(l)
+    let port = net_port(l) else |_| {
+        return (-1, "could not read the control port")
+    }
+    (l, "127.0.0.1:{port}")
+}
+
+/// Was `fd` in the readiness answer? `net_wait` answers the SUBSET in
+/// the caller's order, so a walk is the membership test (the sets are
+/// a listener or three plus the open connections). Pure and total.
+fn ready_has(ready: List[int], fd: int) -> bool {
+    for r in ready {
+        if r == fd {
+            return true
+        }
+    }
+    false
+}
+
+/// How long this pass's `net_wait` may block, in milliseconds.
+///
+/// The floor is the SIGNAL POLL's, and it is the honest limit on how
+/// much of #127's win a server that must notice a SIGHUP can take:
+/// signals have no readiness handle in the language — the loop learns
+/// about one by raising a probe and waiting on the runtime's queue
+/// ([os.signal.wait], the self-raise poll in the header) — so while
+/// signal reception is armed the wait cannot outlast the latency an
+/// operator's `kill -HUP` may see. 25 ms is ws16's own number (the
+/// control listener's accept deadline), so signal latency IMPROVES:
+/// ws16 polled once per pass and a pass was three stacked accepts.
+/// With reception unavailable the control channel is the only trigger
+/// and the wait stretches to 250 ms.
+///
+/// `busy` shortens it to 5 ms: a connection parked on a name needs the
+/// resolver ticked, and the resolver's sockets are not in the wait set
+/// (its own 1 ms reads are its clock). Pure and total.
+fn wait_budget(sig_on: bool, busy: bool) -> int {
+    if busy {
+        return 5
+    }
+    if sig_on {
+        return 25
+    }
+    250
+}
+
 /// Write a control reply when the trigger carried a reply socket (a
 /// signal trigger has none — `cc` is -1). Write trouble is swallowed:
 /// the peer is closing anyway. Total.
@@ -2063,12 +2413,39 @@ fn replace_bool(xs: List[bool], i: int, v: bool) -> List[bool] {
     out
 }
 
-/// A free loopback endpoint for a worker's control listener: bind :0,
-/// read the port, release it. The release-to-rebind window is real
-/// (wolf-lang#121's lesson): a worker whose endpoint was taken in the
-/// gap fails its own bind and exits 1, and the master replaces it
-/// with a fresh endpoint — the supervision path IS the retry. "" when
-/// the host refuses the probe. Total.
+/// The endpoint a hand's control listener will bind, given the
+/// MASTER's own address and the hand's ordinal.
+///
+/// ws17: when the master's endpoint is a unix socket, so are its
+/// hands' — `unix:/run/lobo/control.sock` gives each hand
+/// `…/control.sock.wN`, a sibling in the operator's own directory, so
+/// a HAND's order desk is a uid boundary too (ws16 could only offer it
+/// a loopback port, reachable by every local user on the box). The
+/// path is one the master's configuration NAMES, which is exactly the
+/// case `[os.net.unix]` says a program may unlink unconditionally —
+/// so a replacement hand does not trip over the socket file a
+/// SIGKILLed predecessor left behind. That removal is the master's,
+/// never a hand's: the process that BOUND a path owns it.
+///
+/// Otherwise it is ws16's loopback probe, and the release-to-rebind
+/// window is real (wolf-lang#121's lesson): a hand whose endpoint was
+/// taken in the gap fails its own bind and exits 1, and the master
+/// replaces it with a fresh one — the supervision path IS the retry.
+/// "" when the host refuses the probe. Total.
+fn worker_endpoint(master_ctrl: str, i: int) -> str {
+    if shell.is_unix_addr(master_ctrl) {
+        let ep = shell.unix_worker_addr(master_ctrl, i)
+        let path = shell.unix_path_of(ep)
+        if fs_exists(path) {
+            fs_remove(path) else |_| {}
+        }
+        return ep
+    }
+    free_endpoint()
+}
+
+/// A free loopback endpoint: bind :0, read the port, release it.
+/// "" when the host refuses the probe. Total.
 fn free_endpoint() -> str {
     let l = net_listen("127.0.0.1:0") else |_| {
         return ""
@@ -2082,29 +2459,103 @@ fn free_endpoint() -> str {
 }
 
 /// Start worker `i` (1-based): pick its endpoint, spawn this
-/// executable as a hand, log `worker-started`, and answer the child
-/// handle with the endpoint — or (-1, "") with the reason logged as an
-/// error (the loop retries on its next pass). Total.
-fn spawn_worker(exe: str, prefix: str, conf: str, i: int, restarts: int, mut el: ELog) -> (int, str) {
-    let ep = free_endpoint()
+/// executable as a hand WITH THE MASTER'S LISTENERS IN ITS INHERIT SET
+/// (ws17), log `worker-started`, and answer the child handle with the
+/// endpoint — or (-1, "") with the reason logged as an error (the loop
+/// retries on its next pass).
+///
+/// `lfds` is the master's listening handles in the config's own order
+/// (plaintext first, then TLS). `os_spawn_with` hands them to the
+/// child as descriptors 3, 4, … in that order — the numbering IS the
+/// contract ([os.proc.inherit]), so the hand is told only HOW MANY
+/// rode down, never a descriptor number, and it adopts them by
+/// position. Both processes then hold their own descriptor for the
+/// same socket: the master closing its copy would not disturb a hand,
+/// and a REPLACEMENT hand inherits the same listener, which is why
+/// the master keeps them open for its whole life.
+///
+/// A host that answers `unsupported` to a non-empty set (windows —
+/// handle inheritance exists there but a SOCKET is not a small stable
+/// number a parent can name by position) falls back to ws16's shape:
+/// `os_spawn` with no descriptors, and the hand binds and stands by.
+/// The fallback is named out loud, once per spawn. Total.
+fn spawn_worker(
+    exe: str,
+    prefix: str,
+    conf: str,
+    i: int,
+    restarts: int,
+    lfds: List[int],
+    mctrl: str,
+    hands: int,
+    mut el: ELog,
+) -> (int, str) {
+    let ep = worker_endpoint(mctrl, i)
     if ep.is_empty() {
-        ev_log(mut el, "error", "worker {i}: no free loopback endpoint for its control listener")
+        ev_log(mut el, "error", "worker {i}: no free endpoint for its control listener")
         return (-1, "")
     }
-    let argv = shell.worker_argv(exe, prefix, conf, i, ep)
-    let h = os_spawn(argv) else |e| match e {
-        not_found => {
-            ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
-            return (-1, "")
-        },
-        denied => {
-            ev_log(mut el, "error", "worker {i}: spawn failed — the host refused to execute {exe}")
-            return (-1, "")
-        },
-        io => {
-            ev_log(mut el, "error", "worker {i}: spawn failed (io)")
-            return (-1, "")
-        },
+    var handed = lfds.len
+    var h: int = -1
+    if handed > 0 {
+        var ok = true
+        let hh = os_spawn_with(exe, shell.worker_args(prefix, conf, i, ep, handed, hands), lfds) else |e| match e {
+            unsupported => {
+                ok = false
+                ev_log(
+                    mut el,
+                    "warn",
+                    "worker {i}: this host does not hand descriptors to a child (os_spawn_with unsupported) — falling back to the bind-and-stand-by shape (docs/WORKERS.md)",
+                )
+                -1
+            },
+            not_found => {
+                ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
+                return (-1, "")
+            },
+            denied => {
+                ev_log(
+                    mut el,
+                    "error",
+                    "worker {i}: spawn failed — the host refused to execute {exe}",
+                )
+                return (-1, "")
+            },
+            io => {
+                ev_log(
+                    mut el,
+                    "error",
+                    "worker {i}: spawn failed (io) with {handed} listener(s) in the inherit set",
+                )
+                return (-1, "")
+            },
+        }
+        if ok {
+            h = hh
+        } else {
+            handed = 0
+        }
+    }
+    if h < 0 {
+        let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0, hands)
+        h = os_spawn(argv) else |e| match e {
+            not_found => {
+                ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
+                return (-1, "")
+            },
+            denied => {
+                ev_log(
+                    mut el,
+                    "error",
+                    "worker {i}: spawn failed — the host refused to execute {exe}",
+                )
+                return (-1, "")
+            },
+            io => {
+                ev_log(mut el, "error", "worker {i}: spawn failed (io)")
+                return (-1, "")
+            },
+        }
     }
     ev_event(mut el, "notice", shell.ev_worker_started(i, restarts))
     (h, ep)
@@ -2188,6 +2639,7 @@ fn master_stanza(
         var ev: int = -1
         var lb: int = 0
         var b503: int = 0
+        var acc: int = 0
         if !ep.is_empty() {
             let body = shell.control_fetch(ep, shell.control_line(ctok, "status")) else |_| { "" }
             if !body.is_empty() {
@@ -2201,14 +2653,18 @@ fn master_stanza(
                 }
                 live = shell.stanza_field_sum(body, "live")
                 b503 = shell.stanza_field_sum(body, "budget-503s")
+                acc = shell.stanza_int(body, "accepted")
+                if acc < 0 {
+                    acc = 0
+                }
             }
         }
         sum_bytes = sum_bytes + lb
         if json {
             let sep = if first { "" } else { "," }
-            rows = "{rows}{sep}{shell.status_worker_json(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i])}"
+            rows = "{rows}{sep}{shell.status_worker_json(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i], acc)}"
         } else {
-            rows = "{rows}{shell.status_worker_text(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i])}"
+            rows = "{rows}{shell.status_worker_text(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i], acc)}"
         }
         first = false
         i = i + 1
@@ -2280,22 +2736,69 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var cl: int = 0
     var ctrl_ep = serve.listen_addr_plain(c0)
     if !ctrl.is_empty() {
-        cl = net_listen(ctrl) else |_| {
-            eprint("lobo: [emerg] bind() to control {ctrl} failed")
+        let cb = bind_control(ctrl)
+        if cb.0 < 0 {
+            eprint("lobo: [emerg] {cb.1}")
             return 1
         }
-        let cport = net_port(cl) else |_| {
-            return 1
-        }
-        ctrl_ep = "127.0.0.1:{cport}"
+        cl = cb.0
+        ctrl_ep = cb.1
         have_ctrl = true
     }
     shell.pid_write(pidp, ctrl_ep) else |_| {
         eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
         return 1
     }
+
+    // ws17: THE MASTER BINDS THE LISTENERS. This is nginx's shape and
+    // it is reachable at this pin for the first time: `os_spawn_with`
+    // hands a child the master's net handles as descriptors 3, 4, …
+    // and `net_adopt_listener` takes them by position
+    // (`[os.proc.inherit]`, wolf-lang#235). Every hand then accepts on
+    // ONE socket and the kernel's accept queue distributes the work —
+    // which is the shape that distributes on BOTH serving hosts.
+    //
+    // The other shape the language now offers is `net_listen_with(
+    // addr, reuse_port, backlog)` (#234): N separate sockets sharing
+    // one port. lobo does NOT take it, and the reason is measured
+    // rather than preferred — on macOS a SO_REUSEPORT group hands
+    // every SYN to the NEWEST bound socket, so N hands would be one
+    // server and N-1 idle sockets again, exactly ws16's posture with a
+    // different cause. linux distributes it by a 4-tuple hash, so
+    // there `reuse_port` would work too; a server that picks its
+    // architecture per host is a server with two architectures.
+    // docs/WORKERS.md carries lobo's own re-measurement of both.
+    //
+    // The master ACCEPTS on nothing: these handles are never in its
+    // wait set. It holds them for its whole life because a REPLACEMENT
+    // hand must inherit the same socket — a socket that closed with
+    // its holder is the gap ws16's failover had to cover.
+    let maddr = serve.listen_addr_plain(c0)
+    let mtls = ssl_listen_addr(c0)
+    var lfds = List[int]()
+    var mhl: int = -1
+    var mtl: int = -1
+    if !maddr.is_empty() {
+        mhl = net_listen(maddr) else |_| {
+            eprint("lobo: [emerg] bind() to {maddr} failed")
+            shell.pid_remove(pidp) else |_| {}
+            return 1
+        }
+        (mut lfds).push(mhl)
+    }
+    if !mtls.is_empty() {
+        mtl = net_listen(mtls) else |_| {
+            eprint("lobo: [emerg] bind() to TLS {mtls} failed")
+            shell.pid_remove(pidp) else |_| {}
+            return 1
+        }
+        (mut lfds).push(mtl)
+    }
+
     var elog = build_elog(c0, prefix, 0, 0)
-    let ctrl_auth = if !have_ctrl { "off" } else if ctok.is_empty() {
+    let ctrl_auth = if !have_ctrl { "off" } else if shell.is_unix_addr(ctrl_ep) {
+        if ctok.is_empty() { "socket permissions" } else { "socket permissions + token" }
+    } else if ctok.is_empty() {
         "loopback only"
     } else {
         "loopback + token"
@@ -2303,7 +2806,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     ev_log(
         mut elog,
         "notice",
-        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}; accept distribution at this pin: one hand serves, the others stand by (no SO_REUSEPORT, no listener inheritance — wolf-lang#234, #235; docs/WORKERS.md)",
+        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}; accept distribution: {lfds.len} listener(s) bound here and handed down (os_spawn_with + net_adopt_listener) — every hand accepts on the same socket (docs/WORKERS.md)",
     )
     let sprobe = shell.sig_probe()
     var sig_on = true
@@ -2337,15 +2840,32 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var wup = List[int]()
     var wfail = List[int]()
     var wgone = List[bool]()
+    // ws17: when the master last PROBED each hand. The probe is a
+    // fresh TCP connection every time (there is no channel between a
+    // master and its hands at this pin — nginx has a socketpair;
+    // wolf-lang#235's inherited descriptor is what would give lobo
+    // one), so probing every pass is 3 connections per 25 ms per hand,
+    // each leaving the master's side in TIME_WAIT. Under load that is
+    // ephemeral-port pressure the master creates for itself, and a
+    // transient `connect` failure on a HEALTHY hand is read as
+    // silence — three of them reap a hand that was serving fine
+    // (MEASURED: an e2e run reaped a hand mid-load before this
+    // interval existed). 200 ms is the rate a supervisor needs: since
+    // ws17 the hands share one socket, so a dead hand costs no
+    // availability at all — the survivors are already accepting —
+    // and the probe governs how fast the slot is REFILLED, not how
+    // fast service returns.
+    var wprobe = List[int]()
     var i: int = 0
     while i < n {
-        let s = spawn_worker(exe, prefix, conf, i + 1, 0, mut elog)
+        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, n, mut elog)
         (mut wslot).push(s.0)
         (mut wctl).push(s.1)
         (mut wrest).push(0)
         (mut wup).push(time_unix_ms())
         (mut wfail).push(0)
         (mut wgone).push(false)
+        (mut wprobe).push(0)
         i = i + 1
     }
 
@@ -2358,20 +2878,30 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         var cc = -1
         var denied = false
         if have_ctrl {
-            net_deadline(cl, 25) else |_| {}
-            var got_ctrl = true
-            let cand = net_accept(cl) else |_| {
-                got_ctrl = false
-                0
+            // ws17: the master waits on its ONE socket the same way a
+            // hand waits on its set ([os.net.wait]); the supervision
+            // pass below is this loop's timer work
+            var cready = List[int]()
+            var cwf = List[int]()
+            (mut cwf).push(cl)
+            cready = net_wait(cwf, wait_budget(sig_on, false)) else |_| {
+                List[int]()
             }
+            var got_ctrl = ready_has(cready, cl)
             if got_ctrl {
-                cc = cand
-                net_deadline(cc, 2000) else |_| {}
-                let line = read_command(cc)
-                if shell.control_authorized(line, ctok) {
-                    verb = shell.control_verb_of(line, ctok)
-                } else {
-                    denied = true
+                let cand = net_accept(cl) else |_| {
+                    got_ctrl = false
+                    0
+                }
+                if got_ctrl {
+                    cc = cand
+                    net_deadline(cc, 2000) else |_| {}
+                    let line = read_command(cc)
+                    if shell.control_authorized(line, ctok) {
+                        verb = shell.control_verb_of(line, ctok)
+                    } else {
+                        denied = true
+                    }
                 }
             }
         }
@@ -2477,15 +3007,31 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             alldone = false
             if wslot[j] < 0 {
                 if !quitting {
-                    let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j], mut elog)
+                    let s = spawn_worker(
+                        exe,
+                        prefix,
+                        conf,
+                        j + 1,
+                        wrest[j],
+                        lfds,
+                        ctrl_ep,
+                        n,
+                        mut elog,
+                    )
                     wslot = replace_int(wslot, j, s.0)
                     wctl = replace_str(wctl, j, s.1)
                     wup = replace_int(wup, j, now)
                     wfail = replace_int(wfail, j, 0)
+                    wprobe = replace_int(wprobe, j, now)
                 }
                 j = j + 1
                 continue
             }
+            if now - wprobe[j] < 200 {
+                j = j + 1
+                continue
+            }
+            wprobe = replace_int(wprobe, j, now)
             let ep = wctl[j]
             if shell.control_reachable(ep) {
                 wfail = replace_int(wfail, j, 0)
@@ -2511,12 +3057,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             if now - wup[j] < 1000 {
                 time_sleep_ms(250)
             }
-            let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j] + 1, mut elog)
+            let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j] + 1, lfds, ctrl_ep, n, mut elog)
             wslot = replace_int(wslot, j, s.0)
             wctl = replace_str(wctl, j, s.1)
             wrest = replace_int(wrest, j, wrest[j] + 1)
             wup = replace_int(wup, j, time_unix_ms())
             wfail = replace_int(wfail, j, 0)
+            wprobe = replace_int(wprobe, j, time_unix_ms())
             j = j + 1
         }
         elog = flush_elog(elog)
@@ -2543,6 +3090,16 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     elog = reopen_elog(elog)
     if have_ctrl {
         net_close(cl) else |_| {}
+    }
+    // ws17: the master owns the listeners it bound; every hand owns
+    // its own descriptor for the same socket, so these closes are the
+    // master's copies and nothing else's ([os.proc.inherit]'s
+    // ownership clause). The hands are already gone by here.
+    if mhl >= 0 {
+        net_close(mhl) else |_| {}
+    }
+    if mtl >= 0 {
+        net_close(mtl) else |_| {}
     }
     shell.pid_remove(pidp) else |_| {}
     0
@@ -2947,20 +3504,43 @@ fn main() -> int {
     }
     if cli.mode == "serve" {
         if cli.worker > 0 {
-            return serve_main(cli.prefix, cli.conf, cli.worker, cli.worker_control)
+            return serve_main(
+                cli.prefix,
+                cli.conf,
+                cli.worker,
+                cli.worker_control,
+                cli.inherit,
+                cli.hands,
+            )
         }
-        // ws16: how many hands? `worker_processes` off the config —
-        // 1 (the default) is today's one process; `auto` resolves
-        // through the host's cpu count where this pin can read one
+        // ws16/ws17: how many hands? `worker_processes` off the
+        // config — 1 (the default) is today's one process; `auto`
+        // resolves through `os_cpus()` (`[os.cpus]`, wolf-lang#233,
+        // landed at this pin). The count is SCHEDULABLE cores, not
+        // installed ones: it honours a cgroup cpu quota and an
+        // affinity mask, so a container given two cpus of quota on a
+        // sixty-four-core host answers 2 — where ws16's
+        // `/proc/cpuinfo` row count answered 64 and started
+        // sixty-two hands that would never get a core between them.
+        // The `io` row is NOT swallowed into a default: a host that
+        // cannot answer says so and lobo runs one worker, which is a
+        // different sentence from "this host has one core". macOS's
+        // ws16 notice retires — the call answers there.
         let c = config.load(cli.prefix, cli.conf)
         var n = 1
         if config.ok(c) {
             n = shell.worker_processes(c)
             if n == 0 {
-                n = shell.cpu_count()
-                if n == 0 {
+                var known = true
+                let cpus = os_cpus() else |_| {
+                    known = false
+                    1
+                }
+                if known {
+                    n = cpus
+                } else {
                     eprint(
-                        "lobo: [notice] worker_processes auto: this host offers no cpu count this pin can read (linux answers through /proc/cpuinfo; macOS keeps it behind sysctl(3) and wolf has no cpu query — wolf-lang#233); running 1 worker",
+                        "lobo: [notice] worker_processes auto: this host could not answer os_cpus ([os.cpus] io); running 1 worker",
                     )
                     n = 1
                 }
@@ -2969,7 +3549,7 @@ fn main() -> int {
         if n > 1 {
             return master_main(cli.prefix, cli.conf, n)
         }
-        return serve_main(cli.prefix, cli.conf, 0, "")
+        return serve_main(cli.prefix, cli.conf, 0, "", 0, 1)
     }
     banner()
     0

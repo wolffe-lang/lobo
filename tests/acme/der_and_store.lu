@@ -24,25 +24,34 @@ use config
 fn main() -> int {
     // 1. DER length encoding across the boundaries
     let h0 = acme.der_hdr(4, 0)
-    assert(h0.len == 2 && h0[1] == 0, "short length")
+    assert(h0.len == 2 && h0[1] as int == 0, "short length")
     let h127 = acme.der_hdr(4, 127)
-    assert(h127[1] == 127, "127 is one byte")
+    assert(h127[1] as int == 127, "127 is one byte")
     let h128 = acme.der_hdr(4, 128)
-    assert(h128[1] == 129 && h128[2] == 128, "128 is 0x81 0x80")
+    assert(h128[1] as int == 129 && h128[2] as int == 128, "128 is 0x81 0x80")
     let h300 = acme.der_hdr(4, 300)
-    assert(h300[1] == 130 && h300[2] == 1 && h300[3] == 44, "300 is 0x82 0x01 0x2c")
+    assert(
+        h300[1] as int == 130 && h300[2] as int == 1 && h300[3] as int == 44,
+        "300 is 0x82 0x01 0x2c",
+    )
 
     // 2. der_int minimal + positivity pad
     let i0 = acme.der_int(0)
-    assert(i0.len == 3 && i0[0] == 2 && i0[1] == 1 && i0[2] == 0, "INTEGER 0")
+    assert(i0.len == 3 && i0[0] as int == 2 && i0[1] as int == 1 && i0[2] as int == 0, "INTEGER 0")
     let i128 = acme.der_int(128)
-    assert(i128[1] == 2 && i128[2] == 0 && i128[3] == 128, "128 gets the sign pad")
+    assert(
+        i128[1] as int == 2 && i128[2] as int == 0 && i128[3] as int == 128,
+        "128 gets the sign pad",
+    )
 
     // 3. the Ed25519 OID and SPKI shape
     let alg = acme.alg_ed25519()
-    assert(alg[0] == 48, "alg is a SEQUENCE")
+    assert(alg[0] as int == 48, "alg is a SEQUENCE")
     // 1.3.101.112 -> 06 03 2b 65 70
-    assert(alg[2] == 6 && alg[4] == 43 && alg[5] == 101 && alg[6] == 112, "the Ed25519 OID bytes")
+    assert(
+        alg[2] as int == 6 && alg[4] as int == 43 && alg[5] as int == 101 && alg[6] as int == 112,
+        "the Ed25519 OID bytes",
+    )
 
     // 4. key round trip: our writer, our reader, AND config's reader
     let seed = "a 32-byte ed25519 secret key !!!".bytes()
@@ -64,7 +73,7 @@ fn main() -> int {
 
     // 5. the CSR is a SEQUENCE and carries both SAN names
     let csr = acme.csr_build(seed, "auto.test www.auto.test")
-    assert(csr[0] == 48, "the CSR is a SEQUENCE")
+    assert(csr[0] as int == 48, "the CSR is a SEQUENCE")
     assert(csr.len > 100, "the CSR has real content")
     let csr_pem = acme.pem_wrap("CERTIFICATE REQUEST", csr)
     assert(csr_pem.starts_with("-----BEGIN CERTIFICATE REQUEST-----"), "CSR PEM label")
@@ -76,7 +85,7 @@ fn main() -> int {
     var lens = List[int]()
     let dec = acme.pem_blocks_of(pem, "CERTIFICATE", mut lens) else |_| {
         assert(false, "pem_blocks_of failed on our own output")
-        List[int]()
+        List[byte]()
     }
     assert(lens.len == 1 && lens[0] == blob.len, "one block, right length")
     var pem_ok = true
@@ -94,13 +103,13 @@ fn main() -> int {
     fs_remove_dir_all(store) else |_| {}
     let a1 = acme.account_key(store) else |_| {
         assert(false, "account_key create failed")
-        List[int]()
+        List[byte]()
     }
     assert(a1.len == 32, "account key is 32 bytes")
     assert(fs_exists(acme.account_key_path(store)), "account.key written")
     let a2 = acme.account_key(store) else |_| {
         assert(false, "account_key reuse failed")
-        List[int]()
+        List[byte]()
     }
     var reuse = true
     var k = 0

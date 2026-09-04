@@ -16,8 +16,8 @@
 use obs
 
 fn byte_str(b: int) -> str {
-    var v = List[int]()
-    (mut v).push(b)
+    var v = List[byte]()
+    (mut v).push(b as byte)
     str_from_utf8(v) else ""
 }
 

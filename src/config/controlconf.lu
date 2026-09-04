@@ -12,20 +12,31 @@
 //! fail at the check, not at the first reload.
 //! docs/CONTROL.md carries the design and the nginx deltas.
 
-/// The `control` directive's `-t` check: the optional second arm is
-/// spelled exactly `token <file>`, and nothing else is accepted — a
-/// two-argument `control` (the keyword with no file), an unknown
-/// keyword, or an empty path is a NAMED error rather than a silently
-/// ignored one. The token file's EXISTENCE is not checked here: `-t`
-/// runs where the server may not, and a missing file is the startup
-/// path's refusal (which names it). "" when the config is clean.
-/// Total.
+/// The `control` directive's `-t` check: the ADDRESS is a loopback
+/// endpoint or (ws17) a `unix:<path>` with a path in it, and the
+/// optional second arm is spelled exactly `token <file>` and nothing
+/// else — a two-argument `control` (the keyword with no file), an
+/// unknown keyword, an empty token path or a bare `unix:` is a NAMED
+/// error rather than a silently ignored one.
+///
+/// What is NOT checked here is whether the host HAS unix-domain
+/// sockets, and that is deliberate: `-t` runs where the server may
+/// not, and possibly on a different host from the one that will
+/// serve. The refusal for a host with no family is the startup path's
+/// (`[os.net.unix]`'s `unsupported`, named out loud there), exactly as
+/// the token file's existence is. "" when the config is clean. Total.
 pub fn control_check(c: Conf) -> str {
     var i: int = 0
     let total = c.names.len
     while i < total {
         if c.names[i] == "control" {
             let n = c.args_n[i]
+            if n >= 1 {
+                let addr = c.argp[c.args_at[i]]
+                if addr == "unix:" {
+                    return "\"control\" names an empty unix socket path in {c.files[i]}:{c.lines[i]}"
+                }
+            }
             if n == 2 {
                 let kw = c.argp[c.args_at[i] + 1]
                 return "invalid parameter \"{kw}\" in \"control\" directive, the token arm is spelled \"token <file>\" in {c.files[i]}:{c.lines[i]}"

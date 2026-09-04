@@ -77,6 +77,39 @@ order, one reply at a time) and never from the hands' seqs. A
 cross-process schedule is a different mechanism this repo does not
 have, exactly as a production flight recorder is.
 
+**What ws17 changed about that boundary, and it is not small.** Under
+ws16 the N+1 streams were N-1 quiet ones, one busy one and the
+master: exactly one hand held the listener, so every request in a run
+was in one stream and a reader who found the serving hand had found
+the whole story. Since ws17 every hand accepts on the same inherited
+socket, so **the requests of a single run are SPLIT across N streams
+by the kernel, and which hand took which request is not reproducible**
+— it is the accept queue's answer on the day, and re-running the same
+load will split it differently. Three consequences a bug report has to
+respect:
+
+- **read `accepted=` first.** Each hand's row in `lobo status` (and
+  its own stanza's third head line) carries how many connections THAT
+  process took; the master's `workers:` block is where a reader learns
+  the split before reading a line of log. A hand with `accepted=0` is
+  not a hand whose log is empty by accident.
+- **a request lives entirely in one stream.** A connection is accepted
+  by one hand and served to completion by that hand — nothing hands a
+  connection on — so an access line, its error lines and its
+  generation events share a `worker=` stamp and one `seq` order. That
+  is what keeps a per-request story readable at all, and it is the one
+  thing the split does not take away.
+- **the ACCEPT TURN is the only cross-stream order that is
+  reconstructible.** Hands take 10 ms turns off the wall clock
+  (docs/WORKERS.md), so a run's connections fall into slices whose
+  owner is a function of the ordinal and the millisecond: a reader
+  with two hands' timestamped lines can say which hand OUGHT to have
+  taken a connection that arrived at time T, and one that landed
+  elsewhere is a finding rather than noise. It is a weaker instrument
+  than a seq — millisecond precision, and it retires with the turn
+  when wolf-lang#242 lands — and it is written down here so nobody
+  mistakes it for one.
+
 One sentence, both halves load-bearing: **exploration proves ordering
 properties over the events it can see and permute — and the events it
 can see are the rig's model programs' channel operations, selects,

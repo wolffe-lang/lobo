@@ -100,7 +100,8 @@ fn listen_host(addr: str) -> str {
     if tail.is_empty() {
         return ""
     }
-    for b in tail.bytes() {
+    for b_raw in tail.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return addr
         }

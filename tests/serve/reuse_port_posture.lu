@@ -1,0 +1,180 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws17: WHY LOBO DOES NOT TAKE `reuse_port`, measured on the host
+//! that runs this file rather than read off a manual.
+//!
+//! s137 landed two shapes for making N processes accept on one port
+//! (docs/WORKERS.md): `net_listen_with(addr, reuse_port, backlog)` —
+//! a SO_REUSEPORT group, N sockets on one address — and the
+//! inheritance pair `os_spawn_with` + `net_adopt_listener`, which
+//! gives N processes ONE socket. lobo ships the second. This witness
+//! is the first half of the reason: it builds a live `reuse_port`
+//! group, dials it, and prints WHICH member the kernel handed each
+//! dial to.
+//!
+//! What it ASSERTS is only what `[os.net.listen.opts]` promises on
+//! every serving host — the group binds, and every dial is accepted by
+//! SOME member — because the delivery policy is the host's and this
+//! file must be true on all of them. What it PRINTS is the policy it
+//! saw, which is the measurement: on macOS every dial lands on the
+//! NEWEST bound socket (so a prefork built this way is one server and
+//! N-1 idle sockets — ws16's posture with a different cause), on linux
+//! the 4-tuple hash spreads them.
+//!
+//! The lupin lane is dark by pin, not by choice: lupin 0.1.25 (is36)
+//! predates s137, so `net_listen_with` and `net_wait` do not exist
+//! there — the toolchain file's lane-gap note.
+//!
+//! Loopback only, forever.
+
+fn ready_has(ready: List[int], fd: int) -> bool {
+    for r in ready {
+        if r == fd {
+            return true
+        }
+    }
+    false
+}
+
+fn main() -> !int {
+    // the first member picks the port; the rest join it. Every member
+    // of a group carries the option — a plain bind of a held address
+    // is `exists`, which is the row #234 asked for.
+    var group = List[int]()
+    let l0 = net_listen_with("127.0.0.1:0", true, 0) else |e| match e {
+        unsupported => {
+            // windows refuses the option BY NAME rather than aliasing
+            // it to SO_REUSEADDR, whose delivery promises nothing
+            print(
+                "reuse_port: unsupported on this host (refused by name) — the inheritance shape is the only one",
+            )
+            return 0
+        },
+        exists => {
+            assert(false, "a fresh :0 bind cannot be `exists`")
+            return 1
+        },
+        denied => {
+            assert(false, "a loopback ephemeral port cannot be `denied`")
+            return 1
+        },
+        io => {
+            assert(false, "reuse_port bind of 127.0.0.1:0 answered io")
+            return 1
+        },
+    }
+    (mut group).push(l0)
+    let port = net_port(l0)?
+    let addr = "127.0.0.1:{port}"
+
+    var k: int = 1
+    while k < 3 {
+        let ln = net_listen_with(addr, true, 0) else |_| {
+            assert(false, "member {k} could not join the group on {addr}")
+            return 1
+        }
+        (mut group).push(ln)
+        net_deadline(ln, 5) else |_| {}
+        k = k + 1
+    }
+    net_deadline(l0, 5) else |_| {}
+    assert(group.len == 3, "a three-member group: {group.len}")
+
+    // dial the shared port and ask the readiness surface which member
+    // the kernel woke. `net_wait` is level-triggered, so the answer
+    // survives until the accept drains it ([os.net.wait]).
+    var hits = List[int]()
+    var z: int = 0
+    while z < 3 {
+        (mut hits).push(0)
+        z = z + 1
+    }
+    var dials: int = 0
+    var accepted: int = 0
+    while dials < 30 {
+        let c = net_connect(addr) else |_| {
+            assert(false, "dial {dials} of the group's own port was refused")
+            return 1
+        }
+        let ready = net_wait(group, 500) else |_| {
+            assert(false, "net_wait over the group answered io")
+            return 1
+        }
+        var served = false
+        var m: int = 0
+        while m < group.len {
+            if !served && ready_has(ready, group[m]) {
+                let a = net_accept(group[m]) else |_| {
+                    0
+                }
+                if a > 0 {
+                    net_close(a) else |_| {}
+                    var cur = List[int]()
+                    var q: int = 0
+                    while q < hits.len {
+                        (mut cur).push(if q == m { hits[q] + 1 } else { hits[q] })
+                        q = q + 1
+                    }
+                    hits = cur
+                    served = true
+                    accepted = accepted + 1
+                }
+            }
+            m = m + 1
+        }
+        net_close(c) else |_| {}
+        assert(served, "dial {dials} reached no member of the group")
+        dials = dials + 1
+    }
+
+    // THE GUARANTEE, asserted: every dial was accepted by SOME member.
+    assert(accepted == 30, "every dial accepted by some member: {accepted}/30")
+
+    // THE POLICY, printed: how those 30 fell across the three sockets.
+    var spread: int = 0
+    var d: int = 0
+    while d < hits.len {
+        if hits[d] > 0 {
+            spread = spread + 1
+        }
+        d = d + 1
+    }
+    let shape = if spread == 1 {
+        "ONE SOCKET TOOK ALL — the newest bound member (macOS): a prefork built on reuse_port is one server and N-1 idle sockets"
+    } else {
+        "SPREAD across {spread} of 3 members: the kernel distributes the group (linux)"
+    }
+    print("reuse_port: {hits[0]}/{hits[1]}/{hits[2]} of 30 — {shape}")
+
+    // the survivor clause: close the members that took the dials and
+    // the remaining one takes every dial after them.
+    var w: int = 0
+    while w < group.len - 1 {
+        net_close(group[w]) else |_| {}
+        w = w + 1
+    }
+    let last = group[group.len - 1]
+    let c2 = net_connect(addr) else |_| {
+        assert(false, "the survivor did not take a dial after the others closed")
+        return 1
+    }
+    var solo = List[int]()
+    (mut solo).push(last)
+    let r2 = net_wait(solo, 500) else |_| {
+        assert(false, "net_wait over the survivor answered io")
+        return 1
+    }
+    assert(ready_has(r2, last), "the survivor is ready for the dial the group's closure left it")
+    let a2 = net_accept(last) else |_| {
+        assert(false, "the survivor's accept failed")
+        return 1
+    }
+    net_close(a2) else |_| {}
+    net_close(c2) else |_| {}
+    net_close(last) else |_| {}
+
+    print("reuse_port_posture: ok")
+    0
+}

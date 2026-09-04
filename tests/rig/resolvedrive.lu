@@ -22,8 +22,9 @@ fn to_port(s: str) -> int ! {io} {
         return io
     }
     var n: int = 0
-    for b in s.bytes() {
-        if b < 48 || b > 57 {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b as int < 48 || b as int > 57 {
             return io
         }
         n = n * 10 + b - 48

@@ -56,7 +56,8 @@ fn content_length(head: str) -> int {
             let v = line[15..line.len]
             let t = v.trim()
             var n: int = 0
-            for b in t.bytes() {
+            for b_raw in t.bytes() {
+                let b = b_raw as int
                 if b >= 48 && b <= 57 {
                     n = n * 10 + b - 48
                 }
@@ -75,7 +76,8 @@ fn parse_reply(text: str) -> (int, int, str) {
         let nl = text.find("\n") else text.len
         let num = text[7..nl].trim()
         var ms: int = 0
-        for b in num.bytes() {
+        for b_raw in num.bytes() {
+            let b = b_raw as int
             if b >= 48 && b <= 57 {
                 ms = ms * 10 + b - 48
             }
@@ -87,7 +89,8 @@ fn parse_reply(text: str) -> (int, int, str) {
         let nl = text.find("\n") else text.len
         let num = text[13..nl].trim()
         var n: int = 0
-        for b in num.bytes() {
+        for b_raw in num.bytes() {
+            let b = b_raw as int
             if b >= 48 && b <= 57 {
                 n = n * 10 + b - 48
             }
@@ -110,7 +113,8 @@ fn main() -> !int {
             reply = a
         } else if i == 2 {
             var n: int = 0
-            for b in a.bytes() {
+            for b_raw in a.bytes() {
+                let b = b_raw as int
                 if b >= 48 && b <= 57 {
                     n = n * 10 + b - 48
                 }

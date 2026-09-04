@@ -97,6 +97,8 @@ pub struct Cli {
     stat: bool,
     worker: int,
     worker_control: str,
+    inherit: int,
+    hands: int,
 }
 
 /// True when `name` is one of nginx's four signal words. Total.
@@ -146,6 +148,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var stat = false
     var worker: int = 0
     var worker_control = ""
+    var inherit: int = 0
+    var hands: int = 0
     var want = ""
     var want_kind = ""
     var err_msg = ""
@@ -189,6 +193,31 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 }
             } else if want == "worker-control" {
                 worker_control = a
+            } else if want == "hands" {
+                // ws17: how many hands the master started. A hand needs
+                // the COUNT to know when its accept turn comes round
+                // (`accept_turn`); it cannot read it off its own config
+                // when the directive says `auto`, and a hand that
+                // computed a different N than its siblings would break
+                // the turn-taking outright.
+                hands = digits_val(a)
+                if hands < 1 {
+                    errored = true
+                    err_msg = "option \"--hands\" takes the master's worker count (internal: the master's flag)"
+                }
+            } else if want == "inherit" {
+                // ws17: how many LISTENERS the master handed this hand
+                // through `os_spawn_with` — 0, 1 (plaintext or TLS
+                // alone) or 2 (both). The hand adopts descriptors 3,
+                // 4, … in the config's own order; the numbering is
+                // `[os.proc.inherit]`'s contract, so the count is all
+                // that has to cross the argv. A third internal flag,
+                // never on the usage page.
+                inherit = digits_val(a)
+                if inherit < 0 || inherit > 2 {
+                    errored = true
+                    err_msg = "option \"--inherit\" takes 0, 1 or 2 (internal: the master's flag)"
+                }
             } else if want == "control" {
                 if control_verb_ok(a) {
                     mode = "control"
@@ -256,6 +285,12 @@ pub fn parse_cli(args: List[str]) -> Cli {
         } else if a == "--worker-control" {
             want = "worker-control"
             want_kind = "parameter"
+        } else if a == "--inherit" {
+            want = "inherit"
+            want_kind = "parameter"
+        } else if a == "--hands" {
+            want = "hands"
+            want_kind = "parameter"
         } else if a == "directives-md" {
             mode = "docs"
         } else if a == "logvars-md" {
@@ -315,7 +350,12 @@ pub fn parse_cli(args: List[str]) -> Cli {
             err_msg = "options \"--sni\"/\"--client\"/\"--stat\" shape --request probes; add --request"
         }
     }
-    // the worker flags come as a PAIR, and only with `serve`
+    // the worker flags come as a PAIR, and only with `serve`;
+    // `--inherit` (ws17) rides with them and never alone
+    if !errored && (inherit > 0 || hands > 0) && (worker == 0 || mode != "serve") {
+        errored = true
+        err_msg = "options \"--inherit\"/\"--hands\" ride the master's worker flags (internal)"
+    }
     if !errored && (worker > 0 || !worker_control.is_empty()) {
         if mode != "serve" {
             errored = true
@@ -346,6 +386,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
         stat: stat,
         worker: worker,
         worker_control: worker_control,
+        inherit: inherit,
+        hands: hands,
     }
 }
 
@@ -481,13 +523,17 @@ pub fn pid_remove(path: str) -> () ! {io} {
 
 /// The control address: the `control` directive's argument, or "" when
 /// the directive is absent (the channel is OFF by default). A bare
-/// port becomes a loopback bind (loopback-only, forever). Total.
+/// port becomes a loopback bind (loopback-only, forever); a `unix:`
+/// address is kept whole and dialled by `control_dial` (ws17). Total.
 pub fn control_addr(c: config.Conf) -> str {
     var i: int = 0
     let total = c.names.len
     while i < total {
         if c.names[i] == "control" && c.args_n[i] >= 1 {
             let a = c.argp[c.args_at[i]]
+            if is_unix_addr(a) {
+                return a
+            }
             if a.contains(":") {
                 return a
             }
@@ -496,6 +542,93 @@ pub fn control_addr(c: config.Conf) -> str {
         i = i + 1
     }
     ""
+}
+
+// ------------------------------------------------------------------
+// ws17: the endpoint's UNIX TRANSPORT (wolf-lang#227, landed at this
+// pin as `[os.net.unix]`; std wraps it as `std.net.unix`, sc36). ws15
+// filed the issue after measuring that wolf had no unix-domain socket
+// on ANY host and shipping loopback TCP everywhere; ws16 deferred the
+// consumption; this is it.
+//
+// What it buys is the thing a loopback port cannot be: a UID
+// BOUNDARY. A control port on 127.0.0.1 is reachable by every local
+// user, which is why ws15 grew the token-file arm at all. A socket in
+// a directory the operator owns is permissioned by the filesystem, so
+// `control unix:/run/lobo/control.sock;` needs no shared secret to
+// keep another user off it — the token arm stays for the TCP form and
+// for a host with no unix family.
+//
+// The spelling is `unix:<path>` — nginx's own `listen unix:/path`
+// spelling, so an operator who knows nginx already knows it. Note
+// lobo calls the BUILTINS (`net_listen_unix`, `net_connect_unix`)
+// rather than `std.net.unix`: std has no wrap for the ws17 listener
+// surfaces either (wolf-std#6 stands, sc37's), and using std for one
+// half of the control channel and a builtin for the other would be
+// two seams where the repo has always had one.
+// ------------------------------------------------------------------
+
+/// True when `addr` names a unix-domain socket path — the `unix:`
+/// prefix, nginx's own spelling. Pure and total.
+pub fn is_unix_addr(addr: str) -> bool {
+    addr.starts_with("unix:")
+}
+
+/// The path inside a `unix:` address; "" for a TCP one. Pure and
+/// total.
+pub fn unix_path_of(addr: str) -> str {
+    if !is_unix_addr(addr) {
+        return ""
+    }
+    addr["unix:".len..addr.len]
+}
+
+/// A SIBLING unix address for worker `w` beside the master's own —
+/// `unix:/run/lobo/control.sock` gives `unix:/run/lobo/control.sock.w2`.
+/// The hands' endpoints then live in the master's own directory and
+/// inherit its permissions, which makes a HAND's order desk a uid
+/// boundary too (ws16 could only offer a loopback port there). Pure
+/// and total.
+pub fn unix_worker_addr(master: str, w: int) -> str {
+    if !is_unix_addr(master) {
+        return ""
+    }
+    "{master}.w{w}"
+}
+
+/// Dial a control endpoint, TCP or unix, by the shape of its address.
+/// The answer is an ordinary socket either way — `[os.net.unix]`'s
+/// whole point is that the family is the only difference. Rows are
+/// `net_connect`'s: `refused` (nobody listening, or a stale socket
+/// file with no server behind it), `timeout`, `io`.
+///
+/// **A host with no unix family answers `io` here, not a named row**,
+/// because that is what the coarsening of `net_connect_unix`'s
+/// `unsupported` costs at the call site; the STARTUP path is where the
+/// refusal is named (a `control unix:` config on windows refuses by
+/// name rather than serving nothing).
+fn control_dial(addr: str) -> int ! {refused, timeout, io} {
+    if is_unix_addr(addr) {
+        let p = unix_path_of(addr)
+        return net_connect_unix(p) else |e| match e {
+            unsupported => {
+                return io
+            },
+            not_found => {
+                return refused
+            },
+            refused => {
+                return refused
+            },
+            denied => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+    }
+    net_connect(addr)?
 }
 
 /// The control endpoint's TOKEN FILE: the `control` directive's
@@ -613,7 +746,7 @@ pub fn control_verb_ok(verb: str) -> bool {
 /// (allow w0602: deliberate API — refused and other failures differ).
 #[allow(w0602)]
 pub fn control_send(addr: str, line: str) -> str ! {refused, io} {
-    let c = net_connect(addr) else |e| match e {
+    let c = control_dial(addr) else |e| match e {
         refused => {
             return refused
         },
@@ -825,7 +958,8 @@ pub fn conf_hash(c: config.Conf) -> str {
     let text = config.render_conf(c)
     var a: int = 0
     var b: int = 0
-    for x in text.bytes() {
+    for x_raw in text.bytes() {
+        let x = x_raw as int
         a = (a * 131 + x) % 2147483647
         b = (b * 1000003 + x + 7) % 2147483647
     }
@@ -855,7 +989,8 @@ fn parse_dur_ms(raw: str) -> int {
 /// yields what parsed so far). Total.
 fn digits_val(s: str) -> int {
     var v: int = 0
-    for x in s.bytes() {
+    for x_raw in s.bytes() {
+        let x = x_raw as int
         if x < 48 || x > 57 {
             return v
         }
@@ -1199,7 +1334,7 @@ fn bool_word(b: bool) -> str {
 /// reply keeps its interior newlines; the trailing newline is trimmed.
 #[allow(w0602)]
 pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
-    let c = net_connect(addr) else |e| match e {
+    let c = control_dial(addr) else |e| match e {
         refused => {
             return refused
         },
@@ -1252,7 +1387,7 @@ pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
 
 /// The `worker_processes` directive's value: absent → 1 (nginx's
 /// default); `auto` → 0, the sentinel the entry resolves through
-/// `cpu_count`; a digit run → its value, with `0` read as 1 — a NAMED
+/// `os_cpus`; a digit run → its value, with `0` read as 1 — a NAMED
 /// delta: nginx accepts `worker_processes 0` (a master with no hands,
 /// serving nothing), which lobo declines to imitate. Total.
 pub fn worker_processes(c: config.Conf) -> int {
@@ -1275,46 +1410,120 @@ pub fn worker_processes(c: config.Conf) -> int {
     1
 }
 
-/// The cpu count a linux `/proc/cpuinfo` text reports: one `processor`
-/// row per logical cpu. 0 for a text with none (or an empty one).
-/// Pure and total — the lupin-lane twin of `cpu_count`.
-pub fn cpu_count_of(cpuinfo: str) -> int {
-    var n: int = 0
-    for line in cpuinfo.lines() {
-        if line.starts_with("processor") {
-            n = n + 1
-        }
-    }
-    n
+// ws17: the cpu count RETIRES from this module. ws16 resolved
+// `worker_processes auto` by counting `processor` rows in
+// `/proc/cpuinfo` (linux) with `NUMBER_OF_PROCESSORS` behind it and
+// nothing at all on macOS — a startup notice and one worker, filed as
+// wolf-lang#233. s137 landed `os_cpus()` (`[os.cpus]`), so the reader
+// and its pure twin are GONE rather than kept beside the builtin, and
+// `auto` resolves in main's `serve` arm through the call itself. Two
+// reasons the call does not live here: this module is on the lupin
+// lane in six corpus tests and lupin 0.1.25 predates s137 (the pin
+// file's lane-gap note), and `os_cpus`'s `io` row is a decision the
+// ENTRY takes — the issue's own instruction is not to swallow it into
+// a default. The row-count reader is not merely shorter to replace:
+// on a cgroup-quota'd host `/proc/cpuinfo` answered the machine's
+// cores and lobo would have started workers that never get one.
+
+/// The length of one hand's accept turn, in milliseconds (ws17).
+/// Exposed so the witness can name the number rather than repeat it.
+pub fn accept_slice_ms() -> int {
+    10
 }
 
-/// The host's logical cpu count, or 0 when this pin can read none:
-/// linux answers through `/proc/cpuinfo`, windows through the
-/// `NUMBER_OF_PROCESSORS` variable (claimed, not measured — lobo has
-/// no windows lane), and macOS through NOTHING — the count lives
-/// behind `sysctl(3)`, wolf has no cpu query and no way to read a
-/// child's stdout (std.process F-0065), so `auto` there is 1 with a
-/// startup notice naming this sentence (wolf-lang#233 asks for the
-/// query). fs/env tier; total (every miss reads as 0).
-pub fn cpu_count() -> int {
-    let txt = fs_read_text("/proc/cpuinfo") else |_| ""
-    let n = cpu_count_of(txt)
-    if n > 0 {
-        return n
+/// Is it worker `worker`'s turn to accept, at wall time `now`, among
+/// `hands` hands?
+///
+/// **This is nginx's `accept_mutex` without a mutex, and the reason it
+/// exists is an upstream one, MEASURED (wolf-lang, filed at ws17).**
+/// `net_accept` awaits readiness with the socket's deadline and then
+/// runs a BLOCKING `accept(2)`. With N hands sharing one inherited
+/// listener ([os.proc.inherit]) a single connection wakes all N: one
+/// wins the syscall and the losers block in it — not for their
+/// deadline, which governed only the readiness wait, but until the
+/// NEXT connection arrives. A hand parked there answers no control
+/// verb and runs no timer, so its master reads it as gone and replaces
+/// it; on a busy server the next connection is microseconds away and
+/// nothing is visible, on a quiet one the hand is stuck.
+///
+/// The turn closes it without a new primitive: at any instant exactly
+/// one hand has the listener in its wait set, so there is no race to
+/// lose. Slices are `accept_slice_ms()` wide and assigned round robin
+/// off the wall clock, which every hand on one host reads the same;
+/// each hand accepts every connection that arrives in its own slice
+/// (many, under load — a slice is thousands of passes), so the work
+/// still spreads evenly. The RESIDUAL race is a hand that reads the
+/// clock inside its slice and reaches the syscall after the boundary:
+/// microseconds wide, and it can only bite while connections are
+/// ARRIVING, which is exactly when the next one unparks it.
+///
+/// `hands <= 1` is the single process (and the single-hand master):
+/// always its turn, no clock read at all. Pure and total.
+pub fn accept_turn(worker: int, hands: int, now: int) -> bool {
+    if hands <= 1 {
+        return true
     }
-    let w = env_get("NUMBER_OF_PROCESSORS") else |_| ""
-    digits_val(w.trim())
+    let w = if worker < 1 { 1 } else { worker }
+    let slice = accept_slice_ms()
+    now / slice % hands == w - 1
 }
 
-/// The argv a master starts worker `worker` with: this executable,
-/// `serve`, the same prefix and config, and the two internal flags
-/// that make the child a hand rather than a master — its ordinal and
-/// the loopback control endpoint the master will reach it on. One
-/// value per element, no quoting anywhere (`os_spawn` takes a vector;
-/// std.process's whole reason there is no shell). Pure and total.
-pub fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str) -> List[str] {
+/// How long a hand may block before its accept turn changes hands, in
+/// milliseconds — `base` capped by the time left in this slice (when
+/// the turn is ours) or the time until ours begins (when it is not).
+///
+/// Without this the turn is a bug rather than a mechanism: a hand
+/// reads the clock at the top of its pass, finds the turn is not its
+/// own, and then blocks in `net_wait` for the whole idle budget — 25
+/// ms against a 10 ms slice, so it sleeps clean through its own turn
+/// and the listener is unattended for most of every round. Capping
+/// the wait at the boundary is what makes the round trip exact: a hand
+/// wakes when its turn starts and stops accepting when it ends.
+/// Pure and total.
+pub fn accept_wait_ms(worker: int, hands: int, now: int, base: int) -> int {
+    if hands <= 1 {
+        return base
+    }
+    let slice = accept_slice_ms()
+    let round = slice * hands
+    let w = if worker < 1 { 1 } else { worker }
+    var pos = now % round
+    if pos < 0 {
+        pos = 0
+    }
+    let mine = (w - 1) * slice
+    var left: int = 0
+    if pos >= mine && pos < mine + slice {
+        left = mine + slice - pos
+    } else if pos < mine {
+        left = mine - pos
+    } else {
+        left = round - pos + mine
+    }
+    if left < 1 {
+        left = 1
+    }
+    if left < base {
+        return left
+    }
+    base
+}
+
+/// The ARGUMENTS a master starts a hand with, the program named
+/// apart: `serve`, the same prefix and config, and the three internal
+/// flags that make the child a hand rather than a master — its
+/// ordinal, the loopback control endpoint the master will reach it on
+/// (ws16), how many listeners rode down with it and how many hands the
+/// master started (ws17). One value
+/// per element, no quoting anywhere (the spawn takes a vector;
+/// std.process's whole reason is that there is no shell). This is the
+/// shape `os_spawn_with(exe, args, inherit)` wants — the executable is
+/// its own parameter there, so a master never splices its own path
+/// into a list it also builds options in. Pure and total.
+pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int, hands: int) -> List[
+    str,
+] {
     var a = List[str]()
-    (mut a).push(exe)
     (mut a).push("serve")
     (mut a).push("-p")
     (mut a).push(prefix)
@@ -1324,6 +1533,31 @@ pub fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str) -> 
     (mut a).push("{worker}")
     (mut a).push("--worker-control")
     (mut a).push(ctrl)
+    (mut a).push("--inherit")
+    (mut a).push("{inherit}")
+    (mut a).push("--hands")
+    (mut a).push("{hands}")
+    a
+}
+
+/// `worker_args` with the executable at the head — the single-vector
+/// shape `os_spawn` takes, which is the FALLBACK path (a host that
+/// answers `unsupported` to a non-empty inherit set, and the
+/// zero-listener case). Pure and total.
+pub fn worker_argv(
+    exe: str,
+    prefix: str,
+    conf: str,
+    worker: int,
+    ctrl: str,
+    inherit: int,
+    hands: int,
+) -> List[str] {
+    var a = List[str]()
+    (mut a).push(exe)
+    for w in worker_args(prefix, conf, worker, ctrl, inherit, hands) {
+        (mut a).push(w)
+    }
     a
 }
 
@@ -1383,8 +1617,9 @@ pub fn status_worker_text(
     live_bytes: int,
     budget_503s: int,
     restarts: int,
+    accepted: int,
 ) -> str {
-    "worker {worker}: {state} control={ctrl} generation={gen} live={live} events={events} live-region-bytes={live_bytes} budget-503s={budget_503s} restarts={restarts}\n"
+    "worker {worker}: {state} control={ctrl} generation={gen} live={live} accepted={accepted} events={events} live-region-bytes={live_bytes} budget-503s={budget_503s} restarts={restarts}\n"
 }
 
 /// One worker as a JSON object in the master's stanza (no leading
@@ -1401,8 +1636,9 @@ pub fn status_worker_json(
     live_bytes: int,
     budget_503s: int,
     restarts: int,
+    accepted: int,
 ) -> str {
-    "{{\"worker\":{worker},\"state\":\"{state}\",\"control\":\"{ctrl}\",\"generation\":{gen},\"live\":{live},\"events\":{events},\"live_region_bytes\":{live_bytes},\"budget_503s\":{budget_503s},\"restarts\":{restarts}}}"
+    "{{\"worker\":{worker},\"state\":\"{state}\",\"control\":\"{ctrl}\",\"generation\":{gen},\"live\":{live},\"accepted\":{accepted},\"events\":{events},\"live_region_bytes\":{live_bytes},\"budget_503s\":{budget_503s},\"restarts\":{restarts}}}"
 }
 
 /// The MASTER's JSON stanza open: schema 1's members with the master's
@@ -1418,13 +1654,18 @@ pub fn status_json_master_open(current: int, quitting: bool, events: int, live_b
     "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"live_region_bytes\":{live_bytes},\"workers_configured\":{n},\"generations\":[],\"workers\":["
 }
 
-/// A WORKER's two extra head lines — `worker: N` and `listening:
-/// true|false` — appended after `status_head_text`'s facts, so the
-/// master (and an operator dialling one hand) can read which process
-/// answered and whether it holds the listeners. Only a worker prints
-/// them; the single-process stanza is unchanged. Total.
-pub fn status_worker_head(worker: int, listening: bool) -> str {
-    "worker: {worker}\nlistening: {bool_word(listening)}\n"
+/// A WORKER's three extra head lines — `worker: N`, `listening:
+/// true|false` and (ws17) `accepted: N` — appended after
+/// `status_head_text`'s facts, so the master (and an operator dialling
+/// one hand) can read which process answered, whether it holds the
+/// listeners, and HOW MANY CONNECTIONS IT HAS TAKEN. The third line is
+/// the sprint's own instrument: with every hand accepting on one
+/// inherited socket, the only way to see the kernel distributing the
+/// work is to ask each hand what it did. Appended, nothing renamed:
+/// the ws16 head is a prefix of this one. Only a worker prints them;
+/// the single-process stanza is unchanged. Total.
+pub fn status_worker_head(worker: int, listening: bool, accepted: int) -> str {
+    "worker: {worker}\nlistening: {bool_word(listening)}\naccepted: {accepted}\n"
 }
 
 /// A WORKER's JSON stanza open: `status_json_open`'s members plus
@@ -1437,8 +1678,9 @@ pub fn status_json_open_worker(
     live_bytes: int,
     worker: int,
     listening: bool,
+    accepted: int,
 ) -> str {
-    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"live_region_bytes\":{live_bytes},\"worker\":{worker},\"listening\":{bool_word(listening)},\"generations\":["
+    "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"live_region_bytes\":{live_bytes},\"worker\":{worker},\"listening\":{bool_word(listening)},\"accepted\":{accepted},\"generations\":["
 }
 
 /// The value after `{key}: ` on the line that starts with it, as a
@@ -1451,7 +1693,8 @@ pub fn stanza_int(body: str, key: str) -> int {
     if w.is_empty() {
         return -1
     }
-    for b in w.bytes() {
+    for b_raw in w.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return -1
         }
@@ -1485,7 +1728,8 @@ pub fn stanza_field_sum(body: str, field: str) -> int {
             if w.starts_with(probe) {
                 let v = w[probe.len..w.len]
                 var ok = !v.is_empty()
-                for b in v.bytes() {
+                for b_raw in v.bytes() {
+                    let b = b_raw as int
                     if b < 48 || b > 57 {
                         ok = false
                     }
@@ -1510,7 +1754,7 @@ pub fn control_reachable(addr: str) -> bool {
     if addr.is_empty() {
         return false
     }
-    let c = net_connect(addr) else |_| {
+    let c = control_dial(addr) else |_| {
         return false
     }
     net_close(c) else |_| {}

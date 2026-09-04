@@ -1,0 +1,208 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! THE UNIX CONTROL TRANSPORT, end to end, against the REAL binary
+//! (ws17; wolf-lang#227 landed at this pin as `[os.net.unix]`).
+//!
+//! ws15 filed the issue after measuring that wolf had no unix-domain
+//! socket on ANY host and shipping loopback TCP everywhere; ws16
+//! deferred the consumption; this is the witness that it arrived. What
+//! it drives:
+//!   1. `control unix:<path>` under `worker_processes 2` — the master
+//!      binds the socket, the pid file records the `unix:` address (not
+//!      a port), and EACH HAND gets a sibling socket `<path>.wN`, so a
+//!      hand's order desk is a uid boundary too (ws16 could only give
+//!      it a loopback port, which every local user can dial);
+//!   2. every verb still works over the new transport: `ping`, the
+//!      master's `status` folding both hands' stanzas (fetched over
+//!      THEIR unix sockets), and a `reload` that fans out `workers=2/2`;
+//!   3. a hand's own endpoint answers directly — `unix:` is a hand's
+//!      order desk as much as the master's;
+//!   4. `stop` and the CLEANUP POSTURE: `net_close` of a unix listener
+//!      unlinks its path, so an orderly stop leaves NO socket file
+//!      behind — not the master's and not any hand's.
+//!
+//! Loopback only for http, forever; the control path is a filesystem
+//! socket under the repo's own `target/`, which is where it has to be
+//! for a reason worth writing down: **`sun_path` holds about a hundred
+//! bytes** (104 on macOS, 108 on linux) and a socket under a long
+//! scratch prefix silently exceeds it. lobo names that cause in its
+//! own refusal rather than printing a bare "bind failed" — measured at
+//! ws17 with a 126-byte path.
+//!
+//! Idempotent: the scratch tree is cleared at the START.
+
+use shell
+
+fn http_get(port: int, path: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll `ep` (a `unix:` address) until it answers `ping`, up to ~8s.
+/// Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 160 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn master_status(ep: str) -> str {
+    shell.control_fetch(ep, "status") else |_| { "" }
+}
+
+fn worker_row(st: str, n: int) -> str {
+    for line in st.lines() {
+        if line.starts_with("worker {n}: ") {
+            return line
+        }
+    }
+    ""
+}
+
+fn row_field(row: str, key: str) -> str {
+    let probe = "{key}="
+    for w in row.words() {
+        if w.starts_with(probe) {
+            return w[probe.len..w.len]
+        }
+    }
+    ""
+}
+
+fn main() -> !int {
+    // the socket lives beside the binary under target/, and the path
+    // is SHORT on purpose (see the header's sun_path note)
+    let dir = "target/ux_e2e"
+    fs_remove_dir_all(dir) else |_| {}
+    fs_create_dir_all("{dir}/www")?
+    fs_write_text("{dir}/www/index.html", "unix-body\n")?
+
+    let sock = "{dir}/c.sock"
+    let ep = "unix:{sock}"
+    let hp = free_port()?
+    let confp = "{dir}/lobo.conf"
+    fs_write_text(
+        confp,
+        "worker_processes 2;\npid {dir}/lobo.pid;\ncontrol {ep};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {dir}/www; }}\n}}\n",
+    )?
+
+    var argv = List[str]()
+    (mut argv).push("target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(
+            false,
+            "could not spawn the master (target/lobo-debug — the gauntlet's tiers step builds it)",
+        )
+        return 1
+    }
+
+    // 1. the master binds the socket; the pid file records the address
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        assert(false, "the master never answered on {ep}")
+    }
+    assert(fs_exists(sock), "the master's socket file exists at {sock}")
+    let recorded = fs_read_text("{dir}/lobo.pid") else |_| { "" }
+    assert(
+        recorded.trim() == ep,
+        "the pid file records the unix ADDRESS, not a port: [{recorded.trim()}]",
+    )
+
+    // …and each hand gets a SIBLING socket, so its order desk is a uid
+    // boundary too
+    let st1 = master_status(ep)
+    assert(st1.contains("workers: 2\n"), "the master counts its hands: {st1}")
+    let ep1 = row_field(worker_row(st1, 1), "control")
+    let ep2 = row_field(worker_row(st1, 2), "control")
+    assert(ep1 == "unix:{sock}.w1", "hand 1's endpoint is a sibling of the master's: {ep1}")
+    assert(ep2 == "unix:{sock}.w2", "hand 2's endpoint is a sibling of the master's: {ep2}")
+    assert(fs_exists("{sock}.w1") && fs_exists("{sock}.w2"), "both hand sockets exist on disk")
+
+    // 2. the verbs carry over the new transport
+    let pong = shell.control_send(ep, "ping") else |_| { "" }
+    assert(pong == "pong", "ping over a unix socket: [{pong}]")
+    // the master FETCHED both hands' stanzas over their own unix
+    // sockets to build those rows — the fold works on this transport
+    assert(
+        worker_row(st1, 1).contains(": serving ") && worker_row(st1, 2).contains(": serving "),
+        "both hands answered the master over unix and both serve: {st1}",
+    )
+    let body = http_get(hp, "/index.html")?
+    assert(body.contains("unix-body"), "http still serves beside the unix control channel: {body}")
+
+    // 3. a hand's own endpoint is an order desk too
+    let own = shell.control_fetch(ep1, "status") else |_| { "" }
+    assert(own.contains("worker: 1\n"), "hand 1 answers on its own unix socket: {own}")
+
+    let rr = shell.control_send(ep, "reload") else |_| { "" }
+    assert(rr.starts_with("reload complete (generation 2)"), "reload over unix: {rr}")
+    assert(rr.contains("workers=2/2"), "…and it fanned out to both hands: {rr}")
+
+    // 4. stop, and THE CLEANUP POSTURE: a unix listener unlinks its
+    // path at close, so an orderly stop leaves nothing behind
+    let rs = shell.control_send(ep, "stop") else |_| { "" }
+    assert(rs.contains("shutting down"), "stop over unix: {rs}")
+    let code = os_wait(child) else |_| {
+        -1
+    }
+    assert(code == 0, "the master exits 0: {code}")
+    time_sleep_ms(200)
+    assert(!fs_exists(sock), "the master's socket file is gone (net_close unlinked it)")
+    assert(!fs_exists("{sock}.w1"), "hand 1's socket file is gone")
+    assert(!fs_exists("{sock}.w2"), "hand 2's socket file is gone")
+    assert(!fs_exists("{dir}/lobo.pid"), "pid file removed on stop")
+
+    fs_remove_dir_all(dir) else |_| {}
+    print("control unix e2e: ok")
+    0
+}

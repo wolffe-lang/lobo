@@ -76,7 +76,8 @@ fn unescape_quoted(inner: str) -> str {
     var run: int = 0
     var i: int = 0
     var esc = false
-    for b in inner.bytes() {
+    for b_raw in inner.bytes() {
+        let b = b_raw as int
         if esc {
             if b == 34 || b == 39 || b == 92 {
                 out = "{out}{inner[run..i - 1]}"
@@ -123,7 +124,8 @@ pub fn lex(src: str) -> Toks {
     var startline: int = 1
     var line: int = 1
     var i: int = 0
-    for b in src.bytes() {
+    for b_raw in src.bytes() {
+        let b = b_raw as int
         if state == 0 {
             if is_ws(b) {} else if b == 35 {
                 state = 4
@@ -269,12 +271,12 @@ pub fn word_segments(text: str) -> str {
     let bs = text.bytes()
     let n = bs.len
     while i < n {
-        if bs[i] == 36 && i + 1 < n {
+        if bs[i] as int == 36 && i + 1 < n {
             var name = ""
             var next: int = i
-            if bs[i + 1] == 123 {
+            if bs[i + 1] as int == 123 {
                 var j: int = i + 2
-                while j < n && bs[j] != 125 {
+                while j < n && bs[j] as int != 125 {
                     j = j + 1
                 }
                 if j < n {
@@ -283,7 +285,7 @@ pub fn word_segments(text: str) -> str {
                 }
             } else {
                 var j: int = i + 1
-                while j < n && is_name_byte(bs[j]) {
+                while j < n && is_name_byte(bs[j] as int) {
                     j = j + 1
                 }
                 if j > i + 1 {

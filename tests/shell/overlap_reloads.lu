@@ -28,7 +28,8 @@ fn gen_live(status: str, gen: int) -> int {
     }
     let after = tail[lk + 5..tail.len]
     var v: int = 0
-    for b in after.bytes() {
+    for b_raw in after.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return v
         }

@@ -111,7 +111,8 @@ fn current_gen_of(ep: str, tok: str) -> int {
     }
     var n: int = 0
     var seen = false
-    for b in body[at + key.len..body.len].bytes() {
+    for b_raw in body[at + key.len..body.len].bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             n = n * 10 + b - 48
             seen = true

@@ -14,102 +14,153 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang at TRUNK 31170d1 (the s135 merge, "the byte arrives") —
-# D57 DEV-STAMPED `0.2.3+dev.31170d1`, because r07 had not tagged
-# v0.2.4 at ws16's pin step (checked: `git tag` tops out at v0.2.3);
-# the contract's either/or takes the trunk sha, exactly as ws14 did.
-# Build in a scratch worktree at the sha, stamping the commit ONLY
-# (no WOLF_RELEASE: a release stamp for a version the tag does not
+# wolf-lang at TRUNK d6aeaca (the s137 merge, "the server has cores") —
+# D57 DEV-STAMPED `0.2.4+dev.d6aeaca`, because r08 had not tagged
+# v0.2.5 at ws17's pin step (checked: `git tag` tops out at v0.2.4);
+# the contract's either/or takes the trunk sha, exactly as ws14 and
+# ws16 did. Build in a scratch worktree at the sha, stamping the commit
+# ONLY (no WOLF_RELEASE: a release stamp for a version the tag does not
 # point at claims nothing — D57's rule, and `build_is_release` would
 # refuse it anyway):
-#   git worktree add <scratch> 31170d1
-#   WOLF_COMMIT=31170d1 cargo build --release -p wolf_driver -p wolf_rt
+#   git worktree add <scratch> d6aeaca
+#   WOLF_COMMIT=d6aeaca cargo build --release -p wolf_driver -p wolf_rt
 # and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ — the
 # native tier needs the staticlib beside the driver.
 #
-# What the bump brings this repo, each measured at the bump
-# (v0.2.3..31170d1 is 3befc3e..31170d1 — ELEVEN commits, all s135):
-#   * [type.byte] (D72, #203 closes) — an 8-bit unsigned type,
-#     List[byte] strides by 1, casts truncate/zero-extend. lobo's byte
-#     paths are `List[int]` and stay so until sc35 (wolf-lang#231: no
-#     builtin PRODUCES a byte-typed list yet, so a substitution would
-#     charge 17-18x against today's 16x — wolf-std's sc34 numbers);
-#     `byte` is not an identifier anywhere in lobo's tree (grepped).
-#     Predicted zero motion; MEASURED zero (fmt, both tiers, corpus).
-#   * #222 — one path spelling across the pkg verbs. lobo runs no
-#     pkg verb; blast radius zero.
-#   * #224 — the reset-socket EINVAL on the checked machine: a peer
-#     closed over unread receive data resets the connection and
-#     macOS answered EINVAL to SO_RCVTIMEO on it; `net_deadline` now
-#     reports the deadline ARMED there (what native's timer wheel
-#     reports). THIS is the delta lobo takes: the D41 residue —
-#     `region_measured.lu`'s swallow and `budget_cap.lu`'s drive
-#     ordering — comes out at this bump, with the checked lane the
-#     witness (docs/BUDGET.md's lane table). The `checked-refuses:`
-#     rows are UNTOUCHED: they name C1 (structured concurrency in
-#     checked execution), a different refusal from a different sprint.
-#   * gate floors, ir-volume ceiling, CHANGELOG — upstream process.
-#   * the s135 corpus adds — five witnesses; nothing lobo builds.
-# Deltas classed at this bump: one BEHAVIORAL (#224 — a test-rig
-# residue retired, no server code moved), zero mechanical (the wolfi
-# toolchain stamp reads the VERSION, 0.2.3, which did not change — the
-# dev suffix is not in the header), zero refused-by-name.
-# Pairing note (F-0064, reported never gated): wolf@31170d1 declares
-# lupin **0.1.23** as its pairing; [lupin] below names 0.1.24, ONE
-# point release ahead (forward-only, the ws14 posture) — is35's
-# release is "the byte in the mirror", the interpreter half of the
-# same [type.byte] work, pinned together with the compiler half.
-# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, NINTH
+# 31170d1 → d6aeaca is SIXTY-THREE commits over three trains (s136,
+# r07's v0.2.4 release, s137). What the bump brings this repo, each
+# measured at the bump:
+#   * s137 — THE SPRINT'S OWN FLIP SET, five new builtins lobo consumes
+#     in the same wave it pins them:
+#       - `net_wait(fds: List[int], deadline_ms: int) -> List[int] !
+#         {io}` (`[os.net.wait]`, wolf-lang#127): readiness over a SET,
+#         level-triggered, an empty answer is the deadline expiring and
+#         NOT a failure. It names no host and every tier serves it. It
+#         is what replaced every `net_deadline` time-slice in the
+#         serving loop — the one change that moved lobo's idle cost.
+#       - `net_listen_with(addr, reuse_port, backlog) -> int !
+#         {unsupported, exists, denied, io}` (`[os.net.listen.opts]`,
+#         #234) and `os_spawn_with(exe, args, inherit) -> int` +
+#         `net_adopt_listener(fd) -> int` (`[os.proc.inherit]`, #235).
+#         The two shapes for distributing accepts. lobo takes the
+#         INHERITANCE shape on both serving hosts — the spec states
+#         (measured on the runner, not quoted) that macOS hands every
+#         SYN to the newest bound socket in a `SO_REUSEPORT` group, so
+#         `reuse_port` there buys a shared port and gap-free failover
+#         but NOT distribution; docs/WORKERS.md carries lobo's own
+#         re-measurement of both on this box.
+#       - `os_cpus() -> int ! {io}` (`[os.cpus]`, #233): schedulable
+#         cores, quota- and affinity-aware, `io` rather than a silent
+#         1. `worker_processes auto` reads it; the macOS notice and
+#         shell's `/proc/cpuinfo` reader both retire.
+#     Deltas classed for these: FIVE ADDITIVE surfaces, zero motion in
+#     anything lobo already called.
+#   * s136 — #231, THE ONE THAT MOVED SOURCE: eight byte producers and
+#     consumers change type, `List[int]` → `List[byte]` (`str.bytes()`,
+#     `str_from_utf8`, `fs_read_bytes`/`fs_write_bytes`/`fs_read_chunk`/
+#     `fs_write_chunk`, `net_read_bytes`/`net_write_bytes`). ws16's note
+#     predicted lobo would stay on `List[int]` until the producers
+#     landed; they landed, so the prediction expires and lobo's byte
+#     paths take the new element. MECHANICAL and MEASURED, never
+#     inferred: 306 E0401s over 21 source files at the first build,
+#     closed over 51 `.lu` files — 381 `List[int]` declarations become
+#     `List[byte]`, 201 reads widen with `b as int` and 221 writes
+#     narrow with `x as byte` ([type.byte.op]/[type.byte.cast]; the
+#     E0401 note names the fix at every site, and `byte as char` is
+#     E0805 — a byte bridges to a char through `int`). The `.wolfi`
+#     surfaces move with it: 47 signatures re-record `List[int]` ->
+#     `List[byte]`, with ZERO item motion in any of the fourteen.
+#   * s136 — #227 unix-domain sockets (`[os.net.unix]`):
+#     `net_listen_unix(path)` / `net_connect_unix(path)`, an ordinary
+#     net handle (accept/read/write/deadline/close serve it; `net_port`
+#     is `io`), `net_close` of the LISTENER unlinks the path. This is
+#     the surface ws15 filed for and ws16 deferred: the control
+#     endpoint's `unix:` transport is built on it in this sprint.
+#     windows answers `unsupported` BY NAME.
+#   * s136 — #232 (a consumed `s.bytes()` walk charges 0) and D74/#230
+#     (the string-layout lexer codes, one rule per code). #232 is a
+#     ledger delta lobo's budget tests SEE; D74 is a lexer refusal
+#     class — lobo's sources carry no offending literal (measured by
+#     the fmt and build steps, which are the whole test).
+#   * r07 — v0.2.4 itself: the release train (#226's self-publishing
+#     job, the pairing differ, README). Nothing lobo's sources reach;
+#     the toolchain stamp in every `.wolfi` reads the VERSION, which
+#     moves 0.2.3 → 0.2.4, so the fourteen snapshots re-record with
+#     ZERO item motion (the ws15 precedent, verified the same way).
+# Deltas classed at this bump: ONE MECHANICAL-WITH-SOURCE-MOTION (#231,
+# the byte element), one mechanical-only (the `.wolfi` toolchain stamp),
+# FIVE ADDITIVE surfaces consumed on purpose, zero refused-by-name.
+# Pairing note (F-0064, reported never gated): wolf@d6aeaca declares
+# lupin **0.1.24** as its pairing; [lupin] below names 0.1.25, ONE point
+# release ahead (forward-only, the ws14/ws16 posture).
+# THE LANE GAP, NAMED: lupin 0.1.25 is is36, whose conformance pin is
+# 982f857 (the v0.2.4 tag) — one train BEHIND s137. So none of the five
+# s137 builtins exist on the lupin lane at this trio, and every lobo
+# test that names one declares `lanes: native` (or native+checked where
+# the checked machine serves it: `net_wait` and `net_listen_with` yes;
+# `os_spawn_with` with a NON-EMPTY inherit set and `net_adopt_listener`
+# are refused BY NAME there, since the checked machine is the `wolf`
+# binary interpreting a program and a descriptor handed to "the
+# program's child" would go to the compiler's child). The gap closes at
+# the lupin release that pins s137.
+# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, TENTH
 # measurement — still open, the gauntlet's release step keeps
 # WOLF_MIDEND=0. See [std]'s note.
 repo = "wolffe-lang/wolf-lang"
-rev = "31170d119379086f6242cd88d4f4e5386f6aef23"
-version_line = "wolf 0.2.3+dev.31170d1 (wolfgang, pin 31170d1)"
+rev = "d6aeaca858c518b607ab4ec7a68375f4bee9e484"
+version_line = "wolf 0.2.4+dev.d6aeaca (wolfgang, pin d6aeaca)"
 
 [lupin]
-# lupin at the v0.1.24 RELEASE TAG (294e75c; D57: build the tag, so
-# --version claims the release with no +dev suffix). 0.1.24 is is35
-# ("the byte in the mirror"): the interpreter's [type.byte] — the
-# mirror of the s135 compiler work the [wolf] rev above carries. Its
-# conformance pin (3befc3e, the v0.2.3 tag) is information, not this
-# file's rev — it sits one merge (s135) behind the [wolf] rev above,
-# and s135 is the byte work lupin's own release mirrors. Bumped
-# together with [wolf] as always. Build AT THE TAG (scratch worktree):
-#   git checkout v0.1.24 && cargo build --release --bin lupin
+# lupin at the v0.1.25 RELEASE TAG (f13fc38; D57: build the tag, so
+# --version claims the release with no +dev suffix). 0.1.25 is is36
+# ("the byte arrives"): the interpreter's half of the s136 work the
+# [wolf] rev above carries — `byte` and the producers speaking it
+# (#231/#232), the unix-domain family (#227), D74's lexer codes. Its
+# conformance pin (982f857, the v0.2.4 tag) is information, not this
+# file's rev. It does NOT carry s137 (see [wolf]'s lane-gap note).
+# Bumped together with [wolf] as always. Build AT THE TAG (scratch
+# worktree):
+#   git checkout v0.1.25 && cargo build --release --bin lupin
 # stage target/release/lupin into .wolf-bin/.
 repo = "wolffe-lang/wolf-interp"
-rev = "294e75c1c9b9db8c7d65e0f346bd52407471210a"
-version_line = "lupin 0.1.24 (wolf-interp, reference interpreter at pin 3befc3e)"
+rev = "f13fc38daee83e4ac7e6dc9662a2ef53766a238b"
+version_line = "lupin 0.1.25 (wolf-interp, reference interpreter at pin 982f857)"
 
 [std]
-# wolf-std, pinned at TRUNK f016303 (the sc34 docs commit atop the
-# sc34 merge, "the byte tier is bytes — REFUSED WITH NUMBERS"): the
-# bump that carries the sentence lobo's own byte posture rests on.
-# sc34 MEASURED that the language has `byte` but no byte-typed
-# builtin (wolf-lang#231, F-0106), so a substituted `List[byte]`
-# reader charges 17-18x against today's 16x — and declined the
-# substitution. lobo's byte paths (`List[int]` everywhere) therefore
-# stay put until sc35 lands the producers, by the same numbers. std's
-# own pins at f016303: binary 31170d1 == data 31170d1 (the one-sha
-# invariant restored upstream) — THE SAME wolf rev this file's [wolf]
-# names, so the compiler pins agree exactly for the first time; its
-# machine pin is lupin 0.1.24, this file's [lupin]. Blast radius of
-# 35f69ef → f016303 on lobo, measured at the bump: the tree moves in
-# std/str, std/strbuf, std/bytes, std/mem/budget headers and the
-# Guide (prose; the byte-currency interim named by name) and no lobo
-# source moved for it; suite counts identical. NOT a binary: a SOURCE
-# TREE the toolchain resolves `use std.…` against (`--std-root` /
-# $WOLF_STD — the driver's own mechanism; lib-toolchain.sh exports
-# it). Staged, like every pinned artifact, by a documented one-time
-# action:
+# wolf-std, pinned at TRUNK c0f75e8 (the sc36 docs commit atop the sc36
+# merge, "the socket surface"): the bump that carries `std.net.unix`,
+# the std half of wolf-lang#227 — `unix.listen(path)` / `unix.connect(
+# path)` returning std.net's OWN types, the cleanup posture held by
+# relations (including the best-effort unlink), and the windows row
+# documented as a HOST property (API-CONVENTIONS §14 amended).
+# THE ASK THAT STILL STANDS, named here because lobo's ws17 sources
+# depend on the answer: **wolf-std#6 is OPEN** — std wraps neither
+# `listen_with(addr, opts)` nor `adopt_listener(fd)`, so the two
+# surfaces the many-hands shape is built on have no std tier at this
+# pin and lobo calls the BUILTINS directly (`net_listen_with`,
+# `os_spawn_with`, `net_adopt_listener`, `net_wait`, `os_cpus`). That
+# is a stated posture, not an oversight: sc37 owns the wrap, and the
+# day it lands lobo's call sites move to `std.net`'s spellings with no
+# behavioral change. lobo already calls the net/os builtins directly
+# everywhere else, so the seam is the same one it has always used.
+# f016303 → c0f75e8 also carries sc35's RENAME (233 signatures over 19
+# modules; `fs.read_bytes` 16x → 1.00x on both tiers) and sc36's
+# three-lane witnesses. std's own pins at c0f75e8: binary == data ==
+# 982f857 (the v0.2.4 tag), which is ONE TRAIN behind this file's
+# [wolf] rev — s137 is not in std's pin either, the same gap [lupin]
+# names, and for the same reason.
+# NOT a binary: a SOURCE TREE the toolchain resolves `use std.…`
+# against (`--std-root` / $WOLF_STD — the driver's own mechanism;
+# lib-toolchain.sh exports it). Staged, like every pinned artifact, by
+# a documented one-time action:
 #   git -C <wolf-std-checkout> archive <rev> std | tar -x -C .wolf-bin/
 #   git -C <wolf-std-checkout> rev-parse <rev> > .wolf-bin/std/STD-REV
 # lib-toolchain.sh REFUSES when the tree is missing or STD-REV drifts
 # from `rev` (a tree has no --version; the marker is its identity).
 # KNOWN CAVEAT at this pin trio: wolf-lang#146 (the loop-versioning
 # noalias guard built from a non-dominating len load, sc_muladd) —
-# re-probed at 31170d1 at THIS bump (the NINTH measurement): the
-# issue is OPEN and the gauntlet's release step keeps WOLF_MIDEND=0
-# until the fix enters the [wolf] pin; the flip-back rides that bump.
+# re-probed at d6aeaca at THIS bump (the TENTH measurement): the issue
+# is OPEN and the gauntlet's release step keeps WOLF_MIDEND=0 until the
+# fix enters the [wolf] pin; the flip-back rides that bump.
 repo = "wolffe-lang/wolf-std"
-rev = "f01630318dc2776a3831a7d44eed252138b9ef31"
+rev = "c0f75e8ce4a64108e88a4062bd5b1270ae1fc574"

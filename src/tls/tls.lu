@@ -61,7 +61,20 @@ pub fn version() -> str {
 // ------------------------------------------------------------------
 
 /// Append all of `src` to `out`. Total.
-fn push_all(mut out: List[int], src: List[int]) {
+/// `n` CSPRNG octets as a byte list. `os_random` is the one producer
+/// the language still answers `List[int]` from after s136 ([os.random]
+/// pins it there — the row is a draw count, not a byte read), so this
+/// narrowing walk sits at every crypto call site. The twin of
+/// `acme.rand_bytes`; the modules do not import each other. Total.
+fn rand_bytes(n: int) -> List[byte] {
+    var out = List[byte]()
+    for v in os_random(n) {
+        (mut out).push(v as byte)
+    }
+    out
+}
+
+fn push_all(mut out: List[byte], src: List[byte]) {
     var i: int = 0
     let n = src.len
     while i < n {
@@ -73,8 +86,8 @@ fn push_all(mut out: List[int], src: List[int]) {
 /// The bytes of `b` from `from` (inclusive) to `to` (exclusive).
 /// Offsets are this module's own (validated against lengths before
 /// use). Total.
-fn bsub(b: List[int], from: int, to: int) -> List[int] {
-    var out = List[int]()
+fn bsub(b: List[byte], from: int, to: int) -> List[byte] {
+    var out = List[byte]()
     var i = from
     while i < to {
         (mut out).push(b[i])
@@ -84,51 +97,51 @@ fn bsub(b: List[int], from: int, to: int) -> List[int] {
 }
 
 /// Big-endian uint16 at `at` (the caller has bounds-checked). Total.
-fn be16(b: List[int], at: int) -> int {
+fn be16(b: List[byte], at: int) -> int {
     b[at] * 256 + b[at + 1]
 }
 
 /// Big-endian uint24 at `at`. Total.
-fn be24(b: List[int], at: int) -> int {
+fn be24(b: List[byte], at: int) -> int {
     b[at] * 65536 + b[at + 1] * 256 + b[at + 2]
 }
 
 /// A big-endian uint16 as two bytes. Total for 0..65535.
-fn u16b(v: int) -> List[int] {
-    var out = List[int]()
-    (mut out).push(v / 256 % 256)
-    (mut out).push(v % 256)
+fn u16b(v: int) -> List[byte] {
+    var out = List[byte]()
+    (mut out).push((v / 256 % 256) as byte)
+    (mut out).push((v % 256) as byte)
     out
 }
 
 /// `data` with a one-byte length prefix. Total (data under 256).
-fn u8p(data: List[int]) -> List[int] {
-    var out = List[int]()
-    (mut out).push(data.len)
+fn u8p(data: List[byte]) -> List[byte] {
+    var out = List[byte]()
+    (mut out).push(data.len as byte)
     push_all(mut out, data)
     out
 }
 
 /// `data` with a big-endian uint16 length prefix. Total.
-fn u16p(data: List[int]) -> List[int] {
+fn u16p(data: List[byte]) -> List[byte] {
     var out = u16b(data.len)
     push_all(mut out, data)
     out
 }
 
 /// `data` with a big-endian uint24 length prefix. Total.
-fn u24p(data: List[int]) -> List[int] {
-    var out = List[int]()
-    (mut out).push(data.len / 65536 % 256)
-    (mut out).push(data.len / 256 % 256)
-    (mut out).push(data.len % 256)
+fn u24p(data: List[byte]) -> List[byte] {
+    var out = List[byte]()
+    (mut out).push((data.len / 65536 % 256) as byte)
+    (mut out).push((data.len / 256 % 256) as byte)
+    (mut out).push((data.len % 256) as byte)
     push_all(mut out, data)
     out
 }
 
 /// The bytes of an ASCII string. Total.
-fn ascii(s: str) -> List[int] {
-    var out = List[int]()
+fn ascii(s: str) -> List[byte] {
+    var out = List[byte]()
     for b in s.bytes() {
         (mut out).push(b)
     }
@@ -217,12 +230,12 @@ pub struct Hello {
     ok: bool,
     alert: int,
     reason: str,
-    random: List[int],
-    session_id: List[int],
+    random: List[byte],
+    session_id: List[byte],
     has_chacha: bool,
     has_13: bool,
     has_ed25519: bool,
-    kx: List[int],
+    kx: List[byte],
     sni: str,
     alpn_offered: bool,
     alpn_http11: bool,
@@ -233,12 +246,12 @@ fn hello_bad(reason: str) -> Hello {
         ok: false,
         alert: 50,
         reason: reason,
-        random: List[int](),
-        session_id: List[int](),
+        random: List[byte](),
+        session_id: List[byte](),
         has_chacha: false,
         has_13: false,
         has_ed25519: false,
-        kx: List[int](),
+        kx: List[byte](),
         sni: "",
         alpn_offered: false,
         alpn_http11: false,
@@ -251,12 +264,12 @@ fn hello_bad(reason: str) -> Hello {
 /// key share, the signature scheme) are the CALLER's to judge — this
 /// function only collects facts. Total over arbitrary bytes (every
 /// length is validated before a read). ct: public wire material.
-pub fn parse_client_hello(msg: List[int]) -> Hello {
+pub fn parse_client_hello(msg: List[byte]) -> Hello {
     let n = msg.len
     if n < 4 {
         return hello_bad("short handshake header")
     }
-    if msg[0] != 1 {
+    if msg[0] as int != 1 {
         return hello_bad("not a ClientHello")
     }
     if be24(msg, 1) != n - 4 {
@@ -271,7 +284,7 @@ pub fn parse_client_hello(msg: List[int]) -> Hello {
     p = p + 32
     let sid_len = msg[p]
     p = p + 1
-    if sid_len > 32 || p + sid_len > n {
+    if sid_len as int > 32 || p + sid_len > n {
         return hello_bad("bad session id")
     }
     let sid = bsub(msg, p, p + sid_len)
@@ -303,7 +316,7 @@ pub fn parse_client_hello(msg: List[int]) -> Hello {
     }
     var has_13 = false
     var has_ed = false
-    var kx = List[int]()
+    var kx = List[byte]()
     var sni = ""
     var alpn_offered = false
     var alpn_http = false
@@ -377,7 +390,7 @@ pub fn parse_client_hello(msg: List[int]) -> Hello {
                         if v + nl > stop {
                             break
                         }
-                        if ntype == 0 && sni.is_empty() {
+                        if ntype as int == 0 && sni.is_empty() {
                             let raw = bsub(msg, v, v + nl)
                             sni = str_from_utf8(raw) else ""
                         }
@@ -433,14 +446,14 @@ pub fn parse_client_hello(msg: List[int]) -> Hello {
 /// AAD).
 struct RecR {
     rtype: int,
-    body: List[int],
-    raw: List[int],
+    body: List[byte],
+    raw: List[byte],
 }
 
 /// Read from `fd` until `buf` holds at least `need` bytes. Rows:
 /// `closed` (peer EOF first), `timeout` (the armed deadline fired —
 /// a stalled handshake IS this row), `io`.
-fn fill_to(fd: int, mut buf: List[int], need: int) -> () ! {closed, timeout, io} {
+fn fill_to(fd: int, mut buf: List[byte], need: int) -> () ! {closed, timeout, io} {
     while buf.len < need {
         // the sentinel shape (serve.write_bytes_all): a `return <tag>`
         // that repeats a match-arm name warns W0305 under lupin, and
@@ -450,15 +463,15 @@ fn fill_to(fd: int, mut buf: List[int], need: int) -> () ! {closed, timeout, io}
         let piece = net_read_bytes(fd, 4096) else |e| match e {
             closed => {
                 errc = 1
-                List[int]()
+                List[byte]()
             },
             timeout => {
                 errc = 2
-                List[int]()
+                List[byte]()
             },
             io => {
                 errc = 3
-                List[int]()
+                List[byte]()
             },
         }
         if errc == 1 {
@@ -481,7 +494,7 @@ fn fill_to(fd: int, mut buf: List[int], need: int) -> () ! {closed, timeout, io}
 /// `buf`). Enforces the §5.1 ceiling (2^14 + 256 for protected
 /// records) — an overrun answers `io` after the record_overflow
 /// alert would be the caller's; at this seam the size gate is enough.
-fn rec_next(fd: int, mut buf: List[int]) -> RecR ! {closed, timeout, io} {
+fn rec_next(fd: int, mut buf: List[byte]) -> RecR ! {closed, timeout, io} {
     fill_to(fd, mut buf, 5)?
     let rtype = buf[0]
     let rlen = be16(buf, 3)
@@ -493,12 +506,12 @@ fn rec_next(fd: int, mut buf: List[int]) -> RecR ! {closed, timeout, io} {
     let body = bsub(buf, 5, 5 + rlen)
     let rest = bsub(buf, 5 + rlen, buf.len)
     buf = rest
-    RecR { rtype: rtype, body: body, raw: raw }
+    RecR { rtype: rtype as int, body: body, raw: raw }
 }
 
 /// A zero record (the sentinel-shape default; see `rec_take`). Total.
 fn rec_zero() -> RecR {
-    RecR { rtype: 0, body: List[int](), raw: List[int]() }
+    RecR { rtype: 0, body: List[byte](), raw: List[byte]() }
 }
 
 /// One record with the error routed through an int code (0 ok, 1
@@ -506,7 +519,7 @@ fn rec_zero() -> RecR {
 /// repeats a match-arm name warns under lupin, and the rig denies
 /// warnings; serve.write_bytes_all set the precedent). The caller
 /// maps the code to whatever its own row wants.
-fn rec_take(fd: int, mut buf: List[int]) -> (RecR, int) {
+fn rec_take(fd: int, mut buf: List[byte]) -> (RecR, int) {
     var code = 0
     let r = rec_next(fd, mut buf) else |e| match e {
         closed => {
@@ -527,11 +540,11 @@ fn rec_take(fd: int, mut buf: List[int]) -> (RecR, int) {
 
 /// Frame a PLAINTEXT record (`type || 0x0303 || len || body`) — the
 /// ServerHello's framing, and pre-key alerts. Total.
-fn plain_record(rtype: int, body: List[int]) -> List[int] {
-    var out = List[int]()
-    (mut out).push(rtype)
-    (mut out).push(3)
-    (mut out).push(3)
+fn plain_record(rtype: int, body: List[byte]) -> List[byte] {
+    var out = List[byte]()
+    (mut out).push(rtype as byte)
+    (mut out).push(3 as byte)
+    (mut out).push(3 as byte)
     push_all(mut out, u16b(body.len))
     push_all(mut out, body)
     out
@@ -540,17 +553,17 @@ fn plain_record(rtype: int, body: List[int]) -> List[int] {
 /// Send a PLAINTEXT alert (pre-key failures). Best-effort: the
 /// connection is being torn down regardless. Total.
 fn send_alert_plain(fd: int, code: int) {
-    var body = List[int]()
-    (mut body).push(2)
-    (mut body).push(code)
+    var body = List[byte]()
+    (mut body).push(2 as byte)
+    (mut body).push(code as byte)
     net_write_bytes(fd, plain_record(21, body)) else |_| {}
 }
 
 /// Send a SEALED alert under the given write keys. Best-effort.
-fn send_alert_sealed(fd: int, key: List[int], iv: List[int], seq: int, code: int) {
-    var body = List[int]()
-    (mut body).push(2)
-    (mut body).push(code)
+fn send_alert_sealed(fd: int, key: List[byte], iv: List[byte], seq: int, code: int) {
+    var body = List[byte]()
+    (mut body).push(2 as byte)
+    (mut body).push(code as byte)
     let rec = record.seal(key, iv, seq, 21, body, 0)
     net_write_bytes(fd, rec) else |_| {}
 }
@@ -573,14 +586,14 @@ fn send_alert_sealed(fd: int, key: List[int], iv: List[int], seq: int, code: int
 pub struct Sess {
     fd: int,
     up: bool,
-    rkey: List[int],
-    riv: List[int],
+    rkey: List[byte],
+    riv: List[byte],
     rseq: int,
-    wkey: List[int],
-    wiv: List[int],
+    wkey: List[byte],
+    wiv: List[byte],
     wseq: int,
-    buf: List[int],
-    plain: List[int],
+    buf: List[byte],
+    plain: List[byte],
     got_close: bool,
     sent_close: bool,
     trunc: bool,
@@ -593,14 +606,14 @@ fn sess_dead() -> Sess {
     Sess {
         fd: -1,
         up: false,
-        rkey: List[int](),
-        riv: List[int](),
+        rkey: List[byte](),
+        riv: List[byte](),
         rseq: 0,
-        wkey: List[int](),
-        wiv: List[int](),
+        wkey: List[byte](),
+        wiv: List[byte](),
         wseq: 0,
-        buf: List[int](),
-        plain: List[int](),
+        buf: List[byte](),
+        plain: List[byte](),
         got_close: false,
         sent_close: false,
         trunc: false,
@@ -612,13 +625,13 @@ fn sess_dead() -> Sess {
 
 /// The certificate chain DER (leaf first, concatenated) of SslConf
 /// entry `idx`. Total.
-fn chain_of(s: config.SslConf, idx: int) -> List[int] {
+fn chain_of(s: config.SslConf, idx: int) -> List[byte] {
     let at = s.der_at[idx]
     bsub(s.der, at, at + s.der_n[idx])
 }
 
 /// The 32-byte key seed of SslConf entry `idx`. Total.
-fn seed_of(s: config.SslConf, idx: int) -> List[int] {
+fn seed_of(s: config.SslConf, idx: int) -> List[byte] {
     bsub(s.seed, idx * 32, idx * 32 + 32)
 }
 
@@ -628,27 +641,27 @@ fn seed_of(s: config.SslConf, idx: int) -> List[int] {
 /// this module's (std's `handshake.certificate` frames one entry);
 /// the message header is std's. A malformed span answers the empty
 /// list (the resolver validated it at load, so this is defensive).
-fn certificate_msg(chain: List[int]) -> List[int] {
-    var entries = List[int]()
+fn certificate_msg(chain: List[byte]) -> List[byte] {
+    var entries = List[byte]()
     var pos: int = 0
     while pos < chain.len {
         let stop = cert.cert_end(chain, pos) else |_| {
-            return List[int]()
+            return List[byte]()
         }
         let one = bsub(chain, pos, stop)
         push_all(mut entries, u24p(one))
-        push_all(mut entries, u16p(List[int]()))
+        push_all(mut entries, u16p(List[byte]()))
         pos = stop
     }
-    var body = List[int]()
-    push_all(mut body, u8p(List[int]()))
+    var body = List[byte]()
+    push_all(mut body, u8p(List[byte]()))
     push_all(mut body, u24p(entries))
     handshake.handshake(11, body)
 }
 
 /// The ALPN extension (16) selecting exactly `proto` (RFC 7301's
 /// ProtocolNameList of one). Total.
-fn ext_alpn(proto: str) -> List[int] {
+fn ext_alpn(proto: str) -> List[byte] {
     handshake.ext(16, u16p(u8p(ascii(proto))))
 }
 
@@ -673,11 +686,11 @@ fn log_hs_fail(code: int, why: str) {
 #[allow(w0602)]
 pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused, timeout, io} {
     net_deadline(fd, deadline_ms) else |_| {}
-    var wire = List[int]()
+    var wire = List[byte]()
 
     // ---- ClientHello (plaintext record(s), type 22) --------------
-    var hsbuf = List[int]()
-    var ch_msg = List[int]()
+    var hsbuf = List[byte]()
+    var ch_msg = List[byte]()
     var reading = true
     while reading {
         var need_more = false
@@ -706,7 +719,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
             let r = rt.0
             if r.rtype == 21 {
                 if r.body.len >= 2 {
-                    log_hs_fail(r.body[1], "client alert before ClientHello")
+                    log_hs_fail(r.body[1] as int, "client alert before ClientHello")
                 }
                 return refused
             }
@@ -766,10 +779,10 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     // entropy-less host — the module header's retirement note). Only
     // the SOURCE moved at wsm02; the handshake around them is
     // unchanged.
-    let eph = os_random(32)
+    let eph = rand_bytes(32)
     let spub = curve25519.x25519_base(eph)
-    let srand = os_random(32)
-    var sh_exts = List[int]()
+    let srand = rand_bytes(32)
+    var sh_exts = List[byte]()
     push_all(mut sh_exts, handshake.ext_supported_versions_server())
     push_all(mut sh_exts, handshake.ext_key_share_server_x25519(spub))
     let sh = handshake.server_hello(srand, hello.session_id, 4867, sh_exts)
@@ -794,7 +807,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     let chs_iv = record.traffic_iv(chts)
 
     // ---- the server flight ---------------------------------------
-    var ee_exts = List[int]()
+    var ee_exts = List[byte]()
     if !hello.sni.is_empty() {
         push_all(mut ee_exts, handshake.ext_server_name_ack())
     }
@@ -826,13 +839,13 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     handshake.transcript_add(mut tr, sfin)
     let th_sfin = handshake.transcript_hash(tr)
 
-    var flight = List[int]()
+    var flight = List[byte]()
     push_all(mut flight, plain_record(22, sh))
     if hello.session_id.len > 0 {
         // middlebox-compat CCS (§D.4): after ServerHello when the
         // client sent a legacy session id
-        var ccs = List[int]()
-        (mut ccs).push(1)
+        var ccs = List[byte]()
+        (mut ccs).push(1 as byte)
         push_all(mut flight, plain_record(20, ccs))
     }
     push_all(mut flight, record.seal(shs_key, shs_iv, 0, 22, ee, 0))
@@ -850,8 +863,8 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
 
     // ---- the client Finished -------------------------------------
     var cseq: int = 0
-    var fin_msg = List[int]()
-    var hs2 = List[int]()
+    var fin_msg = List[byte]()
+    var hs2 = List[byte]()
     var waiting = true
     while waiting {
         var need2 = false
@@ -883,7 +896,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
             }
             if r2.rtype == 21 {
                 if r2.body.len >= 2 {
-                    log_hs_fail(r2.body[1], "client alert during the handshake")
+                    log_hs_fail(r2.body[1] as int, "client alert during the handshake")
                 }
                 return refused
             }
@@ -902,7 +915,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
             let content = record.content_of(inner)
             if ct == 21 {
                 if content.len >= 2 {
-                    log_hs_fail(content[1], "client alert during the handshake")
+                    log_hs_fail(content[1] as int, "client alert during the handshake")
                 }
                 return refused
             }
@@ -914,7 +927,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
             push_all(mut hs2, content)
         }
     }
-    if fin_msg[0] != 20 {
+    if fin_msg[0] as int != 20 {
         send_alert_sealed(fd, shs_key, shs_iv, 4, 10)
         log_hs_fail(10, "expected the client Finished")
         return refused
@@ -939,7 +952,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
         wiv: record.traffic_iv(sats),
         wseq: 0,
         buf: wire,
-        plain: List[int](),
+        plain: List[byte](),
         got_close: false,
         sent_close: false,
         trunc: false,
@@ -957,7 +970,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
 /// sprint lifts it). Rows: `closed`, `timeout` (the armed deadline),
 /// `io`.
 #[allow(w0602)]
-pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
+pub fn sess_read(mut z: Sess, max: int) -> List[byte] ! {closed, timeout, io} {
     while z.plain.len == 0 {
         if z.got_close {
             return closed
@@ -968,7 +981,7 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
         var wire = z.buf
         let rt = rec_take(z.fd, mut wire)
         if rt.1 == 1 {
-            z.buf = List[int]()
+            z.buf = List[byte]()
             z.got_close = true
             z.trunc = true
             eprint("lobo: [info] TLS: peer EOF without close_notify (truncation, counted)")
@@ -988,7 +1001,7 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
             continue
         }
         if r.rtype != 23 {
-            if r.rtype == 21 && r.body.len >= 2 && r.body[1] == 0 {
+            if r.rtype == 21 && r.body.len >= 2 && r.body[1] as int == 0 {
                 z.got_close = true
                 return closed
             }
@@ -1008,11 +1021,11 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
             push_all(mut plain, content)
             z.plain = plain
         } else if ct == 21 {
-            if content.len >= 2 && content[1] == 0 {
+            if content.len >= 2 && content[1] as int == 0 {
                 z.got_close = true
             } else {
                 if content.len >= 2 {
-                    eprint("lobo: [info] TLS: client alert {alert_name(content[1])}")
+                    eprint("lobo: [info] TLS: client alert {alert_name(content[1] as int)}")
                 }
                 z.got_close = true
             }
@@ -1042,7 +1055,7 @@ pub fn sess_read(mut z: Sess, max: int) -> List[int] ! {closed, timeout, io} {
 /// Write application bytes, sealed into records of at most 2^14
 /// content bytes (§5.1). Rows: `closed` (the peer vanished), `io`.
 #[allow(w0602)]
-pub fn sess_write(mut z: Sess, data: List[int]) -> () ! {closed, io} {
+pub fn sess_write(mut z: Sess, data: List[byte]) -> () ! {closed, io} {
     if !z.up {
         return io
     }

@@ -70,6 +70,21 @@ pub fn peer_count(p: UpPool) -> int {
 /// milliseconds. A bare number is seconds (nginx). The "ms" suffix is
 /// milliseconds; "s"/"m"/"h" are seconds/minutes/hours. Total; an
 /// unknown unit → seconds.
+
+/// `n` CSPRNG octets as a byte list. `os_random` is the one producer
+/// the language still answers `List[int]` from after s136 ([os.random]
+/// pins it there on purpose — the row is a draw count, not a byte
+/// read), so this narrowing walk sits at every crypto call site. The
+/// twin of `tls.rand_bytes` and `acme.rand_bytes`; the three modules
+/// do not import each other. Total.
+fn rand_bytes(n: int) -> List[byte] {
+    var out = List[byte]()
+    for v in os_random(n) {
+        (mut out).push(v as byte)
+    }
+    out
+}
+
 fn parse_time_ms(s: str) -> int {
     if s.is_empty() {
         return 0
@@ -78,7 +93,8 @@ fn parse_time_ms(s: str) -> int {
     if s.ends_with("ms") {
         let num = s[0..s.len - 2]
         var m: int = 0
-        for b in num.bytes() {
+        for b_raw in num.bytes() {
+            let b = b_raw as int
             if b >= 48 && b <= 57 {
                 m = m * 10 + b - 48
             }
@@ -87,7 +103,8 @@ fn parse_time_ms(s: str) -> int {
     }
     var n: int = 0
     var unit = "s"
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             n = n * 10 + b - 48
         } else if b == 115 {
@@ -118,7 +135,8 @@ fn split_hostport(addr: str) -> (str, int) {
     let ptext = addr[colon + 1..addr.len]
     var port: int = 0
     var ok = false
-    for b in ptext.bytes() {
+    for b_raw in ptext.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return (addr, 80)
         }
@@ -141,7 +159,8 @@ fn flag_int(arg: str, key: str) -> int ! {none} {
     }
     let v = arg[pfx.len..arg.len]
     var n: int = 0
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             n = n * 10 + b - 48
         }
@@ -614,7 +633,8 @@ pub fn parse_response(head: str) -> UpResponse {
         } else if name == "content-length" {
             have_cl = true
             var n: int = 0
-            for b in value.bytes() {
+            for b_raw in value.bytes() {
+                let b = b_raw as int
                 if b >= 48 && b <= 57 {
                     n = n * 10 + b - 48
                 }
@@ -641,7 +661,8 @@ pub fn status_code(status_line: str) -> int {
     let rest = status_line[sp + 1..status_line.len]
     var n: int = 0
     var seen = false
-    for b in rest.bytes() {
+    for b_raw in rest.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             n = n * 10 + b - 48
             seen = true
@@ -1314,11 +1335,11 @@ fn now_packed() -> int {
 fn cli_dead() -> tlsc.Client {
     tlsc.Client {
         fd: -1,
-        write_key: List[int](),
-        write_iv: List[int](),
+        write_key: List[byte](),
+        write_iv: List[byte](),
         write_seq: 0,
-        read_key: List[int](),
-        read_iv: List[int](),
+        read_key: List[byte](),
+        read_iv: List[byte](),
         read_seq: 0,
     }
 }
@@ -1462,7 +1483,7 @@ fn attempt_tls(
     phost: str,
     pport: int,
     sni_host: str,
-    anchors: List[int],
+    anchors: List[byte],
     read_ms: int,
     token: str,
     date: str,
@@ -1484,8 +1505,8 @@ fn attempt_tls(
         sni_host,
         anchors,
         now_packed(),
-        os_random(32),
-        os_random(32),
+        rand_bytes(32),
+        rand_bytes(32),
     ) else |_| {
         eprint(
             "lobo: [error] upstream TLS to {phost}:{pport}: ClientHello write failed; answering 502",
@@ -1654,7 +1675,8 @@ pub fn status_code_of(status_line: str) -> int {
     var v: int = 0
     var seen = false
     let rest = status_line[sp + 1..status_line.len]
-    for b in rest.bytes() {
+    for b_raw in rest.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             v = v * 10 + (b - 48)
             seen = true
@@ -1839,7 +1861,7 @@ pub fn run(
     }
     // the https leg's trust anchors (wsm04): loaded per exchange,
     // refused loudly when the -t contract was somehow skipped
-    var anchors = List[int]()
+    var anchors = List[byte]()
     if pl.pt.scheme == "https" {
         if pl.trust_path.is_empty() {
             eprint(
@@ -1858,7 +1880,7 @@ pub fn run(
         if aok {
             anchors = config.pem_certs(pem) else |_| {
                 aok = false
-                List[int]()
+                List[byte]()
             }
         }
         if !aok || anchors.len == 0 {

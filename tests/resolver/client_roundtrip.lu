@@ -22,13 +22,13 @@
 use resolver
 
 /// Push a big-endian uint16. Total.
-fn put16(mut out: List[int], v: int) {
-    (mut out).push(v / 256 % 256)
-    (mut out).push(v % 256)
+fn put16(mut out: List[byte], v: int) {
+    (mut out).push((v / 256 % 256) as byte)
+    (mut out).push((v % 256) as byte)
 }
 
 /// Read one framed query off `conn` (whole, loopback). Row: io.
-fn read_query(conn: int) -> List[int] ! {io} {
+fn read_query(conn: int) -> List[byte] ! {io} {
     net_deadline(conn, 2000) else |_| {}
     let got = net_read_bytes(conn, 4096) else |_| {
         return io
@@ -36,10 +36,10 @@ fn read_query(conn: int) -> List[int] ! {io} {
     if got.len < 2 {
         return io
     }
-    var msg = List[int]()
+    var msg = List[byte]()
     var k: int = 2
     while k < got.len {
-        (mut msg).push(got[k])
+        (mut msg).push(got[k] as int as byte)
         k = k + 1
     }
     msg
@@ -47,12 +47,12 @@ fn read_query(conn: int) -> List[int] ! {io} {
 
 /// A framed A answer echoing `q`'s id and question: one A record per
 /// quad in `ips` (space separated dotted quads), TTL `ttl`. Total.
-fn framed_answer(q: List[int], ips: List[str], ttl: int) -> List[int] {
-    var body = List[int]()
+fn framed_answer(q: List[byte], ips: List[str], ttl: int) -> List[byte] {
+    var body = List[byte]()
     (mut body).push(q[0])
     (mut body).push(q[1])
-    (mut body).push(129)
-    (mut body).push(128)
+    (mut body).push(129 as byte)
+    (mut body).push(128 as byte)
     put16(mut body, 1)
     put16(mut body, ips.len)
     put16(mut body, 0)
@@ -65,26 +65,27 @@ fn framed_answer(q: List[int], ips: List[str], ttl: int) -> List[int] {
     }
     var a: int = 0
     while a < ips.len {
-        (mut body).push(192)
-        (mut body).push(12)
+        (mut body).push(192 as byte)
+        (mut body).push(12 as byte)
         put16(mut body, 1)
         put16(mut body, 1)
         put16(mut body, ttl / 65536)
         put16(mut body, ttl % 65536)
         put16(mut body, 4)
         var v: int = 0
-        for b in ips[a].bytes() {
+        for b_raw in ips[a].bytes() {
+            let b = b_raw as int
             if b == 46 {
-                (mut body).push(v)
+                (mut body).push(v as byte)
                 v = 0
             } else {
                 v = v * 10 + b - 48
             }
         }
-        (mut body).push(v)
+        (mut body).push(v as byte)
         a = a + 1
     }
-    var out = List[int]()
+    var out = List[byte]()
     put16(mut out, body.len)
     var j: int = 0
     while j < body.len {

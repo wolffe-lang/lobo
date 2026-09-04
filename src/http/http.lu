@@ -120,7 +120,8 @@ pub fn is_token(s: str) -> bool {
     if s.is_empty() {
         return false
     }
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if !is_tchar(b) {
             return false
         }
@@ -142,7 +143,8 @@ pub fn is_target_bad(b: int) -> bool {
 /// the post-percent-decode reject gate (a decoded `%00` NUL, a
 /// decoded CR/LF response-splitting attempt). Total.
 pub fn has_control(s: str) -> bool {
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b < 32 {
             return true
         }
@@ -281,7 +283,8 @@ fn split_lines_strict(head: str) -> List[str] ! {malformed} {
     var start: int = 0
     var i: int = 0
     var prev_cr: int = -2
-    for b in head.bytes() {
+    for b_raw in head.bytes() {
+        let b = b_raw as int
         if b == 13 {
             // CR — the next byte MUST be LF; remember our position
             prev_cr = i
@@ -315,7 +318,8 @@ fn split_lines_strict(head: str) -> List[str] ! {malformed} {
 /// Total; walks from both ends by ASCII bytes.
 fn trim_ows(s: str) -> str {
     var lo: int = 0
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b == 32 || b == 9 {
             lo = lo + 1
         } else {
@@ -326,7 +330,8 @@ fn trim_ows(s: str) -> str {
     while hi > lo {
         let c = s[hi - 1..hi]
         var last: int = 0
-        for b in c.bytes() {
+        for b_raw in c.bytes() {
+            let b = b_raw as int
             last = b
         }
         if last == 32 || last == 9 {
@@ -357,7 +362,8 @@ fn parse_length(s: str, max: int) -> int ! {malformed, too_large} {
         return malformed
     }
     var n: int = 0
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if !is_digit(b) {
             return malformed
         }
@@ -450,7 +456,8 @@ pub fn parse_request(head: str, limits: Limits) -> Request ! {
     // whitespace / control anywhere in the target is a MUST-reject
     // (RFC 9112 §3.2 — the smuggling-relevant no-WS-in-target rule);
     // a second SP would already have landed here as part of `version`
-    for b in target.bytes() {
+    for b_raw in target.bytes() {
+        let b = b_raw as int
         if is_target_bad(b) {
             return malformed
         }
@@ -514,7 +521,8 @@ pub fn parse_request(head: str, limits: Limits) -> Request ! {
         // continuation — reject, never unfold (RFC 9112 §5.2)
         let lead = line[0..1]
         var leadb: int = 0
-        for b in lead.bytes() {
+        for b_raw in lead.bytes() {
+            let b = b_raw as int
             leadb = b
         }
         if leadb == 32 || leadb == 9 {
@@ -642,7 +650,8 @@ fn parse_chunk_size(line: str, max_digits: int) -> int ! {malformed} {
     var n: int = 0
     var digits: int = 0
     var done: bool = false
-    for b in line.bytes() {
+    for b_raw in line.bytes() {
+        let b = b_raw as int
         if done {
             // inside a chunk extension after `;` — ignore the rest
             continue
@@ -744,13 +753,14 @@ pub fn decode_chunked(body: str, limits: Limits) -> str ! {malformed, too_large}
 /// with a distinct cause a caller may log differently.)
 #[allow(w0602)]
 pub fn percent_decode(s: str) -> str ! {malformed, invalid} {
-    var raw = List[int]()
+    var raw = List[byte]()
     let n = s.len
     var i: int = 0
     while i < n {
         let ch = s[i..i + 1]
         var b: int = 0
-        for bb in ch.bytes() {
+        for bb_raw in ch.bytes() {
+            let bb = bb_raw as int
             b = bb
         }
         if b == 37 {
@@ -762,16 +772,18 @@ pub fn percent_decode(s: str) -> str ! {malformed, invalid} {
             let h2 = s[i + 2..i + 3]
             var d1: int = -1
             var d2: int = -1
-            for bb in h1.bytes() {
+            for bb_raw in h1.bytes() {
+                let bb = bb_raw as int
                 d1 = hex_val(bb)
             }
-            for bb in h2.bytes() {
+            for bb_raw in h2.bytes() {
+                let bb = bb_raw as int
                 d2 = hex_val(bb)
             }
             if d1 < 0 || d2 < 0 {
                 return malformed
             }
-            (mut raw).push(d1 * 16 + d2)
+            (mut raw).push((d1 * 16 + d2) as byte)
             i = i + 3
         } else {
             // a multi-byte code point: push each of its bytes verbatim
@@ -809,7 +821,8 @@ pub fn normalize_path(p: str) -> str ! {malformed} {
     // segment is a substring, never rebuilt byte-by-byte)
     var start: int = 0
     var i: int = 0
-    for b in p.bytes() {
+    for b_raw in p.bytes() {
+        let b = b_raw as int
         if b == 47 {
             let seg = p[start..i]
             apply_segment(mut segs, seg)?

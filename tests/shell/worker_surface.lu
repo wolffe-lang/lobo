@@ -15,17 +15,89 @@ use config
 use shell
 
 fn main() -> !int {
-    // ---- the worker argv: exe serve -p P -c C --worker N --worker-control EP
-    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001")
-    assert(a.len == 10, "ten elements: {a.len}")
+    // ---- the worker argv: exe serve -p P -c C --worker N
+    //      --worker-control EP --inherit K
+    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 4)
+    assert(a.len == 14, "fourteen elements: {a.len}")
     assert(a[0] == "/opt/lobo" && a[1] == "serve", "the executable, then serve")
     assert(a[2] == "-p" && a[3] == "/etc/lobo", "the prefix rides")
     assert(a[4] == "-c" && a[5] == "nginx.conf", "the config rides")
     assert(a[6] == "--worker" && a[7] == "3", "the ordinal")
     assert(a[8] == "--worker-control" && a[9] == "127.0.0.1:40001", "the endpoint")
+    assert(a[10] == "--inherit" && a[11] == "1", "ws17: how many listeners rode down")
+    assert(a[12] == "--hands" && a[13] == "4", "ws17: how many hands the master started")
+    // ws17: `os_spawn_with` names the program APART from its
+    // arguments, so the args builder is the one the master actually
+    // uses and `worker_argv` is it with the exe spliced on for the
+    // `os_spawn` fallback. The two agree element for element.
+    let ar = shell.worker_args("/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 4)
+    assert(ar.len == 13, "thirteen arguments without the exe: {ar.len}")
+    var ai: int = 0
+    while ai < ar.len {
+        assert(ar[ai] == a[ai + 1], "args[{ai}] is argv[{ai + 1}]: {ar[ai]} vs {a[ai + 1]}")
+        ai = ai + 1
+    }
     // a path with a space is ONE argument (no quoting layer exists)
-    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1")
+    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1", 0, 2)
     assert(b[0] == "/opt/my lobo" && b[3] == "/etc/x y" && b[5] == "a b.conf", "spaces are bytes")
+    assert(b[11] == "0", "no listeners handed: the fallback shape says so on the argv")
+
+    // ---- ws17: the ACCEPT TURN (shell.accept_turn — nginx's
+    // accept_mutex without a mutex; the clause carries the measured
+    // reason, an upstream blocking accept(2) after a readiness wait a
+    // sibling may have consumed)
+    let sl = shell.accept_slice_ms()
+    assert(sl > 0, "a slice is a positive number of milliseconds: {sl}")
+    // exactly ONE hand holds the turn at any instant, and the round
+    // walks the ordinals in order
+    var ms: int = 0
+    while ms < sl * 3 * 2 {
+        var holders: int = 0
+        var w: int = 1
+        while w <= 3 {
+            if shell.accept_turn(w, 3, ms) {
+                holders = holders + 1
+            }
+            w = w + 1
+        }
+        assert(holders == 1, "exactly one of three hands has the turn at t={ms}: {holders}")
+        ms = ms + 1
+    }
+    assert(shell.accept_turn(1, 3, 0), "the round opens on hand 1")
+    assert(shell.accept_turn(2, 3, sl), "…then hand 2")
+    assert(shell.accept_turn(3, 3, sl * 2), "…then hand 3")
+    assert(shell.accept_turn(1, 3, sl * 3), "…and round again")
+    // the single process never takes turns: there is nobody to race
+    assert(shell.accept_turn(0, 1, 12345), "one hand always has the turn")
+    assert(shell.accept_turn(1, 1, 12345), "…however it is numbered")
+
+    // ---- ws17: the wait is capped at the turn boundary, or the turn
+    // is a bug — a hand that blocks 25 ms against a 10 ms slice sleeps
+    // through its own turn
+    assert(shell.accept_wait_ms(0, 1, 999, 25) == 25, "one hand: the budget is untouched")
+    assert(
+        shell.accept_wait_ms(1, 3, 0, 25) == sl,
+        "at the top of its own slice a hand waits out the REST of it: {shell.accept_wait_ms(1, 3, 0, 25)}",
+    )
+    assert(
+        shell.accept_wait_ms(2, 3, 0, 25) == sl,
+        "hand 2 waits until hand 1's slice ends: {shell.accept_wait_ms(2, 3, 0, 25)}",
+    )
+    assert(
+        shell.accept_wait_ms(3, 3, 0, 25) == sl * 2,
+        "hand 3 waits two slices: {shell.accept_wait_ms(3, 3, 0, 25)}",
+    )
+    assert(
+        shell.accept_wait_ms(1, 3, sl, 25) == sl * 2,
+        "past its slice, hand 1 waits for the round to come back: {shell.accept_wait_ms(1, 3, sl, 25)}",
+    )
+    assert(shell.accept_wait_ms(1, 3, 0, 3) == 3, "a SHORTER budget still wins")
+    var q: int = 0
+    while q < sl * 3 {
+        let v = shell.accept_wait_ms(2, 3, q, 25)
+        assert(v >= 1 && v <= sl * 3, "the wait is bounded by one round at t={q}: {v}")
+        q = q + 1
+    }
 
     // ---- the CLI half of the same flags: a pair, only with serve
     var argv = List[str]()
@@ -91,16 +163,16 @@ fn main() -> !int {
 
     // ---- the master's stanza pieces
     assert(shell.status_workers_line(4) == "workers: 4\n", "the workers: line")
-    let row = shell.status_worker_text(2, "standby", "127.0.0.1:40002", 3, 0, 12, 4096, 1, 1)
+    let row = shell.status_worker_text(2, "standby", "127.0.0.1:40002", 3, 0, 12, 4096, 1, 1, 77)
     assert(
         row ==
-            "worker 2: standby control=127.0.0.1:40002 generation=3 live=0 events=12 live-region-bytes=4096 budget-503s=1 restarts=1\n",
+            "worker 2: standby control=127.0.0.1:40002 generation=3 live=0 accepted=77 events=12 live-region-bytes=4096 budget-503s=1 restarts=1\n",
         "the worker row (text): {row}",
     )
-    let obj = shell.status_worker_json(1, "serving", "127.0.0.1:40001", 2, 5, 41, 65536, 0, 0)
+    let obj = shell.status_worker_json(1, "serving", "127.0.0.1:40001", 2, 5, 41, 65536, 0, 0, 77)
     assert(
         obj ==
-            "{{\"worker\":1,\"state\":\"serving\",\"control\":\"127.0.0.1:40001\",\"generation\":2,\"live\":5,\"events\":41,\"live_region_bytes\":65536,\"budget_503s\":0,\"restarts\":0}}",
+            "{{\"worker\":1,\"state\":\"serving\",\"control\":\"127.0.0.1:40001\",\"generation\":2,\"live\":5,\"accepted\":77,\"events\":41,\"live_region_bytes\":65536,\"budget_503s\":0,\"restarts\":0}}",
         "the worker object (json): {obj}",
     )
     let mo = shell.status_json_master_open(2, false, 9, 70000, 3)
@@ -109,26 +181,32 @@ fn main() -> !int {
             "{{\"schema\":1,\"current\":2,\"quitting\":false,\"events\":9,\"live_region_bytes\":70000,\"workers_configured\":3,\"generations\":[],\"workers\":[",
         "the master's json open: {mo}",
     )
+    let wh = shell.status_worker_head(2, true, 9001)
     assert(
-        shell.status_worker_head(2, true) == "worker: 2\nlistening: true\n",
-        "the hand's two head lines",
+        wh == "worker: 2\nlistening: true\naccepted: 9001\n",
+        "the hand's three head lines: {wh}",
     )
-    let wo = shell.status_json_open_worker(1, false, 3, 100, 2, false)
+    assert(
+        wh.starts_with(shell.status_worker_head(2, true, 0)[0.."worker: 2\nlistening: true\n".len]),
+        "ws17 appended: the ws16 head is a prefix of the ws17 head",
+    )
+    let wo = shell.status_json_open_worker(1, false, 3, 100, 2, false, 9001)
     assert(
         wo ==
-            "{{\"schema\":1,\"current\":1,\"quitting\":false,\"events\":3,\"live_region_bytes\":100,\"worker\":2,\"listening\":false,\"generations\":[",
+            "{{\"schema\":1,\"current\":1,\"quitting\":false,\"events\":3,\"live_region_bytes\":100,\"worker\":2,\"listening\":false,\"accepted\":9001,\"generations\":[",
         "the hand's json open: {wo}",
     )
 
     // ---- the readers, over a hand's real stanza shape
     var st = shell.status_head_text(3, false, 41, 65536)
-    st = "{st}{shell.status_worker_head(1, true)}"
+    st = "{st}{shell.status_worker_head(1, true, 44)}"
     st = "{st}{shell.status_line_text(2, 2, "draining", 500, "abcd", -1, 100, 1, 200)}"
     st = "{st}{shell.status_line_text(3, 5, "current", 10, "efgh", -1, 300, 2, 400)}"
     assert(shell.stanza_int(st, "current generation") == 3, "current generation reads")
     assert(shell.stanza_int(st, "events") == 41, "events reads")
     assert(shell.stanza_int(st, "live-region-bytes") == 65536, "live-region-bytes reads")
     assert(shell.stanza_word(st, "listening") == "true", "listening reads")
+    assert(shell.stanza_int(st, "accepted") == 44, "ws17: the master folds a hand's accept count")
     assert(shell.stanza_word(st, "quitting") == "false", "quitting reads")
     assert(shell.stanza_int(st, "no-such-key") == -1, "an absent key is -1")
     assert(shell.stanza_int(st, "quitting") == -1, "a non-numeric value is -1")
