@@ -19,11 +19,17 @@
 # CLOSE (a connection per request — the accept path is the work) and
 # KEEPALIVE (`ab -k`, 32 connections reused — the read/serve path).
 #
-# What a 1.0x lobo row MEANS (docs/WORKERS.md): at this pin the kernel
-# cannot distribute accepts across lobo's hands (no SO_REUSEPORT, no
-# listener inheritance — wolf-lang#234/#235), so N hands are N-1
-# standbys and one server. That row is the finding, printed as a
-# number; nginx's row at the same N is the differential.
+# What a ~1.0x lobo row MEANS at ws17 (docs/WORKERS.md), and it is a
+# different sentence from ws16's: the kernel DOES distribute accepts
+# now — the master binds the listener and every hand adopts it
+# (wolf-lang#234/#235 landed; tools/lobo-prefork measures the split) —
+# but only one hand may be inside `accept` at a time, because
+# `net_accept` parks in a blocking accept(2) a sibling may have
+# emptied (wolf-lang#242). lobo's answer is nginx's `accept_mutex`
+# shape, so the accept path is serialized however many hands there
+# are, and what N buys is overlapped SERVING, which a 1 KiB static
+# file barely has. That row is the finding, printed as a number;
+# nginx's row at the same N is the differential.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh

@@ -17,6 +17,7 @@ vocabulary); this page owns how an operator asks for it.
 ## The directive
 
 ```nginx
+control unix:/run/lobo/control.sock;           # a uid boundary (ws17)
 control 127.0.0.1:9001;                        # loopback, no secret
 control 127.0.0.1:9001 token /etc/lobo/ctl;    # loopback + a shared secret
 control 9001;                                  # a bare port is a LOOPBACK bind
@@ -35,29 +36,70 @@ stale-pid check all find it without being told.
 
 ## The listener, per host — measured, not assumed
 
-**Loopback TCP, on every host.** Not because it is the best transport,
-but because it is the only one wolf has. Measured at the v0.2.3 pin:
+**Two transports since ws17, and the `unix:` one is the recommended
+default where the host has it.**
 
+ws15 measured that wolf had NO unix-domain socket on any host — every
+spelling answered a bare `io`, so a program could not even tell "this
+host has no unix sockets" from "that path is wrong" — and shipped
+loopback TCP everywhere, filing **wolf-lang#227**. The surface landed
+at the ws17 pin (`[os.net.unix]`, s136; `std.net.unix` wraps it at
+wolf-std sc36) and the `control` directive gains the address form the
+filing asked for:
+
+```nginx
+control unix:/run/lobo/control.sock;
 ```
-net_listen("/tmp/lobo-probe.sock")          -> io
-net_listen("unix:/tmp/lobo-probe.sock")     -> io
-net_listen("unix:///tmp/lobo-probe.sock")   -> io
-net_listen("127.0.0.1:0")                   -> fd 0
-```
 
-`crates/wolf_rt/src/net.rs` binds `std::net::TcpListener` and dials
-`TcpStream`; there is no `AF_UNIX` in the runtime and no clause for one
-in `spec/11-os.md`. Every unix spelling answers a bare `io`, so a
-program cannot even tell "this host has no unix sockets" from "that
-path is wrong". Filed as **wolf-lang#227**; when it lands, `control`
-gains a `unix:` address form and this section changes.
+`unix:<path>` is nginx's own spelling (`listen unix:/path`), so an
+operator who knows nginx knows this one. The path is used as written.
 
-The consequence is the whole reason the next section exists: a unix
-socket in the filesystem namespace is how haproxy's `stats socket`,
-systemd, and nginx-plus's api authorize an operator — file permissions
-ARE the boundary. lobo cannot have that boundary at this pin, and
-**loopback is not a uid boundary**: every local user on the host can
-dial 127.0.0.1.
+**Why it is the recommended form**: a socket in the filesystem
+namespace is how haproxy's `stats socket`, systemd and nginx-plus's
+api authorize an operator — **file permissions ARE the boundary**. A
+loopback port is not a uid boundary: every local user on the host can
+dial 127.0.0.1, which is the whole reason ws15 grew the token arm.
+With a unix endpoint in a directory the operator owns, the token is
+optional; it stays for the TCP form and for a host with no unix
+family.
+
+**The rows, and what lobo does with each** (`bind_control` in main;
+`[os.net.unix]`'s vocabulary, refused by NAME rather than by silence,
+which was the whole point of the filing):
+
+| row at bind | lobo |
+|---|---|
+| `unsupported` | **refuses at startup, by name**: "this host has no unix-domain sockets, so `control unix:…` cannot be served … use a loopback address with the token arm instead". windows at this pin |
+| `exists` | **refuses, and does not clobber.** Something is already at that path — a live master, a stale socket, or an ordinary file — and which of those it is is not a decision a server can make for an operator. Remove it yourself if you know which |
+| `not_found` | the directory on the way to the path does not exist |
+| `denied` | the caller may not create it there |
+
+**Cleanup is the binder's.** `net_close` of a unix LISTENER unlinks
+its path, so an orderly `stop`/`quit` leaves nothing behind; a
+SIGKILLed master leaves the socket file, and the next start's
+stale-pid check is what tells an operator whether a master is actually
+alive. A hand's endpoint is the master's to clean: the master NAMES
+those paths (below), so it removes a dead one before starting a
+replacement — the one case `[os.net.unix]` says a program may unlink
+unconditionally.
+
+**Under `worker_processes N`, the hands' endpoints follow the
+master's.** A unix master gives hand *i* the sibling path
+`<master>.w<i>` — `/run/lobo/control.sock.w2` — so every hand's order
+desk inherits the directory's permissions and **a hand's endpoint is a
+uid boundary too**. That was ws16's residue and it closes here: under
+a TCP master the hands still get loopback ports, which is the same
+non-boundary the master has.
+
+**std is not in this path, and that is stated rather than hidden.**
+lobo calls the builtins (`net_listen_unix`, `net_connect_unix`)
+directly. `std.net.unix` exists and is good, but std wraps neither
+`net_listen_with` nor `net_adopt_listener` (**wolf-std#6**, still
+open, sc37's), so the many-hands listener path has no std tier at this
+pin — and using std for one half of the control channel and a builtin
+for the other would be two seams where this repo has always had one.
+The day #6 lands, these call sites move to `std.net`'s spellings with
+no behavioral change.
 
 ## The verbs
 
@@ -202,7 +244,7 @@ What this is not: a transport secret. The token crosses loopback in
 clear, and anyone who can read the token file can use it. It is a
 *local user* boundary standing in for the file-permission boundary a
 unix socket would give — and it is only as good as the mode the operator
-put on that file. When wolf-lang#227 lands, the socket becomes the
+put on that file. Since wolf-lang#227 landed the socket IS the
 boundary and this arm becomes the windows fallback.
 
 ## The nginx differential
@@ -225,7 +267,7 @@ rule, applied to operation):
 
 | delta | nginx | lobo | why |
 |---|---|---|---|
-| **D1 transport** | `kill(pid, SIGHUP)`; the kernel authorizes (same uid), the pid file is not a secret | a loopback TCP endpoint with an optional token | no getpid/kill-by-pid at this pin (#126), no unix socket at all (#227), and no external RELOAD on windows |
+| **D1 transport** | `kill(pid, SIGHUP)`; the kernel authorizes (same uid), the pid file is not a secret | a unix socket where the host has one, else a loopback TCP endpoint with an optional token | no getpid/kill-by-pid at this pin (#126) and no external RELOAD on windows; the unix socket #227 asked for LANDED at ws17 and is now the recommended form |
 | **D2 who parses** | the CLIENT parses the config and exits 1 with the `[emerg]`; the master is never signalled | the MASTER parses and answers the verdict on the wire, naming the generation that kept serving | lobo's trigger carries a reply socket; nginx's is a signal, which cannot answer |
 | **D3 narration** | the old workers drain in the dark (zero drain events in the error log) | six events per reload — `generation-draining`/`-loaded`/`-activated`/`-retired` — plus `lobo status` | docs/DRAIN.md's whole subject |
 | **D4 idle keepalive at reload** | the old worker closes its IDLE keepalive connections once it finishes shutting down | the draining generation HOLDS them until they close, or `worker_shutdown_timeout` aborts them | lobo is the more forgiving of the two: a client written against nginx keeps working, a client written against lobo may not survive nginx |
