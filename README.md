@@ -37,13 +37,23 @@ from a bug report.
 
 ## Status
 
-ws16 (wsc06): `worker_processes N` is a master and N hands through
-`os.process` — supervised, fanned out to, a row per hand in `lobo
-status`, `worker=` on every hand's log line — with the
-accept-distribution posture at this pin MEASURED rather than assumed
-(docs/WORKERS.md: one hand serves, the rest stand by, wolf-lang#234/
-#235). See the track plan (Track 6) in the planning repo; sprints are
-contracts. This is also, deliberately, a flagship
+ws17 (wsc06, closed): **`worker_processes N` uses the cores.** The
+master binds the listeners and hands them down (`os_spawn_with` +
+`net_adopt_listener`); every hand accepts on ONE socket and the kernel
+distributes the work — measured at 28/32/31 over three hands, with
+`accepted=` on every row of `lobo status` so an operator can see it.
+The serving loop blocks on `net_wait` instead of time-slicing with
+deadlines, which took one lobo process from **37 to 11,278 req/s** on
+a connection-per-request load — within 2x of nginx at one worker. The
+control endpoint takes orders over a **unix-domain socket** where the
+host has one, so file permissions are the boundary, and each hand gets
+its own. What N is not yet is N times: `net_accept` parks in a
+blocking syscall after its readiness wait (wolf-lang#242, filed by
+this sprint), so lobo serializes accepts behind nginx's own
+`accept_mutex` shape to stay correct on a quiet server. The whole
+table, both distribution shapes measured, and the three gates in the
+order they were found are in docs/WORKERS.md. See the track plan
+(Track 6) in the planning repo; sprints are contracts. This is also, deliberately, a flagship
 codebase for reading production wolf: many agents, frozen `.wolfi`
 interfaces between modules, and every language pothole filed
 upstream as an issue.
