@@ -460,19 +460,29 @@ front one. In order:
 | the kernel distributed nothing (#234/#235) | filed, unlanded | **gone** — 28/32/31 over three hands |
 | `net_accept` parks after its readiness wait (#242) | not reachable — one hand held the listener, so there was never a race to lose | **the front gate**: the accept turn is the workaround and it caps N at one hand's accept rate |
 
-**Idle cost, before and after.** s137 measured `net_wait` doing ~37x
-less idle work than deadline time-slicing in a synthetic loop. lobo's
-own loop, measured the same way (one process, one held keepalive
-connection, 120 s, the SAME binary with the wait swapped for ws16's
-per-socket deadlines) does **not** show that, and the reason is worth
-writing down rather than quietly dropping: **lobo's idle loop was
-never busy.** It was asleep in a `net_deadline`, which costs a timer
-and not a core; both shapes sit at roughly three milliseconds of cpu
-per wall second, at the ten-millisecond resolution `ps(1)` offers.
-What the deadline cost was never idle cpu — it was **wake latency**,
-and that is the whole of the 37 -> 11,278. A page that quoted 37x here
-because upstream measured 37x there would be quoting someone else's
-workload.
+**Idle cost, before and after — measured, and it is not the number
+upstream measured.** s137 reported `net_wait` doing ~37x less idle
+work than deadline time-slicing, in a synthetic loop. lobo's own loop
+was measured the same way — one process, one held keepalive
+connection, 120 s of nothing happening, the SAME binary built twice
+with only the wait swapped for ws16's per-socket deadlines:
+
+| loop | cpu over 120 s idle |
+|---|---|
+| ws16: a deadline on every socket, every pass | 0.32 s |
+| ws17: one `net_wait` over the set | 0.26 s |
+
+**About 19% less, not 37x**, and the reason is worth writing down
+rather than quietly dropping: **lobo's idle loop was never busy.** It
+was asleep in a `net_deadline`, which costs a timer and not a core —
+roughly two to three milliseconds of cpu per wall second either way.
+What the deadline cost was never idle cpu. It was **wake latency**:
+the loop learned about a connection when a timer said to look, not
+when the socket spoke, and that is the whole of 37 -> 11,278 req/s. A
+page that quoted 37x here because upstream measured 37x there would be
+quoting someone else's workload; the surface is worth exactly what it
+is worth on this one, which is three hundred times more than the
+number upstream put on it.
 
 ## Witnesses
 
