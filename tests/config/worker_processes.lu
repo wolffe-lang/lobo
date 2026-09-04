@@ -65,11 +65,17 @@ fn main() -> !int {
     assert(!config.ok(c2), "two arguments are refused by the arg-count table")
     assert(c2.err.contains("invalid number of arguments"), "…with the oracle's words: {c2.err}")
 
-    // ---- the pure cpu-count reader (the linux answer, off a text)
-    let info = "processor\t: 0\nvendor_id\t: x\nprocessor\t: 1\nprocessor\t: 2\n\n"
-    assert(shell.cpu_count_of(info) == 3, "three processor rows -> 3")
-    assert(shell.cpu_count_of("") == 0, "an empty text -> 0 (unknown)")
-    assert(shell.cpu_count_of("model name : x\n") == 0, "no processor row -> 0")
+    // ---- `auto` is still the 0 sentinel, and the RESOLVER is gone
+    // from this surface. ws16 resolved it by counting `processor`
+    // rows in a `/proc/cpuinfo` text (`shell.cpu_count_of`, asserted
+    // here on three lanes); ws17 resolves it through `os_cpus()`
+    // ([os.cpus], wolf-lang#233) in main's `serve` arm, so there is no
+    // pure twin left to assert and this file keeps only the sentinel.
+    // The call itself is a RELATION, not a value — the count is the
+    // runner's — and it is witnessed where it is used:
+    // `tests/shell/cpus_auto.lu` (native and checked; lupin 0.1.25
+    // predates s137).
+    assert(shell.worker_processes(ca) == 0, "auto is still the sentinel, resolved by os_cpus")
 
     print("worker_processes: ok")
     0

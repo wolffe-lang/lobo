@@ -2022,6 +2022,15 @@ fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, ac
     }
 }
 
+/// The step a connection takes when `net_wait` said it has nothing to
+/// read (ws17): nothing happened, nothing closed, the carry rides. It
+/// exists so a serving loop with readiness never has to ARM a deadline
+/// and attempt a read just to learn what the poll already told it —
+/// which is the whole of wolf-lang#127's cost. Pure and total.
+pub fn conn_idle(carry: str, served: int) -> ConnStep {
+    step_out(false, false, carry, served, false, obs.access_new())
+}
+
 /// A full head is present in `buf` at `cut`: split it, arm the
 /// body-read deadline, and serve exactly one request. Total.
 fn step_serve(

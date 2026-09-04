@@ -7,21 +7,26 @@
 //! fs → native+checked; lupin declines the process trio). Spawns
 //! `target/lobo-debug serve` with `worker_processes 2` and a control
 //! endpoint, then drives the MASTER as a client:
-//!   1. `status` shows `workers: 2`, one hand `serving` (it holds the
-//!      listener) and one `standby` (the measured accept-distribution
-//!      posture at this pin — no SO_REUSEPORT, no inheritance,
-//!      wolf-lang#234/#235 — docs/WORKERS.md), each with its own
-//!      control endpoint;
-//!   2. a GET is served — by the serving hand, whose own stanza says
-//!      `worker: N` and `listening: true`, and whose `/metrics` scrape
-//!      carries `lobo_worker_id N`;
-//!   3. the serving hand is told `stop` DIRECTLY (a hand's endpoint is
-//!      an order desk too): the standby takes the listener (a GET is
-//!      served again, by the OTHER ordinal), and the master REPLACES
-//!      the gone hand — `status` shows the slot back, `restarts=1`;
-//!   4. `reload` fans out: the reply names `workers=2/2`, every hand's
+//!   1. `status` shows `workers: 2` and BOTH hands `serving` (ws17:
+//!      the master binds the listener and `os_spawn_with` hands it
+//!      down; each hand adopts it by position, so they accept on ONE
+//!      socket — wolf-lang#234/#235 landed, docs/WORKERS.md), each
+//!      with its own control endpoint;
+//!   2. a GET is served, and each hand's own stanza says `worker: N`,
+//!      `listening: true` and `accepted: K`; a `/metrics` scrape
+//!      carries `lobo_worker_id` naming whichever hand took it;
+//!   3. THE DISTRIBUTION, asserted: a run of connection-per-request
+//!      GETs moves the `accepted` counter on BOTH hands — the kernel
+//!      is spreading accepts across the processes, which is the whole
+//!      of W6's first half;
+//!   4. a hand is told `stop` DIRECTLY (a hand's endpoint is an order
+//!      desk too): the service keeps serving from the survivor with no
+//!      failover to wait for, and the master REPLACES the gone hand —
+//!      `status` shows the slot back, `restarts=1`, and SERVING, since
+//!      a replacement inherits the same socket;
+//!   5. `reload` fans out: the reply names `workers=2/2`, every hand's
 //!      row advances to generation 2, the new root serves;
-//!   5. `quit` drains every hand and the master exits 0, pid file gone.
+//!   6. `quit` drains every hand and the master exits 0, pid file gone.
 //! Loopback only, OS-chosen ports (bind :0, learn, close, hand to the
 //! child). Idempotent: the scratch tree is cleared at the START.
 
@@ -129,32 +134,47 @@ fn row_field(row: str, key: str) -> str {
     ""
 }
 
-/// The ordinal of the hand whose row says `serving`, or 0. Total.
-fn serving_worker(st: str) -> int {
+/// How many of the two hands say `serving`. ws17: the answer is 2 —
+/// both adopted the master's listener. Total.
+fn serving_count(st: str) -> int {
+    var n: int = 0
     if worker_row(st, 1).contains(": serving ") {
-        return 1
+        n = n + 1
     }
     if worker_row(st, 2).contains(": serving ") {
-        return 2
+        n = n + 1
     }
-    0
+    n
 }
 
-/// Poll the master until exactly one hand serves and the other stands
-/// by, up to ~8s; answers the serving ordinal or 0. Total.
-fn wait_posture(ep: str) -> int {
+/// Poll the master until BOTH hands serve, up to ~8s. Total.
+fn wait_posture(ep: str) -> bool {
     var i: int = 0
     while i < 160 {
-        let st = master_status(ep)
-        let s = serving_worker(st)
-        let other = if s == 1 { 2 } else { 1 }
-        if s > 0 && worker_row(st, other).contains(": standby ") {
-            return s
+        if serving_count(master_status(ep)) == 2 {
+            return true
         }
         time_sleep_ms(50)
         i = i + 1
     }
-    0
+    false
+}
+
+/// A hand's `accepted=` count off the master's row, or -1. Total.
+fn accepted_of(st: str, w: int) -> int {
+    let v = row_field(worker_row(st, w), "accepted")
+    if v.is_empty() {
+        return -1
+    }
+    var n: int = 0
+    for b in v.bytes() {
+        let d = b as int
+        if d < 48 || d > 57 {
+            return -1
+        }
+        n = n * 10 + (d - 48)
+    }
+    n
 }
 
 fn main() -> !int {
@@ -190,21 +210,19 @@ fn main() -> !int {
         assert(false, "the spawned master never became alive on {ep}")
     }
 
-    // 1. the posture: two hands, one serving, one standing by
-    let s1 = wait_posture(ep)
-    if s1 == 0 {
+    // 1. the posture: two hands, BOTH serving on the inherited socket
+    if !wait_posture(ep) {
         os_kill(child) else |_| {}
-        assert(
-            false,
-            "the master never reported one serving + one standby hand: {master_status(ep)}",
-        )
+        assert(false, "the master never reported two serving hands: {master_status(ep)}")
     }
     let st1 = master_status(ep)
     assert(st1.contains("workers: 2\n"), "the master stanza counts its hands: {st1}")
-    let o1 = if s1 == 1 { 2 } else { 1 }
+    let s1 = 1
+    let o1 = 2
     let row_s = worker_row(st1, s1)
     let row_o = worker_row(st1, o1)
-    assert(row_field(row_s, "generation") == "1", "the serving hand is at generation 1: {row_s}")
+    assert(row_field(row_s, "generation") == "1", "hand 1 is at generation 1: {row_s}")
+    assert(row_field(row_o, "generation") == "1", "hand 2 is at generation 1: {row_o}")
     assert(row_field(row_s, "restarts") == "0", "no hand has been replaced yet: {row_s}")
     let ep_s = row_field(row_s, "control")
     let ep_o = row_field(row_o, "control")
@@ -214,47 +232,89 @@ fn main() -> !int {
     )
     assert(!(ep_s == ep_o), "…and they differ")
 
-    // 2. served by the serving hand, which says so itself
+    // 2. served, and every hand says what it is and what it has taken
     let b1 = http_get(hp, "/index.html")?
     assert(b1.contains("hands-A-body"), "a GET is served: {b1}")
     let own = shell.control_fetch(ep_s, "status") else |_| { "" }
     assert(
         own.contains("worker: {s1}\nlistening: true\n"),
-        "the serving hand's own stanza names itself: {own}",
+        "hand 1's own stanza names itself and says it is listening: {own}",
     )
-    let standby = shell.control_fetch(ep_o, "status") else |_| { "" }
+    assert(own.contains("\naccepted: "), "…and carries its accept count (ws17): {own}")
+    let other = shell.control_fetch(ep_o, "status") else |_| { "" }
     assert(
-        standby.contains("worker: {o1}\nlistening: false\n"),
-        "the standby's own stanza says it holds nothing: {standby}",
+        other.contains("worker: {o1}\nlistening: true\n"),
+        "hand 2 holds the SAME listener — it adopted it, it did not bind it: {other}",
     )
     let m = http_get(hp, "/metrics")?
-    assert(m.contains("lobo_worker_id {s1}\n"), "/metrics names the hand that answered: {m}")
+    assert(
+        m.contains("lobo_worker_id 1\n") || m.contains("lobo_worker_id 2\n"),
+        "/metrics names whichever hand took the scrape: {m}",
+    )
 
-    // 3. the serving hand is told to stop, directly: failover, then replacement
+    // 3. THE DISTRIBUTION. A run of connection-per-request GETs, then
+    // both hands' accept counters read off the master's own rows: the
+    // kernel spread them across the processes. This is the assertion
+    // ws16 could not make, and the whole of W6's first half.
+    let before1 = accepted_of(st1, 1)
+    let before2 = accepted_of(st1, 2)
+    assert(before1 >= 0 && before2 >= 0, "both rows carry accepted=: {st1}")
+    var g: int = 0
+    while g < 60 {
+        let b = http_get(hp, "/index.html") else |_| {
+            ""
+        }
+        assert(b.contains("hands-A-body"), "GET {g} of the distribution run: {b}")
+        g = g + 1
+    }
+    var spread = false
+    var sp: int = 0
+    var stdist = ""
+    while sp < 40 && !spread {
+        stdist = master_status(ep)
+        let a1 = accepted_of(stdist, 1)
+        let a2 = accepted_of(stdist, 2)
+        if a1 > before1 && a2 > before2 {
+            spread = true
+        } else {
+            time_sleep_ms(50)
+            sp = sp + 1
+        }
+    }
+    assert(
+        spread,
+        "60 connections reached BOTH hands (accepted moved on each — the kernel distributes over the inherited socket): {stdist}",
+    )
+
+    // 4. a hand is told to stop, directly: no failover to wait for —
+    // the survivor already holds the same socket — then replacement
     let rs = shell.control_send(ep_s, "stop") else |_| {
         os_kill(child) else |_| {}
-        assert(false, "stop to the serving hand never answered")
+        assert(false, "stop to hand 1 never answered")
         ""
     }
     assert(rs.contains("shutting down"), "the hand takes the order: {rs}")
-    assert(poll_body(hp, "hands-A-body"), "the standby took the listener: a GET is served again")
+    assert(poll_body(hp, "hands-A-body"), "the survivor serves on: a GET is answered")
     let own2 = shell.control_fetch(ep_o, "status") else |_| { "" }
-    assert(own2.contains("worker: {o1}\nlistening: true\n"), "…by the OTHER ordinal: {own2}")
-    // the master replaces the gone hand (its slot returns as a standby,
-    // restarts=1) — the reap waits out the supervision grace
+    assert(own2.contains("worker: {o1}\nlistening: true\n"), "…by the surviving ordinal: {own2}")
+    // the master replaces the gone hand, and the replacement comes back
+    // SERVING: it inherits the same socket the master still holds
     var replaced = false
     var i: int = 0
     while i < 200 && !replaced {
         let st = master_status(ep)
         let r = worker_row(st, s1)
-        if r.contains(": standby ") && row_field(r, "restarts") == "1" {
+        if r.contains(": serving ") && row_field(r, "restarts") == "1" {
             replaced = true
         } else {
             time_sleep_ms(50)
             i = i + 1
         }
     }
-    assert(replaced, "the master replaced hand {s1} (restarts=1, standing by): {master_status(ep)}")
+    assert(
+        replaced,
+        "the master replaced hand {s1} and the replacement SERVES (restarts=1): {master_status(ep)}",
+    )
 
     // 4. reload fans out — rolling, every hand advances
     write_conf(confp, hp, cp, "ws16_e2e/B")?

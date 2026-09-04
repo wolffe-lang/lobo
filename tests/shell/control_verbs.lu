@@ -27,6 +27,49 @@ fn main() -> !int {
         shell.control_addr(port_only) == "127.0.0.1:9001",
         "a bare port is a LOOPBACK bind, forever",
     )
+
+    // ---- ws17: the UNIX transport (wolf-lang#227 landed). The
+    // address is kept whole and the reader tells the two families
+    // apart; nginx's own `unix:<path>` spelling.
+    let ux = config.parse_str("control unix:/run/lobo/control.sock;\nhttp {{ }}\n", "x")
+    assert(
+        shell.control_addr(ux) == "unix:/run/lobo/control.sock",
+        "a unix: address is kept whole: {shell.control_addr(ux)}",
+    )
+    assert(shell.is_unix_addr(shell.control_addr(ux)), "…and reads as the unix family")
+    assert(
+        shell.unix_path_of(shell.control_addr(ux)) == "/run/lobo/control.sock",
+        "…with the path inside it",
+    )
+    assert(!shell.is_unix_addr("127.0.0.1:9001"), "a loopback address is not the unix family")
+    assert(shell.unix_path_of("127.0.0.1:9001").is_empty(), "…and has no path")
+    // a hand's endpoint under a unix master is a SIBLING of it, so it
+    // inherits the operator's directory and is a uid boundary too
+    assert(
+        shell.unix_worker_addr("unix:/run/lobo/control.sock", 2) == "unix:/run/lobo/control.sock.w2",
+        "hand 2's endpoint sits beside the master's: {shell.unix_worker_addr("unix:/run/lobo/control.sock", 2)}",
+    )
+    assert(
+        shell.unix_worker_addr("127.0.0.1:9001", 2).is_empty(),
+        "a TCP master has no unix sibling to give (its hands get loopback ports)",
+    )
+    // the token arm rides the unix form too — a host may want both
+    let uxt = config.
+        parse_str("control unix:/run/lobo/c.sock token secrets/ctl;\nhttp {{ }}\n", "x")
+    assert(shell.control_addr(uxt) == "unix:/run/lobo/c.sock", "the unix address with a token arm")
+    assert(
+        shell.control_token_path(uxt, "/p") == "/p/secrets/ctl",
+        "…and the token path still resolves against the prefix",
+    )
+    // `-t` refuses a bare `unix:` by name; the HOST's family is NOT
+    // checked here (the check runs where the server may not — the
+    // startup path names `unsupported` out loud)
+    let empty_ux = config.parse_str("control unix:;\nhttp {{ }}\n", "x")
+    assert(
+        config.control_check(empty_ux).contains("empty unix socket path"),
+        "a bare unix: is a named -t error: {config.control_check(empty_ux)}",
+    )
+    assert(config.control_check(ux).is_empty(), "a well-formed unix: address passes -t")
     let tokd = config.parse_str("control 127.0.0.1:9001 token secrets/ctl;\nhttp {{ }}\n", "x")
     assert(shell.control_addr(tokd) == "127.0.0.1:9001", "the address arm survives the token arm")
     assert(
