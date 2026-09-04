@@ -300,8 +300,12 @@ worker 2: serving control=127.0.0.1:52357 generation=2 live=1 accepted=32 events
 worker 3: serving control=127.0.0.1:52358 generation=2 live=0 accepted=31 events=9 live-region-bytes=65536 budget-503s=0 restarts=0
 ```
 
-**`accepted=` is ws17's field and it is the sprint's instrument**
-(appended; every earlier fact keeps its place). With every hand
+**`accepted=` is ws17's field and it is the sprint's instrument.**
+It sits after `live=` in the master's row and is APPENDED as a third
+head line to a hand's own stanza; every earlier fact keeps its name
+and its value, and both readers key on `field=` rather than on
+position (`shell.stanza_int`, `stanza_field_sum`), so nothing that
+read a ws16 row stops reading one. With every hand
 accepting on one socket, the only way to SEE the kernel distributing
 the work is to ask each hand what it took — so an operator reads
 distribution off `lobo status` the way this page's numbers were read,
