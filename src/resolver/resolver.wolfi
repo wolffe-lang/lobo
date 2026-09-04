@@ -1,12 +1,12 @@
 module pkg :: resolver
-  wolfi v0 · toolchain 0.2.3 · edition v1
-  export_hash 335a608ed8a1bcaebc89315ca204485dd53b25c5cc15e7b78fd88a4e99e07f2e
-  pkg_hash    335a608ed8a1bcaebc89315ca204485dd53b25c5cc15e7b78fd88a4e99e07f2e
+  wolfi v0 · toolchain 0.2.4 · edition v1
+  export_hash aac614ee3dfaddedddae0dc4928fd2636f7544e1b97d08a23c69690e204a58da
+  pkg_hash    aac614ee3dfaddedddae0dc4928fd2636f7544e1b97d08a23c69690e204a58da
   deps:
-    std.hex  0f06036b76a65d732c75a4ba009e64c4c6ba6f08d0bbd0fa4c722a153c63b59e
+    std.hex  04ed27eecce0b315ef5cfbad1671d9df59bd9c8cb330a223430daa4d1711ff86
   items:
     [0] pub addr_set — fn addr_set(rs: self.Resolver, host: str) -> str · regions (ρ1, -) -> -
-    [1] pub build_query — fn build_query(id: int, name: str) -> prelude.List[int] · regions (-, -) -> ρ_caller
+    [1] pub build_query — fn build_query(id: int, name: str) -> prelude.List[byte] · regions (-, -) -> ρ_caller
     [2] pub cached — fn cached(rs: self.Resolver) -> int · regions (ρ1) -> -
     [3] pub ev_resolve_failed — fn ev_resolve_failed(host: str, reason: str, took_ms: int) -> str
     [4] pub ev_resolved — fn ev_resolved(host: str, addrs: int, ttl_ms: int, took_ms: int) -> str
@@ -17,7 +17,7 @@ module pkg :: resolver
     [9] pub is_pending — fn is_pending(rs: self.Resolver, host: str) -> bool · regions (ρ1, -) -> -
     [10] pub min_ttl_ms — fn min_ttl_ms() -> int
     [11] pub new — fn new() -> self.Resolver · regions () -> ρ_caller
-    [12] pub parse_answer — fn parse_answer(id: int, msg: prelude.List[int]) -> self.Answer · regions (-, ρ1) -> ρ_caller
+    [12] pub parse_answer — fn parse_answer(id: int, msg: prelude.List[byte]) -> self.Answer · regions (-, ρ1) -> ρ_caller
     [13] pub pending — fn pending(rs: self.Resolver) -> int · regions (ρ1) -> -
     [14] pub resolve_now — fn resolve_now(mut rs: self.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int) · regions (ρ1, -, -, -, -) -> -
     [15] pub rotate — fn rotate(mut rs: self.Resolver, host: str) -> prelude.List[str] · regions (ρ1, -) -> ρ_caller

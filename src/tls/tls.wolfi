@@ -1,22 +1,22 @@
 module pkg :: tls
-  wolfi v0 · toolchain 0.2.3 · edition v1
-  export_hash b855cb89c560806f4dd324592dc1540a5160655fb5e02d54dc051ed80e3ee85b
-  pkg_hash    b855cb89c560806f4dd324592dc1540a5160655fb5e02d54dc051ed80e3ee85b
+  wolfi v0 · toolchain 0.2.4 · edition v1
+  export_hash 467abdcc873c979a339c0b3c3d856753523fb0a3a17f97801936f75e5e3e43e5
+  pkg_hash    467abdcc873c979a339c0b3c3d856753523fb0a3a17f97801936f75e5e3e43e5
   deps:
-    config  18c9249938d54b2e1752ffc349e61fcb768a6dc06a70807a0efe66b3f7a22aef
-    std.x.crypto.curve25519  01a215032a171eb1b9366f168a23d78b3e7b6d3c975d37627d3b7ebd9f35ad3a
-    std.x.tls.cert  869655ab09c4766bcc4957a31b0d738cbb9870c829ec2918c879d863d3556442
-    std.x.tls.handshake  418f15ce5f6a3c47c404172faf1d86fa359802143a45cb1719f3dda5b90b75c0
-    std.x.tls.record  641da686f69307515d4fe844a6b8a6a1be399e1bd34e40931fa2bbe5bcc21473
+    config  3d50fcca115ab0b30944c8188afa2c07d073ef03055a30cbc5b5cc18d17b98a7
+    std.x.crypto.curve25519  f5ed55bf76e3dc69e08a3aee0093b290678accf26dbdd935bb40503d923ee48b
+    std.x.tls.cert  b82c9426ed25d39e7dc9c00c49f70822de40a913eeb3eadf634cbf1728fd1d78
+    std.x.tls.handshake  0eacf4bb1b764ee9898211655e7c1cace669295e0e436b0261c8f2e4fcb229ae
+    std.x.tls.record  2c701c7ba8776b785f4e950f9eab2300a82121ec34aee244874d9861bceb6716
   items:
     [0] pub accept — fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> self.Sess ! {io, refused, timeout} · regions (-, ρ1, -) -> ρ_caller
     [1] pub alert_name — fn alert_name(code: int) -> str
     [2] pub no_sess — fn no_sess() -> self.Sess · regions () -> ρ_caller
-    [3] pub parse_client_hello — fn parse_client_hello(msg: prelude.List[int]) -> self.Hello · regions (ρ1) -> ρ_caller
+    [3] pub parse_client_hello — fn parse_client_hello(msg: prelude.List[byte]) -> self.Hello · regions (ρ1) -> ρ_caller
     [4] pub sess_close — fn sess_close(mut z: self.Sess) · regions (ρ1) -> -
-    [5] pub sess_read — fn sess_read(mut z: self.Sess, max: int) -> prelude.List[int] ! {closed, io, timeout} · regions (ρ1, -) -> ρ_caller
-    [6] pub sess_write — fn sess_write(mut z: self.Sess, data: prelude.List[int]) -> () ! {closed, io} · regions (ρ1, ρ2) -> -
+    [5] pub sess_read — fn sess_read(mut z: self.Sess, max: int) -> prelude.List[byte] ! {closed, io, timeout} · regions (ρ1, -) -> ρ_caller
+    [6] pub sess_write — fn sess_write(mut z: self.Sess, data: prelude.List[byte]) -> () ! {closed, io} · regions (ρ1, ρ2) -> -
     [7] pub version — fn version() -> str
-    [8] pub Hello — struct Hello { ok: bool, alert: int, reason: str, random: prelude.List[int], session_id: prelude.List[int], has_chacha: bool, has_13: bool, has_ed25519: bool, kx: prelude.List[int], sni: str, alpn_offered: bool, alpn_http11: bool }
-    [9] pub Sess — struct Sess { fd: int, up: bool, rkey: prelude.List[int], riv: prelude.List[int], rseq: int, wkey: prelude.List[int], wiv: prelude.List[int], wseq: int, buf: prelude.List[int], plain: prelude.List[int], got_close: bool, sent_close: bool, trunc: bool, sni: str, alpn: str, entry: int }
+    [8] pub Hello — struct Hello { ok: bool, alert: int, reason: str, random: prelude.List[byte], session_id: prelude.List[byte], has_chacha: bool, has_13: bool, has_ed25519: bool, kx: prelude.List[byte], sni: str, alpn_offered: bool, alpn_http11: bool }
+    [9] pub Sess — struct Sess { fd: int, up: bool, rkey: prelude.List[byte], riv: prelude.List[byte], rseq: int, wkey: prelude.List[byte], wiv: prelude.List[byte], wseq: int, buf: prelude.List[byte], plain: prelude.List[byte], got_close: bool, sent_close: bool, trunc: bool, sni: str, alpn: str, entry: int }
 
