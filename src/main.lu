@@ -1891,7 +1891,24 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, han
             // pass on them. The row still rides the idle and drain
             // clocks below, which is the work a timer, not a socket,
             // has to do.
-            let st = if ready_has(ready, fd) {
+            // ws17: a connection is stepped when the wait named it —
+            // OR when it has work that no incoming byte will announce.
+            // Two such rows, and BOTH were hangs before they were
+            // measured (tests/resolver/proxy_e2e.lu found the first
+            // inside an hour):
+            //   * a connection coming OUT of a resolver park was never
+            //     in the wait set while it was parked, so it could not
+            //     be in the answer either — it would have ridden
+            //     forward forever with its name settled and nobody to
+            //     write the response;
+            //   * a connection whose CARRY already holds a whole head
+            //     (the pipelined request) is waiting on lobo, not on
+            //     its client, and a poll will never name it again.
+            // ws16 never met either, because ws16 stepped every
+            // connection every pass and paid 12 ms each for the
+            // privilege.
+            let must_step = !waiting.is_empty() || serve.carry_has_head(car)
+            let st = if must_step || ready_has(ready, fd) {
                 serve.conn_step(fd, cconf, opts, lim_for(gens, cg), hport, car, sv, 12, mut rs)
             } else {
                 serve.conn_idle(car, sv)

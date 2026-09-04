@@ -2022,6 +2022,18 @@ fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, ac
     }
 }
 
+/// Does `carry` already hold a complete request head? (ws17)
+///
+/// A serving loop with readiness steps a connection when the poll
+/// names it — but a connection whose CARRY already holds a whole head
+/// has work to do with no new byte arriving, and a poll will never
+/// name it again until the client speaks. That is the pipelined
+/// request, and skipping it is a hang rather than a slowdown. Pure and
+/// total; the same cut `conn_step` makes.
+pub fn carry_has_head(carry: str) -> bool {
+    head_cut(carry).ready
+}
+
 /// The step a connection takes when `net_wait` said it has nothing to
 /// read (ws17): nothing happened, nothing closed, the carry rides. It
 /// exists so a serving loop with readiness never has to ARM a deadline
