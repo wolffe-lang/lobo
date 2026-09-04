@@ -110,9 +110,13 @@ member (macOS): a prefork built on reuse_port is one server and N-1
 idle sockets
 ```
 
-On linux the same file prints a spread (the 4-tuple hash); on windows
-the option is `unsupported`, refused by name rather than aliased to
-`SO_REUSEADDR`, whose delivery promises nothing. **lobo does not take
+On windows the option is `unsupported`, refused by name rather than
+aliased to `SO_REUSEADDR`, whose delivery promises nothing. **On linux
+the file RUNS on the CI runner and asserts the same guarantee, but
+what it prints there is not visible**: the corpus runner does not echo
+a test's stdout, only its verdict — so linux's delivery policy in this
+page is upstream's own measurement (`[os.net.listen.opts]`: a 4-tuple
+hash, every hand accepts), not lobo's. Said rather than borrowed. **lobo does not take
 this shape.** On macOS it would be ws16's posture with a different
 cause; on linux it would work — and a server that picks its
 architecture per host is a server with two architectures.
@@ -129,6 +133,24 @@ master with three hands and reads each hand's own accept counter off
 lobo-prefork: ok — 90 connections reached ALL THREE hands
               (rows with accepted>0: 3; counts: 28/32/31)
 ```
+
+**And it is a gauntlet step, so CI asserts it on linux too** — the
+same run, the runner's own kernel, at the ws17 head:
+
+```
+corpus: 253/253 lane-runs green
+lobo-prefork: ok — 90 connections reached ALL THREE hands
+              (rows with accepted>0: 3; counts: 29/31/31)
+lobo-prefork: ok — the service did not blink across the crash
+              (gap: 2 ms, MEASURED …)
+lobo-prefork: GREEN — 35/35
+```
+
+Two hosts, two kernels, the same even split. The DISTRIBUTION is
+measured on both; the `req/s` table below is macOS only, because the
+bench is deliberately not a gauntlet step (a number depends on the
+box) and no CI job runs it. The linux numbers are unmeasured and are
+not extrapolated anywhere on this page.
 
 **Windows:** `os_spawn_with` with an EMPTY inherit set serves there,
 and `net_adopt_listener` is `unsupported` BY NAME — a `SOCKET` is not
