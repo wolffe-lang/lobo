@@ -12,26 +12,26 @@
 
 use tls
 
-fn u16be(v: int) -> List[int] {
-    var o = List[int]()
-    (mut o).push(v / 256 % 256)
-    (mut o).push(v % 256)
+fn u16be(v: int) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push((v / 256 % 256) as byte)
+    (mut o).push((v % 256) as byte)
     o
 }
 
-fn push_all(mut o: List[int], s: List[int]) {
+fn push_all(mut o: List[byte], s: List[byte]) {
     for b in s {
         (mut o).push(b)
     }
 }
 
-fn u16p(d: List[int]) -> List[int] {
+fn u16p(d: List[byte]) -> List[byte] {
     var o = u16be(d.len)
     push_all(mut o, d)
     o
 }
 
-fn ext(t: int, d: List[int]) -> List[int] {
+fn ext(t: int, d: List[byte]) -> List[byte] {
     var o = u16be(t)
     push_all(mut o, u16p(d))
     o
@@ -39,74 +39,76 @@ fn ext(t: int, d: List[int]) -> List[int] {
 
 /// Build a ClientHello handshake message with a settable extension
 /// block, suite list, and key-share group.
-fn build_ch(exts: List[int], suites: List[int]) -> List[int] {
-    var body = List[int]()
+fn build_ch(exts: List[byte], suites: List[byte]) -> List[byte] {
+    var body = List[byte]()
     push_all(mut body, u16be(771))
     var i: int = 0
     while i < 32 {
-        (mut body).push(i)
+        (mut body).push(i as byte)
         i = i + 1
     }
-    (mut body).push(0)
+    (mut body).push(0 as byte)
     push_all(mut body, u16p(suites))
-    (mut body).push(1)
-    (mut body).push(0)
+    (mut body).push(1 as byte)
+    (mut body).push(0 as byte)
     push_all(mut body, u16p(exts))
-    var msg = List[int]()
-    (mut msg).push(1)
-    (mut msg).push(body.len / 65536 % 256)
-    (mut msg).push(body.len / 256 % 256)
-    (mut msg).push(body.len % 256)
+    var msg = List[byte]()
+    (mut msg).push(1 as byte)
+    (mut msg).push((body.len / 65536 % 256) as byte)
+    (mut msg).push((body.len / 256 % 256) as byte)
+    (mut msg).push((body.len % 256) as byte)
     push_all(mut msg, body)
     msg
 }
 
-fn ext_versions13() -> List[int] {
-    var inner = List[int]()
-    (mut inner).push(2)
+fn ext_versions13() -> List[byte] {
+    var inner = List[byte]()
+    (mut inner).push(2 as byte)
     push_all(mut inner, u16be(772))
     ext(43, inner)
 }
 
-fn ext_keyshare_x25519() -> List[int] {
-    var entry = List[int]()
+fn ext_keyshare_x25519() -> List[byte] {
+    var entry = List[byte]()
     push_all(mut entry, u16be(29))
-    var pt = List[int]()
+    var pt = List[byte]()
     var i: int = 0
     while i < 32 {
-        (mut pt).push(9)
+        (mut pt).push(9 as byte)
         i = i + 1
     }
     push_all(mut entry, u16p(pt))
     ext(51, u16p(entry))
 }
 
-fn ext_sigalgs_ed() -> List[int] {
+fn ext_sigalgs_ed() -> List[byte] {
     ext(13, u16p(u16be(2055)))
 }
 
-fn ext_sni(host: str) -> List[int] {
-    var name = List[int]()
-    (mut name).push(0)
-    var hb = List[int]()
-    for b in host.bytes() {
-        (mut hb).push(b)
+fn ext_sni(host: str) -> List[byte] {
+    var name = List[byte]()
+    (mut name).push(0 as byte)
+    var hb = List[byte]()
+    for b_raw in host.bytes() {
+        let b = b_raw as int
+        (mut hb).push(b as byte)
     }
     push_all(mut name, u16p(hb))
     ext(0, u16p(name))
 }
 
-fn ext_alpn_http11() -> List[int] {
-    var names = List[int]()
-    (mut names).push(8)
-    for b in "http/1.1".bytes() {
-        (mut names).push(b)
+fn ext_alpn_http11() -> List[byte] {
+    var names = List[byte]()
+    (mut names).push(8 as byte)
+    for b_raw in "http/1.1".bytes() {
+        let b = b_raw as int
+        (mut names).push(b as byte)
     }
     ext(16, u16p(names))
 }
 
-fn full_exts() -> List[int] {
-    var e = List[int]()
+fn full_exts() -> List[byte] {
+    var e = List[byte]()
     push_all(mut e, ext_versions13())
     push_all(mut e, ext_keyshare_x25519())
     push_all(mut e, ext_sigalgs_ed())
@@ -124,14 +126,14 @@ fn main() -> int {
     assert(h.has_chacha, "ChaCha20 suite seen")
     assert(h.has_ed25519, "ed25519 sigalg seen")
     assert(h.kx.len == 32, "X25519 key share extracted")
-    assert(h.kx[0] == 9, "key share bytes verbatim")
+    assert(h.kx[0] as int == 9, "key share bytes verbatim")
     assert(h.sni == "wolf.example", "SNI extracted: {h.sni}")
     assert(h.alpn_offered, "ALPN offered")
     assert(h.alpn_http11, "http/1.1 in ALPN")
     assert(h.random.len == 32, "random extracted")
 
     // no TLS 1.3 (drop supported_versions)
-    var e2 = List[int]()
+    var e2 = List[byte]()
     push_all(mut e2, ext_keyshare_x25519())
     push_all(mut e2, ext_sigalgs_ed())
     let h2 = tls.parse_client_hello(build_ch(e2, chacha))
@@ -143,30 +145,30 @@ fn main() -> int {
     assert(!h3.has_chacha, "no chacha when unoffered")
 
     // no key share
-    var e4 = List[int]()
+    var e4 = List[byte]()
     push_all(mut e4, ext_versions13())
     push_all(mut e4, ext_sigalgs_ed())
     let h4 = tls.parse_client_hello(build_ch(e4, chacha))
     assert(h4.kx.len == 0, "no key share extracted")
 
     // ALPN with only h2 (no http/1.1)
-    var e5 = List[int]()
+    var e5 = List[byte]()
     push_all(mut e5, ext_versions13())
-    var h2names = List[int]()
-    (mut h2names).push(2)
-    (mut h2names).push(104)
-    (mut h2names).push(50)
+    var h2names = List[byte]()
+    (mut h2names).push(2 as byte)
+    (mut h2names).push(104 as byte)
+    (mut h2names).push(50 as byte)
     push_all(mut e5, ext(16, u16p(h2names)))
     let h5 = tls.parse_client_hello(build_ch(e5, chacha))
     assert(h5.alpn_offered, "ALPN offered")
     assert(!h5.alpn_http11, "http/1.1 absent from an h2-only offer")
 
     // truncated garbage never traps
-    var junk = List[int]()
-    (mut junk).push(1)
-    (mut junk).push(0)
-    (mut junk).push(0)
-    (mut junk).push(200)
+    var junk = List[byte]()
+    (mut junk).push(1 as byte)
+    (mut junk).push(0 as byte)
+    (mut junk).push(0 as byte)
+    (mut junk).push(200 as byte)
     let hj = tls.parse_client_hello(junk)
     assert(!hj.ok, "truncated hello rejected, not trapped")
 

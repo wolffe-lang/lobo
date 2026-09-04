@@ -19,7 +19,8 @@ pub fn resolver_is_literal(host: str) -> bool {
         return true
     }
     var dots: int = 0
-    for b in host.bytes() {
+    for b_raw in host.bytes() {
+        let b = b_raw as int
         if b == 46 {
             dots = dots + 1
         } else if b < 48 || b > 57 {

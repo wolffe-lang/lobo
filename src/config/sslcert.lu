@@ -31,7 +31,7 @@ use std.x.tls.cert
 
 // ------------------------------------------------------------------
 // the resolved ssl model — one entry per ssl server block, flat
-// parallel lists (the Conf idiom; List[List[int]] is not a shape the
+// parallel lists (the Conf idiom; List[List[byte]] is not a shape the
 // pinned tiers construct)
 // ------------------------------------------------------------------
 
@@ -54,11 +54,11 @@ pub struct SslConf {
     err_line: int,
     warns: str,
     names: List[str],
-    der: List[int],
+    der: List[byte],
     der_at: List[int],
     der_n: List[int],
     leaf_n: List[int],
-    seed: List[int],
+    seed: List[byte],
     cert_path: List[str],
     key_path: List[str],
     default_at: int,
@@ -74,11 +74,11 @@ pub fn ssl_none() -> SslConf {
         err_line: 0,
         warns: "",
         names: List[str](),
-        der: List[int](),
+        der: List[byte](),
         der_at: List[int](),
         der_n: List[int](),
         leaf_n: List[int](),
-        seed: List[int](),
+        seed: List[byte](),
         cert_path: List[str](),
         key_path: List[str](),
         default_at: -1,
@@ -122,11 +122,12 @@ fn b64val(ch: int) -> int {
 /// Decode the base64 body of a PEM block (whitespace tolerated,
 /// `=` padding tolerated at the end). The `bad` row is a malformed
 /// body — an alphabet violation or a dangling quantum.
-fn b64_decode(body: str) -> List[int] ! {bad} {
-    var out = List[int]()
+fn b64_decode(body: str) -> List[byte] ! {bad} {
+    var out = List[byte]()
     var acc: int = 0
     var have: int = 0
-    for ch in body.bytes() {
+    for ch_raw in body.bytes() {
+        let ch = ch_raw as int
         if ch == 10 || ch == 13 || ch == 32 || ch == 9 {
             continue
         }
@@ -140,9 +141,9 @@ fn b64_decode(body: str) -> List[int] ! {bad} {
         acc = acc * 64 + v
         have = have + 1
         if have == 4 {
-            (mut out).push(acc / 65536 % 256)
-            (mut out).push(acc / 256 % 256)
-            (mut out).push(acc % 256)
+            (mut out).push((acc / 65536 % 256) as byte)
+            (mut out).push((acc / 256 % 256) as byte)
+            (mut out).push((acc % 256) as byte)
             acc = 0
             have = 0
         }
@@ -151,11 +152,11 @@ fn b64_decode(body: str) -> List[int] ! {bad} {
         return bad
     }
     if have == 2 {
-        (mut out).push(acc * 16 / 256 % 256)
+        (mut out).push((acc * 16 / 256 % 256) as byte)
     }
     if have == 3 {
-        (mut out).push(acc * 4 / 65536 % 256)
-        (mut out).push(acc * 4 / 256 % 256)
+        (mut out).push((acc * 4 / 65536 % 256) as byte)
+        (mut out).push((acc * 4 / 256 % 256) as byte)
     }
     out
 }
@@ -182,8 +183,8 @@ pub fn pem_first_label(text: str) -> str {
 /// (unterminated, or base64 trouble). Total over arbitrary text
 /// otherwise; zero matching blocks is an EMPTY result, the caller's
 /// error to name.
-fn pem_blocks(text: str, label: str, mut lens: List[int]) -> List[int] ! {bad} {
-    var out = List[int]()
+fn pem_blocks(text: str, label: str, mut lens: List[int]) -> List[byte] ! {bad} {
+    var out = List[byte]()
     var rest = text
     let open_mark = "-----BEGIN {label}-----"
     let close_mark = "-----END {label}-----"
@@ -217,7 +218,7 @@ fn pem_blocks(text: str, label: str, mut lens: List[int]) -> List[int] ! {bad} {
 /// concatenated DER roots; DER is self-delimiting, so no lengths ride
 /// along). The `bad` row is a malformed block; ZERO blocks decode to
 /// an EMPTY list, the caller's error to name. Total otherwise.
-pub fn pem_certs(text: str) -> List[int] ! {bad} {
+pub fn pem_certs(text: str) -> List[byte] ! {bad} {
     var lens = List[int]()
     pem_blocks(text, "CERTIFICATE", mut lens)
 }
@@ -229,13 +230,13 @@ pub fn pem_certs(text: str) -> List[int] ! {bad} {
 
 /// Read one DER TLV header at `pos`: (tag, content_len, content_pos),
 /// or (-1, 0, 0) on any malformed/truncated/indefinite length. Total.
-fn der_tl(b: List[int], pos: int) -> (int, int, int) {
+fn der_tl(b: List[byte], pos: int) -> (int, int, int) {
     let n = b.len
     if pos + 2 > n {
         return (-1, 0, 0)
     }
-    let tag = b[pos]
-    let l0 = b[pos + 1]
+    let tag = b[pos] as int
+    let l0 = b[pos + 1] as int
     if l0 < 128 {
         if pos + 2 + l0 > n {
             return (-1, 0, 0)
@@ -263,7 +264,7 @@ fn der_tl(b: List[int], pos: int) -> (int, int, int) {
 
 /// Decode an OBJECT IDENTIFIER's content octets to dotted form
 /// ("1.3.101.112"), or "" on malformed. Total.
-fn oid_dotted(b: List[int], from: int, len: int) -> str {
+fn oid_dotted(b: List[byte], from: int, len: int) -> str {
     if len <= 0 {
         return ""
     }
@@ -274,7 +275,7 @@ fn oid_dotted(b: List[int], from: int, len: int) -> str {
     while i < len {
         let v = b[from + i]
         acc = acc * 128 + v % 128
-        if v < 128 {
+        if v as int < 128 {
             out = "{out}.{acc}"
             acc = 0
         }
@@ -291,7 +292,7 @@ fn oid_dotted(b: List[int], from: int, len: int) -> str {
 /// "" on malformed DER.
 pub struct KeyInfo {
     alg: str,
-    seed: List[int],
+    seed: List[byte],
 }
 
 /// Parse a PKCS#8 PrivateKeyInfo (RFC 5958): SEQUENCE { INTEGER v,
@@ -300,8 +301,8 @@ pub struct KeyInfo {
 /// holding the 32-byte seed. Answers the classified algorithm name in
 /// every parseable case, so the caller's named-unsupported error can
 /// say WHAT it met; malformed DER answers alg "". Total.
-pub fn pkcs8_parse(der_bytes: List[int]) -> KeyInfo {
-    let none = KeyInfo { alg: "", seed: List[int]() }
+pub fn pkcs8_parse(der_bytes: List[byte]) -> KeyInfo {
+    let none = KeyInfo { alg: "", seed: List[byte]() }
     let outer = der_tl(der_bytes, 0)
     if outer.0 != 48 {
         return none
@@ -324,7 +325,7 @@ pub fn pkcs8_parse(der_bytes: List[int]) -> KeyInfo {
     }
     let alg = cert.alg_name(dotted)
     if alg != "ed25519" {
-        return KeyInfo { alg: alg, seed: List[int]() }
+        return KeyInfo { alg: alg, seed: List[byte]() }
     }
     let pk = der_tl(der_bytes, alg_seq.2 + alg_seq.1)
     if pk.0 != 4 {
@@ -334,7 +335,7 @@ pub fn pkcs8_parse(der_bytes: List[int]) -> KeyInfo {
     if inner.0 != 4 || inner.1 != 32 {
         return none
     }
-    var seed = List[int]()
+    var seed = List[byte]()
     var i: int = 0
     while i < 32 {
         (mut seed).push(der_bytes[inner.2 + i])
@@ -350,15 +351,15 @@ pub fn pkcs8_parse(der_bytes: List[int]) -> KeyInfo {
 /// The SPKI public-key bytes of one DER certificate, or the empty
 /// list when it does not parse (the reorder probe's tolerant read).
 /// Total.
-fn spki_of(d: List[int]) -> List[int] {
+fn spki_of(d: List[byte]) -> List[byte] {
     let cc = cert.parse(d) else |_| {
-        return List[int]()
+        return List[byte]()
     }
     cc.spki_key
 }
 
 /// Byte-list equality. Total.
-fn bytes_eq(a: List[int], b: List[int]) -> bool {
+fn bytes_eq(a: List[byte], b: List[byte]) -> bool {
     if a.len != b.len {
         return false
     }
@@ -375,8 +376,8 @@ fn bytes_eq(a: List[int], b: List[int]) -> bool {
 
 /// The bytes of `b` from `from` (inclusive) to `to` (exclusive).
 /// Offsets are this module's own (validated spans). Total.
-fn bsub(b: List[int], from: int, to: int) -> List[int] {
-    var out = List[int]()
+fn bsub(b: List[byte], from: int, to: int) -> List[byte] {
+    var out = List[byte]()
     var i = from
     while i < to {
         (mut out).push(b[i])

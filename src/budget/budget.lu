@@ -46,13 +46,15 @@ fn read_pipe(pipe_r: int, errored: bool) -> (int, int) {
         return (if errored { 2 } else { 0 }, 0)
     }
     var w: int = 0
-    for b in line[0..sp].bytes() {
+    for b_raw in line[0..sp].bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             w = w * 10 + b - 48
         }
     }
     var rt: int = 0
-    for b in line[sp + 1..line.len].bytes() {
+    for b_raw in line[sp + 1..line.len].bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             rt = rt * 10 + b - 48
         }
@@ -74,7 +76,7 @@ fn body_small(sock: int, path: str, head: str, cap: int, pipe: int) -> int ! {io
     region resp(cap: cap) {
         let body = fs_read_bytes(path) else |_| {
             failed = true
-            List[int]()
+            List[byte]()
         }
         rt = region_bytes(resp)
         if !failed {
@@ -136,11 +138,11 @@ fn body_stream(sock: int, path: str, cap: int, pipe: int) -> int ! {io} {
             let chunk = fs_read_chunk(fd, 65536) else |e| match e {
                 eof => {
                     streaming = false
-                    List[int]()
+                    List[byte]()
                 },
                 io => {
                     wcode = 3
-                    List[int]()
+                    List[byte]()
                 },
             }
             if wcode == 0 && chunk.len > 0 {

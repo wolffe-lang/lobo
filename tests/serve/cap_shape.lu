@@ -93,7 +93,8 @@ fn run_one(n: int, cap: int, sock: int, pipe_w: int, pipe_r: int) -> (int, int, 
         }
         let sp = line.find(" ") else -1
         if sp > 0 {
-            for b in line[sp + 1..line.len].trim().bytes() {
+            for b_raw in line[sp + 1..line.len].trim().bytes() {
+                let b = b_raw as int
                 rt = rt * 10 + b - 48
             }
         }

@@ -24,11 +24,12 @@ fn to_port(s: str) -> int ! {io} {
         return io
     }
     var n: int = 0
-    for b in s.bytes() {
-        if b < 48 {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b as int < 48 {
             return io
         }
-        if b > 57 {
+        if b as int > 57 {
             return io
         }
         n = n * 10 + b - 48
@@ -49,11 +50,12 @@ fn to_count(s: str) -> int ! {io} {
         return io
     }
     var n: int = 0
-    for b in s.bytes() {
-        if b < 48 {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b as int < 48 {
             return io
         }
-        if b > 57 {
+        if b as int > 57 {
             return io
         }
         n = n * 10 + b - 48
@@ -87,8 +89,9 @@ fn content_length_of(head: str) -> int {
         if low.starts_with("content-length:") {
             var n: int = 0
             var seen = false
-            for b in low[15..low.len].bytes() {
-                if b >= 48 && b <= 57 {
+            for b_raw in low[15..low.len].bytes() {
+                let b = b_raw as int
+                if b as int >= 48 && b as int <= 57 {
                     n = n * 10 + b - 48
                     seen = true
                 }

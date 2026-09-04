@@ -51,36 +51,36 @@ pub fn version() -> str {
 /// A DER header (tag + definite length) followed by nothing — the
 /// caller appends the body it measured. Total for len >= 0 (asserts
 /// otherwise; lengths here are always measured .len values).
-pub fn der_hdr(tag: int, len: int) -> List[int] {
+pub fn der_hdr(tag: int, len: int) -> List[byte] {
     assert(len >= 0, "DER length cannot be negative")
-    var out = List[int]()
-    (mut out).push(tag)
+    var out = List[byte]()
+    (mut out).push(tag as byte)
     if len < 128 {
-        (mut out).push(len)
+        (mut out).push(len as byte)
         return out
     }
     if len < 256 {
-        (mut out).push(129)
-        (mut out).push(len)
+        (mut out).push(129 as byte)
+        (mut out).push(len as byte)
         return out
     }
     if len < 65536 {
-        (mut out).push(130)
-        (mut out).push(len / 256)
-        (mut out).push(len % 256)
+        (mut out).push(130 as byte)
+        (mut out).push((len / 256) as byte)
+        (mut out).push((len % 256) as byte)
         return out
     }
     // three length bytes carries 16MB — nothing this module builds
     // gets near it
-    (mut out).push(131)
-    (mut out).push(len / 65536)
-    (mut out).push(len / 256 % 256)
-    (mut out).push(len % 256)
+    (mut out).push(131 as byte)
+    (mut out).push((len / 65536) as byte)
+    (mut out).push((len / 256 % 256) as byte)
+    (mut out).push((len % 256) as byte)
     out
 }
 
 /// `tag` wrapping `body`. Total.
-pub fn der_wrap(tag: int, body: List[int]) -> List[int] {
+pub fn der_wrap(tag: int, body: List[byte]) -> List[byte] {
     var out = der_hdr(tag, body.len)
     for b in body {
         (mut out).push(b)
@@ -89,25 +89,25 @@ pub fn der_wrap(tag: int, body: List[int]) -> List[int] {
 }
 
 /// SEQUENCE (0x30). Total.
-pub fn der_seq(body: List[int]) -> List[int] {
+pub fn der_seq(body: List[byte]) -> List[byte] {
     der_wrap(48, body)
 }
 
 /// SET (0x31). Total.
-pub fn der_set(body: List[int]) -> List[int] {
+pub fn der_set(body: List[byte]) -> List[byte] {
     der_wrap(49, body)
 }
 
 /// OCTET STRING (0x04). Total.
-pub fn der_octet(body: List[int]) -> List[int] {
+pub fn der_octet(body: List[byte]) -> List[byte] {
     der_wrap(4, body)
 }
 
 /// BIT STRING (0x03) with zero unused bits — the only shape X.509
 /// keys and signatures use. Total.
-pub fn der_bitstring(body: List[int]) -> List[int] {
-    var inner = List[int]()
-    (mut inner).push(0)
+pub fn der_bitstring(body: List[byte]) -> List[byte] {
+    var inner = List[byte]()
+    (mut inner).push(0 as byte)
     for b in body {
         (mut inner).push(b)
     }
@@ -115,20 +115,20 @@ pub fn der_bitstring(body: List[int]) -> List[int] {
 }
 
 /// UTF8String (0x0c) over the bytes of `s`. Total.
-pub fn der_utf8(s: str) -> List[int] {
+pub fn der_utf8(s: str) -> List[byte] {
     der_wrap(12, s.bytes())
 }
 
 /// IA5String (0x16) over the bytes of `s` (SAN dNSName payloads —
 /// hostnames are ASCII by the time they reach a SAN). Total.
-pub fn der_ia5(s: str) -> List[int] {
+pub fn der_ia5(s: str) -> List[byte] {
     der_wrap(22, s.bytes())
 }
 
 /// A small non-negative INTEGER (0x02) — versions and the like.
 /// Minimal encoding with the sign-bit pad X.690 demands. Total for
 /// v >= 0.
-pub fn der_int(v: int) -> List[int] {
+pub fn der_int(v: int) -> List[byte] {
     assert(v >= 0, "der_int is non-negative")
     var digits = List[int]()
     var x = v
@@ -141,14 +141,14 @@ pub fn der_int(v: int) -> List[int] {
     }
     // digits are little-endian; emit big-endian with a leading zero
     // when the top bit is set (positivity pad)
-    var body = List[int]()
+    var body = List[byte]()
     let n = digits.len
     if digits[n - 1] >= 128 {
-        (mut body).push(0)
+        (mut body).push(0 as byte)
     }
     var i = n - 1
     while i >= 0 {
-        (mut body).push(digits[i])
+        (mut body).push(digits[i] as byte)
         i = i - 1
     }
     der_wrap(2, body)
@@ -157,18 +157,18 @@ pub fn der_int(v: int) -> List[int] {
 /// A positive INTEGER from raw big-endian bytes (serials). Leading
 /// zeros stripped, positivity pad applied; all-zero input encodes as
 /// INTEGER 1 (a serial must be positive — RFC 5280 §4.1.2.2). Total.
-pub fn der_int_bytes(raw: List[int]) -> List[int] {
+pub fn der_int_bytes(raw: List[byte]) -> List[byte] {
     var start = 0
     let n = raw.len
-    while start < n && raw[start] == 0 {
+    while start < n && raw[start] as int == 0 {
         start = start + 1
     }
     if start == n {
         return der_int(1)
     }
-    var body = List[int]()
-    if raw[start] >= 128 {
-        (mut body).push(0)
+    var body = List[byte]()
+    if raw[start] as int >= 128 {
+        (mut body).push(0 as byte)
     }
     var i = start
     while i < n {
@@ -180,11 +180,12 @@ pub fn der_int_bytes(raw: List[int]) -> List[int] {
 
 /// An OBJECT IDENTIFIER (0x06) from its dotted string. Total for
 /// well-formed dotted OIDs (the callers pass literals).
-pub fn der_oid(dotted: str) -> List[int] {
+pub fn der_oid(dotted: str) -> List[byte] {
     var arcs = List[int]()
     for part in dotted.split(".") {
         var v: int = 0
-        for b in part.bytes() {
+        for b_raw in part.bytes() {
+            let b = b_raw as int
             if b >= 48 && b <= 57 {
                 v = v * 10 + (b - 48)
             }
@@ -192,7 +193,7 @@ pub fn der_oid(dotted: str) -> List[int] {
         (mut arcs).push(v)
     }
     assert(arcs.len >= 2, "an OID has at least two arcs")
-    var body = List[int]()
+    var body = List[byte]()
     let first = arcs[0] * 40 + arcs[1]
     push_base128(mut body, first)
     var i = 2
@@ -205,9 +206,9 @@ pub fn der_oid(dotted: str) -> List[int] {
 
 /// Append `v` in base-128 with continuation bits (X.690 §8.19.2).
 /// Total for v >= 0.
-fn push_base128(mut out: List[int], v: int) {
+fn push_base128(mut out: List[byte], v: int) {
     if v < 128 {
-        (mut out).push(v)
+        (mut out).push(v as byte)
         return
     }
     var digits = List[int]()
@@ -218,15 +219,15 @@ fn push_base128(mut out: List[int], v: int) {
     }
     var i = digits.len - 1
     while i >= 1 {
-        (mut out).push(128 + digits[i])
+        (mut out).push((128 + digits[i]) as byte)
         i = i - 1
     }
-    (mut out).push(digits[0])
+    (mut out).push(digits[0] as byte)
 }
 
 /// Concatenate DER pieces. Total.
-pub fn der_cat(a: List[int], b: List[int]) -> List[int] {
-    var out = List[int]()
+pub fn der_cat(a: List[byte], b: List[byte]) -> List[byte] {
+    var out = List[byte]()
     for x in a {
         (mut out).push(x)
     }
@@ -238,26 +239,26 @@ pub fn der_cat(a: List[int], b: List[int]) -> List[int] {
 
 /// The Ed25519 AlgorithmIdentifier: SEQUENCE { OID 1.3.101.112 } —
 /// RFC 8410's no-params rule. Total.
-pub fn alg_ed25519() -> List[int] {
+pub fn alg_ed25519() -> List[byte] {
     der_seq(der_oid("1.3.101.112"))
 }
 
 /// SubjectPublicKeyInfo for an Ed25519 public key (RFC 8410 §4).
 /// Total.
-pub fn spki_ed25519(pubkey: List[int]) -> List[int] {
+pub fn spki_ed25519(pubkey: List[byte]) -> List[byte] {
     der_seq(der_cat(alg_ed25519(), der_bitstring(pubkey)))
 }
 
 /// An X.501 Name of one CN RDN: SEQ { SET { SEQ { OID 2.5.4.3,
 /// UTF8String cn } } }. Total.
-pub fn name_cn(cn: str) -> List[int] {
+pub fn name_cn(cn: str) -> List[byte] {
     der_seq(der_set(der_seq(der_cat(der_oid("2.5.4.3"), der_utf8(cn)))))
 }
 
 /// The subjectAltName EXTENSION VALUE (the inner GeneralNames
 /// SEQUENCE of dNSName entries) for a space-joined name list. Total.
-pub fn san_names(names: str) -> List[int] {
-    var body = List[int]()
+pub fn san_names(names: str) -> List[byte] {
+    var body = List[byte]()
     for nm in names.words() {
         // dNSName is [2] IMPLICIT IA5String — context primitive 0x82
         body = der_cat(body, der_wrap(130, nm.bytes()))
@@ -267,7 +268,7 @@ pub fn san_names(names: str) -> List[int] {
 
 /// The subjectAltName Extension (OID 2.5.29.17, non-critical, value
 /// wrapped in the OCTET STRING RFC 5280 demands). Total.
-pub fn san_ext(names: str) -> List[int] {
+pub fn san_ext(names: str) -> List[byte] {
     der_seq(der_cat(der_oid("2.5.29.17"), der_octet(san_names(names))))
 }
 
@@ -358,7 +359,7 @@ pub fn packed_to_unix(packed: int) -> int {
 /// A UTCTime (0x17) for a unix instant — YYMMDDHHMMSSZ, the RFC 5280
 /// §4.1.2.5.1 form for years 1950..2049. The harness CA's validity
 /// dates sit inside that window. Total.
-pub fn der_utctime(secs: int) -> List[int] {
+pub fn der_utctime(secs: int) -> List[byte] {
     let c = civil(secs)
     var yy = c.0 % 100
     let s = "{pad2u(yy)}{pad2u(c.1)}{pad2u(c.2)}{pad2u(c.3)}{pad2u(c.4)}{pad2u(c.5)}Z"
@@ -368,42 +369,42 @@ pub fn der_utctime(secs: int) -> List[int] {
 /// basicConstraints Extension. `is_ca` true emits a CRITICAL cA:TRUE
 /// (RFC 5280 §4.2.1.9 marks it critical for a CA); false omits the
 /// extension (the caller simply does not add it for a leaf). Total.
-pub fn bc_ca_ext() -> List[int] {
+pub fn bc_ca_ext() -> List[byte] {
     // Extension ::= SEQ { extnID, critical BOOLEAN TRUE, extnValue
     // OCTET STRING { SEQ { BOOLEAN TRUE } } }
-    var tru = List[int]()
-    (mut tru).push(1)
-    (mut tru).push(1)
-    (mut tru).push(255)
-    var crit = List[int]()
-    (mut crit).push(1)
-    (mut crit).push(1)
-    (mut crit).push(255)
+    var tru = List[byte]()
+    (mut tru).push(1 as byte)
+    (mut tru).push(1 as byte)
+    (mut tru).push(255 as byte)
+    var crit = List[byte]()
+    (mut crit).push(1 as byte)
+    (mut crit).push(1 as byte)
+    (mut crit).push(255 as byte)
     der_seq(der_cat(der_cat(der_oid("2.5.29.19"), crit), der_octet(der_seq(tru))))
 }
 
 /// keyUsage Extension for a CA (critical; keyCertSign + cRLSign) or a
 /// leaf (digitalSignature). RFC 5280 §4.2.1.3. Total.
-pub fn ku_ext(is_ca: bool) -> List[int] {
+pub fn ku_ext(is_ca: bool) -> List[byte] {
     // BIT STRING of the usage bits, DER-minimal
-    var bits = List[int]()
-    (mut bits).push(3)
+    var bits = List[byte]()
+    (mut bits).push(3 as byte)
     if is_ca {
         // keyCertSign (bit 5) + cRLSign (bit 6): byte 0x06, one unused
         // bit position rounding — encode as 03 02 01 06
-        (mut bits).push(2)
-        (mut bits).push(1)
-        (mut bits).push(6)
+        (mut bits).push(2 as byte)
+        (mut bits).push(1 as byte)
+        (mut bits).push(6 as byte)
     } else {
         // digitalSignature (bit 0): 03 02 07 80
-        (mut bits).push(2)
-        (mut bits).push(7)
-        (mut bits).push(128)
+        (mut bits).push(2 as byte)
+        (mut bits).push(7 as byte)
+        (mut bits).push(128 as byte)
     }
-    var crit = List[int]()
-    (mut crit).push(1)
-    (mut crit).push(1)
-    (mut crit).push(255)
+    var crit = List[byte]()
+    (mut crit).push(1 as byte)
+    (mut crit).push(1 as byte)
+    (mut crit).push(255 as byte)
     der_seq(der_cat(der_cat(der_oid("2.5.29.15"), crit), der_octet(bits)))
 }
 
@@ -415,15 +416,15 @@ pub fn ku_ext(is_ca: bool) -> List[int] {
 /// passes `subject_names` == `issuer_cn` and its own pubkey). Returns
 /// the DER certificate. Total.
 pub fn cert_mint(
-    ca_seed: List[int],
+    ca_seed: List[byte],
     issuer_cn: str,
-    leaf_pub: List[int],
+    leaf_pub: List[byte],
     subject_names: str,
     serial: int,
     not_before: int,
     not_after: int,
     is_ca: bool,
-) -> List[int] {
+) -> List[byte] {
     // the subject CN: for a leaf it is the first DNS name; for a
     // self-signed CA it is the issuer name itself (subject == issuer),
     // which lets a CA name carry spaces the DNS-name path never sees.
@@ -438,7 +439,7 @@ pub fn cert_mint(
     }
     let version = der_wrap(160, der_int(2))
     let validity = der_seq(der_cat(der_utctime(not_before), der_utctime(not_after)))
-    var exts = List[int]()
+    var exts = List[byte]()
     if is_ca {
         exts = der_cat(exts, bc_ca_ext())
     } else {
@@ -472,32 +473,47 @@ pub fn cert_mint(
 // keys and PEM
 // ------------------------------------------------------------------
 
+/// `n` CSPRNG octets as a byte list. `os_random` is the ONE producer
+/// in the language that still answers `List[int]` after s136 moved the
+/// other eight to `List[byte]` ([os.random] pins it there on purpose —
+/// the row is a draw count, not a byte read), so every crypto call
+/// site needs this one narrowing walk. Filed upstream; the day it
+/// answers `List[byte]` this function becomes `os_random` itself.
+/// Total (`os_random` has no error row and traps rather than degrade).
+pub fn rand_bytes(n: int) -> List[byte] {
+    var out = List[byte]()
+    for v in os_random(n) {
+        (mut out).push(v as byte)
+    }
+    out
+}
+
 /// A fresh Ed25519 seed from the OS CSPRNG ([os.random.sole] — traps
 /// on an entropy-less host rather than degrade; the serve entry
 /// probes entropy at startup so that death is loud and early). Total
 /// otherwise.
-pub fn keygen() -> List[int] {
-    os_random(32)
+pub fn keygen() -> List[byte] {
+    rand_bytes(32)
 }
 
 /// PKCS#8 PrivateKeyInfo DER for an Ed25519 seed (RFC 5958 + RFC
 /// 8410: version 0, the Ed25519 AlgorithmIdentifier, the seed as an
 /// OCTET STRING inside the privateKey OCTET STRING). The exact shape
 /// config.pkcs8_parse reads back — the round trip is a test. Total.
-pub fn pkcs8_ed25519(seed: List[int]) -> List[int] {
+pub fn pkcs8_ed25519(seed: List[byte]) -> List[byte] {
     assert(seed.len == 32, "an Ed25519 seed is 32 bytes")
     der_seq(der_cat(der_cat(der_int(0), alg_ed25519()), der_octet(der_octet(seed))))
 }
 
 /// base64url (no pad, RFC 4648 §5) — the encoding every ACME field
 /// carries (the CSR included, §7.4). Total.
-pub fn b64url_of(b: List[int]) -> str {
+pub fn b64url_of(b: List[byte]) -> str {
     base64.url_encode(b)
 }
 
 /// Wrap DER in a PEM block: standard base64 (RFC 4648 §4, padded —
 /// NOT the url alphabet JOSE uses), 64-character lines. Total.
-pub fn pem_wrap(label: str, der_bytes: List[int]) -> str {
+pub fn pem_wrap(label: str, der_bytes: List[byte]) -> str {
     let b = base64.encode(der_bytes)
     var out = "-----BEGIN {label}-----\n"
     var i = 0
@@ -518,8 +534,8 @@ pub fn pem_wrap(label: str, der_bytes: List[int]) -> str {
 /// and blank lines; a malformed base64 body is the `bad` row. (The
 /// sslcert PEM reader is config/'s own — this one keeps acme
 /// config-free; both are pinned by tests against the same fixtures.)
-pub fn pem_blocks_of(text: str, label: str, mut lens: List[int]) -> List[int] ! {bad} {
-    var out = List[int]()
+pub fn pem_blocks_of(text: str, label: str, mut lens: List[int]) -> List[byte] ! {bad} {
+    var out = List[byte]()
     let begin = "-----BEGIN {label}-----"
     let fin = "-----END {label}-----"
     var rest = text
@@ -543,7 +559,7 @@ pub fn pem_blocks_of(text: str, label: str, mut lens: List[int]) -> List[int] ! 
         }
         var n = 0
         for b in der_bytes {
-            (mut out).push(b)
+            (mut out).push(b as int as byte)
             n = n + 1
         }
         (mut lens).push(n)
@@ -560,7 +576,7 @@ pub fn pem_blocks_of(text: str, label: str, mut lens: List[int]) -> List[int] ! 
 /// never the account key (the RFC 8555 §7.4 split). Carries the SAN
 /// list as an extensionRequest attribute (OID 1.2.840.113549.1.9.14),
 /// exactly where CAs read it from. Total.
-pub fn csr_build(seed: List[int], names: str) -> List[int] {
+pub fn csr_build(seed: List[byte], names: str) -> List[byte] {
     var primary = ""
     for w in names.words() {
         if primary.is_empty() {
@@ -615,7 +631,7 @@ pub fn account_key_path(store: str) -> str {
 /// persist it (create-or-reuse — RFC 8555 account reuse rides the
 /// key). Row: io (a store this fn cannot write is issuance-fatal;
 /// the caller reports loudly). Native/checked (fs).
-pub fn account_key(store: str) -> List[int] ! {io} {
+pub fn account_key(store: str) -> List[byte] ! {io} {
     let path = account_key_path(store)
     let existing = fs_read_text(path) else |_| ""
     if !existing.is_empty() {
@@ -641,16 +657,16 @@ pub fn account_key(store: str) -> List[int] ! {io} {
 /// minimal read this module needs back from its own writer; the
 /// config-side parser is the cross-check in tests). Empty list when
 /// the shape is not the one pkcs8_ed25519 writes. Total.
-pub fn pkcs8_seed(der_bytes: List[int]) -> List[int] {
+pub fn pkcs8_seed(der_bytes: List[byte]) -> List[byte] {
     // SEQ { INT 0, SEQ { OID }, OCTET { OCTET { seed32 } } } — the
     // writer's exact shape: find the last 34 bytes 04 20 <32>.
     let n = der_bytes.len
-    var out = List[int]()
+    var out = List[byte]()
     if n < 36 {
         return out
     }
     let at = n - 34
-    if der_bytes[at] != 4 || der_bytes[at + 1] != 32 {
+    if der_bytes[at] as int != 4 || der_bytes[at + 1] as int != 32 {
         return out
     }
     var i = at + 2
@@ -687,11 +703,11 @@ pub fn cert_expiry(store: str, primary: str) -> int {
     if lens.is_empty() {
         return 0
     }
-    var leaf = List[int]()
+    var leaf = List[byte]()
     var i = 0
     let n = lens[0]
     while i < n {
-        (mut leaf).push(der_bytes[i])
+        (mut leaf).push(der_bytes[i] as byte)
         i = i + 1
     }
     let c = cert.parse(leaf) else |_| {
@@ -717,17 +733,17 @@ pub fn status_write(store: str, primary: str, expiry: int, attempt_ms: int, resu
 }
 
 /// The Ed25519 public key of `seed`. Total (curve25519's contract).
-pub fn pub_of(seed: List[int]) -> List[int] {
+pub fn pub_of(seed: List[byte]) -> List[byte] {
     curve25519.public(seed)
 }
 
 /// Ed25519-sign `msg` with `seed`. Total (curve25519's contract).
-pub fn sign_of(seed: List[int], msg: List[int]) -> List[int] {
+pub fn sign_of(seed: List[byte], msg: List[byte]) -> List[byte] {
     curve25519.sign(seed, msg)
 }
 
 /// Ed25519 verification (the harness CA's half, shared so the two
 /// sides cannot drift). Total.
-pub fn verify_of(pubkey: List[int], msg: List[int], sig: List[int]) -> bool {
+pub fn verify_of(pubkey: List[byte], msg: List[byte], sig: List[byte]) -> bool {
     curve25519.verify(pubkey, msg, sig)
 }

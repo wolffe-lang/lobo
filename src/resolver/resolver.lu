@@ -19,7 +19,7 @@
 //! RESOLVER.md carries the measurement both cite.
 //!
 //! THE SEAM. Three halves, each pure or bounded:
-//!   * the WIRE — `build_query` / `parse_answer`, pure over `List[int]`
+//!   * the WIRE — `build_query` / `parse_answer`, pure over `List[byte]`
 //!     (A records only at v1 — a named delta from nginx's `ipv6=on`
 //!     default; CNAME chains ride the answer section as the resolver
 //!     already flattened them);
@@ -59,8 +59,8 @@ pub fn version() -> str {
 // ------------------------------------------------------------------
 
 /// A byte list of `s`'s ASCII bytes. Total.
-fn ascii(s: str) -> List[int] {
-    var out = List[int]()
+fn ascii(s: str) -> List[byte] {
+    var out = List[byte]()
     for b in s.bytes() {
         (mut out).push(b)
     }
@@ -68,7 +68,7 @@ fn ascii(s: str) -> List[int] {
 }
 
 /// Append `src` to `dst`. Total.
-fn push_all(mut dst: List[int], src: List[int]) {
+fn push_all(mut dst: List[byte], src: List[byte]) {
     var i: int = 0
     let n = src.len
     while i < n {
@@ -78,19 +78,19 @@ fn push_all(mut dst: List[int], src: List[int]) {
 }
 
 /// Big-endian uint16 at `at` (bounds checked by the caller). Total.
-fn be16(b: List[int], at: int) -> int {
+fn be16(b: List[byte], at: int) -> int {
     b[at] * 256 + b[at + 1]
 }
 
 /// Big-endian uint32 at `at` (bounds checked by the caller). Total.
-fn be32(b: List[int], at: int) -> int {
+fn be32(b: List[byte], at: int) -> int {
     ((b[at] * 256 + b[at + 1]) * 256 + b[at + 2]) * 256 + b[at + 3]
 }
 
 /// Push a big-endian uint16. Total for 0..65535.
-fn put16(mut out: List[int], v: int) {
-    (mut out).push(v / 256 % 256)
-    (mut out).push(v % 256)
+fn put16(mut out: List[byte], v: int) {
+    (mut out).push((v / 256 % 256) as byte)
+    (mut out).push((v % 256) as byte)
 }
 
 /// True when `host` is an IPv4 dotted quad or a bracketed/bare IPv6
@@ -103,7 +103,8 @@ pub fn is_ip_literal(host: str) -> bool {
         return true
     }
     var dots: int = 0
-    for b in host.bytes() {
+    for b_raw in host.bytes() {
+        let b = b_raw as int
         if b == 46 {
             dots = dots + 1
         } else if b < 48 || b > 57 {
@@ -117,41 +118,42 @@ pub fn is_ip_literal(host: str) -> bool {
 /// terminator; a trailing dot is tolerated. Total (labels over 63
 /// bytes are truncated to 63 — the resolver answers NXDOMAIN, which is
 /// the honest verdict for a name that cannot exist).
-fn qname(name: str) -> List[int] {
-    var out = List[int]()
-    var label = List[int]()
-    for b in name.bytes() {
+fn qname(name: str) -> List[byte] {
+    var out = List[byte]()
+    var label = List[byte]()
+    for b_raw in name.bytes() {
+        let b = b_raw as int
         if b == 46 {
             if label.len > 0 {
-                (mut out).push(if label.len > 63 { 63 } else { label.len })
+                (mut out).push(if label.len > 63 { 63 as byte } else { label.len as byte })
                 var k: int = 0
                 while k < label.len && k < 63 {
                     (mut out).push(label[k])
                     k = k + 1
                 }
-                label = List[int]()
+                label = List[byte]()
             }
         } else {
-            (mut label).push(b)
+            (mut label).push(b as byte)
         }
     }
     if label.len > 0 {
-        (mut out).push(if label.len > 63 { 63 } else { label.len })
+        (mut out).push(if label.len > 63 { 63 as byte } else { label.len as byte })
         var k: int = 0
         while k < label.len && k < 63 {
             (mut out).push(label[k])
             k = k + 1
         }
     }
-    (mut out).push(0)
+    (mut out).push(0 as byte)
     out
 }
 
 /// A TCP-framed A/IN query for `name` under message id `id`
 /// (recursion desired, one question): the two-byte length prefix RFC
 /// 1035 §4.2.2 requires, then the message. Pure. Total.
-pub fn build_query(id: int, name: str) -> List[int] {
-    var msg = List[int]()
+pub fn build_query(id: int, name: str) -> List[byte] {
+    var msg = List[byte]()
     put16(mut msg, id % 65536)
     put16(mut msg, 256)
     put16(mut msg, 1)
@@ -161,7 +163,7 @@ pub fn build_query(id: int, name: str) -> List[int] {
     push_all(mut msg, qname(name))
     put16(mut msg, 1)
     put16(mut msg, 1)
-    var out = List[int]()
+    var out = List[byte]()
     put16(mut out, msg.len)
     push_all(mut out, msg)
     out
@@ -187,15 +189,15 @@ fn failed(reason: str) -> Answer {
 /// The byte offset just past the name starting at `at` (compression
 /// pointers end a name in two bytes), or -1 when the message runs
 /// out. Total.
-fn skip_name(msg: List[int], at: int) -> int {
+fn skip_name(msg: List[byte], at: int) -> int {
     var i = at
     let n = msg.len
     while i < n {
         let l = msg[i]
-        if l == 0 {
+        if l as int == 0 {
             return i + 1
         }
-        if l >= 192 {
+        if l as int >= 192 {
             return if i + 2 <= n { i + 2 } else { -1 }
         }
         i = i + 1 + l
@@ -206,7 +208,7 @@ fn skip_name(msg: List[int], at: int) -> int {
 /// Parse one DNS message (the length prefix already stripped) as the
 /// answer to query `id`. Pure. Total — every malformed shape is a
 /// named failure, never a trap.
-pub fn parse_answer(id: int, msg: List[int]) -> Answer {
+pub fn parse_answer(id: int, msg: List[byte]) -> Answer {
     if msg.len < 12 {
         return failed("malformed")
     }
@@ -398,7 +400,8 @@ pub fn split_set(set: str) -> List[str] {
         return out
     }
     var cur = ""
-    for b in set.bytes() {
+    for b_raw in set.bytes() {
+        let b = b_raw as int
         if b == 44 {
             (mut out).push(cur)
             cur = ""
@@ -657,21 +660,21 @@ pub fn tick(mut rs: Resolver, now: int) {
             settle(mut rs, i, failed("timeout"), now)
         } else {
             net_deadline(fd, 1) else |_| {}
-            var got = List[int]()
+            var got = List[byte]()
             var broke = false
             var waiting = false
             got = net_read_bytes(fd, 4096) else |e| match e {
                 timeout => {
                     waiting = true
-                    List[int]()
+                    List[byte]()
                 },
                 closed => {
                     broke = true
-                    List[int]()
+                    List[byte]()
                 },
                 io => {
                     broke = true
-                    List[int]()
+                    List[byte]()
                 },
             }
             if !waiting && got.len == 0 {
@@ -682,11 +685,11 @@ pub fn tick(mut rs: Resolver, now: int) {
                 settle(mut rs, i, failed("io"), now)
             } else if !waiting {
                 let buf = "{rs.q_bufs[i]}{hex.encode(got)}"
-                var whole = List[int]()
-                whole = hex.decode(buf) else |_| { List[int]() }
+                var whole = List[byte]()
+                whole = hex.decode(buf) else |_| { List[byte]() }
                 if whole.len >= 2 && whole.len >= 2 + be16(whole, 0) {
                     let n = be16(whole, 0)
-                    var msg = List[int]()
+                    var msg = List[byte]()
                     var k: int = 2
                     while k < 2 + n {
                         (mut msg).push(whole[k])

@@ -256,7 +256,8 @@ pub fn esc_help(v: str) -> str {
     var out = ""
     var start: int = 0
     var i: int = 0
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         if b == 92 || b == 10 {
             if i > start {
                 out = "{out}{v[start..i]}"
@@ -284,7 +285,8 @@ pub fn esc_label(v: str) -> str {
     var out = ""
     var start: int = 0
     var i: int = 0
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         if b == 92 || b == 34 || b == 10 {
             if i > start {
                 out = "{out}{v[start..i]}"

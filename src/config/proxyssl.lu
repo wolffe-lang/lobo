@@ -94,7 +94,7 @@ pub fn proxy_tls_probe(c: Conf) -> str {
                     var ok = true
                     let anchors = pem_certs(pem) else |_| {
                         ok = false
-                        List[int]()
+                        List[byte]()
                     }
                     if !ok || anchors.len == 0 {
                         return "\"proxy_ssl_trusted_certificate\" file \"{t.0}\" holds no readable CERTIFICATE block (concatenated PEM roots expected) in {c.files[t.1]}:{c.lines[t.1]}"

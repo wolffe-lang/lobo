@@ -22,29 +22,30 @@
 //! dotted call in this repo.
 
 /// Big-endian uint16 at `at`. Total.
-fn be16(b: List[int], at: int) -> int {
+fn be16(b: List[byte], at: int) -> int {
     b[at] * 256 + b[at + 1]
 }
 
 /// Push a big-endian uint16. Total.
-fn put16(mut out: List[int], v: int) {
-    (mut out).push(v / 256 % 256)
-    (mut out).push(v % 256)
+fn put16(mut out: List[byte], v: int) {
+    (mut out).push((v / 256 % 256) as byte)
+    (mut out).push((v % 256) as byte)
 }
 
 /// Push a big-endian uint32. Total.
-fn put32(mut out: List[int], v: int) {
-    (mut out).push(v / 16777216 % 256)
-    (mut out).push(v / 65536 % 256)
-    (mut out).push(v / 256 % 256)
-    (mut out).push(v % 256)
+fn put32(mut out: List[byte], v: int) {
+    (mut out).push((v / 16777216 % 256) as byte)
+    (mut out).push((v / 65536 % 256) as byte)
+    (mut out).push((v / 256 % 256) as byte)
+    (mut out).push((v % 256) as byte)
 }
 
 /// Parse a decimal, else `deflt`. Total.
 fn dec(s: str, deflt: int) -> int {
     var n: int = 0
     var have = false
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             n = n * 10 + b - 48
             have = true
@@ -56,8 +57,8 @@ fn dec(s: str, deflt: int) -> int {
 /// Read one TCP-framed DNS message from `conn` (the length prefix,
 /// then exactly that many bytes). Row: io on a short read. Total
 /// otherwise.
-fn read_message(conn: int) -> List[int] ! {io} {
-    var buf = List[int]()
+fn read_message(conn: int) -> List[byte] ! {io} {
+    var buf = List[byte]()
     var want = -1
     while want < 0 || buf.len < 2 + want {
         let piece = net_read_bytes(conn, 4096) else |_| {
@@ -78,7 +79,7 @@ fn read_message(conn: int) -> List[int] ! {io} {
             return io
         }
     }
-    var msg = List[int]()
+    var msg = List[byte]()
     var k: int = 2
     while k < 2 + want {
         (mut msg).push(buf[k])
@@ -90,7 +91,7 @@ fn read_message(conn: int) -> List[int] ! {io} {
 /// The QNAME of the first question as dotted text, and the offset
 /// just past the question section. ("", -1) on a malformed message.
 /// Total.
-fn question(msg: List[int]) -> (str, int) {
+fn question(msg: List[byte]) -> (str, int) {
     if msg.len < 12 {
         return ("", -1)
     }
@@ -98,20 +99,20 @@ fn question(msg: List[int]) -> (str, int) {
     var i = 12
     while i < msg.len {
         let l = msg[i]
-        if l == 0 {
+        if l as int == 0 {
             i = i + 1
             if i + 4 > msg.len {
                 return ("", -1)
             }
             return (name, i + 4)
         }
-        if l >= 192 || i + 1 + l > msg.len {
+        if l as int >= 192 || i + 1 + l > msg.len {
             return ("", -1)
         }
         var k: int = 0
         var label = ""
-        while k < l {
-            label = "{label}{msg[i + 1 + k] as char}"
+        while k < l as int {
+            label = "{label}{msg[i + 1 + k] as int as char}"
             k = k + 1
         }
         name = if name.is_empty() { label } else { "{name}.{label}" }
@@ -122,20 +123,21 @@ fn question(msg: List[int]) -> (str, int) {
 
 /// Split a dotted quad into its four bytes. Total (a bad quad answers
 /// 0.0.0.0 — the table is the harness's own).
-fn quad(ip: str) -> List[int] {
-    var out = List[int]()
+fn quad(ip: str) -> List[byte] {
+    var out = List[byte]()
     var v: int = 0
-    for b in ip.bytes() {
+    for b_raw in ip.bytes() {
+        let b = b_raw as int
         if b == 46 {
-            (mut out).push(v % 256)
+            (mut out).push((v % 256) as byte)
             v = 0
         } else if b >= 48 && b <= 57 {
             v = v * 10 + b - 48
         }
     }
-    (mut out).push(v % 256)
+    (mut out).push((v % 256) as byte)
     while out.len < 4 {
-        (mut out).push(0)
+        (mut out).push(0 as byte)
     }
     out
 }
@@ -145,19 +147,20 @@ fn quad(ip: str) -> List[int] {
 /// question is echoed; each A record names the question by a
 /// compression pointer to offset 12 (so the client's pointer path is
 /// exercised on every answer). Total.
-fn answer(msg: List[int], qend: int, kind: str, ips: str, ttl: int) -> List[int] {
-    var body = List[int]()
+fn answer(msg: List[byte], qend: int, kind: str, ips: str, ttl: int) -> List[byte] {
+    var body = List[byte]()
     // id
     (mut body).push(msg[0])
     (mut body).push(msg[1])
     // flags: QR AA RD RA + rcode
     let rcode = if kind == "NX" { 3 } else { 0 }
-    (mut body).push(133)
-    (mut body).push(128 + rcode)
+    (mut body).push(133 as byte)
+    (mut body).push((128 + rcode) as byte)
     var addrs = List[str]()
     if kind == "A" {
         var cur = ""
-        for b in ips.bytes() {
+        for b_raw in ips.bytes() {
+            let b = b_raw as int
             if b == 44 {
                 (mut addrs).push(cur)
                 cur = ""
@@ -180,8 +183,8 @@ fn answer(msg: List[int], qend: int, kind: str, ips: str, ttl: int) -> List[int]
     }
     var a: int = 0
     while a < addrs.len {
-        (mut body).push(192)
-        (mut body).push(12)
+        (mut body).push(192 as byte)
+        (mut body).push(12 as byte)
         put16(mut body, 1)
         put16(mut body, 1)
         put32(mut body, ttl)
@@ -194,7 +197,7 @@ fn answer(msg: List[int], qend: int, kind: str, ips: str, ttl: int) -> List[int]
         }
         a = a + 1
     }
-    var out = List[int]()
+    var out = List[byte]()
     put16(mut out, body.len)
     var j: int = 0
     while j < body.len {
@@ -215,7 +218,8 @@ fn lookup(table: str, name: str) -> (str, str, int) {
         }
         var cols = List[str]()
         var cur = ""
-        for b in t.bytes() {
+        for b_raw in t.bytes() {
+            let b = b_raw as int
             if b == 32 || b == 9 {
                 if !cur.is_empty() {
                     (mut cols).push(cur)
@@ -280,7 +284,7 @@ fn main() -> !int {
         var bad = false
         let msg = read_message(conn) else |_| {
             bad = true
-            List[int]()
+            List[byte]()
         }
         if !bad {
             let q = question(msg)

@@ -486,12 +486,12 @@ pub fn match_glob(pat: str, name: str) -> bool {
     glob_at(pat.bytes(), name.bytes(), 0, 0)
 }
 
-fn glob_at(p: List[int], n: List[int], pi0: int, ni0: int) -> bool {
+fn glob_at(p: List[byte], n: List[byte], pi0: int, ni0: int) -> bool {
     var pi = pi0
     var ni = ni0
     while pi < p.len {
         let pc = p[pi]
-        if pc == 42 {
+        if pc as int == 42 {
             // `*`: try every split (names are short; backtracking is
             // linear enough here)
             var k = ni
@@ -506,20 +506,20 @@ fn glob_at(p: List[int], n: List[int], pi0: int, ni0: int) -> bool {
         if ni >= n.len {
             return false
         }
-        if pc == 63 {
+        if pc as int == 63 {
             pi = pi + 1
             ni = ni + 1
-        } else if pc == 91 {
+        } else if pc as int == 91 {
             var j = pi + 1
             var neg = false
-            if j < p.len && p[j] == 33 {
+            if j < p.len && p[j] as int == 33 {
                 neg = true
                 j = j + 1
             }
             var hit = false
             var first = true
-            while j < p.len && (first || p[j] != 93) {
-                if j + 2 < p.len && p[j + 1] == 45 && p[j + 2] != 93 {
+            while j < p.len && (first || p[j] as int != 93) {
+                if j + 2 < p.len && p[j + 1] as int == 45 && p[j + 2] as int != 93 {
                     if n[ni] >= p[j] && n[ni] <= p[j + 2] {
                         hit = true
                     }
@@ -534,7 +534,7 @@ fn glob_at(p: List[int], n: List[int], pi0: int, ni0: int) -> bool {
             }
             if j >= p.len {
                 // unterminated class: literal `[`
-                if n[ni] != 91 {
+                if n[ni] as int != 91 {
                     return false
                 }
                 pi = pi + 1

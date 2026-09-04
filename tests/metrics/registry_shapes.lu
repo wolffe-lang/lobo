@@ -26,7 +26,8 @@ use metrics
 
 fn count_bytes(s: str, b: int) -> int {
     var n: int = 0
-    for x in s.bytes() {
+    for x_raw in s.bytes() {
+        let x = x_raw as int
         if x == b {
             n = n + 1
         }
@@ -38,7 +39,8 @@ fn line_at(s: str, i: int) -> str {
     var seen: int = 0
     var start: int = 0
     var j: int = 0
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b == 10 {
             if seen == i {
                 return s[start..j]

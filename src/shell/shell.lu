@@ -825,7 +825,8 @@ pub fn conf_hash(c: config.Conf) -> str {
     let text = config.render_conf(c)
     var a: int = 0
     var b: int = 0
-    for x in text.bytes() {
+    for x_raw in text.bytes() {
+        let x = x_raw as int
         a = (a * 131 + x) % 2147483647
         b = (b * 1000003 + x + 7) % 2147483647
     }
@@ -855,7 +856,8 @@ fn parse_dur_ms(raw: str) -> int {
 /// yields what parsed so far). Total.
 fn digits_val(s: str) -> int {
     var v: int = 0
-    for x in s.bytes() {
+    for x_raw in s.bytes() {
+        let x = x_raw as int
         if x < 48 || x > 57 {
             return v
         }
@@ -1451,7 +1453,8 @@ pub fn stanza_int(body: str, key: str) -> int {
     if w.is_empty() {
         return -1
     }
-    for b in w.bytes() {
+    for b_raw in w.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return -1
         }
@@ -1485,7 +1488,8 @@ pub fn stanza_field_sum(body: str, field: str) -> int {
             if w.starts_with(probe) {
                 let v = w[probe.len..w.len]
                 var ok = !v.is_empty()
-                for b in v.bytes() {
+                for b_raw in v.bytes() {
+                    let b = b_raw as int
                     if b < 48 || b > 57 {
                         ok = false
                     }

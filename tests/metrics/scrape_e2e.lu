@@ -134,7 +134,8 @@ fn value_of(text: str, needle: str) -> int {
         return -1
     }
     var n: int = 0
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         if b < 48 || b > 57 {
             return -1
         }

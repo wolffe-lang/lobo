@@ -45,10 +45,10 @@ fn main() -> int {
     // p50: CRLF — CR is whitespace, tokens identical to LF input.
     check("pid a;\r\nevents {{\r\n}}\r\n", "w|pid\nw|a\n;\nw|events\n{{\n}}\n", "p50 crlf")
     // p51: a BOM is word bytes.
-    var bom_bytes = List[int]()
-    (mut bom_bytes).push(239)
-    (mut bom_bytes).push(187)
-    (mut bom_bytes).push(191)
+    var bom_bytes = List[byte]()
+    (mut bom_bytes).push(239 as byte)
+    (mut bom_bytes).push(187 as byte)
+    (mut bom_bytes).push(191 as byte)
     let bom = str_from_utf8(bom_bytes) else ""
     assert(!bom.is_empty(), "bom builds")
     let bommed = config.render(config.lex("{bom}pid a;"))

@@ -17,21 +17,22 @@
 use resolver
 
 /// Push the space-separated decimal bytes of `spec`. Total.
-fn push_dec(mut out: List[int], spec: str) {
+fn push_dec(mut out: List[byte], spec: str) {
     var v: int = 0
     var have = false
-    for b in spec.bytes() {
+    for b_raw in spec.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             v = v * 10 + b - 48
             have = true
         } else if have {
-            (mut out).push(v)
+            (mut out).push(v as byte)
             v = 0
             have = false
         }
     }
     if have {
-        (mut out).push(v)
+        (mut out).push(v as byte)
     }
 }
 
@@ -40,19 +41,22 @@ fn main() -> !int {
     let q = resolver.build_query(4660, "app.test.")
     // length 26 = 12 header + 10 qname (3app4test0) + 4
     assert(q.len == 28, "framed length: {q.len}")
-    assert(q[0] == 0 && q[1] == 26, "length prefix {q[0]} {q[1]}")
-    assert(q[2] == 18 && q[3] == 52, "id bytes")
-    assert(q[4] == 1 && q[5] == 0, "flags: RD only")
-    assert(q[6] == 0 && q[7] == 1, "qdcount 1")
-    assert(q[14] == 3 && q[15] == 97 && q[16] == 112 && q[17] == 112, "label app")
-    assert(q[18] == 4 && q[23] == 0, "label test + terminator")
-    assert(q[24] == 0 && q[25] == 1 && q[26] == 0 && q[27] == 1, "A IN")
+    assert(q[0] as int == 0 && q[1] as int == 26, "length prefix {q[0]} {q[1]}")
+    assert(q[2] as int == 18 && q[3] as int == 52, "id bytes")
+    assert(q[4] as int == 1 && q[5] as int == 0, "flags: RD only")
+    assert(q[6] as int == 0 && q[7] as int == 1, "qdcount 1")
+    assert(
+        q[14] as int == 3 && q[15] as int == 97 && q[16] as int == 112 && q[17] as int == 112,
+        "label app",
+    )
+    assert(q[18] as int == 4 && q[23] as int == 0, "label test + terminator")
+    assert(q[24] as int == 0 && q[25] as int == 1 && q[26] as int == 0 && q[27] as int == 1, "A IN")
     print("query ok")
 
     // --- an answer: header, the question echoed, CNAME app.test ->
     // real.test (pointer-free), then two A records whose NAME is a
     // pointer to offset 12 (the question's name), TTLs 300 and 60.
-    var m = List[int]()
+    var m = List[byte]()
     // id, flags QR|RD|RA rcode 0, qd 1, an 3, ns 0, ar 0
     push_dec(mut m, "18 52 129 128 0 1 0 3 0 0 0 0")
     // question: 3app4test0 A IN
@@ -73,24 +77,24 @@ fn main() -> !int {
     // --- failures, each named
     let wrong = resolver.parse_answer(1, m)
     assert(!wrong.ok && wrong.reason == "malformed", "wrong id: {wrong.reason}")
-    var nx = List[int]()
+    var nx = List[byte]()
     push_dec(mut nx, "18 52 129 131 0 1 0 0 0 0 0 0")
     push_dec(mut nx, "3 97 112 112 4 116 101 115 116 0 0 1 0 1")
     let n = resolver.parse_answer(4660, nx)
     assert(!n.ok && n.reason == "nxdomain", "nxdomain: {n.reason}")
-    var sf = List[int]()
+    var sf = List[byte]()
     push_dec(mut sf, "18 52 129 130 0 0 0 0 0 0 0 0")
     assert(resolver.parse_answer(4660, sf).reason == "servfail", "servfail")
-    var rf = List[int]()
+    var rf = List[byte]()
     push_dec(mut rf, "18 52 129 133 0 0 0 0 0 0 0 0")
     assert(resolver.parse_answer(4660, rf).reason == "refused", "refused")
-    var clean = List[int]()
+    var clean = List[byte]()
     push_dec(mut clean, "18 52 129 128 0 0 0 0 0 0 0 0")
     assert(resolver.parse_answer(4660, clean).reason == "noaddr", "no A record")
-    var short = List[int]()
+    var short = List[byte]()
     push_dec(mut short, "18 52")
     assert(resolver.parse_answer(4660, short).reason == "malformed", "short")
-    var trunc = List[int]()
+    var trunc = List[byte]()
     push_dec(mut trunc, "18 52 129 128 0 1 0 1 0 0 0 0 3 97 112")
     assert(resolver.parse_answer(4660, trunc).reason == "malformed", "truncated name")
     print("failures ok")

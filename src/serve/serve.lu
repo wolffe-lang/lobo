@@ -449,7 +449,8 @@ pub fn open_self_pipe() -> (int, int) ! {io} {
 /// rather than splitting the response. Traps `assert` on violation —
 /// a server bug, caught in-process, never a corrupt wire.
 fn safe_value(v: str) -> str {
-    for b in v.bytes() {
+    for b_raw in v.bytes() {
+        let b = b_raw as int
         assert(b != 13, "header value carries CR — response-splitting refused")
         assert(b != 10, "header value carries LF — response-splitting refused")
     }
@@ -475,7 +476,7 @@ fn write_all(mut cn: conn.Conn, s: str) -> () ! {closed, io} {
 /// byte tier, which yields only 0..255 — so it folds to `io` (a
 /// truthful coarsening should a future pin reach it). The sentinel
 /// shape is the W0305 dodge (see shell.control_send).
-fn write_bytes_all(mut cn: conn.Conn, body: List[int]) -> () ! {closed, io} {
+fn write_bytes_all(mut cn: conn.Conn, body: List[byte]) -> () ! {closed, io} {
     conn.conn_write_bytes(mut cn, body)?
 }
 
@@ -510,7 +511,8 @@ pub fn error_response(code: int, special_header_body: bool, date: str, token: st
 /// probed). Total.
 pub fn raw_line(head: str) -> str {
     var i: int = 0
-    for b in head.bytes() {
+    for b_raw in head.bytes() {
+        let b = b_raw as int
         if b == 13 || b == 10 {
             return head[0..i]
         }
@@ -850,7 +852,7 @@ fn serve_file(
         region resp {
             let body = fs_read_bytes(path) else |_| {
                 failed = true
-                List[int]()
+                List[byte]()
             }
             // ws12: the runtime's OWN number for this response's body.
             // Read after the read that charges it and before the block
@@ -951,11 +953,11 @@ fn serve_file(
             let chunk = fs_read_chunk(fd, 65536) else |e| match e {
                 eof => {
                     streaming = false
-                    List[int]()
+                    List[byte]()
                 },
                 io => {
                     bad = true
-                    List[int]()
+                    List[byte]()
                 },
             }
             if bad {
@@ -996,11 +998,11 @@ fn serve_file(
             let chunk = fs_read_chunk(fd, 65536) else |e| match e {
                 eof => {
                     streaming = false
-                    List[int]()
+                    List[byte]()
                 },
                 io => {
                     bad = true
-                    List[int]()
+                    List[byte]()
                 },
             }
             if !bad && chunk.len > 0 {

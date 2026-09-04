@@ -169,7 +169,8 @@ fn parse_dur_s(raw: str) -> int {
 /// first non-digit. Total.
 fn dur_digits(s: str) -> int {
     var v: int = 0
-    for x in s.bytes() {
+    for x_raw in s.bytes() {
+        let x = x_raw as int
         if x < 48 || x > 57 {
             return v
         }
@@ -191,7 +192,8 @@ fn name_usable(name: str) -> bool {
     if name.is_empty() {
         return false
     }
-    for b in name.bytes() {
+    for b_raw in name.bytes() {
+        let b = b_raw as int
         let alpha = b >= 97 && b <= 122 || b >= 65 && b <= 90
         let digit = b >= 48 && b <= 57
         if !alpha && !digit && !(b == 46) && !(b == 45) {
@@ -347,11 +349,11 @@ pub fn auto_store_probe(c: Conf, prefix: str) -> str {
                 rok = false
                 ""
             }
-            var anchors = List[int]()
+            var anchors = List[byte]()
             if rok {
                 anchors = pem_certs(pem) else |_| {
                     rok = false
-                    List[int]()
+                    List[byte]()
                 }
             }
             if !rok || anchors.len == 0 {

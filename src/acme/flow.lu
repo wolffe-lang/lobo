@@ -184,7 +184,14 @@ fn tls_txn(hostport: str, req: str, ca_root: str) -> str ! {io} {
     // wedged CA is a named failure, never a hung serve loop.
     net_deadline(fd, 15000) else |_| {}
     let pend = tlsc.
-        begin(take net.Socket { fd: fd }, host, anchors, now_packed(), os_random(32), os_random(32)) else |_| {
+        begin(
+        take net.Socket { fd: fd },
+        host,
+        anchors,
+        now_packed(),
+        rand_bytes(32),
+        rand_bytes(32),
+    ) else |_| {
         eprint("lobo: [error] ACME https: ClientHello write to {hostport} failed")
         net_close(fd) else |_| {}
         return io
@@ -212,31 +219,31 @@ fn tls_txn(hostport: str, req: str, ca_root: str) -> str ! {io} {
     var out = ""
     var reading = true
     while reading {
-        var got = List[int]()
+        var got = List[byte]()
         let piece = tlsc.read(mut cli) else |e| match e {
             closed => {
                 reading = false
-                List[int]()
+                List[byte]()
             },
             timeout => {
                 reading = false
-                List[int]()
+                List[byte]()
             },
             bad_record_mac => {
                 reading = false
-                List[int]()
+                List[byte]()
             },
             decode_error => {
                 reading = false
-                List[int]()
+                List[byte]()
             },
             unexpected_message => {
                 reading = false
-                List[int]()
+                List[byte]()
             },
             io => {
                 reading = false
-                List[int]()
+                List[byte]()
             },
         }
         got = piece
@@ -312,11 +319,11 @@ fn tls_hint(name: str, host: str) -> str {
 fn cli_dead() -> tlsc.Client {
     tlsc.Client {
         fd: -1,
-        write_key: List[int](),
-        write_iv: List[int](),
+        write_key: List[byte](),
+        write_iv: List[byte](),
         write_seq: 0,
-        read_key: List[int](),
-        read_iv: List[int](),
+        read_key: List[byte](),
+        read_iv: List[byte](),
         read_seq: 0,
     }
 }
@@ -338,7 +345,8 @@ fn status_of(raw: str) -> int {
     }
     var v = 0
     var seen = false
-    for b in raw[sp + 1..raw.len].bytes() {
+    for b_raw in raw[sp + 1..raw.len].bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             v = v * 10 + (b - 48)
             seen = true
@@ -380,7 +388,8 @@ fn parse_resp(raw: str) -> Resp {
     var ra = 0
     let rah = header_of(raw, "retry-after")
     if !rah.is_empty() {
-        for b in rah.bytes() {
+        for b_raw in rah.bytes() {
+            let b = b_raw as int
             if b >= 48 && b <= 57 {
                 ra = ra * 10 + (b - 48)
             }
@@ -446,16 +455,16 @@ pub fn js_str(body: str, key: str) -> str {
     while i < n {
         let b = bytes6[i]
         if esc {
-            if b == 110 {
+            if b as int == 110 {
                 out = "{out}\n"
             } else {
                 let piece = after.get(i..i + 1) else ""
                 out = "{out}{piece}"
             }
             esc = false
-        } else if b == 92 {
+        } else if b as int == 92 {
             esc = true
-        } else if b == 34 {
+        } else if b as int == 34 {
             return out
         } else {
             let piece = after.get(i..i + 1) else ""
@@ -540,8 +549,8 @@ pub struct Flow {
     authz_url: str,
     finalize_url: str,
     chall_token: str,
-    acct_seed: List[int],
-    cert_seed: List[int],
+    acct_seed: List[byte],
+    cert_seed: List[byte],
     // scheduling
     next_ms: int,
     backoff_s: int,
@@ -591,8 +600,8 @@ pub fn flow_new(
         authz_url: "",
         finalize_url: "",
         chall_token: "",
-        acct_seed: List[int](),
-        cert_seed: List[int](),
+        acct_seed: List[byte](),
+        cert_seed: List[byte](),
         next_ms: 0,
         backoff_s: 0,
         retry_after_s: 0,

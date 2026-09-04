@@ -93,13 +93,13 @@ fn read_all(c: int, ms: int) -> str {
 }
 
 /// Push a big-endian uint16. Total.
-fn put16(mut out: List[int], v: int) {
-    (mut out).push(v / 256 % 256)
-    (mut out).push(v % 256)
+fn put16(mut out: List[byte], v: int) {
+    (mut out).push((v / 256 % 256) as byte)
+    (mut out).push((v % 256) as byte)
 }
 
 /// Accept one DNS query on `dl` under `ms`: (conn, message) or io.
-fn accept_query(dl: int, ms: int) -> (int, List[int]) ! {io} {
+fn accept_query(dl: int, ms: int) -> (int, List[byte]) ! {io} {
     net_deadline(dl, ms) else |_| {}
     let c = net_accept(dl) else |_| {
         return io
@@ -113,28 +113,28 @@ fn accept_query(dl: int, ms: int) -> (int, List[int]) ! {io} {
         net_close(c) else |_| {}
         return io
     }
-    var msg = List[int]()
+    var msg = List[byte]()
     var k: int = 2
     while k < got.len {
-        (mut msg).push(got[k])
+        (mut msg).push(got[k] as int as byte)
         k = k + 1
     }
     (c, msg)
 }
 
 /// The QNAME of `msg`'s first question as text. Total.
-fn qname(msg: List[int]) -> str {
+fn qname(msg: List[byte]) -> str {
     var name = ""
     var i = 12
     while i < msg.len {
         let l = msg[i]
-        if l == 0 || l >= 192 {
+        if l as int == 0 || l as int >= 192 {
             return name
         }
         var label = ""
         var k: int = 0
-        while k < l && i + 1 + k < msg.len {
-            label = "{label}{msg[i + 1 + k] as char}"
+        while k < l as int && i + 1 + k < msg.len {
+            label = "{label}{msg[i + 1 + k] as int as char}"
             k = k + 1
         }
         name = if name.is_empty() { label } else { "{name}.{label}" }
@@ -145,12 +145,12 @@ fn qname(msg: List[int]) -> str {
 
 /// A framed answer to `msg`: one A 127.0.0.1 with TTL 300, or
 /// NXDOMAIN when `nx`. Total.
-fn framed(msg: List[int], nx: bool) -> List[int] {
-    var body = List[int]()
+fn framed(msg: List[byte], nx: bool) -> List[byte] {
+    var body = List[byte]()
     (mut body).push(msg[0])
     (mut body).push(msg[1])
-    (mut body).push(129)
-    (mut body).push(if nx { 131 } else { 128 })
+    (mut body).push(129 as byte)
+    (mut body).push(if nx { 131 as byte } else { 128 as byte })
     put16(mut body, 1)
     put16(mut body, if nx { 0 } else { 1 })
     put16(mut body, 0)
@@ -161,19 +161,19 @@ fn framed(msg: List[int], nx: bool) -> List[int] {
         i = i + 1
     }
     if !nx {
-        (mut body).push(192)
-        (mut body).push(12)
+        (mut body).push(192 as byte)
+        (mut body).push(12 as byte)
         put16(mut body, 1)
         put16(mut body, 1)
         put16(mut body, 0)
         put16(mut body, 300)
         put16(mut body, 4)
-        (mut body).push(127)
-        (mut body).push(0)
-        (mut body).push(0)
-        (mut body).push(1)
+        (mut body).push(127 as byte)
+        (mut body).push(0 as byte)
+        (mut body).push(0 as byte)
+        (mut body).push(1 as byte)
     }
-    var out = List[int]()
+    var out = List[byte]()
     put16(mut out, body.len)
     var j: int = 0
     while j < body.len {
@@ -261,7 +261,7 @@ fn main() -> !int {
     var qerr = false
     let q1 = accept_query(dl, 4000) else |_| {
         qerr = true
-        (0, List[int]())
+        (0, List[byte]())
     }
     if qerr {
         os_kill(child) else |_| {}
@@ -308,7 +308,7 @@ fn main() -> !int {
     var again = false
     let none = accept_query(dl, 300) else |_| {
         again = true
-        (0, List[int]())
+        (0, List[byte]())
     }
     if !again {
         net_close(none.0) else |_| {}

@@ -45,7 +45,8 @@ pub fn size_bytes(s: str) -> int {
     var v: int = 0
     var i: int = 0
     let n = s.len
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             v = v * 10 + (b - 48)
             i = i + 1
@@ -75,7 +76,8 @@ pub fn time_ms(s: str) -> int {
     var digits: int = 0
     var i: int = 0
     let n = s.len
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             v = v * 10 + (b - 48)
             digits = digits + 1
@@ -189,21 +191,21 @@ pub fn fmt_vars(f: str) -> str {
     let n = bs.len
     var i: int = 0
     while i < n {
-        if bs[i] == 36 {
+        if bs[i] as int == 36 {
             var j = i + 1
             var braced = false
-            if j < n && bs[j] == 123 {
+            if j < n && bs[j] as int == 123 {
                 braced = true
                 j = j + 1
             }
             var k = j
-            while k < n && is_var_byte(bs[k]) {
+            while k < n && is_var_byte(bs[k] as int) {
                 k = k + 1
             }
             var vend = k
             var consumed = k
             if braced {
-                if k < n && bs[k] == 125 {
+                if k < n && bs[k] as int == 125 {
                     consumed = k + 1
                 } else {
                     vend = j

@@ -18,44 +18,47 @@ use http
 use serve
 
 /// Read the whole reply as BYTES until the peer closes.
-fn read_reply_bytes(cli: int) -> List[int] ! {io} {
+fn read_reply_bytes(cli: int) -> List[byte] ! {io} {
     net_deadline(cli, 2000) else |_| {
         return io
     }
-    var out = List[int]()
+    var out = List[byte]()
     var more = true
     while more {
         var bad = false
         let piece = net_read_bytes(cli, 4096) else |e| match e {
             closed => {
                 more = false
-                List[int]()
+                List[byte]()
             },
             timeout => {
                 bad = true
-                List[int]()
+                List[byte]()
             },
             io => {
                 bad = true
-                List[int]()
+                List[byte]()
             },
         }
         if bad {
             return io
         }
         for b in piece {
-            (mut out).push(b)
+            (mut out).push(b as int as byte)
         }
     }
     out
 }
 
 /// The byte offset just past the head's CRLFCRLF, or -1.
-fn body_start(raw: List[int]) -> int {
+fn body_start(raw: List[byte]) -> int {
     var i: int = 0
     let n = raw.len
     while i + 3 < n {
-        if raw[i] == 13 && raw[i + 1] == 10 && raw[i + 2] == 13 && raw[i + 3] == 10 {
+        if raw[i] as int == 13 &&
+            raw[i + 1] as int == 10 &&
+            raw[i + 2] as int == 13 &&
+            raw[i + 3] as int == 10 {
             return i + 4
         }
         i = i + 1
@@ -64,8 +67,8 @@ fn body_start(raw: List[int]) -> int {
 }
 
 /// The head (ASCII by protocol) as a str: bytes 0..`end` decoded.
-fn head_str(raw: List[int], end: int) -> str {
-    var hb = List[int]()
+fn head_str(raw: List[byte], end: int) -> str {
+    var hb = List[byte]()
     var i: int = 0
     while i < end {
         (mut hb).push(raw[i])
@@ -94,14 +97,14 @@ fn main() -> !int {
 
     // 7 bytes, three of them illegal in UTF-8 anywhere: a NUL, a bare
     // continuation, and 0xFF (a never-byte).
-    var blob = List[int]()
-    (mut blob).push(137)
-    (mut blob).push(80)
-    (mut blob).push(78)
-    (mut blob).push(71)
-    (mut blob).push(0)
-    (mut blob).push(255)
-    (mut blob).push(10)
+    var blob = List[byte]()
+    (mut blob).push(137 as byte)
+    (mut blob).push(80 as byte)
+    (mut blob).push(78 as byte)
+    (mut blob).push(71 as byte)
+    (mut blob).push(0 as byte)
+    (mut blob).push(255 as byte)
+    (mut blob).push(10 as byte)
     fs_write_bytes("{root}/blob.bin", blob)?
 
     let src = "http {{\n  types {{ application/octet-stream bin; }}\n  server {{ root wsm01_sb; }}\n}}\n"

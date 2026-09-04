@@ -24,7 +24,8 @@ pub fn worker_check(c: Conf) -> str {
             let raw = c.argp[c.args_at[i]].trim()
             if !(raw == "auto") {
                 var digits = !raw.is_empty()
-                for b in raw.bytes() {
+                for b_raw in raw.bytes() {
+                    let b = b_raw as int
                     if b < 48 || b > 57 {
                         digits = false
                     }

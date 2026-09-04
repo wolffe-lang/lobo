@@ -58,7 +58,8 @@ fn content_length(head: str) -> int {
         let low = line.lower()
         if low.starts_with("content-length:") {
             var n = 0
-            for b in line[15..line.len].trim().bytes() {
+            for b_raw in line[15..line.len].trim().bytes() {
+                let b = b_raw as int
                 if b >= 48 && b <= 57 {
                     n = n * 10 + b - 48
                 }
@@ -134,7 +135,7 @@ fn send(mut cn: conn.Conn, s: str) {
 struct Jws {
     ok: bool,
     payload: str,
-    jwk_x: List[int],
+    jwk_x: List[byte],
     kid: str,
     nonce: str,
     url: str,
@@ -201,21 +202,21 @@ fn parse_jws(body: str) -> Jws {
     let p_b64 = jws_field(body, "protected")
     let pl_b64 = jws_field(body, "payload")
     if p_b64.is_empty() {
-        return Jws { ok: false, payload: "", jwk_x: List[int](), kid: "", nonce: "", url: "" }
+        return Jws { ok: false, payload: "", jwk_x: List[byte](), kid: "", nonce: "", url: "" }
     }
     let prot = base64.url_decode(p_b64) else |_| {
-        return Jws { ok: false, payload: "", jwk_x: List[int](), kid: "", nonce: "", url: "" }
+        return Jws { ok: false, payload: "", jwk_x: List[byte](), kid: "", nonce: "", url: "" }
     }
     let prot_str = bytes_to_str(prot)
     let kid = hdr_str(prot_str, "kid")
     let nonce = hdr_str(prot_str, "nonce")
     let url = hdr_str(prot_str, "url")
     let xb64 = hdr_jwk_x(prot_str)
-    var jwk_x = List[int]()
+    var jwk_x = List[byte]()
     if !xb64.is_empty() {
-        jwk_x = base64.url_decode(xb64) else List[int]()
+        jwk_x = base64.url_decode(xb64) else List[byte]()
     }
-    let pl = base64.url_decode(pl_b64) else List[int]()
+    let pl = base64.url_decode(pl_b64) else List[byte]()
     Jws {
         ok: true,
         payload: bytes_to_str(pl),
@@ -228,7 +229,7 @@ fn parse_jws(body: str) -> Jws {
 
 /// Verify the account signature over `BASE64URL(protected).BASE64URL(
 /// payload)` with `pub` (the account key). Total.
-fn jws_verify(body: str, acct_pub: List[int]) -> bool {
+fn jws_verify(body: str, acct_pub: List[byte]) -> bool {
     let p_b64 = jws_field(body, "protected")
     let pl_b64 = jws_field(body, "payload")
     let sig_b64 = jws_field(body, "signature")
@@ -239,7 +240,7 @@ fn jws_verify(body: str, acct_pub: List[int]) -> bool {
     acme.verify_of(acct_pub, si.bytes(), sig)
 }
 
-fn bytes_to_str(b: List[int]) -> str {
+fn bytes_to_str(b: List[byte]) -> str {
     str_from_utf8(b) else ""
 }
 
@@ -253,7 +254,7 @@ fn bytes_to_str(b: List[int]) -> str {
 /// SPKI in a CertificationRequestInfo — our own csr_build shape: the
 /// SPKI's BIT STRING is `03 21 00 <32>`). Empty on a shape miss.
 /// Total.
-fn csr_pubkey(der: List[int]) -> List[int] {
+fn csr_pubkey(der: List[byte]) -> List[byte] {
     // find the pattern 03 21 00 followed by 32 bytes; the CSR carries
     // exactly one Ed25519 SPKI, and the account-signature BIT STRING
     // at the end is 03 41 (65 bytes) — a different length, so 03 21
@@ -261,8 +262,8 @@ fn csr_pubkey(der: List[int]) -> List[int] {
     var i = 0
     let n = der.len
     while i + 35 <= n {
-        if der[i] == 3 && der[i + 1] == 33 && der[i + 2] == 0 {
-            var out = List[int]()
+        if der[i] as int == 3 && der[i + 1] as int == 33 && der[i + 2] as int == 0 {
+            var out = List[byte]()
             var j = 0
             while j < 32 {
                 (mut out).push(der[i + 3 + j])
@@ -272,24 +273,24 @@ fn csr_pubkey(der: List[int]) -> List[int] {
         }
         i = i + 1
     }
-    List[int]()
+    List[byte]()
 }
 
 /// The space-joined dNSName list from a CSR's SAN attribute (each
 /// dNSName is a 0x82 context-primitive run). Best-effort over our own
 /// encoder's output. Total.
-fn csr_names(der: List[int]) -> str {
+fn csr_names(der: List[byte]) -> str {
     var out = ""
     var i = 0
     let n = der.len
     while i < n {
-        if der[i] == 130 && i + 1 < n {
-            let ln = der[i + 1]
+        if der[i] as int == 130 && i + 1 < n {
+            let ln = der[i + 1] as int
             if ln > 0 && ln < 64 && i + 2 + ln <= n {
                 var nm = ""
                 var j = 0
                 while j < ln {
-                    let piece = charof(der[i + 2 + j])
+                    let piece = charof(der[i + 2 + j] as int)
                     nm = "{nm}{piece}"
                     j = j + 1
                 }
@@ -312,8 +313,8 @@ fn csr_names(der: List[int]) -> str {
 }
 
 fn charof(b: int) -> str {
-    var one = List[int]()
-    (mut one).push(b)
+    var one = List[byte]()
+    (mut one).push(b as byte)
     str_from_utf8(one) else ""
 }
 
@@ -321,7 +322,8 @@ fn looks_like_host(s: str) -> bool {
     if s.is_empty() {
         return false
     }
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         let alpha = b >= 97 && b <= 122 || b >= 65 && b <= 90
         let digit = b >= 48 && b <= 57
         if !alpha && !digit && !(b == 46) && !(b == 45) {
@@ -414,7 +416,7 @@ fn main() -> !int {
             now_s + 315360000,
             false,
         )
-        var chain = List[int]()
+        var chain = List[byte]()
         for b in tls_leaf {
             (mut chain).push(b)
         }
@@ -462,11 +464,11 @@ fn main() -> !int {
     }
     var nonce_ctr = 1000
     var post_ctr = 0
-    var acct_pub = List[int]()
+    var acct_pub = List[byte]()
     var order_names = ""
     var order_status = "pending"
     var chall_token = ""
-    var issued_der = List[int]()
+    var issued_der = List[byte]()
     var issued = 0
 
     while issued < max_issue {
@@ -575,7 +577,7 @@ fn main() -> !int {
             post_ctr = post_ctr + 1
             let jws = parse_jws(req.body)
             let csr_b64 = order_csr(jws.payload)
-            let csr = base64.url_decode(csr_b64) else List[int]()
+            let csr = base64.url_decode(csr_b64) else List[byte]()
             let leaf_pub = csr_pubkey(csr)
             var names = csr_names(csr)
             if names.is_empty() {
@@ -640,7 +642,7 @@ fn main() -> !int {
 /// lands, so a real-CA-style poll (a few short attempts) is what makes
 /// the validation deterministic — not a single fixed-sleep shot.
 /// Total.
-fn validate_http01(portfile: str, token: str, acct_pub: List[int], force_fail: bool) -> bool {
+fn validate_http01(portfile: str, token: str, acct_pub: List[byte], force_fail: bool) -> bool {
     if force_fail {
         return false
     }
@@ -764,7 +766,8 @@ fn first_word(s: str) -> str {
 
 fn intof(s: str) -> int {
     var n = 0
-    for b in s.bytes() {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
         if b >= 48 && b <= 57 {
             n = n * 10 + b - 48
         }

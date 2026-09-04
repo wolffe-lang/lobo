@@ -28,11 +28,12 @@ fn to_port(s: str) -> int ! {io} {
         return io
     }
     var n: int = 0
-    for b in s.bytes() {
-        if b < 48 {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b as int < 48 {
             return io
         }
-        if b > 57 {
+        if b as int > 57 {
             return io
         }
         n = n * 10 + b - 48
@@ -53,11 +54,12 @@ fn to_ms(s: str) -> int ! {io} {
         return io
     }
     var n: int = 0
-    for b in s.bytes() {
-        if b < 48 {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b as int < 48 {
             return io
         }
-        if b > 57 {
+        if b as int > 57 {
             return io
         }
         n = n * 10 + b - 48
