@@ -81,9 +81,13 @@ serving hands with no replacement. That is exactly how #242 was found
 the level lobo cares about instead of quoted from upstream. prefork
 **35/35 → 38/38**, and it is a gauntlet step, so linux CI runs it too.
 The distribution was re-checked and SURVIVES the deletion: 90
-connections over three hands, **36/29/26** free-for-all against ws17's
-28/32/31 through the turn — the turn assigned slices by ordinal and
-the kernel does not, so this had to be measured rather than assumed.
+connections over three hands, **36/29/26** on macOS and **26/34/31**
+on the linux runner, free-for-all, against ws17's 28/32/31 through the
+turn — the turn assigned slices by ordinal and the kernel does not, so
+this had to be measured rather than assumed. **Linux CI (9m45s) is
+GREEN at the ws18 head**: corpus 253/253, prefork 38/38 including the
+quiet server (3/3 hands answering after the silence), the failover gap
+1 ms.
 
 **Pins.** wolf → **trunk `32f66bf` dev-stamped** (`0.2.5+dev.32f66bf`;
 r09 had not tagged v0.2.6 at the pin step — checked, `git tag` tops

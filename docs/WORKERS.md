@@ -148,18 +148,23 @@ same run, the runner's own kernel, at the ws18 head:
 ```
 corpus: 253/253 lane-runs green
 lobo-prefork: ok — 90 connections reached ALL THREE hands
-              (rows with accepted>0: 3; counts: CI-COUNTS)
-lobo-prefork: ok — the quiet server: one GET, served
-lobo-prefork: ok — …after 2 s of silence every hand still answers
-              its OWN control endpoint (3/3)
+              (rows with accepted>0: 3; counts: 26/34/31)
+lobo-prefork: ok — the quiet server: one GET, served (body: HANDS-GEN-A)
+lobo-prefork: ok — …and after 2 s of silence every hand still answers
+              its OWN control endpoint (3/3 — a #242 park leaves the
+              losers mute)
+lobo-prefork: ok — the service did not blink across the crash
+              (gap: 1 ms, MEASURED …)
 lobo-prefork: GREEN — 38/38
 ```
 
-Two hosts, two kernels, the same even split. The DISTRIBUTION is
-measured on both; the `req/s` table below is macOS only, because the
-bench is deliberately not a gauntlet step (a number depends on the
-box) and no CI job runs it. The linux numbers are unmeasured and are
-not extrapolated anywhere on this page.
+Two hosts, two kernels: **36/29/26 on macOS and 26/34/31 on linux**,
+free-for-all, and the quiet server holds on both. The DISTRIBUTION and
+the #242 observable are measured on both; the `req/s` table below is
+macOS only, because the bench is deliberately not a gauntlet step (a
+number depends on the box) and no CI job runs it. The linux numbers
+are unmeasured and are not extrapolated anywhere on this page.
+
 
 **Windows:** `os_spawn_with` with an EMPTY inherit set serves there,
 and `net_adopt_listener` is `unsupported` BY NAME — a `SOCKET` is not
