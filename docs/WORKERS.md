@@ -159,7 +159,11 @@ lobo-prefork: GREEN — 38/38
 ```
 
 Two hosts, two kernels: **36/29/26 on macOS and 26/34/31 on linux**,
-free-for-all, and the quiet server holds on both. The DISTRIBUTION and
+free-for-all, and the quiet server holds on both. The runner's split is
+not a fixed shape and is not asserted as one — a second CI run over the
+same three hands read **34/25/32** — which is the point: the kernel
+picks, and what the step asserts is that every hand is picked. The
+DISTRIBUTION and
 the #242 observable are measured on both; the `req/s` table below is
 macOS only, because the bench is deliberately not a gauntlet step (a
 number depends on the box) and no CI job runs it. The linux numbers
