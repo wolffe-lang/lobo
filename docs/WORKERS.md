@@ -68,13 +68,16 @@ With N >= 2, the process that ran `lobo serve` is the **master**:
   because a REPLACEMENT hand has to inherit the same socket;
 - it starts N **hands** through `os_spawn_with` (`[os.proc.inherit]`):
   this same executable, `serve -p <prefix> -c <conf> --worker i
-  --worker-control 127.0.0.1:<port> --inherit K --hands N`, with the
+  --worker-control 127.0.0.1:<port> --inherit K`, with the
   listeners in the inherit set. The child receives them as descriptors
   **3, 4, …in the order given** — plaintext first, then TLS — and
   **that numbering is the contract**, so the master never learns a
-  descriptor number and a hand is told only how many rode down. Four
+  descriptor number and a hand is told only how many rode down. Three
   internal flags, none of them on the usage page: an operator never
-  types any of them;
+  types any of them. (ws17 passed a fourth, `--hands N`, so a hand
+  could compute its accept TURN; the turn retired at ws18 and the flag
+  with it — a free-for-all hand has no reason to know how many
+  siblings it has);
 - it supervises them (below) and fans every verb out.
 
 A hand is `serve_main` — today's one poll loop — with four
@@ -131,26 +134,41 @@ master with three hands and reads each hand's own accept counter off
 
 ```
 lobo-prefork: ok — 90 connections reached ALL THREE hands
-              (rows with accepted>0: 3; counts: 28/32/31)
+              (rows with accepted>0: 3; counts: 36/29/26)
 ```
 
+That is the ws18 head — free-for-all, with the accept turn deleted.
+ws17 read 28/32/31 through the turn on the same rig; **the split
+survives the deletion**, which is the thing that had to be re-checked,
+because the turn assigned slices by ordinal and the kernel does not.
+
 **And it is a gauntlet step, so CI asserts it on linux too** — the
-same run, the runner's own kernel, at the ws17 head:
+same run, the runner's own kernel, at the ws18 head:
 
 ```
 corpus: 253/253 lane-runs green
 lobo-prefork: ok — 90 connections reached ALL THREE hands
-              (rows with accepted>0: 3; counts: 29/31/31)
+              (rows with accepted>0: 3; counts: 26/34/31)
+lobo-prefork: ok — the quiet server: one GET, served (body: HANDS-GEN-A)
+lobo-prefork: ok — …and after 2 s of silence every hand still answers
+              its OWN control endpoint (3/3 — a #242 park leaves the
+              losers mute)
 lobo-prefork: ok — the service did not blink across the crash
-              (gap: 2 ms, MEASURED …)
-lobo-prefork: GREEN — 35/35
+              (gap: 1 ms, MEASURED …)
+lobo-prefork: GREEN — 38/38
 ```
 
-Two hosts, two kernels, the same even split. The DISTRIBUTION is
-measured on both; the `req/s` table below is macOS only, because the
-bench is deliberately not a gauntlet step (a number depends on the
-box) and no CI job runs it. The linux numbers are unmeasured and are
-not extrapolated anywhere on this page.
+Two hosts, two kernels: **36/29/26 on macOS and 26/34/31 on linux**,
+free-for-all, and the quiet server holds on both. The runner's split is
+not a fixed shape and is not asserted as one — a second CI run over the
+same three hands read **34/25/32** — which is the point: the kernel
+picks, and what the step asserts is that every hand is picked. The
+DISTRIBUTION and
+the #242 observable are measured on both; the `req/s` table below is
+macOS only, because the bench is deliberately not a gauntlet step (a
+number depends on the box) and no CI job runs it. The linux numbers
+are unmeasured and are not extrapolated anywhere on this page.
+
 
 **Windows:** `os_spawn_with` with an EMPTY inherit set serves there,
 and `net_adopt_listener` is `unsupported` BY NAME — a `SOCKET` is not
@@ -161,55 +179,66 @@ binds and stands by, which is ws16's posture kept alive for exactly
 this reason. Still CLAIMED rather than measured — lobo has no windows
 lane.
 
-## The accept turn — nginx's `accept_mutex`, and why it is here
+## The accept, free-for-all — and the turn that used to be here
 
 **Readiness is not exclusivity, and one connection wakes every hand.**
-`net_accept` awaits readiness with the socket's deadline and then runs
-a **blocking** `accept(2)`: with N hands on one listener, one wins the
-syscall and the losers block inside it — not for their deadline, which
-governed only the readiness wait, but **until the next connection
-arrives**. A hand parked there answers no control verb and runs no
-timer, so its master reads it as gone and replaces it.
+`net_wait` says a socket CAN be accepted without blocking; with N
+hands on ONE inherited listener, one SYN wakes all N and exactly one
+wins the take. That is the thundering herd, and it is not a bug in
+`net_wait` — `[os.net.wait]` is level-triggered and says exactly what
+it saw. It is the thing a program that shares a listener owes the
+kernel.
 
-That is an upstream defect and it is filed with its measurement
-(**wolf-lang#242**). It was found the way this repo finds things:
-`worker_processes 2`, one GET, and one hand never spoke again — alive
-at 0.0% CPU, a syscall park and not a spin. Isolated three ways: the
-non-blocking ask (`net_wait(fds, 0)`) does not park, the blocking one
-does, and removing the connection handles from the wait set does not
-help, so it is the listener.
+**What lobo does about it, since ws18, is nothing** — and that is the
+whole design. Every hand keeps both listeners in its wait set on every
+pass. A hand that loses the race calls `net_accept` on a queue a
+sibling has already emptied, and from its side that is
+indistinguishable from the connection never having arrived, so the
+call **waits again against the budget the listener already carries**
+and answers `timeout` when it runs out (`[os.net.accept]`). The budget
+is `arm_accept`'s 5 ms, armed once at acquisition. **A lost race costs
+5 ms and nothing else.**
 
-Under load it is invisible — the next connection is microseconds away
-and unparks every loser, which is why `ab -n 4000 -c 32` across three
-hands gives 1338/1336/1327 and looks perfect. It bites when traffic
-stops, which is most of the time on most servers.
+**It was not always nothing.** At the ws17 pin `net_accept` awaited
+readiness with the socket's deadline and then ran a *blocking*
+`accept(2)`: the deadline governed only the wait, so a losing hand
+parked in the syscall **until the next connection arrived** — alive at
+0.0% CPU, answering no control verb, running no timer, and reaped by
+its own master as unreachable. On a busy server the next connection is
+microseconds away and nothing is visible; on a quiet one the hand is
+stuck. That is an upstream defect, and this repo filed it with its
+measurement (**wolf-lang#242**), found the way this repo finds things:
+`worker_processes 2`, one GET, and one hand never spoke again.
+Isolated three ways — the non-blocking ask (`net_wait(fds, 0)`) does
+not park, the blocking one does, and removing the connection handles
+from the wait set does not help, so it is the listener.
 
-**What lobo does about it is nginx's own answer**: hands take TURNS.
-`shell.accept_turn(worker, hands, now)` gives each hand a
-`shell.accept_slice_ms()` slice (10 ms) of a round, assigned by
-ordinal off the wall clock — which every hand on one host reads the
-same — and a hand puts the listener in its wait set only during its
-own slice. Exactly one hand can be in `accept` at any instant, so
-there is no race to lose. Two details make it a mechanism rather than
-a decoration:
+ws17 shipped nginx's own answer meanwhile: hands took 10 ms TURNS off
+the wall clock (`shell.accept_turn`, `accept_wait_ms`,
+`accept_slice_ms`, and a `--hands N` flag on the hand's argv), so
+exactly one hand held the listener at any instant and there was no
+race to lose. **s138 closed #242 and ws18 deleted all of it** — 84
+lines of pure surface (`src/shell/shell.lu` net −106 with the
+plumbing), four guard sites in the loop, one flag, one test section. What the deletion bought is in the measurement below, and it
+is bigger than the accept path alone, because the turn also capped
+every hand's `net_wait` budget at the turn boundary: a hand serving
+keepalive connections was woken by the ROUND, not by its sockets.
 
-- **the wait is capped at the turn boundary** (`shell.
-  accept_wait_ms`). Without it a hand reads the clock, finds the turn
-  is not its own, and then blocks for the whole 25 ms idle budget —
-  sleeping through its own 10 ms slice, so the listener goes
-  unattended for most of every round. Capping is what makes the round
-  trip exact, and it was worth **2,725 → 11,622 req/s** when it landed;
-- **a turn drains**, up to 64 accepts a pass, each after the first
-  guarded by a zero-deadline `net_wait` on the listener alone — the
-  ask that cannot block. One accept per pass was ws16's shape and it
-  is what held a connection-per-request load to one accept per poll.
+**A turn drains, and so does a free-for-all.** Up to 64 accepts a
+pass, each after the first guarded by a zero-deadline `net_wait` on
+the listener alone — the ask that cannot block. That shape is older
+than the turn (ws17) and outlives it: it keeps the common case one
+syscall wide. The difference is that a sibling can now empty the queue
+between the ask and the take, which is the race `[os.net.accept]`
+bounds.
 
-The RESIDUAL race is a hand that reads the clock inside its slice and
-reaches the syscall after the boundary: microseconds wide, and it can
-only bite while connections are ARRIVING, which is exactly when the
-next one unparks it. **The turn retires the day #242 lands** — one
-pure function and its twin come out, and the `--hands` flag with
-them.
+**The check that replaced the turn** is `tools/lobo-prefork`'s quiet
+server (a gauntlet step, so CI runs it on linux too): three hands,
+**one** GET, then two seconds of silence, and every hand must still
+answer its own control endpoint with no replacement. That is the
+observable #242 broke, asserted at the level lobo cares about rather
+than quoted from upstream.
+
 ## Supervision
 
 The master owns no `try_wait` (std.process F-0065: `os_wait` blocks
@@ -423,92 +452,100 @@ gauntlet gate (a number depends on the box) — runs lobo at
 `worker_processes 1` and `N`, then the pinned nginx at the same two,
 same 1 KiB file, same `ab -n 20000 -c 32`, in two shapes (a connection
 per request; `-k` keepalive), and reads cores-used as Σ cpu time over
-the process tree ÷ wall time off `ps(1)`. The table it printed on this
-box, 2026-09-04 (macOS 15 arm64, 18 cpus, N = 18), with **ws16's
-numbers in the last column so the movement is readable**:
+the process tree ÷ wall time off `ps(1)`.
 
-| server | shape | req/s | cores used | ws16 req/s |
-|---|---|---|---|---|
-| lobo worker_processes 1 | close | **11,277.81** | 0.69 | 37.37 |
-| lobo worker_processes 1 | keepalive | **10,324.18** | 0.67 | 576.21 |
-| lobo worker_processes 18 | close | **12,329.98** | 0.84 | 69.60 |
-| lobo worker_processes 18 | keepalive | **9,934.98** | 0.68 | 1,117.68 |
-| nginx worker_processes 1 | close | 23,488.10 | 0.47 | 38,123.20 |
-| nginx worker_processes 1 | keepalive | 42,654.38 | 0.45 | 73,607.89 |
-| nginx worker_processes 18 | close | 19,223.75 | 1.61 | 24,158.09 |
-| nginx worker_processes 18 | keepalive | 83,831.08 | 2.18 | 111,383.38 |
+**ws18 re-ran it as an A/B in one session**, because the run-to-run
+noise on this box is larger than some of the movements it had to
+report: the SAME source at the same pin, built twice — once at the
+commit before the deletion (the accept turn intact) and once after —
+and both benched back to back on 2026-09-06 (macOS 15 arm64, 18 cpus,
+N = 18). ws17's own table, taken 2026-09-04, is in the last column.
 
-(nginx's own numbers move between the two runs by up to 2x — same
-binary, same config, a different day and a differently loaded box.
-That is the honest scale of run-to-run noise here, and it is why the
-lobo movements below are quoted as orders of magnitude and not as
-percentages.)
+| server | shape | with the turn | **free-for-all** | cores (turn → free) | ws17's run |
+|---|---|---|---|---|---|
+| lobo worker_processes 1 | close | 13,203.76 | **13,508.27** | 0.65 → 0.69 | 11,277.81 |
+| lobo worker_processes 1 | keepalive | 10,264.27 | **9,501.84** | 0.58 → 0.58 | 10,324.18 |
+| lobo worker_processes 18 | close | 13,557.26 | **16,120.62** | 0.84 → **3.08** | 12,329.98 |
+| lobo worker_processes 18 | keepalive | 9,554.14 | **38,960.68** | 0.65 → **4.54** | 9,934.98 |
+| nginx worker_processes 1 | close | 27,656.32 | 27,731.17 | 0.48 → 0.45 | 23,488.10 |
+| nginx worker_processes 1 | keepalive | 52,501.16 | 52,424.36 | 0.53 → 0.53 | 42,654.38 |
+| nginx worker_processes 18 | close | 21,720.20 | 19,553.11 | 1.63 → 1.36 | 19,223.75 |
+| nginx worker_processes 18 | keepalive | 72,960.48 | 86,432.66 | 1.95 → 2.04 | 83,831.08 |
 
-**Read it three times.**
+(nginx's rows are the control: the oracle moved by up to 18% between
+the two halves of one session, which is the scale of noise here and
+why the lobo movements worth reading are the ones measured in
+multiples.)
 
-**1. The reactor gate is gone, and it was the whole story.** One
-lobo process went from **37 to 11,278 req/s** on the connection-per-
-request shape — about **300x** — and from 576 to 10,324 on keepalive.
-Nothing about the process count did that: it is `net_wait`. ws16's
-loop blocked 25 ms in the control listener's accept, then 25 in the
-http listener's, then 12 per open connection, every pass, so a
-connection-per-request load got about **one accept per 62 ms pass**.
-The loop now wakes when a socket speaks. lobo at one process is
-within **2x of nginx at one worker** on the close shape, which is a
-sentence this repo has never been able to write.
+**And the direct A/B, the shape ws17 used for its 11,622-vs-17,347
+estimate** — three hands, `ab -n 6000 -c 32`, connection per request,
+three runs of each binary, alternating nothing else:
 
-**2. The kernel distributes, and that is measured elsewhere in this
-page** — 90 connections over three hands as 28/32/31, every hand
-`serving` on one socket, `accepted=` on every row. W6's first half is
-true in the sense the charter meant it: the work reaches every
-process.
-
-**3. And `worker_processes N` is still not N x throughput** —
-12,330 against 11,278, nine percent — because of the accept turn, and
-the turn is there because of wolf-lang#242. Only ONE hand may be in
-`accept` at a time, so the accept path is serialized however many
-hands there are; what the other hands can overlap is the SERVING, and
-with `-c 32` against a 1 KiB static file there is almost no serving to
-overlap — the turn-holder drains the whole queue and answers it inside
-its own slice. That is exactly what nginx's `accept_mutex` cost nginx,
-and it is why nginx turned it off by default once its kernels grew
-`EPOLLEXCLUSIVE` and `SO_REUSEPORT`. **The number the fix is worth was
-measured directly**, three hands, `ab -n 6000 -c 32`, close shape:
-**11,622 req/s with the turn against 17,347 free-for-all** — and
-free-for-all is not a shippable posture, because it parks hands.
-
-So the two gates ws16 named have both moved, and a third is now the
-front one. In order:
-
-| gate | ws16 | ws17 |
+| build | runs | median |
 |---|---|---|
-| the loop had no readiness surface (#127) | **the front gate**: 0.01 cores, one accept per pass | **gone** — 300x on the close shape |
-| the kernel distributed nothing (#234/#235) | filed, unlanded | **gone** — 28/32/31 over three hands |
-| `net_accept` parks after its readiness wait (#242) | not reachable — one hand held the listener, so there was never a race to lose | **the front gate**: the accept turn is the workaround and it caps N at one hand's accept rate |
+| with the accept turn | 13,417 · 12,866 · 12,863 | **12,866 req/s** |
+| free-for-all (ws18) | 25,470 · 23,663 · 21,443 | **23,663 req/s** |
 
-**Idle cost, before and after — measured, and it is not the number
-upstream measured.** s137 reported `net_wait` doing ~37x less idle
-work than deadline time-slicing, in a synthetic loop. lobo's own loop
-was measured the same way — one process, one held keepalive
-connection, 120 s of nothing happening, the SAME binary built twice
-with only the wait swapped for ws16's per-socket deadlines:
+**1.84x, against the 1.49x the fix was predicted to be worth.** The
+prediction was made on the accept path alone; the measurement found
+more, and the extra is named below.
 
-| loop | cpu over 120 s idle |
-|---|---|
-| ws16: a deadline on every socket, every pass | 0.32 s |
-| ws17: one `net_wait` over the set | 0.26 s |
+**Read it four times.**
 
-**About 19% less, not 37x**, and the reason is worth writing down
-rather than quietly dropping: **lobo's idle loop was never busy.** It
-was asleep in a `net_deadline`, which costs a timer and not a core —
-roughly two to three milliseconds of cpu per wall second either way.
-What the deadline cost was never idle cpu. It was **wake latency**:
-the loop learned about a connection when a timer said to look, not
-when the socket spoke, and that is the whole of 37 -> 11,278 req/s. A
-page that quoted 37x here because upstream measured 37x there would be
-quoting someone else's workload; the surface is worth exactly what it
-is worth on this one, which is three hundred times more than the
-number upstream put on it.
+**1. The deletion is worth more than the accept path.** At three hands
+the close shape nearly doubles (1.84x), and at eighteen the KEEPALIVE
+shape goes from 9,554 to **38,961 req/s — 4.1x**, on a load that
+contains almost no accepting at all. That is not the thundering herd:
+it is `shell.accept_wait_ms`, the turn's other half. It capped the
+hand's WHOLE `net_wait` budget at the turn boundary, so a hand serving
+thirty-two established keepalive connections woke on the ROUND rather
+than on its own sockets, and stopped waiting on them at every slice
+edge. The accept turn was throttling the serving path to keep the
+accept path correct, and nothing in ws17 could see that, because with
+the turn there was no other posture to compare against. **A workaround
+costs more than the thing it works around, and the only way to find
+out is to delete it and measure.**
+
+**2. `worker_processes N` is finally N-ish.** The cores-used column is
+the plainest reading: 0.84 → **3.08** on close and 0.65 → **4.54** on
+keepalive at N=18. ws16 could not put a connection on a second
+process; ws17 put them on all of them but let only one accept at a
+time; ws18 lets them all work at once. Eighteen hands is still not
+eighteen times — the 1 KiB static file and the loopback client are the
+ceiling, and `ab -c 32` offers 32 connections to 18 processes — but
+the shape of the curve changed sign.
+
+**3. One process did not move, and that is the control.** 13,204 →
+13,508 close and 10,264 → 9,502 keepalive: inside the noise, both
+ways. `accept_turn(worker, hands, now)` returned `true` immediately
+for `hands <= 1`, so a single-process lobo never paid for the turn and
+gains nothing from its removal. Any movement in the N=1 rows would
+have meant the deletion changed something it should not have.
+
+**4. lobo is within sight of the oracle on this shape now.** Three
+hands free-for-all serve 23,663 req/s against the pinned nginx's
+27,731 at one worker and 19,553 at eighteen — so on the
+connection-per-request shape this box's lobo now serves MORE than this
+box's nginx at the same eighteen workers. The keepalive shape is where
+the gap is real and stays real: 38,961 against 86,433. That gap is
+W8's, not this sprint's.
+
+**The gates, in the order this campaign found them:**
+
+| gate | ws16 | ws17 | ws18 |
+|---|---|---|---|
+| the loop had no readiness surface (#127) | **the front gate**: 0.01 cores, one accept per pass | **gone** — 300x on the close shape | — |
+| the kernel distributed nothing (#234/#235) | filed, unlanded | **gone** — 28/32/31 over three hands | still even free-for-all: 36/29/26 |
+| `net_accept` parks after its readiness wait (#242) | not reachable — one hand held the listener | **the front gate**: the accept turn is the workaround and it caps N at one hand's accept rate | **gone** — the turn is deleted, 1.84x at three hands and 4.1x on keepalive at eighteen |
+
+**Idle cost is unchanged and was re-measured to say so.** ws17's own
+A/B (the same binary built twice with only the wait swapped, 120 s
+idle holding one keepalive connection) reported 0.32 s of cpu the ws16
+way against 0.26 s — about 19%, not upstream's 37x, because lobo's
+idle loop was asleep in a timer rather than busy. The turn's deletion
+does not touch that: an idle hand with no connections waits the same
+25 ms budget it always did, and now waits it on its own sockets
+instead of on the round.
 
 ## Witnesses
 
@@ -526,13 +563,13 @@ number upstream put on it.
   native + checked — lupin 0.1.25 predates s137.
 - `tests/shell/worker_surface.lu` — the pure surface: the hand's argv
   and the args builder `os_spawn_with` wants (no shell, one value per
-  element, the four internal flags), the two events, the trailing
+  element, the three internal flags), the two events, the trailing
   field (the ws15 line is a prefix of the ws16 line, which is a prefix
   of nothing new — `accepted:` is a stanza head, not a log field), the
-  master's rows and readers, and **the accept turn**: exactly one of
-  three hands holds it at every millisecond of two whole rounds, the
-  round walks the ordinals in order, a single hand always holds it,
-  and the wait is capped at the boundary in both directions.
+  master's rows and readers, and **the accept turn's DELETION**:
+  `--hands` takes the ordinary unknown-option road, and `--inherit`,
+  the one internal flag that outlived it, still refuses by name when
+  it rides alone.
 - `tests/shell/prefork_e2e.lu` — the real binary with
   `worker_processes 2`: both hands serving on the inherited listener,
   a GET served, each hand's own stanza (`worker: N`, `listening:
@@ -541,7 +578,7 @@ number upstream put on it.
   the survivor serving on and the replacement coming back SERVING
   (`restarts=1`), `reload … workers=2/2` with every row at generation
   2, `quit` exiting 0 with the hands gone.
-- `tools/lobo-prefork` — a gauntlet step, 35/35: three hands all
+- `tools/lobo-prefork` — a gauntlet step, 38/38: three hands all
   serving and none standing by, **90 connections reaching all three**
   (the counts printed), a REAL `kill -9` with the service not
   blinking, the master's `worker-exited reason=unreachable code=-1` /

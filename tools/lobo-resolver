@@ -24,6 +24,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 LOBO="$(pwd)/target/lobo-release"
 if [ ! -x "$LOBO" ]; then
@@ -62,16 +64,16 @@ wait_port() { # wait_port <file>
 
 # the DNS server: one table, a record of every QNAME, up to 4 queries,
 # each answered after DELAY ms
-"$WOLF" run ./tests/rig/dnssrv/dnssrv.lu "$scratch/dns.table" "$scratch/dns.record" 4 "$DELAY" > "$scratch/dns.port" 2> "$scratch/dns.err" &
+"$WOLF" run "$rig_root"/tests/rig/dnssrv/dnssrv.lu "$scratch/dns.table" "$scratch/dns.record" 4 "$DELAY" > "$scratch/dns.port" 2> "$scratch/dns.err" &
 dnspid=$!
 dport=$(wait_port "$scratch/dns.port") || { say "FAILED — dnssrv never printed its port ($(cat "$scratch/dns.err"))" >&2; kill "$dnspid" 2>/dev/null; exit 1; }
 
 # the backend: two exchanges
-"$WOLF" run ./tests/rig/rigback/rigback.lu "$scratch/back.record" "$scratch/reply.raw" 2 > "$scratch/back.port" 2> "$scratch/back.err" &
+"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu "$scratch/back.record" "$scratch/reply.raw" 2 > "$scratch/back.port" 2> "$scratch/back.err" &
 backpid=$!
 bport=$(wait_port "$scratch/back.port") || { say "FAILED — rigback never printed its port" >&2; kill "$dnspid" "$backpid" 2>/dev/null; exit 1; }
 
-hp=$("$WOLF" run ./tests/rig/freeport.lu)
+hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 cat > "$scratch/lobo.conf" <<CONF
 pid $scratch/lobo.pid;
 http {
@@ -99,7 +101,7 @@ while [ $i -lt 80 ]; do
     i=$((i + 1))
 done
 
-out=$("$WOLF" run ./tests/rig/resolvedrive.lu "$hp" 2> "$scratch/drive.err")
+out=$("$WOLF" run "$rig_root"/tests/rig/resolvedrive.lu "$hp" 2> "$scratch/drive.err")
 drc=$?
 kill "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
 kill "$dnspid" "$backpid" 2>/dev/null; wait "$dnspid" "$backpid" 2>/dev/null

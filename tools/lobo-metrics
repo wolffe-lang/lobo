@@ -50,8 +50,10 @@
 # Loopback only; OS-chosen ports; scratch cleared at START.
 set -u
 cd "$(dirname "$0")/.." || exit 2
+. tools/lib-rigproc.sh
+rig_arm
 
-BIN=target/lobo-debug
+BIN="$rig_root/target/lobo-debug"
 if [ ! -x "$BIN" ]; then
     echo "lobo-metrics: FAILED — $BIN is missing; run the gauntlet's build step first" >&2
     exit 1

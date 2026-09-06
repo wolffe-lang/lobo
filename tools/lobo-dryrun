@@ -33,9 +33,11 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
-LOBO=target/lobo-debug
-LOBO_LIVE=target/lobo-release
+LOBO="$rig_root/target/lobo-debug"
+LOBO_LIVE="$rig_root/target/lobo-release"
 DIFF_DIR=tests/differential
 PROBES=tests/dryrun/probes
 
@@ -99,7 +101,7 @@ done
 # ---------------------------------------------------------------
 free_port() {
     for _ in 1 2 3 4 5; do
-        p=$("$WOLF" run ./tests/rig/freeport.lu 2>/dev/null)
+        p=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu 2>/dev/null)
         case "$p" in '' | *[!0-9]*) continue ;; esac
         echo "$p"; return 0
     done
@@ -107,7 +109,7 @@ free_port() {
 }
 send() { # send <port> <reqfile> <outfile>
     for _poll in $(seq 1 50); do
-        if "$WOLF" run ./tests/rig/diffsend.lu "$1" "$2" > "$3" 2> "$3.err"; then
+        if "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$2" > "$3" 2> "$3.err"; then
             return 0
         fi
         grep -q 'error: refused' "$3.err" || return 1
@@ -180,7 +182,7 @@ cross_proxy() {
     scratch="target/dryrun/cross-proxy"
     rm -rf "$scratch"; mkdir -p "$scratch"
     printf 'HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok' > "$scratch/reply.raw"
-    "$WOLF" run ./tests/rig/rigback/rigback.lu "$scratch/record" "$scratch/reply.raw" 1 > "$scratch/bport" 2> "$scratch/rigback.err" &
+    "$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu "$scratch/record" "$scratch/reply.raw" 1 > "$scratch/bport" 2> "$scratch/rigback.err" &
     backpid=$!
     bport=""
     for _ in $(seq 1 50); do

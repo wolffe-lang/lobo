@@ -33,6 +33,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 if ! command -v ab > /dev/null 2>&1; then
     echo "lobo-prefork-bench: REFUSED — ab(1) is not on PATH (macOS ships it; linux: apache2-utils)" >&2
@@ -57,12 +59,12 @@ cpu_seconds() { # cpu_seconds <pids...> — Σ ps cputime, in seconds
         { n = split($1, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; t += s }
         END { printf "%.2f", t }'
 }
-now_ms() { "$WOLF" run ./tests/rig/nowms.lu 2>/dev/null; }
+now_ms() { "$WOLF" run "$rig_root"/tests/rig/nowms.lu 2>/dev/null; }
 wait_port() { # wait_port <port> — up to ~8s
     i=0
     while [ $i -lt 80 ]; do
         if printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt" &&
-            "$WOLF" run ./tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null | grep -q "200 OK"; then
+            "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null | grep -q "200 OK"; then
             return 0
         fi
         sleep 0.1
@@ -80,8 +82,8 @@ run_ab() { # run_ab <port> <keepalive:0|1> — prints req/s
 rows=""
 
 bench_lobo() { # bench_lobo <workers>
-    hp=$("$WOLF" run ./tests/rig/freeport.lu)
-    cp=$("$WOLF" run ./tests/rig/freeport.lu)
+    hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     conf="$scratch/lobo-$1.conf"
     printf 'worker_processes %s;\npid %s/lobo-%s.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
         "$1" "$scratch" "$1" "$cp" "$hp" "$scratch" > "$conf"
@@ -111,7 +113,7 @@ bench_lobo() { # bench_lobo <workers>
 }
 
 bench_nginx() { # bench_nginx <workers>
-    np=$("$WOLF" run ./tests/rig/freeport.lu)
+    np=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     mkdir -p "$scratch/nginx-$1/logs"
     printf 'daemon off;\nworker_processes %s;\npid nginx.pid;\nerror_log error.log;\nevents {\n}\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
         "$1" "$np" "$scratch" > "$scratch/nginx-$1/nginx.conf"

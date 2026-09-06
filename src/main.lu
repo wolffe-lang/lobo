@@ -1029,7 +1029,7 @@ fn reopen_elog(el: ELog) -> ELog {
     ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq, worker: el.worker }
 }
 
-fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, hands: int) -> int {
+fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
         eprint("lobo: [emerg] configuration file {conf} test failed")
@@ -1499,16 +1499,19 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, han
         if have_ctrl {
             (mut wfds).push(cl)
         }
-        // ws17: the listener joins the wait set only on this hand's
-        // ACCEPT TURN (shell.accept_turn — nginx's accept_mutex without
-        // a mutex; the clause there carries the measured reason). A
-        // single process and a hand whose siblings are gone always
-        // have the turn.
-        let myturn = shell.accept_turn(worker, hands, now)
-        if have_http && running && !quitting && myturn {
+        // ws18: EVERY hand's listeners join the wait set, every pass —
+        // FREE-FOR-ALL, which is the posture ws17 measured (17,347
+        // req/s) and could not ship. ws17 admitted a listener only
+        // during the hand's own accept turn, because a hand that lost
+        // the race then parked inside a blocking `accept(2)` until the
+        // next connection (wolf-lang#242). s138 closed that: a lost
+        // race answers NOTHING, inside the budget `arm_accept` armed —
+        // so there is nothing left for a turn to buy, and the twenty
+        // lines that bought it are gone.
+        if have_http && running && !quitting {
             (mut wfds).push(hl)
         }
-        if have_tls && running && !quitting && myturn {
+        if have_tls && running && !quitting {
             (mut wfds).push(tls_l)
         }
         var wi: int = 0
@@ -1521,10 +1524,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, han
             }
             wi = wi + 1
         }
-        var wms = wait_budget(sig_on, parked)
-        if have_http || have_tls {
-            wms = shell.accept_wait_ms(worker, hands, now, wms)
-        }
+        let wms = wait_budget(sig_on, parked)
         var ready = List[int]()
         if wfds.len > 0 {
             ready = net_wait(wfds, wms) else |_| {
@@ -1736,23 +1736,20 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, han
 
         // 2. accept a new http connection (unless winding down) — it is
         // tagged with the CURRENT generation and bumps that counter
-        if have_http &&
-            running &&
-            !quitting &&
-            myturn &&
-            shell.accept_turn(worker, hands, time_unix_ms()) &&
-            ready_has(ready, hl) {
-            // ws17: DRAIN the accept queue while the turn is ours,
-            // bounded. One accept per pass was ws16's shape and it is
-            // what held a connection-per-request load to one accept
-            // per poll; with the turn in hand no sibling can take the
-            // queue out from under us, so the honest thing is to take
-            // what is there. Every accept after the first is guarded
-            // by a ZERO-deadline `net_wait` on the listener alone —
-            // the ask that cannot block ([os.net.wait]) — so the loop
-            // never reaches an accept the kernel has nothing for,
-            // which is the syscall that would park
-            // (shell.accept_turn's note).
+        if have_http && running && !quitting && ready_has(ready, hl) {
+            // DRAIN the accept queue, bounded. One accept per pass
+            // was ws16's shape and it is what held a
+            // connection-per-request load to one accept per poll, so
+            // the honest thing is to take what is there. Every accept
+            // after the first is guarded by a ZERO-deadline
+            // `net_wait` on the listener alone — the ask that cannot
+            // block ([os.net.wait]) — which keeps the common case one
+            // syscall wide. ws18: a sibling CAN now take the queue out
+            // from under us between that ask and the take, because
+            // readiness is not exclusivity — and that is exactly the
+            // race `[os.net.accept]` bounds at the listener's own 5 ms
+            // budget (arm_accept), so the loop pays a budget at worst
+            // and never a park.
             var burst: int = 0
             var draining = true
             var probe = List[int]()
@@ -1800,12 +1797,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, han
         // the NAMED D24 rider (see the listener comment above). A
         // stalled handshake is bounded by the read deadline, never a
         // hang.
-        if have_tls &&
-            running &&
-            !quitting &&
-            myturn &&
-            shell.accept_turn(worker, hands, time_unix_ms()) &&
-            ready_has(ready, tls_l) {
+        if have_tls && running && !quitting && ready_has(ready, tls_l) {
             var got_tls = true
             let tconn = net_accept(tls_l) else |_| {
                 got_tls = false
@@ -2169,22 +2161,29 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int, han
 
 /// Arm the bounded accept every listener in a many-hands lobo needs
 /// (ws17), and say nothing when the host declines — a listener whose
-/// deadline could not be armed still works, it just blocks longer on a
+/// deadline could not be armed still works, it just waits longer on a
 /// lost race.
 ///
 /// THE REASON, and it is the first thing a shared listener teaches:
 /// **readiness is not exclusivity.** `net_wait` says a socket CAN be
 /// accepted without blocking; with N hands polling ONE inherited
-/// listener, one SYN wakes all N and exactly one wins the `accept(2)`.
-/// The other N-1 then call `net_accept` on a queue that is empty
-/// again, and an accept with no deadline armed PARKS THERE — a hand
-/// that stops answering its own control endpoint until the next
-/// connection arrives, which the master reads as gone and reaps. That
-/// is the thundering herd, and it is not a bug in `net_wait`
-/// ([os.net.wait] is level-triggered and says exactly what it saw);
-/// it is the thing a program that shares a listener owes the kernel.
-/// ws16 never met it because ws16's listener had one holder and the
-/// loop re-armed 25 ms on it every pass.
+/// listener, one SYN wakes all N and exactly one wins the take. The
+/// other N-1 then call `net_accept` on a queue that is empty again,
+/// and from their side that is indistinguishable from the connection
+/// never having arrived — so the call **waits again against the
+/// budget armed here**, and answers `timeout` when it runs out
+/// ([os.net.accept], wolf-lang#242, closed at this pin). It is not a
+/// bug in `net_wait` ([os.net.wait] is level-triggered and says
+/// exactly what it saw); it is the thing a program that shares a
+/// listener owes the kernel, and the budget is how it pays.
+///
+/// **THIS LINE IS WHY ws18 COULD DELETE THE ACCEPT TURN.** At the ws17
+/// pin the deadline governed only the readiness WAIT, so a losing hand
+/// still parked in a blocking `accept(2)` until the next connection —
+/// alive at 0.0% CPU, answering no control verb, reaped by its own
+/// master — and lobo serialized accepts behind nginx's `accept_mutex`
+/// shape to stay correct on a quiet server. Now the budget bounds the
+/// whole call, so a lost race costs 5 ms and the hands go free-for-all.
 ///
 /// 5 ms, not 25: a losing accept is the common case under load, so it
 /// is the cost of every contended pass. The deadline is armed ONCE, at
@@ -2469,7 +2468,10 @@ fn free_endpoint() -> str {
 /// child as descriptors 3, 4, … in that order — the numbering IS the
 /// contract ([os.proc.inherit]), so the hand is told only HOW MANY
 /// rode down, never a descriptor number, and it adopts them by
-/// position. Both processes then hold their own descriptor for the
+/// position. That count is now the ONLY thing the master tells a hand
+/// about the shape of the group: `--hands N` retired with the accept
+/// turn at ws18, because a free-for-all hand has no reason to know how
+/// many siblings it has. Both processes then hold their own descriptor for the
 /// same socket: the master closing its copy would not disturb a hand,
 /// and a REPLACEMENT hand inherits the same listener, which is why
 /// the master keeps them open for its whole life.
@@ -2487,7 +2489,6 @@ fn spawn_worker(
     restarts: int,
     lfds: List[int],
     mctrl: str,
-    hands: int,
     mut el: ELog,
 ) -> (int, str) {
     let ep = worker_endpoint(mctrl, i)
@@ -2499,7 +2500,7 @@ fn spawn_worker(
     var h: int = -1
     if handed > 0 {
         var ok = true
-        let hh = os_spawn_with(exe, shell.worker_args(prefix, conf, i, ep, handed, hands), lfds) else |e| match e {
+        let hh = os_spawn_with(exe, shell.worker_args(prefix, conf, i, ep, handed), lfds) else |e| match e {
             unsupported => {
                 ok = false
                 ev_log(
@@ -2537,7 +2538,7 @@ fn spawn_worker(
         }
     }
     if h < 0 {
-        let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0, hands)
+        let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0)
         h = os_spawn(argv) else |e| match e {
             not_found => {
                 ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
@@ -2858,7 +2859,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var wprobe = List[int]()
     var i: int = 0
     while i < n {
-        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, n, mut elog)
+        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, mut elog)
         (mut wslot).push(s.0)
         (mut wctl).push(s.1)
         (mut wrest).push(0)
@@ -3015,7 +3016,6 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                         wrest[j],
                         lfds,
                         ctrl_ep,
-                        n,
                         mut elog,
                     )
                     wslot = replace_int(wslot, j, s.0)
@@ -3057,7 +3057,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             if now - wup[j] < 1000 {
                 time_sleep_ms(250)
             }
-            let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j] + 1, lfds, ctrl_ep, n, mut elog)
+            let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j] + 1, lfds, ctrl_ep, mut elog)
             wslot = replace_int(wslot, j, s.0)
             wctl = replace_str(wctl, j, s.1)
             wrest = replace_int(wrest, j, wrest[j] + 1)
@@ -3504,14 +3504,7 @@ fn main() -> int {
     }
     if cli.mode == "serve" {
         if cli.worker > 0 {
-            return serve_main(
-                cli.prefix,
-                cli.conf,
-                cli.worker,
-                cli.worker_control,
-                cli.inherit,
-                cli.hands,
-            )
+            return serve_main(cli.prefix, cli.conf, cli.worker, cli.worker_control, cli.inherit)
         }
         // ws16/ws17: how many hands? `worker_processes` off the
         // config — 1 (the default) is today's one process; `auto`
@@ -3549,7 +3542,7 @@ fn main() -> int {
         if n > 1 {
             return master_main(cli.prefix, cli.conf, n)
         }
-        return serve_main(cli.prefix, cli.conf, 0, "", 0, 1)
+        return serve_main(cli.prefix, cli.conf, 0, "", 0)
     }
     banner()
     0

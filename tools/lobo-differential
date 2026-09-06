@@ -15,10 +15,12 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 DIFF_DIR=tests/differential
 BIN=$DIFF_DIR/bin/nginx
-LOBO=target/lobo-release
+LOBO="$rig_root/target/lobo-release"
 pin_version=$(sed -n 's/^version = //p' $DIFF_DIR/NGINX-PIN)
 pin_configure=$(sed -n 's/^configure = //p' $DIFF_DIR/NGINX-PIN)
 
@@ -88,7 +90,7 @@ section() {
 # free_port : an OS-chosen ephemeral loopback port via the wolf rig.
 free_port() {
     for _ in 1 2 3 4 5; do
-        p=$("$WOLF" run ./tests/rig/freeport.lu 2>/dev/null)
+        p=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu 2>/dev/null)
         case "$p" in '' | *[!0-9]*) continue ;; esac
         echo "$p"
         return 0
@@ -103,7 +105,7 @@ send() {
     _req=$2
     _out=$3
     for _poll in $(seq 1 50); do
-        if "$WOLF" run ./tests/rig/diffsend.lu "$_port" "$_req" > "$_out" 2> "$_out.err"; then
+        if "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$_port" "$_req" > "$_out" 2> "$_out.err"; then
             return 0
         fi
         grep -q 'error: refused' "$_out.err" || return 1

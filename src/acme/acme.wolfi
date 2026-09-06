@@ -1,14 +1,14 @@
 module pkg :: acme
-  wolfi v0 · toolchain 0.2.4 · edition v1
-  export_hash 8e15d8a13428dc5e555c85926fe2de181b855cbd3e0f2c5eaa4bd80882c67331
-  pkg_hash    8e15d8a13428dc5e555c85926fe2de181b855cbd3e0f2c5eaa4bd80882c67331
+  wolfi v0 · toolchain 0.2.5 · edition v1
+  export_hash 959d2b1f6c9bf7edf483d42a9b3f7c9cac03a4793df57c9cba946115d824c47c
+  pkg_hash    959d2b1f6c9bf7edf483d42a9b3f7c9cac03a4793df57c9cba946115d824c47c
   deps:
-    std.base64  15fa086a4b7b9bff12b1ccde4575c7f643a62a325592522a84cc2a93e69b06cf
-    std.net  07b3060e28580a278d9c97780ff933bd9fb8f95c1c00e722bde3ba190d139e01
-    std.x.crypto.curve25519  f5ed55bf76e3dc69e08a3aee0093b290678accf26dbdd935bb40503d923ee48b
-    std.x.jose  ca16a82c0587c9d9e1fbca23231ffb1608f55000b69d02f8d4af4b70d9b9b9a0
-    std.x.tls.cert  b82c9426ed25d39e7dc9c00c49f70822de40a913eeb3eadf634cbf1728fd1d78
-    std.x.tls.client  8f45995062c0e22825cfb2dd6bb95c8a5ca96f9541dfae19c9aaa939660c077a
+    std.base64  d3adea4655af1864843caac86dfcb9d91afc2897eccd5494b7075eb5e5fb5cf7
+    std.net  67bf01be88fa2c2250c1f5f73bce68e9e80c23fc02a1a6888d934fd1ad765155
+    std.x.crypto.curve25519  3acb8e31dae920b175115428b6b9a4b712a7812135125b4dd3510d1e960fb310
+    std.x.jose  8f009251a4f4b07a0ff0dfbee1b8f838210d1d5cb9e496fe4baefdf48575b1e9
+    std.x.tls.cert  efc0e562f119b26b3f82aebb6ab7a8297ace32bdcd4ade4d4ff4abdab464583f
+    std.x.tls.client  aaf8f048ae92465909429bcc6d8db057d8624a67102df90ce62cc83ca50a60cf
   items:
     [0] pub account_key — fn account_key(store: str) -> prelude.List[byte] ! {io} · regions (-) -> ρ_caller
     [1] pub account_key_path — fn account_key_path(store: str) -> str

@@ -98,7 +98,6 @@ pub struct Cli {
     worker: int,
     worker_control: str,
     inherit: int,
-    hands: int,
 }
 
 /// True when `name` is one of nginx's four signal words. Total.
@@ -149,7 +148,6 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var worker: int = 0
     var worker_control = ""
     var inherit: int = 0
-    var hands: int = 0
     var want = ""
     var want_kind = ""
     var err_msg = ""
@@ -193,18 +191,6 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 }
             } else if want == "worker-control" {
                 worker_control = a
-            } else if want == "hands" {
-                // ws17: how many hands the master started. A hand needs
-                // the COUNT to know when its accept turn comes round
-                // (`accept_turn`); it cannot read it off its own config
-                // when the directive says `auto`, and a hand that
-                // computed a different N than its siblings would break
-                // the turn-taking outright.
-                hands = digits_val(a)
-                if hands < 1 {
-                    errored = true
-                    err_msg = "option \"--hands\" takes the master's worker count (internal: the master's flag)"
-                }
             } else if want == "inherit" {
                 // ws17: how many LISTENERS the master handed this hand
                 // through `os_spawn_with` — 0, 1 (plaintext or TLS
@@ -288,9 +274,6 @@ pub fn parse_cli(args: List[str]) -> Cli {
         } else if a == "--inherit" {
             want = "inherit"
             want_kind = "parameter"
-        } else if a == "--hands" {
-            want = "hands"
-            want_kind = "parameter"
         } else if a == "directives-md" {
             mode = "docs"
         } else if a == "logvars-md" {
@@ -351,10 +334,13 @@ pub fn parse_cli(args: List[str]) -> Cli {
         }
     }
     // the worker flags come as a PAIR, and only with `serve`;
-    // `--inherit` (ws17) rides with them and never alone
-    if !errored && (inherit > 0 || hands > 0) && (worker == 0 || mode != "serve") {
+    // `--inherit` (ws17) rides with them and never alone. `--hands`
+    // rode here too until ws18 deleted the accept turn that read it —
+    // it is not a retired flag with a kind refusal, it is GONE, and an
+    // argv carrying it takes the ordinary `invalid option` road.
+    if !errored && inherit > 0 && (worker == 0 || mode != "serve") {
         errored = true
-        err_msg = "options \"--inherit\"/\"--hands\" ride the master's worker flags (internal)"
+        err_msg = "option \"--inherit\" rides the master's worker flags (internal)"
     }
     if !errored && (worker > 0 || !worker_control.is_empty()) {
         if mode != "serve" {
@@ -387,7 +373,6 @@ pub fn parse_cli(args: List[str]) -> Cli {
         worker: worker,
         worker_control: worker_control,
         inherit: inherit,
-        hands: hands,
     }
 }
 
@@ -1425,104 +1410,21 @@ pub fn worker_processes(c: config.Conf) -> int {
 // on a cgroup-quota'd host `/proc/cpuinfo` answered the machine's
 // cores and lobo would have started workers that never get one.
 
-/// The length of one hand's accept turn, in milliseconds (ws17).
-/// Exposed so the witness can name the number rather than repeat it.
-pub fn accept_slice_ms() -> int {
-    10
-}
-
-/// Is it worker `worker`'s turn to accept, at wall time `now`, among
-/// `hands` hands?
-///
-/// **This is nginx's `accept_mutex` without a mutex, and the reason it
-/// exists is an upstream one, MEASURED (wolf-lang, filed at ws17).**
-/// `net_accept` awaits readiness with the socket's deadline and then
-/// runs a BLOCKING `accept(2)`. With N hands sharing one inherited
-/// listener ([os.proc.inherit]) a single connection wakes all N: one
-/// wins the syscall and the losers block in it — not for their
-/// deadline, which governed only the readiness wait, but until the
-/// NEXT connection arrives. A hand parked there answers no control
-/// verb and runs no timer, so its master reads it as gone and replaces
-/// it; on a busy server the next connection is microseconds away and
-/// nothing is visible, on a quiet one the hand is stuck.
-///
-/// The turn closes it without a new primitive: at any instant exactly
-/// one hand has the listener in its wait set, so there is no race to
-/// lose. Slices are `accept_slice_ms()` wide and assigned round robin
-/// off the wall clock, which every hand on one host reads the same;
-/// each hand accepts every connection that arrives in its own slice
-/// (many, under load — a slice is thousands of passes), so the work
-/// still spreads evenly. The RESIDUAL race is a hand that reads the
-/// clock inside its slice and reaches the syscall after the boundary:
-/// microseconds wide, and it can only bite while connections are
-/// ARRIVING, which is exactly when the next one unparks it.
-///
-/// `hands <= 1` is the single process (and the single-hand master):
-/// always its turn, no clock read at all. Pure and total.
-pub fn accept_turn(worker: int, hands: int, now: int) -> bool {
-    if hands <= 1 {
-        return true
-    }
-    let w = if worker < 1 { 1 } else { worker }
-    let slice = accept_slice_ms()
-    now / slice % hands == w - 1
-}
-
-/// How long a hand may block before its accept turn changes hands, in
-/// milliseconds — `base` capped by the time left in this slice (when
-/// the turn is ours) or the time until ours begins (when it is not).
-///
-/// Without this the turn is a bug rather than a mechanism: a hand
-/// reads the clock at the top of its pass, finds the turn is not its
-/// own, and then blocks in `net_wait` for the whole idle budget — 25
-/// ms against a 10 ms slice, so it sleeps clean through its own turn
-/// and the listener is unattended for most of every round. Capping
-/// the wait at the boundary is what makes the round trip exact: a hand
-/// wakes when its turn starts and stops accepting when it ends.
-/// Pure and total.
-pub fn accept_wait_ms(worker: int, hands: int, now: int, base: int) -> int {
-    if hands <= 1 {
-        return base
-    }
-    let slice = accept_slice_ms()
-    let round = slice * hands
-    let w = if worker < 1 { 1 } else { worker }
-    var pos = now % round
-    if pos < 0 {
-        pos = 0
-    }
-    let mine = (w - 1) * slice
-    var left: int = 0
-    if pos >= mine && pos < mine + slice {
-        left = mine + slice - pos
-    } else if pos < mine {
-        left = mine - pos
-    } else {
-        left = round - pos + mine
-    }
-    if left < 1 {
-        left = 1
-    }
-    if left < base {
-        return left
-    }
-    base
-}
-
 /// The ARGUMENTS a master starts a hand with, the program named
 /// apart: `serve`, the same prefix and config, and the three internal
 /// flags that make the child a hand rather than a master — its
-/// ordinal, the loopback control endpoint the master will reach it on
-/// (ws16), how many listeners rode down with it and how many hands the
-/// master started (ws17). One value
+/// ordinal, the control endpoint the master will reach it on (ws16),
+/// and how many listeners rode down with it (ws17). A fourth,
+/// `--hands N`, rode here from ws17 until ws18: it existed only so a
+/// hand could compute its accept TURN, and the turn retired with
+/// wolf-lang#242. A free-for-all hand has no reason to know how many
+/// siblings it has. One value
 /// per element, no quoting anywhere (the spawn takes a vector;
 /// std.process's whole reason is that there is no shell). This is the
 /// shape `os_spawn_with(exe, args, inherit)` wants — the executable is
 /// its own parameter there, so a master never splices its own path
 /// into a list it also builds options in. Pure and total.
-pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int, hands: int) -> List[
-    str,
-] {
+pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int) -> List[str] {
     var a = List[str]()
     (mut a).push("serve")
     (mut a).push("-p")
@@ -1535,8 +1437,6 @@ pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int,
     (mut a).push(ctrl)
     (mut a).push("--inherit")
     (mut a).push("{inherit}")
-    (mut a).push("--hands")
-    (mut a).push("{hands}")
     a
 }
 
@@ -1544,18 +1444,12 @@ pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int,
 /// shape `os_spawn` takes, which is the FALLBACK path (a host that
 /// answers `unsupported` to a non-empty inherit set, and the
 /// zero-listener case). Pure and total.
-pub fn worker_argv(
-    exe: str,
-    prefix: str,
-    conf: str,
-    worker: int,
-    ctrl: str,
-    inherit: int,
-    hands: int,
-) -> List[str] {
+pub fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str, inherit: int) -> List[
+    str,
+] {
     var a = List[str]()
     (mut a).push(exe)
-    for w in worker_args(prefix, conf, worker, ctrl, inherit, hands) {
+    for w in worker_args(prefix, conf, worker, ctrl, inherit) {
         (mut a).push(w)
     }
     a

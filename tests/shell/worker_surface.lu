@@ -4,7 +4,8 @@
 //! stage-src: shell config
 //!
 //! The ws16 prefork surface, PURE, on all three lanes: the hand's argv
-//! (one value per element — no shell, ever), the two vocabulary
+//! (one value per element — no shell, ever; ws18: two elements
+//! shorter, `--hands` retired with the accept turn), the two vocabulary
 //! events appended at ws16 (nothing renamed), the `worker=` trailing
 //! field, the master's status rows (text and JSON), the worker's two
 //! extra head lines, and the stanza readers the master folds a hand's
@@ -17,87 +18,71 @@ use shell
 fn main() -> !int {
     // ---- the worker argv: exe serve -p P -c C --worker N
     //      --worker-control EP --inherit K
-    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 4)
-    assert(a.len == 14, "fourteen elements: {a.len}")
+    // ws18: the fifth flag pair is GONE. `--hands N` existed only so a
+    // hand could compute its accept turn, and the turn retired with
+    // wolf-lang#242 — so the argv is two elements shorter than ws17's
+    // and the last pair is `--inherit`.
+    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1)
+    assert(a.len == 12, "twelve elements: {a.len}")
     assert(a[0] == "/opt/lobo" && a[1] == "serve", "the executable, then serve")
     assert(a[2] == "-p" && a[3] == "/etc/lobo", "the prefix rides")
     assert(a[4] == "-c" && a[5] == "nginx.conf", "the config rides")
     assert(a[6] == "--worker" && a[7] == "3", "the ordinal")
     assert(a[8] == "--worker-control" && a[9] == "127.0.0.1:40001", "the endpoint")
     assert(a[10] == "--inherit" && a[11] == "1", "ws17: how many listeners rode down")
-    assert(a[12] == "--hands" && a[13] == "4", "ws17: how many hands the master started")
     // ws17: `os_spawn_with` names the program APART from its
     // arguments, so the args builder is the one the master actually
     // uses and `worker_argv` is it with the exe spliced on for the
     // `os_spawn` fallback. The two agree element for element.
-    let ar = shell.worker_args("/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 4)
-    assert(ar.len == 13, "thirteen arguments without the exe: {ar.len}")
+    let ar = shell.worker_args("/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1)
+    assert(ar.len == 11, "eleven arguments without the exe: {ar.len}")
     var ai: int = 0
     while ai < ar.len {
         assert(ar[ai] == a[ai + 1], "args[{ai}] is argv[{ai + 1}]: {ar[ai]} vs {a[ai + 1]}")
         ai = ai + 1
     }
     // a path with a space is ONE argument (no quoting layer exists)
-    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1", 0, 2)
+    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1", 0)
     assert(b[0] == "/opt/my lobo" && b[3] == "/etc/x y" && b[5] == "a b.conf", "spaces are bytes")
     assert(b[11] == "0", "no listeners handed: the fallback shape says so on the argv")
 
-    // ---- ws17: the ACCEPT TURN (shell.accept_turn — nginx's
-    // accept_mutex without a mutex; the clause carries the measured
-    // reason, an upstream blocking accept(2) after a readiness wait a
-    // sibling may have consumed)
-    let sl = shell.accept_slice_ms()
-    assert(sl > 0, "a slice is a positive number of milliseconds: {sl}")
-    // exactly ONE hand holds the turn at any instant, and the round
-    // walks the ordinals in order
-    var ms: int = 0
-    while ms < sl * 3 * 2 {
-        var holders: int = 0
-        var w: int = 1
-        while w <= 3 {
-            if shell.accept_turn(w, 3, ms) {
-                holders = holders + 1
-            }
-            w = w + 1
-        }
-        assert(holders == 1, "exactly one of three hands has the turn at t={ms}: {holders}")
-        ms = ms + 1
-    }
-    assert(shell.accept_turn(1, 3, 0), "the round opens on hand 1")
-    assert(shell.accept_turn(2, 3, sl), "…then hand 2")
-    assert(shell.accept_turn(3, 3, sl * 2), "…then hand 3")
-    assert(shell.accept_turn(1, 3, sl * 3), "…and round again")
-    // the single process never takes turns: there is nobody to race
-    assert(shell.accept_turn(0, 1, 12345), "one hand always has the turn")
-    assert(shell.accept_turn(1, 1, 12345), "…however it is numbered")
-
-    // ---- ws17: the wait is capped at the turn boundary, or the turn
-    // is a bug — a hand that blocks 25 ms against a 10 ms slice sleeps
-    // through its own turn
-    assert(shell.accept_wait_ms(0, 1, 999, 25) == 25, "one hand: the budget is untouched")
+    // ---- ws18: THE TURN IS GONE, and this is where it was.
+    // ws17 shipped `shell.accept_turn`/`accept_wait_ms`/
+    // `accept_slice_ms` — nginx's `accept_mutex` without a mutex —
+    // because `net_accept` parked a losing hand in a blocking
+    // `accept(2)` after its readiness wait (wolf-lang#242). s138
+    // closed that: a lost race waits again against the budget the
+    // listener already carries and answers `timeout`, so there is
+    // nothing left for a turn to buy and the three pure functions and
+    // the `--hands` flag that fed them are deleted rather than
+    // deprecated. What is asserted here is the DELETION, on all three
+    // lanes: the flag takes the ordinary unknown-option road.
+    var hflag = List[str]()
+    (mut hflag).push("serve")
+    (mut hflag).push("--worker")
+    (mut hflag).push("1")
+    (mut hflag).push("--worker-control")
+    (mut hflag).push("127.0.0.1:1")
+    (mut hflag).push("--hands")
+    (mut hflag).push("3")
+    let chf = shell.parse_cli(hflag)
+    assert(chf.mode == "error" && chf.exit_code == 1, "--hands is not a flag any more")
     assert(
-        shell.accept_wait_ms(1, 3, 0, 25) == sl,
-        "at the top of its own slice a hand waits out the REST of it: {shell.accept_wait_ms(1, 3, 0, 25)}",
+        chf.err_msg == "invalid option: \"-hands\"",
+        "…and it refuses as an unknown option, not as a retired one: {chf.err_msg}",
     )
+    // `--inherit` is the one internal flag that outlived it, and it
+    // still rides the worker pair rather than standing alone
+    var lone = List[str]()
+    (mut lone).push("serve")
+    (mut lone).push("--inherit")
+    (mut lone).push("2")
+    let cl2 = shell.parse_cli(lone)
+    assert(cl2.mode == "error", "--inherit without the worker flags is refused")
     assert(
-        shell.accept_wait_ms(2, 3, 0, 25) == sl,
-        "hand 2 waits until hand 1's slice ends: {shell.accept_wait_ms(2, 3, 0, 25)}",
+        cl2.err_msg == "option \"--inherit\" rides the master's worker flags (internal)",
+        "…by name, and the message no longer speaks for a flag that is gone: {cl2.err_msg}",
     )
-    assert(
-        shell.accept_wait_ms(3, 3, 0, 25) == sl * 2,
-        "hand 3 waits two slices: {shell.accept_wait_ms(3, 3, 0, 25)}",
-    )
-    assert(
-        shell.accept_wait_ms(1, 3, sl, 25) == sl * 2,
-        "past its slice, hand 1 waits for the round to come back: {shell.accept_wait_ms(1, 3, sl, 25)}",
-    )
-    assert(shell.accept_wait_ms(1, 3, 0, 3) == 3, "a SHORTER budget still wins")
-    var q: int = 0
-    while q < sl * 3 {
-        let v = shell.accept_wait_ms(2, 3, q, 25)
-        assert(v >= 1 && v <= sl * 3, "the wait is bounded by one round at t={q}: {v}")
-        q = q + 1
-    }
 
     // ---- the CLI half of the same flags: a pair, only with serve
     var argv = List[str]()

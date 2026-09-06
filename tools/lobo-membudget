@@ -73,6 +73,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 case "$(uname -s)" in
 Linux | Darwin) ;;
@@ -112,7 +114,7 @@ check() { # check <desc> <ok(0/1)>
     fi
 }
 
-hp=$("$WOLF" run ./tests/rig/freeport.lu)
+hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 printf 'pid %s/lobo.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
     "$scratch" "$hp" "$scratch" > "$scratch/lobo.conf"
 
@@ -128,7 +130,7 @@ done
 
 rss_kb() { ps -o rss= -p "$pid" | tr -d ' '; }
 drive() { # drive <count> <path> <desc>
-    if out=$("$WOLF" run ./tests/rig/memdrive.lu "$hp" "$1" "$2" 2> "$scratch/drive.err"); then
+    if out=$("$WOLF" run "$rig_root"/tests/rig/memdrive.lu "$hp" "$1" "$2" 2> "$scratch/drive.err"); then
         check "$3 ($out)" 0
     else
         check "$3 (stderr: $(tail -c 120 "$scratch/drive.err"))" 1
@@ -200,8 +202,8 @@ fi
 head -c 33000 /dev/zero | tr '\0' 'B' > "$scratch/w/band.bin"
 head -c 32768 /dev/zero | tr '\0' 'F' > "$scratch/w/fits.bin"
 head -c 50000 /dev/zero | tr '\0' 'O' > "$scratch/w/over.bin"
-hp2=$("$WOLF" run ./tests/rig/freeport.lu)
-ctp=$("$WOLF" run ./tests/rig/freeport.lu)
+hp2=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+ctp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 conf2="$scratch/lobo-cap.conf"
 printf 'pid %s/lobo-cap.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; application/octet-stream bin; }\n  memory_budget 40k;\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
     "$scratch" "$ctp" "$hp2" "$scratch" > "$conf2"

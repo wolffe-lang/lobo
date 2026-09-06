@@ -52,10 +52,12 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 DIFF_DIR=tests/differential
 BIN=$DIFF_DIR/bin/nginx
-LOBO=target/lobo-release
+LOBO="$rig_root/target/lobo-release"
 pin_version=$(sed -n 's/^version = //p' $DIFF_DIR/NGINX-PIN)
 
 if [ ! -x "$BIN" ]; then
@@ -95,7 +97,7 @@ note() { echo "control-differential: $1"; }
 
 get() { # get <port> — the served body's first line, or "" on refusal
     printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
-    "$WOLF" run ./tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null |
+    "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null |
         awk 'BEGIN { RS = "\r\n\r\n" } NR == 2 { print $1 }'
 }
 poll_body() { # poll_body <port> <want> — up to ~8s
@@ -130,7 +132,7 @@ hammer() { # hammer <port> <n> — echoes the count of NON-200 answers
 }
 
 # ============================ the oracle ============================
-nport=$("$WOLF" run ./tests/rig/freeport.lu)
+nport=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 ngconf() { # ngconf <root-subdir> [extra]
     printf 'daemon off;\npid nginx.pid;\nerror_log error.log;\nevents { }\nhttp {\n  access_log access.log;\n  types { text/html html; }\n  %s\n  server { listen 127.0.0.1:%s; root %s/%s; }\n}\n' \
         "${2:-}" "$nport" "$root" "$1" > "$scratch/nginx.conf"
@@ -149,7 +151,7 @@ row "oracle: nginx/$have_version serving generation A" $((1 - ng_up))
 # The hold is short on purpose: nginx's old worker closes its IDLE
 # keepalive connections once it finishes shutting down, so a long hold
 # measures the worker's lifetime rather than the config it serves.
-"$WOLF" run ./tests/rig/reloadhold.lu "$nport" 700 > "$scratch/ng-hold.out" 2>&1 &
+"$WOLF" run "$rig_root"/tests/rig/reloadhold.lu "$nport" 700 > "$scratch/ng-hold.out" 2>&1 &
 nghold=$!
 await_pre "$scratch/ng-hold.out" || row "the oracle's held connection made its first request" 1
 
@@ -177,8 +179,8 @@ kill "$ngpid" 2>/dev/null
 wait "$ngpid" 2>/dev/null
 
 # ============================= lobo =================================
-lport=$("$WOLF" run ./tests/rig/freeport.lu)
-lctl=$("$WOLF" run ./tests/rig/freeport.lu)
+lport=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+lctl=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 lbconf() { # lbconf <root-subdir> [extra]
     printf 'pid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  access_log %s/lobo-access.log;\n  %s\n  server { listen 127.0.0.1:%s; root %s/%s; }\n}\n' \
         "$root" "$lctl" "$root" "${2:-}" "$lport" "$root" "$1" > "$scratch/lobo.conf"
@@ -193,7 +195,7 @@ else
 fi
 row "lobo: serving generation A on its own loopback port" $((1 - lb_up))
 
-"$WOLF" run ./tests/rig/reloadhold.lu "$lport" 700 > "$scratch/lb-hold.out" 2>&1 &
+"$WOLF" run "$rig_root"/tests/rig/reloadhold.lu "$lport" 700 > "$scratch/lb-hold.out" 2>&1 &
 lbhold=$!
 await_pre "$scratch/lb-hold.out" || row "lobo's held connection made its first request" 1
 

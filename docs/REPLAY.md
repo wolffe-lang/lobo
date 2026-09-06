@@ -99,16 +99,16 @@ respect:
   generation events share a `worker=` stamp and one `seq` order. That
   is what keeps a per-request story readable at all, and it is the one
   thing the split does not take away.
-- **the ACCEPT TURN is the only cross-stream order that is
-  reconstructible.** Hands take 10 ms turns off the wall clock
-  (docs/WORKERS.md), so a run's connections fall into slices whose
-  owner is a function of the ordinal and the millisecond: a reader
-  with two hands' timestamped lines can say which hand OUGHT to have
-  taken a connection that arrived at time T, and one that landed
-  elsewhere is a finding rather than noise. It is a weaker instrument
-  than a seq — millisecond precision, and it retires with the turn
-  when wolf-lang#242 lands — and it is written down here so nobody
-  mistakes it for one.
+- **there is NO reconstructible cross-stream order, and ws18 took the
+  last one away.** ws17 could offer one: hands took 10 ms accept turns
+  off the wall clock, so a reader with two hands' timestamped lines
+  could say which hand OUGHT to have taken a connection that arrived
+  at time T. That instrument retired with the turn when wolf-lang#242
+  landed (docs/WORKERS.md) — the hands now accept free-for-all and the
+  kernel alone decides. It is written down as a LOSS rather than
+  quietly dropped: a per-hand `seq` orders one stream and nothing
+  orders two, so a cross-stream claim needs a mechanism this repo does
+  not have yet, not a clock.
 
 One sentence, both halves load-bearing: **exploration proves ordering
 properties over the events it can see and permute — and the events it
