@@ -19,6 +19,8 @@
 # reason lobo-confcheck is sh.
 set -u
 cd "$(dirname "$0")/.." || exit 2
+. tools/lib-rigproc.sh
+rig_arm
 
 NGINX="$(pwd)/tests/differential/bin/nginx"
 LOBO="$(pwd)/target/lobo-debug"

@@ -18,6 +18,8 @@
 # without os_spawn stdout capture (F-0065 → wolf-lang#129, ws00's D3).
 set -u
 cd "$(dirname "$0")/.." || exit 2
+. tools/lib-rigproc.sh
+rig_arm
 
 NGINX="$(pwd)/tests/differential/bin/nginx"
 LOBO="$(pwd)/target/lobo-debug"

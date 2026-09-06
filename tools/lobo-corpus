@@ -80,6 +80,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 roots="${*:-tests}"
 total=0

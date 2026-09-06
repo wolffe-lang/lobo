@@ -25,6 +25,8 @@ step() {
 
 step "toolchain pin"
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 echo "wolf:  $have_wolf ($($WOLF --version | sed -n 2p))"
 echo "lupin: $have_lupin"
 

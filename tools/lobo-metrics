@@ -50,6 +50,8 @@
 # Loopback only; OS-chosen ports; scratch cleared at START.
 set -u
 cd "$(dirname "$0")/.." || exit 2
+. tools/lib-rigproc.sh
+rig_arm
 
 BIN=target/lobo-debug
 if [ ! -x "$BIN" ]; then

@@ -31,6 +31,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 case "$(uname -s)" in
 Linux | Darwin) ;;
@@ -65,8 +67,8 @@ check() { # check <desc> <ok(0/1)>
     fi
 }
 
-hp=$("$WOLF" run ./tests/rig/freeport.lu)
-ctp=$("$WOLF" run ./tests/rig/freeport.lu)
+hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+ctp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 conf="$scratch/lobo.conf"
 render() { # render <root>
     printf 'pid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
@@ -97,7 +99,7 @@ poll() { # poll <desc> <grep-pattern> — up to ~8s
 poll "server up, generation 1 current" "generation 1: current"
 
 # 1. hold a keepalive connection on generation 1
-"$WOLF" run ./tests/rig/holdconn.lu "$hp" 4000 > "$scratch/hold.out" 2> "$scratch/hold.err" &
+"$WOLF" run "$rig_root"/tests/rig/holdconn.lu "$hp" 4000 > "$scratch/hold.out" 2> "$scratch/hold.err" &
 holder=$!
 poll "held connection counted (gen 1 live=1)" "generation 1: current live=1"
 
@@ -110,7 +112,7 @@ poll "generation 2 current while gen 1 drains" "generation 2: current"
 
 # gen 2 serves a NEW connection while gen 1 still drains
 printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
-body=$("$WOLF" run ./tests/rig/diffsend.lu "$hp" "$scratch/req.txt" 2>/dev/null)
+body=$("$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$hp" "$scratch/req.txt" 2>/dev/null)
 case "$body" in
 *SIG-GEN-B*) check "new connection served by generation 2 during the drain" 0 ;;
 *) check "new connection served by generation 2 during the drain (got: $(printf '%s' "$body" | tail -c 60))" 1 ;;
@@ -180,8 +182,8 @@ fi
 # `source`. Normalize the first two away and the blocks must be
 # IDENTICAL; leave `source` alone and it must be the only line that
 # differs.
-hp3=$("$WOLF" run ./tests/rig/freeport.lu)
-ctp3=$("$WOLF" run ./tests/rig/freeport.lu)
+hp3=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+ctp3=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 conf3="$scratch/lobo3.conf"
 printf 'pid %s/lobo3.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
     "$scratch" "$ctp3" "$hp3" "$scratch/A" > "$conf3"

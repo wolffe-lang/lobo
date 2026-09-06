@@ -41,6 +41,8 @@
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
 
 case "$(uname -s)" in
 Linux | Darwin) ;;
@@ -78,8 +80,8 @@ check() { # check <desc> <ok(0/1)>
     fi
 }
 
-hp=$("$WOLF" run ./tests/rig/freeport.lu)
-ctp=$("$WOLF" run ./tests/rig/freeport.lu)
+hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+ctp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
 conf="$scratch/lobo.conf"
 render() { # render <root>
     printf 'worker_processes 3;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  memory_budget 4k;\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
@@ -127,7 +129,7 @@ get() { # get <path> — the served reply's body first line, or "" (nc:
 get_status() { # get_status <path> — the status code
     printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$1" | nc 127.0.0.1 "$hp" 2>/dev/null | head -1 | awk '{print $2}'
 }
-now_ms() { "$WOLF" run ./tests/rig/nowms.lu 2>/dev/null; }
+now_ms() { "$WOLF" run "$rig_root"/tests/rig/nowms.lu 2>/dev/null; }
 
 # 1. the posture: every hand serves on the ONE inherited listener
 poll "master up, 3 hands configured" status_text "^workers: 3"
@@ -205,7 +207,7 @@ fi
 # connection. ws16 knew which hand that was — there was only one
 # serving; ws17 does not, because the kernel picks (that is the whole
 # point), so the driver asks each hand which of them is holding it.
-"$WOLF" run ./tests/rig/holdconn.lu "$hp" 4000 > "$scratch/hold.out" 2> "$scratch/hold.err" &
+"$WOLF" run "$rig_root"/tests/rig/holdconn.lu "$hp" 4000 > "$scratch/hold.out" 2> "$scratch/hold.err" &
 holder=$!
 holder_of() { # which hand's own stanza shows the held connection
     for w in 1 2 3; do
