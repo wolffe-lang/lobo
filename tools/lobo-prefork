@@ -10,6 +10,11 @@
 #      `accepted=` on EVERY hand — the kernel is spreading the work
 #      across the processes, which is W6's first half and the thing
 #      ws16 could only file an issue about;
+#   1c. THE QUIET SERVER (ws18): one GET, then two seconds of silence,
+#      and every hand still answers its own control endpoint with no
+#      replacement. That is the check the accept turn used to buy — a
+#      hand that loses a free-for-all race must come back from the take
+#      rather than park in it (wolf-lang#242, closed at the ws18 pin);
 #   2. a REAL `kill -9` of one hand: the service does not blink (the
 #      survivors already hold the same socket — the window is MEASURED
 #      and printed, and is now the cost of one request, not a
@@ -164,6 +169,36 @@ for w in 1 2 3; do
     [ -n "$a" ] && [ "$a" -gt 0 ] && moved=$((moved + 1))
 done
 check "90 connections reached ALL THREE hands (rows with accepted>0: $moved; counts: $(row_field 1 accepted)/$(row_field 2 accepted)/$(row_field 3 accepted))" $([ "$moved" = 3 ] && echo 0 || echo 1)
+
+# 1c. THE QUIET SERVER — ws18's check, and the one the accept turn
+# used to buy. Three hands now sit in `net_wait` on the SAME listener
+# with no turn between them (free-for-all), so one SYN wakes all three
+# and two of them lose the take. Before wolf-lang#242 closed, a loser
+# then PARKED inside a blocking accept(2) until the next connection
+# arrived: alive at 0.0% CPU, answering no control verb, reaped by its
+# own master as unreachable — which is exactly how #242 was found, with
+# two hands and one GET. So: one GET, then two seconds of SILENCE, then
+# every hand must still answer its OWN endpoint and the master must
+# still read three serving hands with no restart. The silence is the
+# whole test; under load the next connection unparks a loser within
+# microseconds and nothing is visible.
+rst_before=$(row_field 1 restarts)$(row_field 2 restarts)$(row_field 3 restarts)
+one=$(get /index.html)
+check "the quiet server: one GET, served (body: $one)" $([ "$one" = "HANDS-GEN-A" ] && echo 0 || echo 1)
+sleep 2
+spoke=0
+for w in 1 2 3; do
+    epw=$(hand_ep "$w")
+    if [ -n "$epw" ]; then
+        case "$(hand_status "$epw")" in
+        *"worker: $w"*) spoke=$((spoke + 1)) ;;
+        esac
+    fi
+done
+check "…and after 2 s of silence every hand still answers its OWN control endpoint ($spoke/3 — a #242 park leaves the losers mute)" $([ "$spoke" = 3 ] && echo 0 || echo 1)
+serving_q=$(status_text | grep -c "^worker [0-9]: serving ")
+rst_after=$(row_field 1 restarts)$(row_field 2 restarts)$(row_field 3 restarts)
+check "…and the master still reads three serving hands ($serving_q) with no replacement (restarts $rst_before -> $rst_after)" $([ "$serving_q" = 3 ] && [ "$rst_before" = "$rst_after" ] && echo 0 || echo 1)
 
 # 2. a REAL crash of one hand
 # the pattern names THIS run's config as well as the ordinal: a
