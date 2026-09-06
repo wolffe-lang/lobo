@@ -208,9 +208,9 @@ ws17 shipped nginx's own answer meanwhile: hands took 10 ms TURNS off
 the wall clock (`shell.accept_turn`, `accept_wait_ms`,
 `accept_slice_ms`, and a `--hands N` flag on the hand's argv), so
 exactly one hand held the listener at any instant and there was no
-race to lose. **s138 closed #242 and ws18 deleted all of it** — 101
-lines of `shell/`, four call sites in the loop, one flag, one test
-section. What the deletion bought is in the measurement below, and it
+race to lose. **s138 closed #242 and ws18 deleted all of it** — 84
+lines of pure surface (`src/shell/shell.lu` net −106 with the
+plumbing), four guard sites in the loop, one flag, one test section. What the deletion bought is in the measurement below, and it
 is bigger than the accept path alone, because the turn also capped
 every hand's `net_wait` budget at the turn boundary: a hand serving
 keepalive connections was woken by the ROUND, not by its sockets.
