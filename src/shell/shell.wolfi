@@ -1,9 +1,9 @@
 module pkg :: shell
-  wolfi v0 · toolchain 0.2.4 · edition v1
-  export_hash 5ab3fe414556832727501a35f8fa27597ede89d6aa0936420b218c5c39d2956e
-  pkg_hash    5ab3fe414556832727501a35f8fa27597ede89d6aa0936420b218c5c39d2956e
+  wolfi v0 · toolchain 0.2.5 · edition v1
+  export_hash 82ce287547067c94e0b2e12b326f1c6b55731faaf0c89f0899315243cbb77658
+  pkg_hash    82ce287547067c94e0b2e12b326f1c6b55731faaf0c89f0899315243cbb77658
   deps:
-    config  3d50fcca115ab0b30944c8188afa2c07d073ef03055a30cbc5b5cc18d17b98a7
+    config  e5c956488d6a43bae972cb1d7fdd3e839dfbc6cec16a28a4b0a4a04c74426691
   items:
     [0] pub accept_slice_ms — fn accept_slice_ms() -> int
     [1] pub accept_turn — fn accept_turn(worker: int, hands: int, now: int) -> bool

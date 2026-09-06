@@ -1,9 +1,9 @@
 module pkg :: resolver
-  wolfi v0 · toolchain 0.2.4 · edition v1
-  export_hash aac614ee3dfaddedddae0dc4928fd2636f7544e1b97d08a23c69690e204a58da
-  pkg_hash    aac614ee3dfaddedddae0dc4928fd2636f7544e1b97d08a23c69690e204a58da
+  wolfi v0 · toolchain 0.2.5 · edition v1
+  export_hash 65320cc9c063edfd1d24c75a7ec32add2ededfd4377762251c1a50d4d24ddc67
+  pkg_hash    65320cc9c063edfd1d24c75a7ec32add2ededfd4377762251c1a50d4d24ddc67
   deps:
-    std.hex  04ed27eecce0b315ef5cfbad1671d9df59bd9c8cb330a223430daa4d1711ff86
+    std.hex  d04c3e53a01796ca18ccf3bb167b0ac0ce579d9102f663f8bb3c84e5441ceb44
   items:
     [0] pub addr_set — fn addr_set(rs: self.Resolver, host: str) -> str · regions (ρ1, -) -> -
     [1] pub build_query — fn build_query(id: int, name: str) -> prelude.List[byte] · regions (-, -) -> ρ_caller
