@@ -24,7 +24,7 @@ cd "$(dirname "$0")/.." || exit 2
 . tools/lib-rigproc.sh
 rig_arm
 
-LOBO=target/lobo-debug
+LOBO="$rig_root/target/lobo-debug"
 CA_SRC="$rig_root/tests/rig/acmeca/acmeca.lu"
 if [ ! -x "$LOBO" ]; then
     echo "acme: FAILED — $LOBO missing (the gauntlet's tiers step builds it)" >&2

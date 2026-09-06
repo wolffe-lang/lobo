@@ -10,8 +10,14 @@
 # its child: `kill "$dnspid"` reaps the wrapper and orphans the helper,
 # which then holds its loopback port for as long as the box is up.
 # Filed as lobo#1 after nineteen orphans up to 21 h old were found by
-# hand; a twentieth (a dnssrv, 45 h old) was still running when ws18
-# opened, and this file's first act was to reap it.
+# hand. Three more were alive when ws18 opened — one 45 h old, and one
+# from each of the two gauntlet runs the sprint began with, so the rate
+# is EXACTLY ONE LEAK PER RUN. Those three could not be reaped by the
+# fix that found them: they were launched the old way, with a relative
+# `./tests/rig/...`, so their command lines carry no repo root and the
+# checkout-scoped marker below cannot see them. They were killed by
+# hand, once. Every helper started after this file exists carries the
+# absolute form and is collectable.
 #
 # THE RULE is sc12's idempotency rule applied to processes: a run
 # leaves nothing behind, AND a run finds nothing behind. Both halves
@@ -29,10 +35,13 @@
 #     reason: `wolf run ./tests/rig/x.lu` leaves a RELATIVE cmdline
 #     that matches every lobo tree on the host, and a reaper that kills
 #     by a bare name is worse than the leak it collects.
-#   * a lobo under test — `target/lobo-debug` / `target/lobo-release`.
-#     Its cmdline carries the root either in the binary path or in the
-#     `-c <config>` the step wrote under `target/`, so the root test
-#     holds for both spellings.
+#   * a lobo under test — `<root>/target/lobo-debug` or
+#     `<root>/target/lobo-release`. Every tool that starts one names it
+#     absolutely (`$rig_root/target/...`), which is a change this file
+#     made rather than an assumption it relies on: a relative `LOBO=`
+#     left a cmdline with no root in it, and a server leaked from a
+#     killed step would then be invisible to the same reaper that
+#     collects the helpers beside it.
 # Nothing else is ever killed: not the operator's editor, not another
 # checkout, not the pinned nginx (which the differential harness stops
 # by name and whose cmdline names no lobo path).

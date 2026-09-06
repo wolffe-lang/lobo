@@ -36,8 +36,8 @@ cd "$(dirname "$0")/.." || exit 2
 . tools/lib-rigproc.sh
 rig_arm
 
-LOBO=target/lobo-debug
-LOBO_LIVE=target/lobo-release
+LOBO="$rig_root/target/lobo-debug"
+LOBO_LIVE="$rig_root/target/lobo-release"
 DIFF_DIR=tests/differential
 PROBES=tests/dryrun/probes
 
