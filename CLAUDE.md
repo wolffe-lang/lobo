@@ -29,7 +29,10 @@ remote is the orchestrator's call, never a lane's.
 Host tools the rig leans on beyond the toolchain: POSIX sh, awk, jq,
 diff — plus a real OpenSSL 3.x for the TLS steps (macOS ships
 LibreSSL as `openssl`; point `$OPENSSL_BIN` at e.g. Homebrew's
-openssl@3 — the tools refuse a non-OpenSSL oracle by name).
+openssl@3 — the tools refuse a non-OpenSSL oracle by name), GNU tar
+for the release archive's reproducible pack (`gtar` from Homebrew's
+gnu-tar on macOS; `tools/lobo-dist` refuses bsdtar by name) and curl
+for its smoke.
 
 ## Hard rules (inherited from the wolf org, binding here)
 - The gauntlet (`tools/lobo-gauntlet`: toolchain pin, manifest, fmt,
