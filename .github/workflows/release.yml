@@ -1,0 +1,356 @@
+# lobo — release (ws19). Modelled on wolf-lang's release.yml, with the
+# two things lobo's shape adds:
+#
+#   1. THE TOOLCHAIN IS BUILT FROM THE PIN, NEVER TAKEN FROM THE RUNNER.
+#      Every dist leg clones the pinned siblings (wolf-toolchain.toml)
+#      exactly as ci.yml does, builds wolf at the pinned tag with the
+#      D57 release stamp, stages .wolf-bin/, and only then runs
+#      tools/lobo-dist — whose lib-toolchain.sh refuses on identity
+#      drift before a line compiles. If WOLF_CI_TOKEN is absent this
+#      job FAILS, loudly. ci.yml may loud-skip (local runs remain that
+#      gate); a release job that publishes nothing while reporting
+#      green is a lie, so here the absence is an error.
+#   2. THE LEARNER SMOKE. After the release is public, a job with NO
+#      checkout downloads the PUBLISHED archive on a clean runner,
+#      verifies its digest, unpacks it with the host's own tar, runs
+#      `lobo -v` against the archive's own BUILD record, tests and
+#      serves the stock config, fetches the page and compares the
+#      bytes — the ww09 pattern (the site's windows learner-path job)
+#      applied to lobo's own release. A release nobody has installed
+#      is a claim, not a fact.
+#
+# THE HOSTS: wolf's RELEASE tier — linux x86-64 and macOS aarch64. Two
+# archives, so `publish` refuses at fewer than two (#226's shape).
+# Windows x86-64 and linux aarch64 are NAMED REFUSALS until s60c
+# (wolf's LLVM release tier does not serve them; tools/lobo-dist
+# refuses them by name), and the release notes say so — never silence.
+#
+# WHAT THIS WORKFLOW CANNOT PROVE YET. lobo is the ONE PRIVATE repo in
+# the org, so `gh release download` here works only because the runner
+# carries the workflow token. The learner smoke below is therefore a
+# clean-MACHINE test (no source tree, no wolf, nothing but the archive,
+# curl and tar) but not yet a clean-STRANGER test: an unauthenticated
+# download 404s while the repo is private. That half of W7's falsifiable
+# test — a person outside the org obtaining the artifact — is gated on
+# making the repo public, which is the human's decision and not a lane's
+# to take. Nothing in this file changes when it flips; the smoke simply
+# stops needing GH_TOKEN.
+#
+# REHEARSAL. A release workflow that has never run is the worst kind
+# of untested code, and the tag is the orchestrator's act, not a
+# lane's. `workflow_dispatch` runs the SAME dist and smoke jobs from
+# any ref, with the archives handed from dist to smoke as workflow
+# artifacts instead of release assets; `publish` and the release
+# upload are the only steps a rehearsal skips, and those are wolf's
+# proven lines. A rehearsal's archive is named `+dev` when the tree's
+# channel is (tools/lobo-stamp), so it can never be mistaken for a
+# release.
+
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  dist:
+    name: dist (${{ matrix.host }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            host: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            host: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lobo
+          fetch-depth: 0   # the stamp check reads the tags
+
+      # Before anything builds: the tree claims the version the tag
+      # names, on the release channel, with a CHANGELOG entry to cut
+      # the notes from. A rehearsal checks the sites and reports the
+      # channel; a tag run asserts it.
+      - name: the stamp holds
+        shell: bash
+        working-directory: lobo
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "push" ]; then
+            tools/lobo-stamp --check --tag "${GITHUB_REF_NAME}"
+          else
+            tools/lobo-stamp --check
+          fi
+
+      - name: read toolchain pins
+        id: pins
+        shell: bash
+        working-directory: lobo
+        run: |
+          rev() { awk -v s="[$1]" '$0==s{f=1} f&&/^rev = /{gsub(/"/,"",$3); print $3; exit}' wolf-toolchain.toml; }
+          echo "wolf=$(rev wolf)" >> "$GITHUB_OUTPUT"
+          echo "lupin=$(rev lupin)" >> "$GITHUB_OUTPUT"
+          echo "std=$(rev std)" >> "$GITHUB_OUTPUT"
+
+      # The sibling repos are private; the default token cannot read
+      # them. ci.yml loud-skips without WOLF_CI_TOKEN. This job does
+      # not: an archive built with "whatever wolf the runner has" is
+      # the failure this workflow exists to prevent, and a green
+      # release run that shipped nothing would be worse than a red one.
+      - name: acquire pinned siblings (the token is REQUIRED here)
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+        run: |
+          set -uo pipefail
+          if [ -z "${TOKEN:-}" ]; then
+            echo "::error::WOLF_CI_TOKEN is absent — the pinned toolchain cannot be built, and a release must be built from the pin (wolf-toolchain.toml), never from a runner's wolf. FAILING, not skipping."
+            exit 1
+          fi
+          ok=1
+          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-lang" wolf-lang \
+            && git -C wolf-lang checkout --quiet "${{ steps.pins.outputs.wolf }}" || ok=0
+          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-interp" wolf-interp \
+            && git -C wolf-interp checkout --quiet "${{ steps.pins.outputs.lupin }}" || ok=0
+          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-std" wolf-std || ok=0
+          if [ "$ok" != 1 ]; then echo "::error::token present but sibling acquisition failed"; exit 1; fi
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            wolf-lang
+            wolf-interp
+
+      # The D57 stamp, as ci.yml grants it: WOLF_COMMIT always; the
+      # release stamp only when the pinned rev IS a release tag (the
+      # pin at 0.1.0 is v0.2.6, so `wolf --version` claims the bare
+      # version the pin file names). lib-toolchain.sh compares the
+      # first line VERBATIM, so a wrong stamp cannot build anything.
+      - name: build pinned wolf (release) + runtime staticlib
+        shell: bash
+        working-directory: wolf-lang
+        run: |
+          set -euo pipefail
+          TAG="$(git tag --points-at HEAD | grep '^v[0-9]' | head -1 || true)"
+          if [ -n "$TAG" ]; then export WOLF_RELEASE="$TAG"; fi
+          WOLF_COMMIT="$(echo "${{ steps.pins.outputs.wolf }}" | cut -c1-7)" \
+            cargo build --release -p wolf_driver -p wolf_rt
+          target/release/wolf --version
+
+      - name: build pinned lupin (release)
+        shell: bash
+        working-directory: wolf-interp
+        run: cargo build --release --bin lupin
+
+      - name: stage .wolf-bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lobo/.wolf-bin
+          cp wolf-lang/target/release/wolf wolf-lang/target/release/libwolf_rt.a lobo/.wolf-bin/
+          cp wolf-interp/target/release/lupin lobo/.wolf-bin/
+          git -C wolf-std archive "${{ steps.pins.outputs.std }}" std | tar -x -C lobo/.wolf-bin/
+          git -C wolf-std rev-parse "${{ steps.pins.outputs.std }}" > lobo/.wolf-bin/std/STD-REV
+
+      # The reproducible pack needs GNU tar (--sort, --mtime). Linux
+      # runners have it as `tar`; macOS ships bsdtar, so gnu-tar comes
+      # from brew (the image usually carries it already).
+      - name: GNU tar (macOS)
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          command -v gtar > /dev/null || brew install gnu-tar
+          gtar --version | head -1
+
+      # Build, stage, pack twice, unpack elsewhere, smoke: -v, -t, a
+      # served page byte-compared. The host assertion refuses a matrix
+      # leg building the wrong archive.
+      - name: tools/lobo-dist
+        shell: bash
+        working-directory: lobo
+        env:
+          LOBO_DIST_HOST: ${{ matrix.host }}
+        run: tools/lobo-dist
+
+      - name: release notes from the CHANGELOG
+        if: github.event_name == 'push'
+        shell: bash
+        working-directory: lobo
+        run: tools/lobo-release-notes "${GITHUB_REF_NAME}" --out target/release-notes.md
+
+      # Every matrix job writes the same notes and passes them twice —
+      # on the create, so whichever leg wins the race sets the body,
+      # and on an edit, so it is right even for a release opened by
+      # hand. The release is a DRAFT until `publish` counts the
+      # archives.
+      - name: upload to the draft release
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        working-directory: lobo
+        run: |
+          notes=target/release-notes.md
+          gh release create "${GITHUB_REF_NAME}" --draft --title "lobo ${GITHUB_REF_NAME}" --notes-file "$notes" || echo "release already exists"
+          gh release edit "${GITHUB_REF_NAME}" --notes-file "$notes"
+          gh release upload "${GITHUB_REF_NAME}" target/dist/*.tar.gz target/dist/*.tar.gz.sha256 --clobber
+
+      - name: hand the archive to the smoke (rehearsal)
+        if: github.event_name != 'push'
+        uses: actions/upload-artifact@v4
+        with:
+          name: lobo-${{ matrix.host }}
+          path: |
+            lobo/target/dist/*.tar.gz
+            lobo/target/dist/*.tar.gz.sha256
+          if-no-files-found: error
+
+  # `gh release create --draft` above is deliberate: a half-uploaded
+  # release page must never be public. `needs: dist` is the whole
+  # matrix; with `fail-fast: false` every host still runs, and this
+  # job runs ONLY if both succeeded. The count is the evidence in the
+  # log before the flag moves: two archives and two digests, one per
+  # host the release tier serves. Fewer, and it stays a draft.
+  publish:
+    name: publish (un-draft)
+    if: github.event_name == 'push'
+    needs: dist
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release view "${GITHUB_REF_NAME}" --json assets --jq ".assets[].name" | sort | tee assets.txt
+          archives=$(grep -c "\.tar\.gz$" assets.txt || true)
+          digests=$(grep -c "\.tar\.gz\.sha256$" assets.txt || true)
+          if [ "$archives" -lt 2 ] || [ "$digests" -lt 2 ]; then
+            echo "publish: ${GITHUB_REF_NAME} carries $archives archives and $digests digests, wanted 2 and 2 (linux x86-64, macOS aarch64) — leaving it a draft" >&2
+            exit 1
+          fi
+          gh release edit "${GITHUB_REF_NAME}" --draft=false
+          echo "publish: ${GITHUB_REF_NAME} is public with $archives archives (windows x86-64 and linux aarch64 are named refusals until s60c — see the notes)"
+
+  # THE LEARNER SMOKE. No checkout: this runner has no lobo source, no
+  # wolf, nothing but what a stranger has — the archive it downloads,
+  # curl, and the host's tar. On a tag run the archive is the PUBLISHED
+  # asset (after `publish`); on a rehearsal it is the dist leg's
+  # artifact. Everything after the download is identical.
+  smoke:
+    name: learner smoke (${{ matrix.host }})
+    if: always() && needs.dist.result == 'success' && (github.event_name != 'push' || needs.publish.result == 'success')
+    needs: [dist, publish]
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            host: x86_64-unknown-linux-gnu
+          - os: macos-latest
+            host: aarch64-apple-darwin
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - name: download the published archive
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          gh release download "${GITHUB_REF_NAME}" --pattern "lobo-*-${{ matrix.host }}.tar.gz*"
+          ls -l
+
+      - name: take the rehearsal archive
+        if: github.event_name != 'push'
+        uses: actions/download-artifact@v4
+        with:
+          name: lobo-${{ matrix.host }}
+
+      - name: the digest, then the host's own tar
+        shell: bash
+        run: |
+          set -euo pipefail
+          ls -l
+          archive=$(ls lobo-*-${{ matrix.host }}.tar.gz)
+          if command -v sha256sum > /dev/null; then sha256sum -c "$archive.sha256"; else shasum -a 256 -c "$archive.sha256"; fi
+          bytes=$(wc -c < "$archive" | tr -d ' ')
+          if [ "$bytes" -lt 1000000 ]; then echo "::error::$archive is $bytes bytes — that is not a server"; exit 1; fi
+          tar -xzf "$archive"
+          dir="${archive%.tar.gz}"
+          ls -l "$dir"
+          echo "LOBO_DIR=$PWD/$dir" >> "$GITHUB_ENV"
+          echo "ARCHIVE=$archive" >> "$GITHUB_ENV"
+
+      # `lobo -v` names the version and the toolchain pin it was built
+      # with — W7's acceptance criterion. The expectation comes from the
+      # archive's own BUILD record (written by tools/lobo-dist from the
+      # pin file), and on a tag run the version half must be the tag's,
+      # bare: a `+dev` here is a rehearsal archive on a release page.
+      - name: lobo -v
+        shell: bash
+        working-directory: ${{ env.LOBO_DIR }}
+        run: |
+          set -euo pipefail
+          cat BUILD
+          got=$(./lobo -v 2>&1)
+          want=$(sed -n 's/^version_line: //p' BUILD)
+          echo "-v: $got"
+          [ "$got" = "$want" ] || { echo "::error::-v printed \"$got\"; BUILD records \"$want\""; exit 1; }
+          echo "$got" | grep -Eq '\(built with wolf [^,]+, pin [0-9a-f]{7}\)$' || { echo "::error::-v does not name a toolchain pin"; exit 1; }
+          if [ "${{ github.event_name }}" = "push" ]; then
+            v="${GITHUB_REF_NAME#v}"
+            [ "$got" != "${got#lobo version: lobo/$v (}" ] || { echo "::error::the tag is ${GITHUB_REF_NAME} but -v claims \"$got\""; exit 1; }
+          fi
+          ./lobo -V 2>&1
+
+      - name: the stock config: test, serve, fetch, compare, stop
+        shell: bash
+        working-directory: ${{ env.LOBO_DIR }}
+        run: |
+          set -euo pipefail
+          ./lobo -t -c conf/lobo.conf
+          ./lobo -c conf/lobo.conf serve > logs/serve.out 2>&1 &
+          spid=$!
+          for i in $(seq 1 100); do
+            if curl -s -o logs/body -D logs/headers http://127.0.0.1:8080/; then break; fi
+            kill -0 "$spid" 2> /dev/null || { cat logs/serve.out; echo "::error::the server exited before answering"; exit 1; }
+            sleep 0.1
+          done
+          [ -s logs/headers ] || { cat logs/serve.out; echo "::error::nothing answered on 127.0.0.1:8080 within 10 s"; exit 1; }
+          head -1 logs/headers | grep -q "^HTTP/1.1 200" || { echo "::error::answered $(head -1 logs/headers)"; exit 1; }
+          cmp logs/body html/index.html || { echo "::error::the served bytes differ from html/index.html"; exit 1; }
+          grep -i '^Server:' logs/headers
+          ./lobo -s stop -c conf/lobo.conf
+          for i in $(seq 1 100); do kill -0 "$spid" 2> /dev/null || break; sleep 0.1; done
+          if kill -0 "$spid" 2> /dev/null; then echo "::error::still running 10 s after -s stop"; kill -9 "$spid"; exit 1; fi
+          echo "served $(wc -c < logs/body | tr -d ' ') bytes, byte-identical to html/index.html; -s stop took it down"
+          {
+            echo "### learner smoke — ${{ matrix.host }}"
+            echo ""
+            echo '```'
+            echo "$ ./lobo -v"
+            ./lobo -v 2>&1
+            echo "$ curl -i http://127.0.0.1:8080/  (first line + Server)"
+            head -1 logs/headers
+            grep -i '^Server:' logs/headers
+            echo '```'
+            echo ""
+            echo "The page came back byte-identical to the archive's html/index.html; \`-s stop\` stopped the server. Windows x86-64 and linux aarch64: named refusals until s60c."
+          } >> "$GITHUB_STEP_SUMMARY"

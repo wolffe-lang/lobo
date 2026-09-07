@@ -1,0 +1,72 @@
+#!/bin/sh
+# lobo-release-notes — the CHANGELOG entry for a release tag (ws19; the
+# model is wolf-lang's `xtask release-notes`, #214's mechanism).
+# Make-free POSIX sh + awk.
+#
+#   tools/lobo-release-notes <TAG> [--out FILE]
+#
+# The release workflow passes the text to `gh release create
+# --notes-file`, so the release body fills itself at the tag instead of
+# needing a hand step nobody remembers — wolf's v0.2.1 and v0.2.2 both
+# answered the releases API with an empty body for exactly that reason.
+#
+# The section runs from `## <version>` (a `## 0.1.0 — 2026-09-07 — …`
+# heading, or a bare `## 0.1.0`; a longer version that merely starts
+# the same, `0.1.10`, is not it) to the next top-level `## `. Fenced
+# blocks are transparent: a `## ` inside one is content, not the next
+# release. Everything else is carried through verbatim — the `###`
+# subsections and the repo-relative links a GitHub release page is the
+# one place that resolves correctly. No entry, or an empty one, is a
+# refusal by name: tools/lobo-stamp --check holds the same rule
+# BEFORE the tag, so this tool refusing at the tag would be the second
+# fence, not the first.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+tag="${1:-}"
+[ -n "$tag" ] || { echo "lobo-release-notes: need a tag — \`tools/lobo-release-notes v0.1.0 [--out FILE]\`" >&2; exit 2; }
+shift
+out=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --out) out="${2:-}"; [ -n "$out" ] || { echo "lobo-release-notes: --out needs a path" >&2; exit 2; }; shift 2 ;;
+        *) echo "lobo-release-notes: unknown flag $1" >&2; exit 2 ;;
+    esac
+done
+version="${tag#v}"
+
+body=$(awk -v v="$version" '
+    {
+        if ($0 ~ /^```/) {
+            fenced = !fenced
+        } else if (!fenced && $0 ~ /^## /) {
+            if (collecting) exit
+            rest = substr($0, 4)
+            sub(/^[ \t]+/, "", rest)
+            collecting = (index(rest, v) == 1 && (length(rest) == length(v) || substr(rest, length(v) + 1, 1) ~ /[ \t]/))
+            found = found || collecting
+            next
+        }
+        if (collecting) print
+    }
+    END { if (!found) exit 3 }
+' CHANGELOG.md)
+rc=$?
+if [ "$rc" = 3 ]; then
+    echo "lobo-release-notes: CHANGELOG.md has no \`## $version\` entry, so $tag's release body would be empty — which is the whole of wolf-lang#214. Curate the entry before tagging." >&2
+    exit 1
+fi
+# trim leading/trailing blank lines
+body=$(printf '%s\n' "$body" | awk 'NF { blank = 0 } { if (!started && !NF) next; started = 1; lines[++n] = $0 } END { last = n; while (last > 0 && lines[last] !~ /[^ \t]/) last--; for (i = 1; i <= last; i++) print lines[i] }')
+if [ -z "$body" ]; then
+    echo "lobo-release-notes: CHANGELOG.md's \`## $version\` entry is empty" >&2
+    exit 1
+fi
+if [ -n "$out" ]; then
+    dir=$(dirname "$out")
+    mkdir -p "$dir" || { echo "lobo-release-notes: cannot create $dir" >&2; exit 1; }
+    printf '%s\n' "$body" > "$out" || { echo "lobo-release-notes: cannot write $out" >&2; exit 1; }
+    echo "lobo-release-notes: $tag -> $out ($(wc -c < "$out" | tr -d ' ') bytes, first line: $(printf '%s\n' "$body" | head -1))"
+else
+    printf '%s\n' "$body"
+fi
