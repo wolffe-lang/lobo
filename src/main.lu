@@ -75,17 +75,12 @@ use serve
 use shell
 use tls
 
-/// The package version. Matches wolf.pkg; the release ritual (far
-/// future) bumps both in one commit. Total; never traps.
-fn version() -> str {
-    "0.0.1"
-}
-
-/// The no-argument banner: identity plus every module's frozen
-/// interface version, which is also what keeps each stub import
-/// honestly used (E0305).
+/// The no-argument banner: identity (the release stamp — shell's,
+/// ws19; wolf.pkg and it move in one commit) plus every module's
+/// frozen interface version, which is also what keeps each stub
+/// import honestly used (E0305).
 fn banner() {
-    print("lobo {version()} — a web server in wolf")
+    print("lobo {shell.release_version()}{shell.release_channel()} — a web server in wolf")
     let mods = "config {config.version()} · dryrun {dryrun.version()} · http {http.version()} · obs {obs.version()} · proxy {proxy.version()} · serve {serve.version()} · shell {shell.version()}"
     print("modules: {mods}")
 }

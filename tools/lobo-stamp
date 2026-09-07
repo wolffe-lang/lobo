@@ -1,0 +1,159 @@
+#!/bin/sh
+# lobo-stamp — the release stamp: every version site held equal, and
+# the channel held honest against git's tags (ws19). Make-free POSIX
+# sh + awk; git when the tree has one.
+#
+#   tools/lobo-stamp --check [--tag vX.Y.Z]   the gate (a gauntlet step)
+#   tools/lobo-stamp --print                  the stamp as key=value
+#                                             lines (tools/lobo-dist
+#                                             and the workflows read it)
+#
+# WHY A SOURCE STAMP. `wolf --version` is the model (D57: the bare
+# version exactly at the release tag, `+dev.<sha>` anywhere else), and
+# wolf gets it from a compile-time env its driver reads at build. A
+# wolf PROGRAM has no such input: `wolf build` takes no defines, the
+# language has no compile-time environment read, and D33 forbids the
+# build script that would write one. So lobo's provenance is SOURCE —
+# five constants at the top of src/shell/shell.lu — and this tool is
+# what makes a source stamp truthful rather than a lie waiting to
+# happen: it holds every version site equal to the manifest and the
+# pin file, and it holds the channel against the tags so a tree that
+# is not the release cannot claim to be it. The upstream answer is a
+# builtin that names the compiling toolchain (filed as wolf-lang#247,
+# from this sprint); when it lands, toolchain_version/toolchain_pin
+# become that call and this tool stops holding them.
+#
+# THE SITES (each is a line this tool parses; a site it cannot find
+# is a red, never a skip):
+#   wolf.pkg               version: "X"
+#   src/shell/shell.lu     release_version / release_channel /
+#                          toolchain_version / toolchain_pin / std_rev
+#   src/serve/serve.lu     default_opts' token "lobo/X" — the WIRE
+#                          identity (the Server header), which stays
+#                          bare on every channel the way nginx's does:
+#                          provenance is `-v`'s, not the wire's
+#   wolf-toolchain.toml    [wolf] version_line == "wolf <tv> (wolfgang, pin <pin>)"
+#                          [std] rev begins with <std_rev>
+#   CHANGELOG.md           a `## X` entry exists when the channel is
+#                          the release (#214's shape: the tag's notes
+#                          are cut from it, so an empty body is refused
+#                          here, before the tag)
+#
+# THE CHANNEL RULE (D57 for a source stamp):
+#   ""      the tree claims to BE v<version>. Admitted when no v<version>
+#           tag exists yet (the release commit, before the orchestrator
+#           tags it) or when that tag points at HEAD. REFUSED when the
+#           tag exists and points elsewhere: the release has happened
+#           and this tree is not it — flip release_channel to "+dev".
+#   "+dev"  an honest dev build; the archive it makes is named +dev too.
+#           REFUSED only when v<version> points at HEAD: the release
+#           tree must say so.
+#   --tag   the release workflow's assertion: the tag names <version>
+#           and the channel is "" — a tag naming a version the tree
+#           does not claim is refused before anything builds.
+# No git (a source tarball): the tag half is REPORTED unverifiable, the
+# site equality still gates.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+
+mode="${1:---check}"
+[ $# -gt 0 ] && shift
+tag=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --tag) tag="$2"; shift 2 ;;
+        *) echo "lobo-stamp: unknown argument $1" >&2; exit 2 ;;
+    esac
+done
+
+red=0
+fail() { echo "lobo-stamp: FAILED — $1" >&2; red=1; }
+
+lu_const() { # lu_const <fn> — the literal on the line after `pub fn <fn>() -> str {`
+    awk -v f="pub fn $1() -> str {" '
+        $0 == f { getline; sub(/^[ \t]*"/, ""); sub(/"[ \t]*$/, ""); print; exit }
+    ' src/shell/shell.lu
+}
+toml_value() { # toml_value <section> <key>
+    awk -v s="[$1]" -v k="$2" '
+        $0 == s { in_s = 1; next }
+        /^\[/ { in_s = 0 }
+        in_s && $1 == k { sub(/^[^=]*= */, ""); gsub(/"/, ""); print; exit }
+    ' wolf-toolchain.toml
+}
+
+ver=$(lu_const release_version)
+chan=$(lu_const release_channel)
+tv=$(lu_const toolchain_version)
+pin=$(lu_const toolchain_pin)
+std=$(lu_const std_rev)
+pkg=$(sed -n 's/^[ \t]*version:[ \t]*"\([^"]*\)".*$/\1/p' wolf.pkg | head -1)
+wire=$(awk '/^pub fn default_opts\(\)/ { f = 1 }
+            f && /token:/ { if (match($0, /"lobo\/[^"]*"/)) print substr($0, RSTART + 6, RLENGTH - 7); exit }' src/serve/serve.lu)
+version_line="lobo version: lobo/$ver$chan (built with wolf $tv, pin $pin)"
+
+if [ "$mode" = "--print" ]; then
+    printf 'version=%s\nchannel=%s\ntoolchain_version=%s\ntoolchain_pin=%s\nstd_rev=%s\nversion_line=%s\n' \
+        "$ver" "$chan" "$tv" "$pin" "$std" "$version_line"
+    exit 0
+fi
+[ "$mode" = "--check" ] || { echo "lobo-stamp: usage: --check [--tag vX.Y.Z] | --print" >&2; exit 2; }
+
+# 1. the sites exist and agree
+echo "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "shell.release_version() is \"$ver\", not a MAJOR.MINOR.PATCH"
+[ "$chan" = "" ] || [ "$chan" = "+dev" ] || fail "shell.release_channel() is \"$chan\"; the channel is \"\" (the release) or \"+dev\""
+echo "$pin" | grep -Eq '^[0-9a-f]{7}$' || fail "shell.toolchain_pin() is \"$pin\", not a 7-hex short sha"
+[ -n "$tv" ] || fail "shell.toolchain_version() is empty"
+[ -n "$std" ] || fail "shell.std_rev() is empty"
+[ "$pkg" = "$ver" ] || fail "wolf.pkg says version \"$pkg\", shell.release_version() says \"$ver\" — every version site moves in ONE commit"
+[ "$wire" = "$ver" ] || fail "serve.default_opts() token is \"lobo/$wire\", shell.release_version() says \"$ver\" — the wire identity is a version site"
+want_line="wolf $tv (wolfgang, pin $pin)"
+have_line=$(toml_value wolf version_line)
+[ "$have_line" = "$want_line" ] || fail "the stamp says it was built with \"$want_line\"; wolf-toolchain.toml [wolf] pins \"$have_line\" — a binary must name the toolchain that built it (D57)"
+std_rev=$(toml_value std rev)
+case "$std_rev" in
+    "$std"*) : ;;
+    *) fail "the stamp says std \"$std\"; wolf-toolchain.toml [std] pins $std_rev" ;;
+esac
+
+# 2. the CHANGELOG carries the release entry (the tag's notes are cut from it)
+if [ "$chan" = "" ]; then
+    if ! awk -v v="$ver" 'index($0, "## " v) == 1 && (length($0) == length(v) + 3 || substr($0, length(v) + 4, 1) ~ /[ \t]/) { f = 1 } END { exit !f }' CHANGELOG.md; then
+        fail "the channel is the release but CHANGELOG.md has no \`## $ver\` entry — curate it before the tag (#214's shape)"
+    fi
+fi
+
+# 3. the channel against the tags
+if git rev-parse --git-dir > /dev/null 2>&1; then
+    head=$(git rev-parse HEAD 2> /dev/null)
+    at=$(git rev-parse -q --verify "refs/tags/v$ver^{commit}" 2> /dev/null || true)
+    if [ "$chan" = "" ]; then
+        if [ -z "$at" ]; then
+            echo "lobo-stamp: channel \"\" — v$ver is not tagged yet; this tree claims it (the release commit, pending the tag)"
+        elif [ "$at" = "$head" ]; then
+            echo "lobo-stamp: channel \"\" — v$ver points at HEAD; this tree IS the release"
+        else
+            fail "the channel is the release but v$ver is tagged at $(echo "$at" | cut -c1-7) and HEAD is $(echo "$head" | cut -c1-7) — the release has happened and this tree is not it; set shell.release_channel() to \"+dev\" (and bump release_version when the next release is planned)"
+        fi
+    else
+        if [ -n "$at" ] && [ "$at" = "$head" ]; then
+            fail "v$ver points at HEAD but the channel says +dev — the release tree must claim its own version"
+        else
+            echo "lobo-stamp: channel \"+dev\" — an honest dev build (v$ver $([ -n "$at" ] && echo "is tagged at $(echo "$at" | cut -c1-7)" || echo "is not tagged"))"
+        fi
+    fi
+else
+    echo "lobo-stamp: no git here — the channel (\"$chan\") is unverifiable against tags; the sites still gate"
+fi
+
+# 4. the workflow's tag assertion
+if [ -n "$tag" ]; then
+    [ "$tag" = "v$ver" ] || fail "the tag is $tag but the tree claims v$ver — refusing to build a release under a name the source does not carry"
+    [ "$chan" = "" ] || fail "the tag is $tag but the channel is +dev — the tagged tree must be the release"
+fi
+
+if [ "$red" = 1 ]; then
+    exit 1
+fi
+echo "lobo-stamp: ok — lobo $ver$chan, built with $want_line, std $std (wolf.pkg, shell, serve, wolf-toolchain.toml and CHANGELOG agree)"
+echo "lobo-stamp: -v prints: $version_line"

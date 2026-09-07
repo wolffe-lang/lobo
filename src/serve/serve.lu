@@ -247,7 +247,10 @@ pub struct ServerOpts {
 }
 
 /// The lobo-flavoured defaults (nginx analogues: keepalive_timeout 75s,
-/// keepalive_requests 1000). `server_tokens on` → "lobo/<ver>". Total.
+/// keepalive_requests 1000). `server_tokens on` → "lobo/<ver>" — the
+/// wire identity, a VERSION SITE: the entry threads
+/// `shell.version_token()` over it, and tools/lobo-stamp --check holds
+/// this literal equal to shell.release_version() (ws19). Total.
 pub fn default_opts() -> ServerOpts {
     ServerOpts {
         token: "lobo/0.1.0",

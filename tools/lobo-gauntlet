@@ -37,6 +37,12 @@ if ! "$WOLF" fmt --check wolf.pkg; then
 fi
 echo "wolf.pkg ok"
 
+step "stamp (ws19: every version site equal, the channel honest against the tags, the toolchain the pin's)"
+if ! tools/lobo-stamp --check; then
+    echo "lobo-gauntlet: FAILED at stamp — see above for the ritual" >&2
+    exit 1
+fi
+
 step "fmt --check (src, tests)"
 if ! "$WOLF" fmt --check src tests; then
     echo "lobo-gauntlet: FAILED at fmt — run \`$WOLF fmt src tests\` and re-check" >&2

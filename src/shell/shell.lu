@@ -55,6 +55,62 @@ pub fn version() -> str {
 }
 
 // ------------------------------------------------------------------
+// the release stamp — lobo's own provenance (ws19). FIVE constants,
+// and with wolf.pkg and the wire token in serve.default_opts the ONLY
+// version sites in the tree: tools/lobo-stamp --check (a gauntlet
+// step) holds them all equal, holds toolchain_version/toolchain_pin/
+// std_rev equal to wolf-toolchain.toml, and holds the channel against
+// git's tags. wolf's own `--version` is the model (D57: the bare
+// version exactly at the release tag, a dev suffix anywhere else) —
+// but a wolf PROGRAM cannot read a compile-time env, `wolf build`
+// takes no define, and D33 forbids the build script that would write
+// one, so the stamp is SOURCE and the gate is what keeps it true.
+// The upstream answer is wolf-lang#247 (a builtin naming the
+// compiling toolchain); toolchain_version/toolchain_pin become that
+// call the day it lands. The release ritual: release_version,
+// wolf.pkg, the wire token and the CHANGELOG entry move in ONE commit
+// with the channel ""; the orchestrator tags it; the first commit
+// after the tag flips the channel to "+dev", and the gate is RED
+// until it does — that red is the design, not an accident. Every fn
+// here is pure and total.
+// ------------------------------------------------------------------
+
+/// The package version — MAJOR.MINOR.PATCH, wolf.pkg's `version`.
+pub fn release_version() -> str {
+    "0.1.0"
+}
+
+/// The channel: "" exactly at the tree a `v<release_version>` tag
+/// points at (or is about to), "+dev" at every other tree. Printed
+/// after the version by `-v`, carried in the archive's name.
+pub fn release_channel() -> str {
+    ""
+}
+
+/// The wolf this binary was built with — wolf-toolchain.toml [wolf]'s
+/// version (bare at a release tag; `0.2.5+dev.32f66bf` at a trunk pin).
+pub fn toolchain_version() -> str {
+    "0.2.6"
+}
+
+/// …and its commit: the short sha `wolf --version` names as `pin`.
+pub fn toolchain_pin() -> str {
+    "398e5f5"
+}
+
+/// The wolf-std tree compiled in — wolf-toolchain.toml [std]'s rev,
+/// short. A tree has no --version; its sha is its identity.
+pub fn std_rev() -> str {
+    "bd12ef5"
+}
+
+/// The pin file's [wolf] version_line, reassembled: what `wolf
+/// --version` printed on the machine that built this binary.
+pub fn toolchain_line() -> str {
+    "wolf {toolchain_version()} (wolfgang, pin {toolchain_pin()})"
+}
+
+// ------------------------------------------------------------------
 // the CLI grammar — a PURE parse of argv into a decision, so the
 // whole flag table is testable off the socket, on every lane.
 // nginx's shape: `nginx [-?hvVtTq] [-s signal] [-p prefix]
@@ -382,26 +438,34 @@ pub fn parse_cli(args: List[str]) -> Cli {
 // the entry follows suit.
 // ------------------------------------------------------------------
 
-/// The server identity token, "lobo/<ver>" (nginx: "nginx/1.30.4").
+/// The server identity token, "lobo/<ver>" (nginx: "nginx/1.30.4") —
+/// the WIRE identity: the Server header and the build_info metric.
+/// Bare on every channel, the way nginx's is; provenance is `-v`'s.
 /// Total.
 pub fn version_token() -> str {
-    "lobo/0.1.0"
+    "lobo/{release_version()}"
 }
 
-/// The one-line version report (`-v`): "lobo version: lobo/0.1.0"
-/// (nginx: "nginx version: nginx/1.30.4"). Total.
+/// The one-line version report (`-v`): the version, the channel, and
+/// the toolchain pin the binary was built with — W7's acceptance
+/// criterion (D57: a binary that cannot name its own provenance is
+/// one nobody can debug). nginx's prefix (`nginx version:
+/// nginx/1.30.4`) with wolf's parenthetical: "lobo version: lobo/0.1.0
+/// (built with wolf 0.2.6, pin 398e5f5)". Total.
 pub fn version_report() -> str {
-    "lobo version: {version_token()}"
+    "lobo version: {version_token()}{release_channel()} (built with wolf {toolchain_version()}, pin {toolchain_pin()})"
 }
 
-/// The `-V` build metadata, nginx's one-line-per-fact shape: identity,
-/// the wolf toolchain it was built with, the two-tier posture, and the
-/// module set. No compile-time git pin (D33: no build scripts), so the
-/// toolchain's own version string is the honest identity. Total.
+/// The `-V` build metadata, nginx's one-line-per-fact shape: the
+/// report, the toolchain's own version line, the std tree, the tier
+/// posture and the module set. The tier line names what the release
+/// path builds; the binary cannot tell which tier built it (the
+/// second hole wolf-lang#247 names). Total.
 pub fn version_verbose() -> str {
     var s = "{version_report()}\n"
-    s = "{s}built with wolf 0.1.0 (wolfgang)\n"
-    s = "{s}tier: two-tier (owned debug + LLVM release)\n"
+    s = "{s}built with {toolchain_line()}\n"
+    s = "{s}std: wolf-std {std_rev()}\n"
+    s = "{s}tier: two-tier (owned debug + LLVM release; the archive is the release tier, WOLF_MIDEND=0 while wolf-lang#146 stands)\n"
     s = "{s}modules: config {config.version()} · http · serve · proxy · obs · shell {version()}\n"
     s
 }
