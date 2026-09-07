@@ -1,0 +1,241 @@
+#!/bin/sh
+# lobo-dist — the release archive (ws19): built with the PINNED
+# toolchain, staged with what a first-time user needs, packed
+# reproducibly, then unpacked somewhere else and SMOKED — `-v`, `-t`,
+# a served page, the bytes compared. Make-free POSIX sh; GNU tar for
+# the pack step (see below); curl for the smoke. The model is
+# wolf-lang's `cargo xtask dist` (s60a's learner path, mechanized).
+#
+#   tools/lobo-dist              → target/dist/lobo-<ver>[+dev]-<host>.tar.gz
+#                                  and its .sha256 beside it
+#   LOBO_DIST_HOST=<triple>       the workflow's assertion: refuse when
+#                                  this host is not the one the matrix
+#                                  leg was told it is
+#   SOURCE_DATE_EPOCH=<secs>      the archive's one timestamp (default:
+#                                  HEAD's commit time; 0 without git)
+#
+# THE TOOLCHAIN IS THE PIN'S, NOT THE RUNNER'S. lib-toolchain.sh
+# refuses identity drift before anything compiles, so the binary in
+# the archive was built by exactly the wolf wolf-toolchain.toml names
+# — which is what "reproducible from wolf-toolchain.toml" means, and
+# the failure this tool exists to prevent (the release workflow builds
+# that wolf from source on every dist host, and if it cannot, it FAILS
+# rather than reaching for a PATH wolf). The build is the gauntlet's
+# release-tier build flag for flag: `--release` with WOLF_MIDEND=0
+# while wolf-lang#146 stands (the pin file's caveat).
+#
+# THE HOSTS are wolf's RELEASE tier — linux x86-64 and macOS aarch64.
+# Windows x86-64 and linux aarch64 are NAMED REFUSALS until s60c (the
+# LLVM release tier does not serve them; docs/platforms.md upstream);
+# this tool says so by name rather than producing an archive that
+# would not run.
+#
+# THE ARCHIVE is `lobo-<version><channel>-<host>/` (wolf's
+# `wolf-<version>-<host>` shape), flat: the binary, LICENSE, the stock
+# `conf/lobo.conf` and the `html/index.html` it serves, an empty
+# `logs/` for the pid file and the logs, GETTING-STARTED.md, README.md,
+# CHANGELOG.md, docs/, and BUILD — the provenance record (what `-v`
+# prints, the pins, the host, the source commit, the epoch) that the
+# learner smoke reads back against the binary. A dev-channel build is
+# named `+dev` in the archive name too, so it can never be mistaken
+# for the release on a download page.
+#
+# REPRODUCIBLE means: same source tree, same pinned toolchain, same
+# host → the same bytes. The pack step is the reproducible-builds
+# recipe — GNU tar with `--sort=name --mtime=@$SOURCE_DATE_EPOCH
+# --owner=0 --group=0 --numeric-owner`, piped through `gzip -n` so no
+# name or timestamp lands in the gzip header — and this tool PROVES
+# the pack half by packing the stage twice and comparing digests.
+# bsdtar (macOS's `tar`) has no --sort/--mtime, so GNU tar is required
+# for the pack: $TAR, else `gtar`, else a `tar` that says GNU, else a
+# refusal by name (`brew install gnu-tar` on macOS; the release
+# workflow does exactly that). UNPACKING needs no such thing: the
+# smoke below unpacks with the host's own `tar`, the way a learner
+# will. The BINARY half of reproducibility is the toolchain's to
+# promise; this sprint measured it on nomad-1 (see CHANGELOG 0.1.0)
+# and the number is recorded there, not claimed here.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+root="$(pwd)"
+. tools/lib-toolchain.sh   # $WOLF, $LUPIN, WOLF_STD; refuses on drift
+# ABSOLUTE, always. lib-toolchain.sh resolves `.wolf-bin/wolf` relative
+# to the repo root, and the smoke below runs from INSIDE the unpacked
+# archive — a relative toolchain path dies there with a bare "No such
+# file or directory". Exactly ws18/lobo#1's shape (a tool that names
+# its binary relatively cannot be used from anywhere else), caught here
+# by running the smoke rather than reasoning about it.
+case "$WOLF" in /*) ;; *) WOLF="$root/$WOLF" ;; esac
+case "$LUPIN" in /*) ;; *) LUPIN="$root/$LUPIN" ;; esac
+
+refuse() { echo "lobo-dist: REFUSED — $1" >&2; exit 1; }
+fail() { echo "lobo-dist: FAILED — $1" >&2; exit 1; }
+
+# 0. the host, by name
+case "$(uname -s)/$(uname -m)" in
+    Linux/x86_64) host=x86_64-unknown-linux-gnu ;;
+    Darwin/arm64) host=aarch64-apple-darwin ;;
+    Linux/aarch64 | Linux/arm64) refuse "linux aarch64 is a NAMED REFUSAL: wolf's release tier (\`wolf build --release\`) does not serve it until s60c, so there is no lobo archive for it — the release notes say so" ;;
+    MINGW* | MSYS* | CYGWIN* | Windows*) refuse "windows is a NAMED REFUSAL: wolf's release tier does not serve it until s60c (clang-cl/lld), so there is no lobo archive for it — the release notes say so" ;;
+    Darwin/x86_64) refuse "macOS x86-64 is not in wolf's release tier (linux x86-64 and macOS aarch64 are); no lobo archive" ;;
+    *) refuse "unknown host $(uname -s)/$(uname -m); the release tier is linux x86-64 and macOS aarch64" ;;
+esac
+if [ -n "${LOBO_DIST_HOST:-}" ] && [ "$LOBO_DIST_HOST" != "$host" ]; then
+    refuse "this host is $host but the caller expected $LOBO_DIST_HOST — a matrix leg building the wrong archive"
+fi
+
+# 1. the stamp (every version site equal; the channel honest)
+tools/lobo-stamp --check || fail "the stamp does not hold (see above) — an archive would carry a lie"
+stamp="$(tools/lobo-stamp --print)"
+sv() { printf '%s\n' "$stamp" | sed -n "s/^$1=//p"; }
+version=$(sv version)
+channel=$(sv channel)
+version_line=$(sv version_line)
+name="lobo-$version$channel-$host"
+
+# 2. GNU tar, by name
+TAR="${TAR:-}"
+if [ -z "$TAR" ]; then
+    for c in gtar tar; do
+        if command -v "$c" > /dev/null 2>&1 && "$c" --version 2> /dev/null | head -1 | grep -q "GNU tar"; then
+            TAR="$c"
+            break
+        fi
+    done
+fi
+[ -n "$TAR" ] || refuse "no GNU tar (\$TAR, gtar, or a tar that says GNU) — the reproducible pack needs --sort/--mtime; \`brew install gnu-tar\` on macOS"
+command -v curl > /dev/null 2>&1 || refuse "no curl — the smoke fetches the served page with it"
+sha256() {
+    if command -v sha256sum > /dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+if git rev-parse --git-dir > /dev/null 2>&1; then
+    commit=$(git rev-parse HEAD)
+    tags=$(git tag --points-at HEAD 2> /dev/null | tr '\n' ' ' | sed 's/ $//')
+    epoch="${SOURCE_DATE_EPOCH:-$(git log -1 --format=%ct)}"
+    dirty=$(git status --porcelain --untracked-files=no 2> /dev/null | head -1)
+else
+    commit="no git"
+    tags=""
+    epoch="${SOURCE_DATE_EPOCH:-0}"
+    dirty=""
+fi
+
+# 3. the build — the gauntlet's release tier, flag for flag
+dist="target/dist"
+stage="$dist/$name"
+rm -rf "$stage" "$dist/$name.tar.gz" "$dist/$name.tar.gz.sha256" "$dist/smoke"
+mkdir -p "$stage"
+echo "lobo-dist: building $name with $have_wolf (WOLF_MIDEND=0, wolf-lang#146)"
+if ! WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o "$stage/lobo"; then
+    fail "the release tier did not build"
+fi
+
+# 4. the stage
+for f in LICENSE README.md CHANGELOG.md docs/GETTING-STARTED.md conf/lobo.conf html/index.html; do
+    [ -f "$f" ] || fail "$f is missing — the archive would not carry what a first-time user needs"
+done
+mkdir -p "$stage/conf" "$stage/html" "$stage/docs" "$stage/logs"
+cp LICENSE README.md CHANGELOG.md "$stage/"
+cp docs/GETTING-STARTED.md "$stage/GETTING-STARTED.md"
+cp conf/lobo.conf "$stage/conf/"
+cp html/index.html "$stage/html/"
+# GETTING-STARTED.md rides at the TOP of the archive (it is the first
+# thing a learner opens); docs/ carries the contracts, not a copy of it.
+for d in docs/*.md; do
+    [ "$d" = "docs/GETTING-STARTED.md" ] && continue
+    cp "$d" "$stage/docs/"
+done
+{
+    echo "lobo $version$channel"
+    echo "version_line: $version_line"
+    echo "toolchain: $have_wolf"
+    echo "lupin: $have_lupin (the test lane; not linked)"
+    echo "std: wolf-std $(toml_value std rev)"
+    echo "host: $host"
+    echo "source: $commit${tags:+ (tags: $tags)}${dirty:+ (DIRTY working tree)}"
+    echo "source_date_epoch: $epoch"
+    echo "build: WOLF_MIDEND=0 wolf build --release ./src/main.lu"
+    echo "pins: wolf-toolchain.toml at the source commit above; tools/lobo-dist packed this"
+} > "$stage/BUILD"
+# every staged file gets the ONE timestamp; the tar flags restate it
+find "$stage" -exec touch -d "@$epoch" {} + 2> /dev/null \
+    || find "$stage" -exec touch -t "$(date -u -r "$epoch" +%Y%m%d%H%M.%S)" {} +
+
+# 5. the pack, twice
+pack() {
+    (cd "$dist" && "$TAR" --sort=name --mtime="@$epoch" --owner=0 --group=0 --numeric-owner \
+        --format=gnu -cf - "$name") | gzip -n -9 > "$1"
+}
+pack "$dist/$name.tar.gz" || fail "tar/gzip failed"
+pack "$dist/$name.tar.gz.again" || fail "the second pack failed"
+sum=$(sha256 "$dist/$name.tar.gz")
+again=$(sha256 "$dist/$name.tar.gz.again")
+rm -f "$dist/$name.tar.gz.again"
+[ "$sum" = "$again" ] || fail "the pack is not reproducible: $sum then $again from the same stage"
+printf '%s  %s\n' "$sum" "$name.tar.gz" > "$dist/$name.tar.gz.sha256"
+bytes=$(wc -c < "$dist/$name.tar.gz" | tr -d ' ')
+echo "lobo-dist: $dist/$name.tar.gz ($bytes bytes, sha256 $sum; packed twice, identical)"
+
+# 6. the smoke — somewhere ELSE, with the host's own tar, as a learner would
+smoke="$dist/smoke"
+mkdir -p "$smoke"
+(cd "$smoke" && tar -xzf "$root/$dist/$name.tar.gz") || fail "smoke: the host's tar cannot unpack the archive"
+u="$root/$smoke/$name"
+[ -x "$u/lobo" ] || fail "smoke: no executable lobo in the archive"
+got=$("$u/lobo" -v 2>&1)
+[ "$got" = "$version_line" ] || fail "smoke: the unpacked binary's -v says \"$got\"; the stamp says \"$version_line\""
+want_build=$(sed -n 's/^version_line: //p' "$u/BUILD")
+[ "$got" = "$want_build" ] || fail "smoke: -v \"$got\" but BUILD records \"$want_build\""
+echo "lobo-dist: smoke — -v prints \"$got\" (the stamp, BUILD and the binary agree)"
+
+cd "$u" || fail "smoke: cannot enter $u"
+if ! ./lobo -t -c conf/lobo.conf > logs/t.out 2>&1; then
+    cat logs/t.out >&2
+    fail "smoke: \`lobo -t -c conf/lobo.conf\` refused the stock config"
+fi
+grep -q "test is successful" logs/t.out || fail "smoke: -t did not say the test is successful: $(cat logs/t.out)"
+
+# the stock port is 8080; the smoke takes a free one so it never
+# collides with a real server on this box
+port=$("$WOLF" run "$root/tests/rig/freeport.lu") || fail "smoke: no free port"
+sed "s/127\.0\.0\.1:8080/127.0.0.1:$port/" conf/lobo.conf > conf/smoke.conf
+./lobo -c conf/smoke.conf serve > logs/serve.out 2>&1 &
+spid=$!
+cleanup() {
+    kill "$spid" 2> /dev/null
+    kill -9 "$spid" 2> /dev/null
+}
+trap cleanup EXIT
+i=0
+served=1
+while [ $i -lt 100 ]; do
+    if curl -s -o logs/body -D logs/headers "http://127.0.0.1:$port/" 2> /dev/null; then
+        served=0
+        break
+    fi
+    kill -0 "$spid" 2> /dev/null || break
+    sleep 0.1
+    i=$((i + 1))
+done
+[ "$served" = 0 ] || { cat logs/serve.out >&2; fail "smoke: nothing answered on 127.0.0.1:$port within 10 s"; }
+head -1 logs/headers | grep -q "^HTTP/1.1 200" || fail "smoke: the page answered $(head -1 logs/headers | tr -d '\r'), not 200"
+cmp -s logs/body html/index.html || fail "smoke: the served bytes differ from html/index.html"
+grep -qi "^Server: lobo/$version\r*$" logs/headers || fail "smoke: the Server header is $(grep -i '^Server:' logs/headers | tr -d '\r'), not lobo/$version"
+echo "lobo-dist: smoke — GET / on 127.0.0.1:$port answered 200, $(wc -c < logs/body | tr -d ' ') bytes, byte-identical to html/index.html, Server: lobo/$version"
+
+if ! ./lobo -s stop -c conf/smoke.conf > logs/stop.out 2>&1; then
+    cat logs/stop.out >&2
+    fail "smoke: \`lobo -s stop\` refused"
+fi
+i=0
+while kill -0 "$spid" 2> /dev/null && [ $i -lt 100 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+kill -0 "$spid" 2> /dev/null && fail "smoke: the server is still running 10 s after -s stop"
+trap - EXIT
+echo "lobo-dist: smoke — -s stop took the server down ($(cat logs/stop.out | head -1))"
+cd "$root" || exit 2
+rm -rf "$smoke"
+echo "lobo-dist: ok — $name"

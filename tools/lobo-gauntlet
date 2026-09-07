@@ -195,5 +195,11 @@ if ! tools/lobo-acme; then
     exit 1
 fi
 
+step "dist (ws19: the release archive — built from the pin, packed twice, unpacked elsewhere with the host's tar, smoked: -v against BUILD, -t, a served page byte-compared, -s stop)"
+if ! tools/lobo-dist; then
+    echo "lobo-gauntlet: FAILED at dist — the archive a stranger would download does not hold (ws19)" >&2
+    exit 1
+fi
+
 echo ""
 echo "lobo-gauntlet: GREEN"
