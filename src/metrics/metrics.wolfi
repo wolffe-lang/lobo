@@ -1,7 +1,7 @@
 module pkg :: metrics
-  wolfi v0 · toolchain 0.2.5 · edition v1
-  export_hash 457fa4acdc5cbb67eea07048218903ad7340f430be15255f04671fd681656305
-  pkg_hash    457fa4acdc5cbb67eea07048218903ad7340f430be15255f04671fd681656305
+  wolfi v0 · toolchain 0.2.6 · edition v1
+  export_hash 09cedb28cb5467cd9f71d668155d201d745a20fbb64c9a94d9da64a6eee1826b
+  pkg_hash    09cedb28cb5467cd9f71d668155d201d745a20fbb64c9a94d9da64a6eee1826b
   deps: (none)
   items:
     [0] pub buckets_ms — fn buckets_ms() -> prelude.List[int] · regions () -> ρ_caller
