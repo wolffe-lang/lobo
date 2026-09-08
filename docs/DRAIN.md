@@ -3,7 +3,7 @@
 nginx's `-s reload` is a shrug: the old workers drain in the dark. lobo
 narrates it. An operator can see which config generation is live, how
 many connections each older generation still holds, how long it has been
-draining, and the moment it retires — from a `lobo status` command and
+draining, and the moment it retires, from a `lobo status` command and
 from log events. This page is the CONTRACT for those two surfaces:
 ws09's structured logs and ws12's metrics endpoint reuse the names and
 the schema documented here, so a change to either is a change to this
@@ -11,39 +11,40 @@ file and a red test (`tests/shell/status_surface.lu` pins every shape).
 
 ## How the drain works
 
-The server is one spawn-free poll loop (D7 — the release tier refuses a
+The server is one spawn-free poll loop (D7: the release tier refuses a
 task entry's address). The loop multiplexes the http listener, the
 control channel, and every open connection, stepping each connection a
 slice at a time so none blocks the loop. Every connection is TAGGED with
 the generation it was accepted under, and each generation carries a
-LIVE-CONNECTION COUNTER in the loop's own bookkeeping — no scan, no lock
-across the accept path; the counter moves only at accept and close.
+LIVE-CONNECTION COUNTER in the loop's own bookkeeping, with no scan and
+no lock across the accept path; the counter moves only at accept and
+close.
 
-- **accept** → the current generation's counter increments.
-- **reload** → the current generation begins DRAINING (it keeps its
+- accept → the current generation's counter increments.
+- reload → the current generation begins DRAINING (it keeps its
   frozen model and its open connections; a request arriving on one of
-  those connections still routes the OLD model — the frozen-model
-  discipline, ws04) and the freshly parsed model becomes the new current
-  generation, which serves all new connections.
-- **close** (on any exit path — normal close, keepalive budget spent,
+  those connections still routes the OLD model, the frozen-model
+  discipline of ws04) and the freshly parsed model becomes the new
+  current generation, which serves all new connections.
+- close (on any exit path: normal close, keepalive budget spent,
   keepalive idle timeout, error response, malformed request, or a
   worker_shutdown_timeout abort) → the owning generation's counter
   decrements.
-- **retire** → a draining generation whose counter reaches zero (or
+- retire → a draining generation whose counter reaches zero (or
   whose worker_shutdown_timeout expires) leaves the table.
 
 A debug assertion that a counter never goes negative stays in EVERY
-profile (the checked-arithmetic spirit — a leak that made a generation
-immortal is loud, not silent).
+profile (the checked-arithmetic spirit), so a leak that made a
+generation immortal trips it.
 
 ### Retirement semantics
 
-A draining generation retires when **its live count hits zero OR its
-`worker_shutdown_timeout` expires**. Connections still open when the
+A draining generation retires when its live count hits zero or its
+`worker_shutdown_timeout` expires. Connections still open when the
 timeout bites are ABORTED (force-closed) and counted as such, so the
-retirement event reads `drained=N aborted=M`: the operator sees that the
-timeout, not a clean drain, ended it. With no `worker_shutdown_timeout`
-(the directive absent, or `0` — the nginx default) a generation drains
+retirement event reads `drained=N aborted=M` and the operator sees that
+the timeout ended it. With no `worker_shutdown_timeout`
+(the directive absent, or `0`, the nginx default) a generation drains
 FULLY, however long that takes.
 
 `-s quit` reuses this machinery: it marks the current generation
@@ -74,7 +75,7 @@ generation 3: current live=5 age-ms=1840 id=623a301150e5f3a3 mem-hw=812 budget-5
 
 - `age-ms` is time in the generation's current role: since load for the
   current generation, since drain start for a draining one.
-- `mem-hw` / `budget-503s` (ws10, appended — every earlier fact keeps
+- `mem-hw` / `budget-503s` (ws10, appended; every earlier fact keeps
   its place): the high-water admitted bytes of any single request the
   generation served, and its `memory_budget` refusal count. Always
   printed (`0 0` with no budget armed) so a parser never branches;
@@ -83,10 +84,10 @@ generation 3: current live=5 age-ms=1840 id=623a301150e5f3a3 mem-hw=812 budget-5
   configured `worker_shutdown_timeout` (the remaining budget, clamped at
   0); it is omitted for the current generation and when no timeout is
   set.
-- `events` (ws11, appended — every earlier fact keeps its place): the
+- `events` (ws11, appended; every earlier fact keeps its place): the
   count of vocabulary events emitted so far, which is the highest
-  `seq=` stamped (see the vocabulary section). The completeness anchor
-  for a bug report's attached log: a stream whose top seq matches
+  `seq=` stamped (see the vocabulary section). It is the completeness
+  anchor for a bug report's attached log: a stream whose top seq matches
   `events` has no trailing hole (docs/REPLAY.md is the workflow).
 
 ### `lobo status --format json` (single line, schema-versioned)
@@ -99,9 +100,9 @@ generation 3: current live=5 age-ms=1840 id=623a301150e5f3a3 mem-hw=812 budget-5
 ```
 
 The wire is ONE line (rendered here with breaks for reading). `schema` is
-the version — currently **1**; it bumps only on a breaking shape change
+the version, currently 1; it bumps only on a breaking shape change
 (`mem_high_water`/`budget_503s` are ws10's ADDITIVE members, `events`
-is ws11's — nothing renamed or moved, so the version holds;
+is ws11's, nothing renamed or moved, so the version holds;
 docs/BUDGET.md is the model).
 `shutdown_remaining_ms` is `-1` when none applies. ws12's metrics
 endpoint serves this same object.
@@ -109,8 +110,8 @@ endpoint serves this same object.
 ### The generation id
 
 `id` is a content hash of the FROZEN model (16 hex chars). Identical
-configs across a reload share an id — an operator can see a reload
-changed nothing — and any content change changes it.
+configs across a reload share an id, so an operator can see a reload
+changed nothing, and any content change changes it.
 
 ### Under `worker_processes N` (ws16)
 
@@ -121,7 +122,7 @@ and one `worker i: serving|standby|unreachable control=… generation=…
 live=… events=… live-region-bytes=… budget-503s=… restarts=…` row per
 hand, folded from each hand's own stanza over its endpoint; the JSON
 twin carries `workers_configured`, an empty `generations` array and a
-`workers` array (schema stays 1 — additive). A hand's OWN stanza is
+`workers` array (schema stays 1, additive). A hand's OWN stanza is
 the one above plus `worker: N` and `listening: true|false`. Every
 shape is pinned in `tests/shell/worker_surface.lu`; docs/WORKERS.md
 is the page, and it says why one hand serves while the others stand
@@ -132,22 +133,21 @@ by at this pin.
 A status read races the generation swap on purpose. The stanza is one
 pass over the generation-list reference: a read that crosses a swap may
 show a torn view ACROSS generations, but each per-generation count is
-monotone-correct. This is a documented property, not a global lock — the
-sprint deliberately does not serialize the accept path against a reader.
+monotone-correct. There is no global lock; the accept path is not
+serialized against a reader.
 
 ## The log-event vocabulary (FROZEN)
 
-Emitted through the logging seam (ws02 — `lobo: [notice] <event>` on
+Emitted through the logging seam (ws02: `lobo: [notice] <event>` on
 stderr, UNCHANGED by ws09; when an `error_log` file is configured the
 same events land there too, level-gated, in nginx's text shape or as
-schema-versioned JSON lines — docs/LOGGING.md). The event NAMES and
+schema-versioned JSON lines; docs/LOGGING.md). The event NAMES and
 FIELD KEYS are a stable contract; ws09's JSON door renders them
 verbatim (`"event":"<name>"` plus one member per field, digit values
-typed as numbers, keys byte-identical — `age-ms` stays `age-ms`).
+typed as numbers, keys byte-identical, so `age-ms` stays `age-ms`).
 Nine events (the sixth is wsm01's EXTENSION, the seventh ws10's, the
-eighth and ninth ws13's — each appended, nothing renamed); the LEVEL
-column is ws09's (§5: the wws mapping is documented per event, not
-vibes):
+eighth and ninth ws13's, each appended, nothing renamed); the LEVEL
+column is ws09's (§5, which documents the wws mapping per event):
 
 | event | level | fields | emitted when |
 |-------|-------|--------|--------------|
@@ -163,25 +163,25 @@ vibes):
 | `worker-started` | notice | `worker`, `restarts` | the MASTER started a hand (ws16, docs/WORKERS.md): `worker` its ordinal, `restarts` how many times this slot has been replaced (0 at the first start) |
 | `worker-exited` | notice | `worker`, `reason`, `code` | the master reaped a hand (ws16): `reason` is `exit` (it returned `code`), `signal` (it died without a code — crashed, or killed; `code` is -1) or `unreachable` (its endpoint refused past the supervision grace and the master killed it; `code` is what the reap answered) |
 
-**The seq stamp (ws11, appended — nothing renamed).** Every vocabulary
+The seq stamp (ws11, appended, nothing renamed). Every vocabulary
 event above carries one more trailing field, `seq=N`: the event's
 ordinal in the one poll loop's emission order (1-based, monotone for
-the life of the process — a reload never resets it). The stamp is
+the life of the process; a reload never resets it). The stamp is
 applied by the EMISSION SEAM, not the builders, so every shape in the
 table is unchanged ahead of it and every prefix pin keeps matching;
 the JSON door types it as a number member (`"seq":41`) through the
-same generic k=v decode. What it buys: an attached log excerpt is an
-ORDERED, GAP-VISIBLE event stream — the loop's own decision order,
+same generic k=v decode. So an attached log excerpt is an
+ORDERED, GAP-VISIBLE event stream, the loop's own decision order,
 quotable in a bug report, with any hole (a level-gated mirror, a
 counted drop) visible as a seq gap instead of a silent absence. The
 status stanza's `events` fact is the same counter read back. Prose
-notices are never stamped: the seq stream IS the vocabulary stream.
+notices are never stamped: the seq stream is the vocabulary stream.
 docs/REPLAY.md teaches the bug-report workflow this feeds.
 
 Beside the vocabulary, the prose notices ride the same seam with
 their own levels: serving-on / signal-arming / reopen / ACME issuance
 at `notice`; sink-drop reports at `warn`; ACME failures and
-cert-keep errors at `error`; startup refusals at `emerg` (stderr —
+cert-keep errors at `error`; startup refusals at `emerg` (stderr;
 they precede the sinks). docs/LOGGING.md is the full ladder story.
 
 Example lifecycle of one reloaded-away generation holding two
@@ -194,9 +194,9 @@ lobo: [notice] connection-retired gen=1 remaining=0 seq=7
 lobo: [notice] generation-retired gen=1 drained=2 aborted=0 age-ms=1840 seq=8
 ```
 
-**The `worker=` stamp (ws16, appended after `seq` — nothing renamed).**
-Under `worker_processes N` every line a HAND emits — the events above
-and the prose notices alike — ends in one more trailing field,
+The `worker=` stamp (ws16, appended after `seq`, nothing renamed).
+Under `worker_processes N` every line a HAND emits, the events above
+and the prose notices alike, ends in one more trailing field,
 `worker=N`, its ordinal; the master's own lines carry none, and
 neither do a single-process lobo's (the default: byte-identical to
 ws15). `seq` stays per PROCESS: a hand's stream is its own total
@@ -207,38 +207,38 @@ is the page). The two `worker-*` events are the master's.
 
 Eleven events (nine through ws15, two appended at ws16), and
 `signal-received`'s `source` is the ONLY thing in this
-vocabulary that says which door an order came through. That is
-deliberate: docs/CONTROL.md is the page, and its claim — a control verb
-and a real signal are indistinguishable in the log but for that field —
-is asserted as a diff by `tools/lobo-signal`, not left as prose.
+vocabulary that says which door an order came through.
+docs/CONTROL.md is the page for it, and its claim (a control verb and
+a real signal are indistinguishable in the log but for that field) is
+asserted as a diff by `tools/lobo-signal`.
 
 ## Trigger disposition (control channel AND signals — the wsm01 flip)
 
 Both triggers are REAL now and flow through the ONE verb dispatch
 ws04 built:
 
-- **Signals** (wsm01, s114 in the s115 pin): a genuine `SIGHUP` is
+- Signals (wsm01, s114 in the s115 pin): a genuine `SIGHUP` is
   `reload`, `SIGTERM` is `stop` (fast shutdown), `SIGQUIT` is `quit`
-  (graceful drain-then-exit) — the platform meanings. Delivery is
+  (graceful drain-then-exit), the platform meanings. Delivery is
   Linux-full at this pin; other unixes follow wolf's task-layer port
-  and Windows has no HUP/USR2 at all ([os.signal.platform]) — where
+  and Windows has no HUP/USR2 at all ([os.signal.platform]). Where
   the listen refuses, the server says so at startup and runs
   control-channel-only. The serve loop polls the signal queue
   spawn-free by SELF-RAISING the probe meaning (UPGRADE's bit) each
-  pass and waiting once — FIFO delivery returns any real pending
+  pass and waiting once: FIFO delivery returns any real pending
   signal first and the probe bounds the wait. Named residue: a real
   outside `SIGUSR2` is indistinguishable from the probe and ignored
   until the binary-swap sprint claims UPGRADE; and with no getpid
   surface yet, the pid FILE still records the control endpoint, so
   `lobo -s reload` still sends over the channel while `kill -HUP`
   needs the pid from the process table.
-- **The control channel** (ws04, made the ORDER DESK at ws15) STAYS:
+- The control channel (ws04, made the ORDER DESK at ws15) STAYS:
   the portable trigger, the Windows reload story, and the transport
-  for `status` — and now the whole verb set
+  for `status`, plus the whole verb set
   (`reload`/`quit`/`stop`/`reopen`/`status`/`upgrade`/`ping`), an
   optional shared-secret arm, and `lobo control <verb>` as its CLI
-  door. **docs/CONTROL.md is that page**: the measured per-host
-  listener posture (loopback TCP everywhere — wolf has no
+  door. docs/CONTROL.md is that page: the measured per-host
+  listener posture (loopback TCP everywhere; wolf has no
   unix-domain socket at this pin, wolf-lang#227), the auth story and
   why lobo reads its token file rather than writing one
   (wolf-std#5), and the nginx differential's rows. Both triggers
@@ -248,9 +248,9 @@ ws04 built:
 ### Windows: what lobo promises for `reload` and `upgrade` (ws14)
 
 s60b landed `[os.signal.platform]`'s windows row in the 5f99b9f pin:
-the console handler is the delivery — `CTRL_C` and `CTRL_CLOSE` are
-`terminate` (lobo's `stop`), `CTRL_BREAK` is `quit` (the graceful
-drain) — and **`RELOAD` and `UPGRADE` have no windows analog**; an
+the console handler is the delivery (`CTRL_C` and `CTRL_CLOSE` are
+`terminate`, lobo's `stop`; `CTRL_BREAK` is `quit`, the graceful
+drain), and `RELOAD` and `UPGRADE` have no windows analog; an
 `os_signal_raise` there is in-process only, so lobo's own probe
 self-raise (the spawn-free poll) works, and nothing outside the
 process can raise `reload`. ws04's control-channel question is
@@ -264,32 +264,33 @@ promises:
 > every platform at this pin) will be a control-channel verb when it
 > exists, and the only trigger for it on windows.
 
-**ws15 flips this sentence from a windows promise to a MEASURED rule
-on every host.** Two things changed, and both are witnessed on linux
-and macOS rather than claimed:
+At ws15 the sentence went from a windows promise to a MEASURED rule
+on every host. Two things changed, and both are witnessed on linux
+and macOS:
 
 1. `lobo -s reload` against a config with NO `control` directive now
-   REFUSES BY NAME instead of dialling the http port — "a running lobo
+   REFUSES, naming the directive, instead of dialling the http port:
+   "a running lobo
    is reached ONLY over its control endpoint at this pin (there is no
    arbitrary-pid signal send — wolf-lang#126)". The second half of the
    windows sentence is therefore true everywhere, for the same reason,
    and `tools/lobo-shell` probes it.
-2. `upgrade` EXISTS on the endpoint. It is dispatched, it answers by
-   name (unclaimed at this pin), and it is the one verb the endpoint
-   reaches that no signal does — on unix because UPGRADE's bit is
+2. `upgrade` EXISTS on the endpoint. It is dispatched, it answers with
+   its own name (unclaimed at this pin), and it is the one verb the
+   endpoint reaches that no signal does: on unix because UPGRADE's bit is
    lobo's own poll probe, on windows because there is no external
    UPGRADE at all. "It will be a control-channel verb when it exists"
    is now "it is a control-channel verb, and it says what it is."
 
 What is still CLAIMED and not measured is the windows half itself: the
 console-handler mapping, and that no external RELOAD arrives there. The
-measured-versus-claimed paragraph below is unchanged by ws15 — lobo's
+measured-versus-claimed paragraph below is unchanged by ws15: lobo's
 CI is still linux, and a windows lane is still a ws16-class decision.
 
 What that means in the running server: `os_signal_listen` SUCCEEDS
 on windows (unlike the hosts where delivery is unwired), so the
 startup notice cannot use the listen's answer to tell the operator
-which meanings will actually arrive — and the language has no
+which meanings will actually arrive, and the language has no
 platform query to ask. The notice therefore names the MEANINGS and
 the two platform maps in one line
 (`signal reception armed by meaning … windows CTRL_C/CTRL_CLOSE=
@@ -297,17 +298,17 @@ terminate, CTRL_BREAK=quit, no external reload — the control channel
 is reload's only trigger there`); an operator reads the line, not a
 platform-detected variant of it. `lobo -s reload` already sends over
 the channel on every platform (there is no getpid surface, so it
-never did anything else — the wsm01 residue), which is why the
+never did anything else; the wsm01 residue), which is why the
 seam falls out small: nothing in lobo's dispatch changes, and the
 control channel's tests (`tests/shell/control_e2e.lu`, `-s` against
 a running master) are the reload witness windows would run.
 
-**Measured versus claimed.** lobo's CI is linux-only and the local
+Measured versus claimed. lobo's CI is linux-only and the local
 gauntlet runs on linux+macOS; the windows-native tier at this pin
 runs spawn/procs/select/net deadlines (s60b) but refuses `wolf build
 --release` by name (the LLVM tier is s60c's), and lobo's gauntlet
-builds the release tier on every commit — so **nothing on this page
-about windows is measured by lobo**. The mapping is CLAIMED from
+builds the release tier on every commit, so nothing on this page
+about windows is measured by lobo. The mapping is CLAIMED from
 `[os.signal.platform]`'s normative table and wolf-lang's own
 windows floor (261/278 rows, zero refused by construct name at s60b);
 the control-channel path is measured on linux and macOS only. A
@@ -317,36 +318,36 @@ when the repo goes public), and the first thing it would run is
 
 The real-signal witness is `tools/lobo-signal` (a gauntlet step): a
 held connection, a real `kill -HUP`, the observable drain, retirement,
-then `SIGQUIT`/`SIGTERM` shutdowns — including `SIGTERM` against a
+then `SIGQUIT`/`SIGTERM` shutdowns, including `SIGTERM` against a
 server with NO control directive, because signals need no channel.
 
 ## Witnesses
 
-- `tests/shell/drain_watch.lu` — the headline: gen1 drains (count
+- `tests/shell/drain_watch.lu`, the headline: gen1 drains (count
   falling) while gen2 serves new connections, gen1 retires on its last
   close. Ten-run.
-- `tests/shell/overlap_reloads.lu` — three overlapping reloads, three
+- `tests/shell/overlap_reloads.lu`: three overlapping reloads, three
   generations draining at once, each retiring in order, counts exact.
-- `tests/shell/counter_integrity.lu` — every exit path decrements; the
+- `tests/shell/counter_integrity.lu`: every exit path decrements; the
   worker_shutdown_timeout abort retires a stuck draining generation.
-- `tests/shell/quit_drains.lu` — `-s quit` drains then exits, status
+- `tests/shell/quit_drains.lu`: `-s quit` drains then exits, status
   shows `quitting: true`.
-- `tests/shell/status_surface.lu` — the pure shapes (all three lanes):
+- `tests/shell/status_surface.lu`, the pure shapes (all three lanes):
   the hash, the timeout parse, the event vocabulary, the stanza
   builders, and the signal meaning/verb map.
-- `tools/lobo-signal` — the REAL-SIGNAL witness (wsm01): `kill -HUP`
+- `tools/lobo-signal`, the REAL-SIGNAL witness (wsm01): `kill -HUP`
   drives the observable drain end-to-end; Linux+macOS, named skip
   elsewhere. ws15 adds the INDISTINGUISHABILITY witness: one server
   reloaded twice, once by verb and once by signal, and the two event
   blocks diffed line by line (one differing line, and none once
   `source` is normalized too).
-- `tools/lobo-control-differential` — `nginx -s reload` beside `lobo -s
+- `tools/lobo-control-differential`, `nginx -s reload` beside `lobo -s
   reload` (ws15): the reload semantics that carry, and the transport /
-  parse-locus / narration / idle-keepalive deltas measured rather than
-  asserted. docs/CONTROL.md carries the table.
-- `tests/shell/control_verbs.lu`, `tests/shell/control_e2e.lu` — the
+  parse-locus / narration / idle-keepalive deltas, measured.
+  docs/CONTROL.md has the table.
+- `tests/shell/control_verbs.lu`, `tests/shell/control_e2e.lu`: the
   endpoint's pure surface and its live auth arm (ws15).
 - `tests/shell/worker_surface.lu`, `tests/shell/prefork_e2e.lu`,
-  `tools/lobo-prefork` — the many-hands surface, the real master with
+  `tools/lobo-prefork`: the many-hands surface, the real master with
   its hands, and the crash/reload/budget/log witness (ws16,
   docs/WORKERS.md).
