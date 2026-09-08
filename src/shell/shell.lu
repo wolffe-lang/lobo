@@ -84,7 +84,7 @@ pub fn release_version() -> str {
 /// points at (or is about to), "+dev" at every other tree. Printed
 /// after the version by `-v`, carried in the archive's name.
 pub fn release_channel() -> str {
-    ""
+    "+dev"
 }
 
 /// The wolf this binary was built with — wolf-toolchain.toml [wolf]'s
