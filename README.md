@@ -1,77 +1,138 @@
-# Lobo
+# lobo
 
-> Named 2026-08-29 (D64): **Lobo** — Seton's wolf no trap could take.
-> The name landed at wsm03, under the gauntlet. The repo goes public
-> under `wolffe-lang/lobo` at ws16, "the door opens".
+A web server written in [wolf](https://github.com/wolffe-lang/wolf-lang).
+Your `nginx.conf` carries. Your certificates and their tooling keep
+working.
 
-A production web server, written in wolf. The charter: **nginx,
-rewritten without their owned bugs, so that a 20-year nginx user
-says "finally!"** — a drop-in replacement aside from the new
-capabilities. Your `nginx.conf` carries. Your certificates and their
-tooling keep working. That last part is a hard minimum, not a
-stretch goal.
+```sh
+brew install wolffe-lang/wolf/lobo     # macOS arm64
+yay -S lobo-bin                        # Arch x86-64
+```
 
-## What "without their owned bugs" means
+Then:
 
-- **The memory-corruption class is structural, not vigilant.** Wolf
-  has checked arithmetic in every build profile, region-owned
-  request memory, and no undefined behavior. The historical nginx
-  CVE inputs live in this repo's test corpus; the acceptance is
-  refuse-or-trap-clean, forever, in CI.
-- **The config footguns are named at load.** The `if`-is-evil class,
-  inheritance surprises, alias traversal — the config carries, and
-  the linter tells you where nginx would have quietly hurt you.
-- **The drop-in claim is falsifiable.** CI runs a pinned real nginx
-  beside lobo with the same configs and diffs the responses. Claims
-  ratchet; they don't hand-wave.
+```sh
+mkdir -p ~/lobo && cd ~/lobo
+cp -R "$(brew --prefix lobo)"/share/lobo/{conf,html} .   # or /usr/share/lobo
+mkdir -p logs
+lobo -c conf/lobo.conf serve      # serves html/ on 127.0.0.1:8080
+lobo -s stop
+```
 
-## What "finally!" means
+`lobo -v` names the version **and the compiler that built it**, because
+a binary that cannot say what it is cannot be debugged:
 
-Built-in ACME (certificates without the certbot dance — though the
-certbot dance still works). A dry-run that exercises routing, not
-just syntax. Reloads whose connection draining you can observe.
-`-T` that tells you which file set every directive. Structured logs.
-Per-vhost memory budgets that are enforced, not hoped. And — because
-wolf's scheduler is deterministic under test — races you can replay
-from a bug report.
+```
+lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)
+```
 
-## Status
+> **0.1.0 — early.** The core is real and tested: static serving,
+> reverse proxy, TLS, ACME, prefork workers, reload with draining,
+> structured logs, a control socket. It has not run anyone's
+> production traffic yet. Treat it accordingly, and please file what
+> breaks.
 
-ws19 (wsc07): **lobo is 0.1.0, and it ships.** `lobo -v` prints
-`lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)` — the
-version AND the toolchain that built it, because a binary that cannot
-name its own provenance is one nobody can debug. `tools/lobo-dist`
-builds the release archive with the toolchain `wolf-toolchain.toml`
-pins (never the one a runner happens to have), packs it reproducibly,
-then unpacks it somewhere else and smokes it: `-v` against the
-archive's own `BUILD` record, `-t` on the stock config, a page fetched
-and byte-compared, `-s stop`. `.github/workflows/release.yml` does the
-same on both hosts wolf's release tier serves (linux x86-64, macOS
-aarch64 — windows x86-64 and linux aarch64 are named refusals until
-s60c), publishes only when both archives are present, and then a job
-with no checkout at all downloads the PUBLISHED archive on a clean
-runner and repeats the smoke. A release nobody has installed is a
-claim, not a fact.
+## Why another web server
 
-ws18 (wsc07): **`worker_processes N` is N-ish at last.** The master
-binds the listeners and hands them down (`os_spawn_with` +
-`net_adopt_listener`); every hand accepts on ONE socket, free-for-all,
-and the kernel distributes the work — measured at 36/29/26 over three
-hands, with `accepted=` on every row of `lobo status` so an operator
-can see it. The serving loop blocks on `net_wait` instead of
-time-slicing with deadlines, which took one lobo process from **37 to
-13,508 req/s** on a connection-per-request load. Accepts first had to
-be serialized behind nginx's own `accept_mutex` shape, because
-`net_accept` parked in a blocking syscall after its readiness wait
-(wolf-lang#242, filed from here); once the fix landed upstream **that
-workaround was deleted** — three hands go from 12,866 to **23,663 req/s** (1.84x)
-and eighteen hands on a keepalive load from 9,554 to **38,961**
-(4.1x), because the turn had been capping the SERVING path as well as
-the accept path. The control endpoint takes orders over a
-**unix-domain socket** where the host has one, so file permissions are
-the boundary, and each hand gets its own. The whole table, both
-distribution shapes measured, and the three gates in the order they
-were found are in docs/WORKERS.md. This is also, deliberately, a
-flagship codebase for reading production wolf: frozen `.wolfi`
-interfaces between modules, and every language pothole filed
-upstream as an issue.
+nginx is excellent and twenty years old. Some of its sharpest edges
+are not bugs it failed to fix — they are consequences of the language
+it is written in and decisions that hardened before anyone knew
+better. lobo's charter is to keep everything that made nginx worth
+learning and drop the rest:
+
+**The memory-corruption class is structural, not vigilant.** wolf has
+checked arithmetic in every build profile, region-owned request
+memory, and no undefined behaviour. Historical nginx CVE inputs live
+in this repo's corpus; the acceptance is refuse-or-trap-clean, in CI,
+forever.
+
+**Config footguns are named at load.** The `if`-is-evil class,
+inheritance surprises, alias traversal — your config still works, and
+the linter tells you where nginx would have quietly hurt you.
+
+**The drop-in claim is falsifiable.** CI runs a pinned real nginx
+(1.30.4) beside lobo on the same configs and diffs the responses. The
+claims ratchet; they are not hand-waved.
+
+## What you get that nginx doesn't have
+
+- **Built-in ACME** — certificates without the certbot dance, and the
+  certbot dance still works.
+- **A dry-run that exercises routing**, not just syntax:
+  `lobo -t --request 'GET https://host/path'` tells you what *would*
+  happen.
+- **Observable reloads** — connection draining you can watch, not
+  infer.
+- **`-T` that says which file set every directive**, so config
+  archaeology stops being archaeology.
+- **Per-vhost memory budgets that are enforced**, not hoped.
+- **Replayable races.** wolf's scheduler is deterministic under test,
+  so a scheduling bug from a report can be replayed.
+
+## Performance
+
+One process went from 37 to 13,508 req/s when the serving loop learned
+to block on readiness instead of time-slicing. Workers then made it a
+real prefork server — the master binds the listeners and hands them
+down, every worker accepts on one socket, and the kernel distributes
+the work:
+
+| workers | shape | req/s |
+|---|---|---|
+| 3 | connection per request | 23,663 |
+| 18 | connection per request | 16,120 |
+| 18 | keepalive | 38,961 |
+
+Measured on macOS arm64 (18 cores) against the same box's pinned
+nginx, which does 24,158 and 83,831 on the last two rows. **lobo is
+not at parity yet** — roughly 1.5x on connection-per-request and 2.2x
+on keepalive. Closing that is the current campaign, and the numbers
+above will move; `docs/PARITY.md` defines what "parity" has to mean
+before any of it is claimed.
+
+## Compatibility
+
+108 nginx directives, with every deliberate difference documented in
+[`docs/directives.md`](docs/directives.md) rather than discovered in
+production. Where lobo must differ, it says so at load.
+
+Not yet: windows and linux-aarch64 builds (the compiler's native tier
+does not serve those hosts yet — they refuse by name, never silently).
+
+## Documentation
+
+| | |
+|---|---|
+| [GETTING-STARTED.md](docs/GETTING-STARTED.md) | your first five minutes, start here |
+| [directives.md](docs/directives.md) | every directive, and every difference from nginx |
+| [WORKERS.md](docs/WORKERS.md) | prefork, descriptor handoff, distribution measurements |
+| [CONTROL.md](docs/CONTROL.md) · [DRAIN.md](docs/DRAIN.md) | the control socket; reload and draining |
+| [DRYRUN.md](docs/DRYRUN.md) | routing dry-runs |
+| [LOGGING.md](docs/LOGGING.md) · [log-variables.md](docs/log-variables.md) | structured logs and their variables |
+| [BUDGET.md](docs/BUDGET.md) | per-vhost memory budgets |
+| [ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it is put together |
+| [DIFFERENTIAL.md](docs/DIFFERENTIAL.md) · [PARITY.md](docs/PARITY.md) | the nginx oracle, and the parity bar |
+
+## Building from source
+
+lobo pins its toolchain by exact identity — a specific wolf compiler,
+interpreter and standard library, named in `wolf-toolchain.toml`. That
+is why the packages above ship a prebuilt binary: a distro's rolling
+`wolf` would break the build the day it moved ahead of the pin.
+
+To build anyway, stage the pinned toolchain into `.wolf-bin/` and the
+pinned nginx into `tests/differential/bin/` (each section of
+`wolf-toolchain.toml` and `docs/DIFFERENTIAL.md` carry their build
+commands), then:
+
+```sh
+tools/lobo-gauntlet     # the full gate: build, both tiers, corpus, differential
+tools/lobo-dist         # a release archive, packed reproducibly and smoke-tested
+```
+
+Every release archive carries a `BUILD` file recording the toolchain,
+the source commit and the pins it was built from.
+
+## License
+
+[GPL-3.0-or-later](LICENSE).
