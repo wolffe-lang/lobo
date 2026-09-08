@@ -1,0 +1,273 @@
+#!/bin/sh
+# lobo-parity — THE BAR, measured exactly as docs/PARITY.md wrote it
+# (ws22). W8 is nginx parity on the differential's own workload; this
+# tool is what says whether it holds, and it says so in the bar's own
+# words: five INTERLEAVED pairs (lobo, nginx, lobo, nginx, …), each
+# server fresh per pair, both shapes per server, a RATIO per pair,
+# the median of the five ratios with min and max beside it, and the
+# set REFUSED by name when the rig was not quiet, the generator was
+# the ceiling, the oracle would not hold still, or anything failed.
+# NOT a gauntlet gate: a number depends on the box. The table it
+# prints is what docs/PARITY.md's ledger and the campaign closeout
+# carry, dated and named by host.
+#
+#   tools/lobo-parity [pairs] [seconds] [concurrency] [N] [gens]
+#     pairs        interleaved pairs per cell (default 5 — the bar's)
+#     seconds      ab -t per run (default 5 — the bar's)
+#     concurrency  TOTAL concurrent connections (default 32 — the bar's)
+#     N            worker count for the gating cell (default: this
+#                  box's cpu count — the bar's); the N=1 cell is
+#                  always taken too and never gates
+#     gens         ab processes the load is split across (default 4;
+#                  each runs -c concurrency/gens) — see below
+#
+# The generator is ab(1) — single-threaded, on every macOS and in
+# apache2-utils on linux — and ONE ab is the ceiling on the keepalive
+# shape: the first set ever taken against the bar (ws22, this box)
+# had nginx at 114k req/s with ab at 0.93 cores, refused by the rule
+# below. So the load is split across `gens` ab processes started
+# together, each with its share of the connections; req/s is their
+# SUM, wall the longest, and every one's own cpu ÷ wall is checked
+# against the ceiling (the max is printed). "cores" is Σ cpu time
+# over the server's process tree ÷ the run's wall, read off ps(1)
+# after each run: the host's accounting, not the server's claim.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
+
+# the bar's constants — change docs/PARITY.md first, then these
+BAR=1.10           # median ratio nginx ÷ lobo at or under this is MET
+LOADMAX=3.0        # 1-minute load above this: the set does not count
+GENMAX=0.90        # ab's own cpu ÷ wall above this: ab was the ceiling
+ORACLE_SPREAD=1.15 # nginx max ÷ min per shape above this: not quiet
+REQCAP=1000000     # ab -n, out of reach at -t 5 on either server
+
+if ! command -v ab > /dev/null 2>&1; then
+    echo "lobo-parity: REFUSED — ab(1) is not on PATH (macOS ships it; linux: apache2-utils)" >&2
+    exit 1
+fi
+LOBO="$(pwd)/target/lobo-release"
+NGINX="$(pwd)/tests/differential/bin/nginx"
+[ -x "$LOBO" ] || { echo "lobo-parity: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+[ -x "$NGINX" ] || { echo "lobo-parity: REFUSED — pinned nginx missing at $NGINX (docs/DIFFERENTIAL.md)" >&2; exit 1; }
+
+cores=$( (nproc 2>/dev/null || sysctl -n hw.ncpu) | head -1)
+PAIRS=${1:-5}
+SECS=${2:-5}
+CONC=${3:-32}
+N=${4:-$cores}
+GENS=${5:-4}
+PERGEN=$((CONC / GENS))
+[ "$PERGEN" -ge 1 ] || { echo "lobo-parity: REFUSED — concurrency $CONC cannot split across $GENS generators" >&2; exit 1; }
+scratch="$(pwd)/target/parity"
+rm -rf "$scratch"
+mkdir -p "$scratch/www" "$scratch/logs"
+awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
+
+load1=$(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }')
+host="$(uname -sm)"
+stamp=$(date -u +%Y-%m-%dT%H:%MZ)
+
+cpu_seconds() { # cpu_seconds <pids...> — Σ cpu time over the pids, in seconds
+    if [ -r /proc/self/stat ]; then
+        # linux: ps -o time= is WHOLE seconds there (the first linux
+        # set printed nginx at 0.00 cores over a 5 s run), so read
+        # utime+stime in clock ticks off /proc instead
+        tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+        t=0
+        for p in "$@"; do
+            [ -r "/proc/$p/stat" ] && t=$(awk -v t="$t" -v tck="$tck" '{ sub(/.*\) /, ""); print t + ($12 + $13) / tck }' "/proc/$p/stat")
+        done
+        printf '%.2f' "$t"
+    else
+        ps -o time= -p "$(echo "$@" | tr ' ' ',')" 2>/dev/null | awk '
+            { n = split($1, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; t += s }
+            END { printf "%.2f", t }'
+    fi
+}
+wait_port() { # wait_port <port> — up to ~8s
+    i=0
+    while [ $i -lt 80 ]; do
+        if printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt" &&
+            "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null | grep -q "200 OK"; then
+            return 0
+        fi
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+# run_ab <port> <keepalive:0|1> <tag> — one run: GENS ab processes
+# started together, each with CONC/GENS connections; sets rps (their
+# sum), wall (the longest), failed and non2xx (sums), gen (the LARGEST
+# single generator's own cpu ÷ wall). Each generator's subshell ends
+# with `times` — POSIX, and its second line is the children's (that
+# ab's) user and system time.
+run_ab() {
+    g=1
+    genpids=""
+    while [ $g -le "$GENS" ]; do
+        out="$scratch/ab-$3-g$g.txt"
+        if [ "$2" = 1 ]; then
+            ( ab -q -k -t "$SECS" -n "$REQCAP" -c "$PERGEN" "http://127.0.0.1:$1/index.html" > "$out" 2>&1; times ) > "$out.times" &
+        else
+            ( ab -q -t "$SECS" -n "$REQCAP" -c "$PERGEN" "http://127.0.0.1:$1/index.html" > "$out" 2>&1; times ) > "$out.times" &
+        fi
+        genpids="$genpids $!"
+        g=$((g + 1))
+    done
+    # the generators only — a bare `wait` would also wait on the
+    # server this shell started with `&`
+    wait $genpids
+    rps=0; wall=0; failed=0; non2xx=0; gen=0
+    g=1
+    while [ $g -le "$GENS" ]; do
+        out="$scratch/ab-$3-g$g.txt"
+        r=$(awk '/^Requests per second/ { print $4 }' "$out")
+        w=$(awk '/^Time taken for tests/ { print $5 }' "$out")
+        f=$(awk '/^Failed requests/ { print $3 }' "$out")
+        x=$(awk '/^Non-2xx responses/ { print $3 }' "$out")
+        [ -z "$r" ] && { failed="?"; r=0; }
+        : "${w:=0}" "${f:=0}" "${x:=0}"
+        gencpu=$(awk 'NR == 2 { s = 0; for (i = 1; i <= 2; i++) { split($i, a, "m"); sub("s", "", a[2]); s += a[1] * 60 + a[2] } printf "%.2f", s }' "$out.times")
+        rps=$(awk -v a="$rps" -v b="$r" 'BEGIN { printf "%.2f", a + b }')
+        wall=$(awk -v a="$wall" -v b="$w" 'BEGIN { print (b > a) ? b : a }')
+        [ "$failed" != "?" ] && failed=$((failed + f))
+        non2xx=$((non2xx + x))
+        gen=$(awk -v c="$gencpu" -v w="$w" -v m="$gen" 'BEGIN { g = (w > 0) ? c / w : 0; printf "%.2f", (g > m) ? g : m }')
+        g=$((g + 1))
+    done
+}
+
+# measure <port> <pids> <tag> — both shapes against one fresh server;
+# sets r0 c0 g0 f0 (close) and r1 c1 g1 f1 (keepalive)
+measure() {
+    for k in 0 1; do
+        before=$(cpu_seconds $2)
+        run_ab "$1" "$k" "$3-$k"
+        after=$(cpu_seconds $2)
+        cpu=$(awk -v a="$before" -v b="$after" 'BEGIN { printf "%.2f", b - a }')
+        used=$(awk -v c="$cpu" -v w="$wall" 'BEGIN { if (w > 0) printf "%.2f", c / w; else print "?" }')
+        bad=$(awk -v f="$failed" -v n="$non2xx" 'BEGIN { print (f == "?" || f + n > 0) ? 1 : 0 }')
+        if [ "$k" = 0 ]; then r0=$rps; c0=$used; g0=$gen; f0=$bad; else r1=$rps; c1=$used; g1=$gen; f1=$bad; fi
+        shape=$([ "$k" = 1 ] && echo keepalive || echo close)
+        echo "lobo-parity: $3 $shape: $rps req/s over ${wall}s, server $used cores, ab $gen cores, failed=$failed non2xx=$non2xx"
+    done
+}
+
+start_lobo() { # start_lobo <workers> — sets hp, mpid, lpids, lconf
+    hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    lconf="$scratch/lobo-$1.conf"
+    printf 'worker_processes %s;\npid %s/lobo-%s.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$1" "$scratch" "$1" "$cp" "$hp" "$scratch" > "$lconf"
+    "$LOBO" serve -p . -c "$lconf" 2>> "$scratch/logs/lobo-$1.log" &
+    mpid=$!
+    wait_port "$hp" || { echo "lobo-parity: lobo ($1 workers) never served" >&2; kill "$mpid"; return 1; }
+    sleep 1
+    lpids="$mpid $(pgrep -f -- "--worker [0-9]* --worker-control" | tr '\n' ' ')"
+}
+stop_lobo() {
+    "$LOBO" -s stop -p . -c "$lconf" > /dev/null 2>&1
+    wait "$mpid" 2>/dev/null
+}
+start_nginx() { # start_nginx <workers> — sets np, npid, npids
+    np=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    mkdir -p "$scratch/nginx-$1/logs"
+    printf 'daemon off;\nworker_processes %s;\npid nginx.pid;\nerror_log error.log;\nevents {\n}\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$1" "$np" "$scratch" > "$scratch/nginx-$1/nginx.conf"
+    "$NGINX" -p "$scratch/nginx-$1" -c nginx.conf >> "$scratch/logs/nginx-$1.out" 2>&1 &
+    npid=$!
+    wait_port "$np" || { echo "lobo-parity: nginx ($1 workers) never served" >&2; kill "$npid"; return 1; }
+    sleep 1
+    npids="$npid $(pgrep -P "$npid" | tr '\n' ' ')"
+}
+stop_nginx() {
+    kill -QUIT "$npid" 2>/dev/null
+    wait "$npid" 2>/dev/null
+}
+
+median() { # median <space-separated numbers>
+    echo "$@" | tr ' ' '\n' | sort -n | awk '{ a[NR] = $1 } END { if (NR % 2) print a[(NR + 1) / 2]; else printf "%.2f", (a[NR / 2] + a[NR / 2 + 1]) / 2 }'
+}
+minmax() { # minmax <numbers> — "min max"
+    echo "$@" | tr ' ' '\n' | sort -n | awk 'NR == 1 { mn = $1 } { mx = $1 } END { print mn, mx }'
+}
+maxof() { echo "$@" | tr ' ' '\n' | sort -n | tail -1; }
+
+refused=""
+rows=""
+verdicts=""
+
+# cell <workers> <gates:1|0>
+cell() {
+    W=$1
+    L0=""; L1=""; X0=""; X1=""; R0=""; R1=""
+    LC0=""; LC1=""; XC0=""; XC1=""; G=""; F=0
+    p=1
+    while [ $p -le "$PAIRS" ]; do
+        start_lobo "$W" || return 1
+        measure "$hp" "$lpids" "lobo-N$W-p$p"
+        stop_lobo
+        L0="$L0 $r0"; L1="$L1 $r1"; LC0="$LC0 $c0"; LC1="$LC1 $c1"; G="$G $g0 $g1"; F=$((F + f0 + f1))
+        lr0=$r0; lr1=$r1
+        start_nginx "$W" || return 1
+        measure "$np" "$npids" "nginx-N$W-p$p"
+        stop_nginx
+        X0="$X0 $r0"; X1="$X1 $r1"; XC0="$XC0 $c0"; XC1="$XC1 $c1"; G="$G $g0 $g1"; F=$((F + f0 + f1))
+        R0="$R0 $(awk -v n="$r0" -v l="$lr0" 'BEGIN { if (l > 0) printf "%.3f", n / l; else print 99 }')"
+        R1="$R1 $(awk -v n="$r1" -v l="$lr1" 'BEGIN { if (l > 0) printf "%.3f", n / l; else print 99 }')"
+        p=$((p + 1))
+    done
+    genmax=$(maxof $G)
+    for k in 0 1; do
+        if [ "$k" = 0 ]; then shape=close; L=$L0; X=$X0; R=$R0; LC=$LC0; XC=$XC0; else shape=keepalive; L=$L1; X=$X1; R=$R1; LC=$LC1; XC=$XC1; fi
+        set -- $(minmax $X)
+        spread=$(awk -v a="$1" -v b="$2" 'BEGIN { if (a > 0) printf "%.3f", b / a; else print 99 }')
+        set -- $(minmax $R)
+        rmin=$1; rmax=$2
+        rmed=$(median $R)
+        rows="$rows| N=$W c=$CONC | $shape | $(median $L) | $(median $X) | **${rmed}x** [$rmin, $rmax] | $(median $LC) | $(median $XC) | $genmax |
+"
+        [ "$(awk -v s="$spread" -v m="$ORACLE_SPREAD" 'BEGIN { print (s > m) ? 1 : 0 }')" = 1 ] &&
+            refused="$refused
+  oracle not stable: nginx N=$W $shape max/min = $spread (> $ORACLE_SPREAD)"
+        if [ "$2" != "" ] && [ "$W" = "$N" ]; then
+            met=$(awk -v r="$rmed" -v b="$BAR" 'BEGIN { print (r <= b) ? "MET" : "NOT MET" }')
+            verdicts="$verdicts
+  parity($shape, N=$W, c=$CONC): median ${rmed}x [$rmin, $rmax] — $met on $host (bar ${BAR}x)"
+        fi
+    done
+    [ "$(awk -v g="$genmax" -v m="$GENMAX" 'BEGIN { print (g > m) ? 1 : 0 }')" = 1 ] &&
+        refused="$refused
+  generator was the ceiling: ab reached $genmax cores at N=$W (> $GENMAX) — split the load across k generators"
+    [ "$F" -gt 0 ] && refused="$refused
+  $F run(s) at N=$W had failed or non-2xx requests"
+    return 0
+}
+
+echo "lobo-parity: $stamp host $host, $cores cpus, load(1m) $load1; bar N=$N c=$CONC over $GENS generators (-c $PERGEN each); $PAIRS pairs × ab -t $SECS; file $(wc -c < "$scratch/www/index.html") bytes"
+[ "$(awk -v l="$load1" -v m="$LOADMAX" 'BEGIN { print (l > m) ? 1 : 0 }')" = 1 ] &&
+    refused="$refused
+  rig not quiet: load(1m) $load1 before the set (> $LOADMAX)"
+
+cell "$N" 1 || exit 1
+if [ "$N" != 1 ]; then
+    cell 1 0 || exit 1
+fi
+
+echo ""
+echo "set: $stamp · $host · $cores cpus · load(1m) $load1 · $PAIRS pairs × ab -t $SECS · c=$CONC over $GENS generators · lobo $("$LOBO" -v 2>&1 | head -1) · nginx $("$NGINX" -v 2>&1 | head -1)"
+echo ""
+echo "| cell | shape | lobo req/s (median) | nginx req/s (median) | nginx ÷ lobo median [min, max] | lobo cores | nginx cores | ab cores max |"
+echo "|---|---|---|---|---|---|---|---|"
+printf '%s' "$rows"
+echo ""
+if [ -n "$refused" ]; then
+    echo "lobo-parity: SET REFUSED — not a result (docs/PARITY.md validity):$refused"
+    exit 3
+fi
+echo "lobo-parity: VALID SET$verdicts"

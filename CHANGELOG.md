@@ -80,6 +80,59 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo deliberately differs from nginx is a **named delta** in it.
 
+## ws22 — 2026-09-08 — the gap measured (the bar first, then the profile; nothing optimized)
+
+W8 is nginx parity, and a bar chosen after the results are in has
+measured nothing — so this sprint wrote the bar down first
+(`docs/PARITY.md`, committed before the tool existed), built the tool
+that measures it exactly as written (`tools/lobo-parity`; a `parity`
+workflow_dispatch input runs it on the CI runner), and only then asked
+where the time goes (`docs/PROFILE.md`, `sample(1)`, six profiles).
+
+- **The bar:** both shapes (close, keepalive) gate; N = cpus at
+  c = 32; five interleaved pairs of `ab -t 5`; the median per-pair
+  ratio nginx ÷ lobo ≤ 1.10; on linux x86-64 AND macOS arm64; a set
+  refused by name on load, generator ceiling, oracle spread or any
+  failure. The first set on each host was refused — one `ab` is the
+  ceiling on keepalive (0.93–1.04 cores), so the load is split across
+  four generators now.
+- **linux x86-64, a valid set (the runner, 4 cpus):** close **2.27x**,
+  keepalive **110.9x** — NOT MET. lobo's keepalive on linux is
+  **781 req/s**: one request per 41 ms per connection, the 40 ms
+  delayed ACK meeting Nagle on lobo's two-write response. Nobody had
+  taken lobo's req/s on linux before; macOS hides it (lobo#3).
+- **macOS arm64, the quiet box (load 2.55, after the last sibling lane
+  left):** close **1.15x** [1.13, 1.19], keepalive **2.76x** [2.65,
+  2.77] at N = 18 — NOT MET on both; 0.1.0's 1.50x/2.15x were one
+  20k-request run and an `ab`-bound nginx. Two earlier macOS sets,
+  taken under sibling-lane load, are in the ledger as REFUSED with
+  their loads.
+- **Where the time goes, one process, keepalive, 63 µs/request:**
+  ~30 µs is the runtime's reactor round-trip (the serving thread
+  parked in `__psynch_cvwait` 38% of the time, waiting for
+  `wolf-reactor` to confirm a readiness `net_wait` had already
+  reported — three times per request; the syscalls are 12%); ~16 µs
+  file syscalls (one `open`, THREE `stat`); ~8 µs two `sendto`; ~7 µs
+  user space of which lobo's own code is ~1.5. At eighteen hands on
+  the close shape a hand is 64% parked in the accept herd. nginx's
+  whole request on the same box is 19 µs. Profiled twice — loaded and
+  quiet — and every proportion held within two points.
+- **wolf's vs lobo's:** ~35 µs the language's, ~12 lobo's, ~16 the
+  kernel's that nginx pays too. Filed: wolf-lang#257 (optimistic I/O
+  in the runtime), wolf-lang#254 (no `TCP_NODELAY`, no `writev`),
+  lobo#3 (the linux stall; one write per response is ws23's first
+  change).
+- **The mid-end** (`WOLF_MIDEND=0`, #146, re-probed: the thirteenth
+  measurement, same ICE) is worth **nothing measurable** on lobo's
+  parse + response-head path: 534/527/534 ms vs 546/542/536 ms per
+  300k iterations, and 563/555/558 vs 570/571/555 on the quiet box. The compiler is not where the gap is.
+- Trunk was RED at the stamp step before this sprint: `be46c61`
+  landed past the `v0.1.0` tag without flipping the channel to
+  `+dev`. Flipped here, as `lobo-stamp` prescribes.
+- `tcp_nodelay` has been `planned(ws02)` in the directive table for
+  twenty waves because the language cannot set it; the linux number
+  is what that costs.
+
 ## ws19 — 2026-09-07 — the artifact (lobo gets a version, and an archive a stranger could run)
 
 wsc07's second sprint, and the one W7 is actually about: *someone
