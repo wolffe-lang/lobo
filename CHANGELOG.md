@@ -796,117 +796,117 @@ half of that sentence.
 Pins advance first, gauntlet green at the trio before a line changed
 (suite counts IDENTICAL: corpus 233/233, differential 3/3, proxy 8/8,
 signal 15/15, membudget 15/15, shell 13, confcheck 8): wolf → the
-**v0.2.3 TAG** (`3befc3e`), and with it **the bare stamp at last** —
+v0.2.3 TAG (`3befc3e`), and with it the bare stamp at last,
 `wolf 0.2.3 (wolfgang, pin 3befc3e)`, built at the tag with
 `WOLF_COMMIT=3befc3e WOLF_RELEASE=v0.2.3` so D57's release rule
-grants it. lupin holds at **v0.1.23** and std at **trunk 35f69ef**,
-which closes the pairing gap to **zero** for the first time in this
+grants it. lupin holds at v0.1.23 and std at trunk 35f69ef,
+which closes the pairing gap to zero for the first time in this
 repo's history: wolf@3befc3e declares lupin 0.1.23 as its pairing and
 that is exactly the release staged beside it. v0.2.2..v0.2.3 is six
 commits and ws14 already pinned five of them, so the delta lobo takes
-is r06's release train only — #212 (dist writes one archive per
+is r06's release train only: #212 (dist writes one archive per
 target), #214 (release notes cut from the CHANGELOG), #215 (nine
-literal productions, anchors held 411), #225 (filed upstream) — none
-of which lobo's sources reach. **Deltas classed: zero behavioral, one
-mechanical, zero refused-by-name.** The mechanical one is the
+literal productions, anchors held 411), #225 (filed upstream), none
+of which lobo's sources reach. Deltas classed: zero behavioral, one
+mechanical, zero refused-by-name. The mechanical one is the
 release commit's own: every `.wolfi` header embeds the toolchain
 version by design, so all fourteen snapshots re-record `toolchain
 0.2.2` → `0.2.3` and their export/pkg hashes and std dep-hashes
-re-derive under the new driver — with **zero item motion** (verified:
-not one `[n]` line moved in the diff). #146 re-probed an **EIGHTH**
+re-derive under the new driver, with zero item motion (verified:
+not one `[n]` line moved in the diff). #146 re-probed an EIGHTH
 time, still open, `WOLF_MIDEND=0` stays.
 
-**The control endpoint takes orders.** ws04 built a loopback reload
+The control endpoint takes orders. ws04 built a loopback reload
 pipe and left a question; D73 asks it properly. The `control`
 directive now names an endpoint a running lobo answers the whole verb
-set on — `reload`, `quit`, `stop`, `reopen`, `status`, `upgrade`,
-`ping` — and `lobo control <verb>` is its CLI door, so `lobo -s` can
-keep **exactly** nginx's four words (the parity `tools/lobo-shell`
+set on (`reload`, `quit`, `stop`, `reopen`, `status`, `upgrade`,
+`ping`) and `lobo control <verb>` is its CLI door, so `lobo -s` can
+keep nginx's four words (the parity `tools/lobo-shell`
 probes against the oracle). A rejected reload, an unknown verb, an
 `unauthorized` answer and `upgrade`'s named refusal are all exit 1,
 so `lobo -s reload && deploy` cannot run on a reload that did not
-happen — a gap the new differential found and closed.
+happen, a gap the new differential found and closed.
 
-`upgrade` exists before it works, deliberately: it is the ONE verb
+`upgrade` exists before it works: it is the ONE verb
 the endpoint reaches that no signal does. On unix UPGRADE's bit is
 lobo's own poll probe (an outside `SIGUSR2` is indistinguishable from
-it — the wsm01 residue); on windows `RELOAD`/`UPGRADE` have no analog
+it, the wsm01 residue); on windows `RELOAD`/`UPGRADE` have no analog
 at all. Dispatching it so it can say "when it lands it lands HERE" is
 what makes the endpoint the place the binary swap will go.
 
-**The listener, per host: loopback TCP everywhere — measured, not
-assumed.** wolf has no unix-domain socket at the v0.2.3 pin. Every
+The listener, per host: loopback TCP everywhere, measured rather than
+assumed. wolf has no unix-domain socket at the v0.2.3 pin. Every
 spelling answers a bare `io` (`/tmp/x.sock`, `unix:/tmp/x.sock`,
 `unix:///tmp/x.sock`) while `127.0.0.1:0` binds; the runtime's
 `net.rs` is `TcpListener`/`TcpStream` and `spec/11-os.md` has no
-clause. Filed as **wolf-lang#227**. That is why lobo cannot have the
+clause. Filed as wolf-lang#227. That is why lobo cannot have the
 filesystem-permissioned socket haproxy, systemd and nginx-plus use,
-and why the second auth arm exists at all: **loopback is not a uid
-boundary**.
+and why the second auth arm exists at all: loopback is not a uid
+boundary.
 
-**Auth: loopback always, an optional shared secret beside it.**
+Auth: loopback always, an optional shared secret beside it.
 `control <addr> token <file>` arms a secret; the wire line becomes
 `<secret> <verb>` and anything else is answered `unauthorized`,
 dispatches nothing and changes nothing (the e2e witness proves the
 generation did not move). Three decisions, each named rather than
-implied: lobo **reads** the token file and never writes one — std has
-no file-permission surface at this pin (**wolf-std#5**), so a token
-lobo generated would land at the umask's mode, and a world-readable
-secret is worse than none; a config naming a token file lobo cannot
-read **refuses at startup**, because an endpoint whose auth silently
+implied: lobo reads the token file and never writes one, because std
+has no file-permission surface at this pin (wolf-std#5), so a token
+lobo generated would land at the umask's mode and could be
+world-readable; a config naming a token file lobo cannot
+read refuses at startup, because an endpoint whose auth silently
 does nothing is the failure mode that matters; and `ping` is
-**exempt**, because it is the liveness probe `-s` and the stale-pid
+exempt, because it is the liveness probe `-s` and the stale-pid
 check use, and gating it would let a rotated token make a live master
 look dead and have the next start replace a running server's pid file.
 
-**A verb and a signal are one code path, asserted as a diff.** Both
+A verb and a signal are one code path, asserted as a diff. Both
 triggers reach one dispatch and one emission site, so ws09's
-vocabulary gains no event and no new key — `signal-received` grows a
+vocabulary gains no event and no new key: `signal-received` grows a
 trailing `source` (`signal`|`control`), appended, nothing renamed,
 every earlier prefix pin still matching. `tools/lobo-signal` now
 reloads one server twice, once by verb and once by `kill -HUP`,
 extracts both five-line event blocks, normalizes the generation
-numbers, seq stamps, content hash and age, and requires **exactly one
-differing line** — then normalizes `source` too and requires the
-blocks to be **byte-identical**. 15/15 → 20/20. The verbs with no
+numbers, seq stamps, content hash and age, and requires exactly one
+differing line; then it normalizes `source` too and requires the
+blocks to be byte-identical. 15/15 → 20/20. The verbs with no
 signal twin emit nothing, which is what keeps `sig`'s value set
 frozen at `reload|terminate|quit`.
 
-**The nginx differential grows an operation half**
+The nginx differential grows an operation half
 (`tools/lobo-control-differential`, a gauntlet step; 9/9). Four rows
 CARRY: config re-read, listener survival (20 connects each after the
 reload, zero refusals), an already-open connection never served the
 NEW config, and a bad config refused with the old one still serving
 AND a non-zero exit on both. Four deltas are NAMED and measured
-rather than hidden — **D1 transport** (`kill(pid, SIGHUP)` with the
-kernel authorizing vs a loopback endpoint with a token), **D2 who
-parses** (nginx's CLIENT parses and exits 1 before the master ever
+rather than hidden: D1 transport (`kill(pid, SIGHUP)` with the
+kernel authorizing vs a loopback endpoint with a token), D2 who
+parses (nginx's CLIENT parses and exits 1 before the master ever
 hears; lobo's MASTER parses and answers the verdict plus the
-generation that kept serving), **D3 narration** (0 drain events in
-nginx's error log against 6 in lobo's), and **D4 idle keepalive at
-reload** (nginx's old worker closes them once it finishes shutting
+generation that kept serving), D3 narration (0 drain events in
+nginx's error log against 6 in lobo's), and D4 idle keepalive at
+reload (nginx's old worker closes them once it finishes shutting
 down; lobo's draining generation holds them until they close or
-`worker_shutdown_timeout` bites — lobo is the more forgiving, so an
-nginx-written client keeps working and a lobo-written one may not
+`worker_shutdown_timeout` bites, so lobo is the more forgiving and an
+nginx-written client keeps working while a lobo-written one may not
 survive nginx). docs/CONTROL.md is the page.
 
-**ws14's windows sentence flips to a measured rule on every host.**
+ws14's windows sentence flips to a measured rule on every host.
 `lobo -s reload` against a config with no `control` directive now
-refuses BY NAME — "a running lobo is reached ONLY over its control
-endpoint at this pin (there is no arbitrary-pid signal send —
-wolf-lang#126)" — instead of dialling the http port. The second half
-of the windows promise is therefore true everywhere, for the same
+refuses, naming the directive: "a running lobo is reached ONLY over
+its control endpoint at this pin (there is no arbitrary-pid signal
+send — wolf-lang#126)", instead of dialling the http port. The second
+half of the windows promise is therefore true everywhere, for the same
 reason, and it is probed on linux and macOS. What stays CLAIMED is
 the windows half itself (the console-handler mapping); lobo's CI is
 still linux and a windows lane is still a ws16-class decision.
 
-**D40 resolved: the envelope follows the growth law.** ws14 measured
+D40 resolved: the envelope follows the growth law. ws14 measured
 `charge(N) = 16 × pow2ceil(N) − 16` and found a BAND in which the
-runtime refused a body the meter had ADMITTED — 33,000 bytes under
+runtime refused a body the meter had ADMITTED: 33,000 bytes under
 `memory_budget 40k` charged 1,048,560 against a flat-16× cap of
 655,360 and died at the join. That made the cap a SECOND METER with
 arithmetic no config states. The envelope is now `16 × pow2ceil(
-memory_budget)`, which makes it a **backstop**: for any body the
+memory_budget)`, which makes it a backstop: for any body the
 meter admits, `N ≤ budget` so `pow2ceil(N) ≤ pow2ceil(budget)` and
 the charge is strictly under the cap; the stream path's one 64 KiB
 chunk (1,048,560) sits under it because admitting a streamed body
@@ -914,42 +914,42 @@ needs `budget ≥ 65,536` and therefore a cap ≥ 2,097,152.
 `tests/serve/budget_cap.lu` ASSERTS that over every budget from 1
 byte past the stream threshold, and `tools/lobo-membudget` MEASURES
 the closure: the same file, the same config, 200 in full at
-`mem-rt-hw=1048560` under a cap of 1,048,576 — a sixteen-unit margin
-— with **no `site=region` event anywhere in the run**, while a
+`mem-rt-hw=1048560` under a cap of 1,048,576, a sixteen-unit margin,
+with no `site=region` event anywhere in the run, while a
 50,000-byte file beside it is still refused by the meter at
 `site=file`. 15/15 → 17/17. The operator rule collapses to one
 sentence ("set `memory_budget` to the bytes you are willing to
 admit"); ws14's power-of-two footnote is retired. The `site=region`
-mapping keeps its witness where a config can no longer reach it —
+mapping keeps its witness where a config can no longer reach it:
 the join, driven directly.
 
-**The other two debts.** **wolf-lang#224** (the checked machine
+The other two debts. wolf-lang#224 (the checked machine
 killing a connected peer's handle after lobo's serve sequence): s135
-had NOT merged at either gauntlet — the branch exists locally with
-one commit, on `[type.byte]` spec work, and the issue is open — so
+had NOT merged at either gauntlet (the branch exists locally with
+one commit, on `[type.byte]` spec work, and the issue is open) so
 the either/or's ELSE arm was taken: nothing adopted, the
 `checked-refuses:` rows left standing, noted here and in the
-closeout. **wolf-std#4** (a resolver surface in std.net): open, sc34
+closeout. wolf-std#4 (a resolver surface in std.net): open, sc34
 has not landed one, the ask stands unchanged.
 
-**Findings filed this sprint.** wolf-lang#227 (no unix-domain socket
+Findings filed this sprint. wolf-lang#227 (no unix-domain socket
 surface; every unix spelling answers a bare `io`) and wolf-std#5 (no
 file-permission surface, so a program cannot create a secret that is
 not world-readable). Both shaped the design rather than being worked
 around, and both are named in docs/CONTROL.md where the design
 touches them.
 
-**The linux CI earned its keep.** The first push of the differential
+The linux CI earned its keep. The first push of the differential
 was green on macOS and RED on the linux runner: the keepalive probe
 read `pre=` empty on the lobo side only. The cause is lobo's own
-write shape — it writes the head and the body with separate calls, so
+write shape: it writes the head and the body with separate calls, so
 Linux delivered them in two segments and one `net_read` yielded
 headers with no body, while macOS coalesced them and hid it. The rig
 driver now reads until the body carries a newline (bounded), and an
 empty `pre` is reported as a HARNESS fault rather than a server
 mismatch, so the next occurrence names itself.
 
-Corpus 233 → **238** lane-runs (`control_verbs.lu` on three lanes,
+Corpus 233 → 238 lane-runs (`control_verbs.lu` on three lanes,
 `reloadhold.lu` on two); the gauntlet gains one step.
 
 ## ws14 — 2026-09-02 — the cap lands (and the signal arrives)
