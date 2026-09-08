@@ -1,15 +1,15 @@
 # lobo
 
 A web server written in [wolf](https://github.com/wolffe-lang/wolf-lang).
-Your `nginx.conf` carries. Your certificates and their tooling keep
-working.
+It reads nginx configuration files and works with the certificate
+tooling you already have.
 
 ```sh
 brew install wolffe-lang/wolf/lobo     # macOS arm64
 yay -S lobo-bin                        # Arch x86-64
 ```
 
-Then:
+To serve the stock page:
 
 ```sh
 mkdir -p ~/lobo && cd ~/lobo
@@ -19,101 +19,98 @@ lobo -c conf/lobo.conf serve      # serves html/ on 127.0.0.1:8080
 lobo -s stop
 ```
 
-`lobo -v` names the version **and the compiler that built it**, because
-a binary that cannot say what it is cannot be debugged:
+`lobo -v` prints the version and the compiler that built it:
 
 ```
 lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)
 ```
 
-> **0.1.0 — early.** The core is real and tested: static serving,
-> reverse proxy, TLS, ACME, prefork workers, reload with draining,
-> structured logs, a control socket. It has not run anyone's
-> production traffic yet. Treat it accordingly, and please file what
-> breaks.
+> **Version 0.1.0.** Static serving, reverse proxy, TLS, ACME, prefork
+> workers, reload with connection draining, structured logs and a
+> control socket all work and are tested. It has not carried anyone's
+> production traffic. Please file what breaks.
 
 ## Why another web server
 
 nginx is excellent and twenty years old. Some of its sharpest edges
-are not bugs it failed to fix — they are consequences of the language
-it is written in and decisions that hardened before anyone knew
-better. lobo's charter is to keep everything that made nginx worth
-learning and drop the rest:
+come from the language it is written in, and some from decisions that
+hardened before anyone knew better. lobo keeps the configuration
+format and the operational habits that made nginx worth learning, and
+changes the parts underneath.
 
-**The memory-corruption class is structural, not vigilant.** wolf has
-checked arithmetic in every build profile, region-owned request
-memory, and no undefined behaviour. Historical nginx CVE inputs live
-in this repo's corpus; the acceptance is refuse-or-trap-clean, in CI,
-forever.
+Memory safety is a property of the language. wolf checks arithmetic in
+every build profile, ties request memory to regions, and has no
+undefined behaviour. The historical nginx CVE inputs are in this
+repository's test corpus, and CI requires each one to be refused or to
+trap cleanly.
 
-**Config footguns are named at load.** The `if`-is-evil class,
-inheritance surprises, alias traversal — your config still works, and
-the linter tells you where nginx would have quietly hurt you.
+Configuration mistakes are reported when the file loads. The `if`
+directive, directive inheritance and alias traversal all carry over
+from nginx, and the linter points out the places where nginx would have
+failed quietly.
 
-**The drop-in claim is falsifiable.** CI runs a pinned real nginx
-(1.30.4) beside lobo on the same configs and diffs the responses. The
-claims ratchet; they are not hand-waved.
+The compatibility claim is tested. CI runs a pinned copy of nginx
+1.30.4 next to lobo with the same configuration files and compares the
+responses.
 
-## What you get that nginx doesn't have
+## What lobo adds
 
-- **Built-in ACME** — certificates without the certbot dance, and the
-  certbot dance still works.
-- **A dry-run that exercises routing**, not just syntax:
-  `lobo -t --request 'GET https://host/path'` tells you what *would*
-  happen.
-- **Observable reloads** — connection draining you can watch, not
-  infer.
-- **`-T` that says which file set every directive**, so config
-  archaeology stops being archaeology.
-- **Per-vhost memory budgets that are enforced**, not hoped.
-- **Replayable races.** wolf's scheduler is deterministic under test,
-  so a scheduling bug from a report can be replayed.
+- ACME is built in, so certificates can be issued and renewed without
+  certbot. certbot still works if you prefer it.
+- `lobo -t --request 'GET https://host/path'` dry-runs a request through
+  the routing rules and reports what would happen.
+- Reloads expose their connection draining, so you can watch a reload
+  finish instead of guessing.
+- `-T` reports which file set every directive.
+- Per-vhost memory budgets are enforced.
+- wolf's scheduler is deterministic under test, so a race reported from
+  the field can be replayed.
 
 ## Performance
 
-One process went from 37 to 13,508 req/s when the serving loop learned
-to block on readiness instead of time-slicing, and workers then made it
-a real prefork server: the master binds the listeners and hands them
-down, every worker accepts on one socket, and the kernel distributes
-the work.
+One process went from 37 to 13,508 req/s when the serving loop switched
+from time-slicing to blocking on readiness. Prefork workers came after:
+the master binds the listeners and passes them to each worker, every
+worker accepts on the same socket, and the kernel distributes the
+connections.
 
-**lobo is not at parity with nginx, and on linux it is badly off it.**
-The bar is defined in [`docs/PARITY.md`](docs/PARITY.md) — written
-before any measurement, so the number could not be chosen after the
-fact — and measured as the ratio nginx ÷ lobo on the same box, workers
-= cpus, five interleaved pairs, sets refused under load:
+lobo is slower than nginx, and on linux it is much slower on keepalive
+traffic. [`docs/PARITY.md`](docs/PARITY.md) defines the comparison (it
+was written before the first measurement) as the ratio nginx ÷ lobo on
+one machine, with workers equal to cpus, over five interleaved runs:
 
 | host | connection-per-request | keepalive |
 |---|---|---|
 | macOS arm64, 18 cpus | 1.15x | 2.76x |
-| linux x86-64, 4 cpus | 2.27x | **110.9x** |
+| linux x86-64, 4 cpus | 2.27x | 110.9x |
 
-The linux keepalive number is a stall, not a slowness: lobo answers one
-request per ~41 ms per connection, because the kernel's 40 ms delayed
-ACK meets Nagle's algorithm on lobo's two-write response. It is
-invisible on macOS, which is why 0.1.0 shipped with it. The one-buffer
-write that removes it is the next change.
+The linux keepalive figure is a stall. lobo answers about one request
+every 41 ms per connection because the kernel's 40 ms delayed ACK
+interacts with Nagle's algorithm on lobo's two-write response. macOS
+does not show it, which is how 0.1.0 shipped with it. A single-buffer
+write removes it and is the next change.
 
-Where the rest of the time goes is in [`docs/PROFILE.md`](docs/PROFILE.md):
-63 µs per request against nginx's 19 on the same box, and about half of
-the difference is the runtime parking on its reactor thread before
-syscalls on sockets already reported ready — the language's cost, filed
-upstream, not lobo's. These numbers will move; the bar will not.
+[`docs/PROFILE.md`](docs/PROFILE.md) has the rest: 63 µs per request
+against nginx's 19 on the same machine, with about half of the
+difference spent in the runtime parking on its reactor thread before
+syscalls on sockets that were already ready. That part is the
+language's, and is filed upstream.
 
 ## Compatibility
 
-108 nginx directives, with every deliberate difference documented in
-[`docs/directives.md`](docs/directives.md) rather than discovered in
-production. Where lobo must differ, it says so at load.
+108 nginx directives are supported. [`docs/directives.md`](docs/directives.md)
+lists each one and every place lobo's behaviour differs from nginx's.
+Where it differs, lobo says so when the configuration loads.
 
-Not yet: windows and linux-aarch64 builds (the compiler's native tier
-does not serve those hosts yet — they refuse by name, never silently).
+Windows and linux-aarch64 builds do not exist yet, because the
+compiler's native code generator does not serve those hosts. On those
+hosts the compiler refuses and names the reason.
 
 ## Documentation
 
 | | |
 |---|---|
-| [GETTING-STARTED.md](docs/GETTING-STARTED.md) | your first five minutes, start here |
+| [GETTING-STARTED.md](docs/GETTING-STARTED.md) | start here |
 | [directives.md](docs/directives.md) | every directive, and every difference from nginx |
 | [WORKERS.md](docs/WORKERS.md) | prefork, descriptor handoff, distribution measurements |
 | [CONTROL.md](docs/CONTROL.md) · [DRAIN.md](docs/DRAIN.md) | the control socket; reload and draining |
@@ -121,27 +118,27 @@ does not serve those hosts yet — they refuse by name, never silently).
 | [LOGGING.md](docs/LOGGING.md) · [log-variables.md](docs/log-variables.md) | structured logs and their variables |
 | [BUDGET.md](docs/BUDGET.md) | per-vhost memory budgets |
 | [ARCHITECTURE.md](docs/ARCHITECTURE.md) | how it is put together |
-| [DIFFERENTIAL.md](docs/DIFFERENTIAL.md) · [PARITY.md](docs/PARITY.md) | the nginx oracle, and the parity bar |
+| [DIFFERENTIAL.md](docs/DIFFERENTIAL.md) · [PARITY.md](docs/PARITY.md) | the nginx comparison, and the parity definition |
 
 ## Building from source
 
-lobo pins its toolchain by exact identity — a specific wolf compiler,
-interpreter and standard library, named in `wolf-toolchain.toml`. That
-is why the packages above ship a prebuilt binary: a distro's rolling
-`wolf` would break the build the day it moved ahead of the pin.
+`wolf-toolchain.toml` pins an exact wolf compiler, interpreter and
+standard library, and the build refuses any other. That is why the
+packages above are prebuilt: a distribution's `wolf` package moves
+ahead of the pin, and a source package depending on it would stop
+building at that point.
 
-To build anyway, stage the pinned toolchain into `.wolf-bin/` and the
-pinned nginx into `tests/differential/bin/` (each section of
-`wolf-toolchain.toml` and `docs/DIFFERENTIAL.md` carry their build
-commands), then:
+To build anyway, put the pinned toolchain in `.wolf-bin/` and the
+pinned nginx in `tests/differential/bin/` (the build commands are in
+`wolf-toolchain.toml` and `docs/DIFFERENTIAL.md`), then run:
 
 ```sh
-tools/lobo-gauntlet     # the full gate: build, both tiers, corpus, differential
+tools/lobo-gauntlet     # build, both tiers, corpus, differential
 tools/lobo-dist         # a release archive, packed reproducibly and smoke-tested
 ```
 
-Every release archive carries a `BUILD` file recording the toolchain,
-the source commit and the pins it was built from.
+Each release archive includes a `BUILD` file with the toolchain, source
+commit and pins it was built from.
 
 ## License
 
