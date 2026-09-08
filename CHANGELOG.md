@@ -204,6 +204,17 @@ binary relatively cannot be used from anywhere else), and it was
 caught by RUNNING the smoke rather than reasoning about it. Fixed:
 `lobo-dist` absolutizes `$WOLF` and `$LUPIN` before it goes anywhere.
 
+**AND A SECOND ONE, which only the other kernel could find.** The
+smoke asserted the `Server:` header with `grep -qi "^Server:
+lobo/$version\r*$"`. In a POSIX **basic** regex `\r` is a literal
+`r`, so under GNU grep that pattern silently reads *zero or more
+`r`* and never matches a real CRLF header — macOS was green, linux
+was red, and the archive built and served correctly on both. The
+assertion now strips the CR instead of trying to match it. Two bugs
+this sprint, both in the CHECKING code rather than the server, and
+both found by running the thing on a machine that was not the one it
+was written on. That is the entire argument for the learner smoke.
+
 **WHAT W7 STILL WAITS ON, said plainly.** lobo is the only PRIVATE
 repo in the org. The learner smoke is a clean-MACHINE test today — it
 downloads with the workflow token — but not yet a clean-STRANGER
