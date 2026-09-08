@@ -956,70 +956,71 @@ Corpus 233 → 238 lane-runs (`control_verbs.lu` on three lanes,
 
 The budget is structural on BOTH halves: the meter admits, the
 runtime's own region cap enforces, and the day the two disagree is
-measured, not theorized.
+measured.
 
 Pins advance first, gauntlet green at the trio before a line changed
 (suite counts IDENTICAL: corpus 228/228, differential 3/3, proxy
-8/8, signal 15/15, membudget 5/5, resolver 9/9): wolf → **trunk
-5f99b9f** (the s134 merge; r06 had not tagged v0.2.3 at the pin
-step, so the D57 dev stamp `0.2.2+dev.5f99b9f` — built with
+8/8, signal 15/15, membudget 5/5, resolver 9/9): wolf → trunk
+5f99b9f (the s134 merge; r06 had not tagged v0.2.3 at the pin
+step, so the D57 dev stamp `0.2.2+dev.5f99b9f`, built with
 `WOLF_COMMIT=5f99b9f`, no release stamp; ci.yml's tag probe finds
-none and stays `+dev`), lupin → **v0.1.23** (is34), wolf-std →
-**trunk 35f69ef** (sc33; std's own machine pin is the same 0.1.23 —
+none and stays `+dev`), lupin → v0.1.23 (is34), wolf-std →
+trunk 35f69ef (sc33; std's own machine pin is the same 0.1.23,
 the first bump at which the two repos' interpreter pins agree).
 Deltas classed: the interface snapshots did not move at all (zero
 re-record, the cap branch's own `interface(...)` commit rides the
-merge); #146 re-probed a SEVENTH time — the same `sc_muladd`
+merge); #146 re-probed a SEVENTH time, the same `sc_muladd`
 dominance ICE, `WOLF_MIDEND=0` stays; membudget's "round B
-retained" 11,072 KB (macOS) vs 12,444 KB (linux CI) — host, not
+retained" 11,072 KB (macOS) vs 12,444 KB (linux CI) is host, not
 pin, both under the #191 named gate. One rig delta at the bump,
 classed host-not-pin and fixed in the witness: macOS's page
 compressor (holding ~40 GB on the rig that day) shrank the server's
 RSS between two `ps(1)` samples so round A read 6,976 / 7,792 KB
 against a 10.6 MB steady reading (2 of 9 quiet runs; 0 of 15 at the
-previous pin) and the differential blamed round B — a tripped
+previous pin) and the differential blamed round B. A tripped
 differential is now re-driven once, both pairs printed, and only a
 second trip is red (a leak trips every drive; a compressed sample
 does not).
 
-**The cap lands.** wolf-lang#219 closed at s134 — the LLVM emitter
+The cap lands. wolf-lang#219 closed at s134: the LLVM emitter
 takes a mangled symbol's address across partitions, so the proc
 `src/budget` spawns from a non-entry module links under
-`WOLF_MIDEND=0 --release`, the exact shape the release tier refused
-at ws13 — and branch `ws13-cap` is merged at the new pin, no
+`WOLF_MIDEND=0 --release`, the shape the release tier refused
+at ws13. Branch `ws13-cap` is merged at the new pin, no
 conflicts, the interface snapshots already true. Per lane, stated
-(docs/BUDGET.md's table): **native** runs it (`budget_cap.lu`'s
+(docs/BUDGET.md's table): native runs it (`budget_cap.lu`'s
 four relations, `budget_cap_e2e.lu`'s real server, `cap_shape.lu`);
-**release** runs it — the gauntlet's tiers step links
-`@budget.run_small.task0.entry` and every release-binary witness
-runs that binary; **checked** — `wolf conform-run --checked`, the
-s23 UB machine — **refuses by name**, `unsupported` at `mem` with
+release runs it, and the gauntlet's tiers step links
+`@budget.run_small.task0.entry` while every release-binary witness
+runs that binary; checked (`wolf conform-run --checked`, the
+s23 UB machine) refuses by name, `unsupported` at `mem` with
 `x-unsupported-construct: "structured concurrency in checked
 execution (C1 deferred)"`, and `tools/lobo-corpus` gains a
 `//! checked-refuses: <construct>` directive that ASSERTS that
 record as a lane-run (a refusal by the wrong name, a run, or a
 crash is red; declaring both `checked` and `checked-refuses` is a
-header error) — never a blanket skip; every witness whose refusal
+header error), never a blanket skip; every witness whose refusal
 fires before the proc keeps its checked lane, and the one budgeted
 200 that lived in `budget_refusals.lu` moved to `budget_cap.lu`;
-**lupin** runs the shape (`cap_shape.lu`) and cannot run the serve
-suite (no fs — the suite's posture since ws01).
+lupin runs the shape (`cap_shape.lu`) and cannot run the serve
+suite (no fs, the suite's posture since ws01).
 
-**The breach, end to end through a real socket.** ws13 could only
+The breach, end to end through a real socket. ws13 could only
 drive the join directly, on a theorem that the cap cannot fire on a
-meter-admitted request ("the small path charges ≈ 8N + 352" — one
+meter-admitted request ("the small path charges ≈ 8N + 352", one
 measurement, extrapolated). The end-to-end witness this sprint was
 asked for falsified it: the ledger's growth law is `charge(N) =
-16 × pow2ceil(N) − 16` (1,024 → 16,368; **1,025 → 32,752**; 4,097 →
-131,056; 40,000 → 1,048,560 — the buffer doubles and the ledger keeps
-every abandoned buffer), so #203's 16× holds exactly AT a power of
-two and reaches 32× just past one, and **a budgeted small body is
-refused by the runtime whenever `memory_budget < pow2ceil(body)`**
-though the meter admitted it. `tools/lobo-membudget` now runs a
+16 × pow2ceil(N) − 16` (1,024 → 16,368; 1,025 → 32,752; 4,097 →
+131,056; 40,000 → 1,048,560, because the buffer doubles and the
+ledger keeps every abandoned buffer), so #203's 16× holds exactly AT
+a power of two and reaches 32× just past one, and a budgeted small
+body is refused by the runtime whenever
+`memory_budget < pow2ceil(body)` though the meter admitted it. `tools/lobo-membudget` now runs a
 second server under `memory_budget 40k` on the release binary:
 rounds A'/B' RE-BASELINED through the capped proc (A' 10,800 KB, B'
-11,696 KB, difference 896 KB, 29 KB/req — the same two gates as
-A/B, which read 448 KB and 27 KB/req uncapped in the same run), then a 33,000-byte
+11,696 KB, difference 896 KB, 29 KB/req, the same two gates as
+A/B, which read 448 KB and 27 KB/req uncapped in the same run), then
+a 33,000-byte
 file → `503 Service Temporarily Unavailable`, `Connection: close`,
 the event `budget-exceeded gen=1 site=region budget=40960
 would=40961 cap=655360`, the 32,768-byte file beside it (a power of
@@ -1027,21 +1028,21 @@ two) 200 in full through the proc, fifty keepalive requests after
 the breach (the proc died, the server lived), `budget-503s=1` and
 `mem-rt-hw=524272` in `lobo status`. 15/15. The band is written into
 BUDGET.md with the operator rule (round the budget up to the power
-of two above the largest small file, or 64k+ — the stream path is
+of two above the largest small file, or 64k+; the stream path is
 outside the band by construction), the directive table, and ledger
-row D40: the envelope is deliberately LEFT at #203's 16× rather than
-silently widened to the growth law, because `16 × pow2ceil(budget)`
-makes the region site unreachable from any config again — what the
+row D40: the envelope is LEFT at #203's 16× rather than
+widened to the growth law, because `16 × pow2ceil(budget)`
+makes the region site unreachable from any config again; what the
 cap is FOR is the campaign closeout's decision, and every refusal in
-the band is loud and named meanwhile. BUDGET.md's "which half is
-structural" flips to **both**; the ws10 deferral row (D30's cap
+the band is named meanwhile. BUDGET.md's "which half is
+structural" flips to both; the ws10 deferral row (D30's cap
 half) closes dated, so does ws13's #219 row.
 
-**The signal arrives (windows).** s60b landed `[os.signal.platform]`'s
+The signal arrives (windows). s60b landed `[os.signal.platform]`'s
 windows row in the pin: CTRL_C/CTRL_CLOSE → terminate, CTRL_BREAK →
 quit, RELOAD/UPGRADE with no windows analog. lobo's promise is one
 sentence in docs/DRAIN.md: on windows, `lobo -s reload` reaches a
-running lobo over its `control` endpoint or not at all — there is
+running lobo over its `control` endpoint or not at all: there is
 no signal that reloads it, and a config without a `control`
 directive cannot be reloaded without a restart; `upgrade` (unclaimed
 everywhere at this pin) will be a control-channel verb and the only
@@ -1056,7 +1057,7 @@ by name (s60c's), so every windows statement is CLAIMED from the
 clause and wolf-lang's windows floor, and the control-channel path
 is measured on linux+macOS only.
 
-**Findings filed.** wolf-lang#224 — on the checked lane (the UB
+Findings filed. wolf-lang#224: on the checked lane (the UB
 machine) a client socket's handle dies when the peer it dialled is
 closed after lobo's serve sequence ran on that peer (`net_deadline`
 → `io`; native and lupin keep it; present at v0.2.2 too);
@@ -1065,8 +1066,8 @@ closed after lobo's serve sequence ran on that peer (`net_deadline`
 first and says why (D41).
 
 Corpus 228 → 233 lane-runs (`budget_cap.lu` and `budget_cap_e2e.lu`
-join — three lane-runs plus `budget_cap.lu`'s `checked-refuses`
-assertion — and `cap_shape.lu` gains its own); membudget 5 → 15
+join (three lane-runs plus `budget_cap.lu`'s `checked-refuses`
+assertion) and `cap_shape.lu` gains its own); membudget 5 → 15
 checks.
 
 ## ws13 — 2026-09-02 — the name resolves in time (wsc05 opens)
@@ -1076,42 +1077,42 @@ resolves without stalling the loop, and the pin names a release.
 
 Pins advance first, gauntlet green at the trio before a line changed
 (suite counts IDENTICAL: corpus 213/213, differential 3/3, proxy
-8/8, membudget 5/5): wolf → **the v0.2.2 TAG** (8cda3aa) — the bare
+8/8, membudget 5/5): wolf → the v0.2.2 TAG (8cda3aa), the bare
 stamp at last, because s132's cap and D68's fault merged BEFORE the
-tag this time — lupin → **v0.1.22** (is33: the contained trap is
+tag this time; lupin → v0.1.22 (is33: the contained trap is
 `fault(alloc-contract)` at the join; the two tags name each other),
 wolf-std held at a62a5d4 (its trunk had not moved). #146 re-probed a
 SIXTH time at the tag: the same ICE at the same site, `WOLF_MIDEND=0`
 stays. The interface re-record moves every header with zero item
 motion. GitHub CI's first real run on this branch refused the tag
 pin as identity drift (`+dev.8cda3aa` vs the bare `0.2.2` the pin
-names) — the workflow now grants xtask's own `WOLF_RELEASE` stamp
+names). The workflow now grants xtask's own `WOLF_RELEASE` stamp
 when the pinned rev is a tag, and the branch is green on GitHub.
 
-**Async upstream DNS.** report 11 §2 item 9, the one STRONG item
+Async upstream DNS. report 11 §2 item 9, the one STRONG item
 wsc03 left unshipped, measured first: with a loopback resolver
 holding its answer 800 ms, a static request on a SECOND connection
-waited **805 ms** behind a proxied request's name — the dial
+waited 805 ms behind a proxied request's name, because the dial
 resolved the name synchronously on the one poll loop's thread, with
 no deadline. There was no blocking call to wrap: std.net says in its
 own header that `dns`/`resolve` is not a function it has, and the
 runtime's `net_connect` hands a name to getaddrinfo (its
 `connect_timeout` resolves first and reaches no lane). Both FILED
-(**wolf-std#4**, **wolf-lang#217**), neither absorbed: lobo now
-carries a DNS-over-TCP stub client (`resolver`, a leaf module — the
+(wolf-std#4, wolf-lang#217), neither absorbed: lobo now
+carries a DNS-over-TCP stub client (`resolver`, a leaf module: the
 wire half pure over `List[int]`, the TTL cache with nginx's `valid=`
 override and round-robin, a pending-query table the loop TICKS under
 a 1 ms deadline like any other socket) and a PARK: serve asks which
 name a request needs before it reads a byte past the head, the loop
 skips that connection until the query settles, then steps it from
-the top with the cache warm. After: **static-ms=1**, proxied 836,
+the top with the cache warm. After: static-ms=1, proxied 836,
 cached 0 with exactly one query recorded (`tools/lobo-resolver`, a
 gauntlet step; `tests/rig/dnssrv` is the resolver, in wolf). nginx's
 `resolver … valid=` and `resolver_timeout` carry as directives, `-t`
 answers nginx's own `invalid parameter` wording, the two parameters
 lobo cannot honour refuse by name (`ipv4=off`, `status_zone=`);
 LOBO-L012 names a hostname with no resolver in effect (the stall),
-LOBO-L013 names the delta in lobo's favour — nginx resolves a static
+LOBO-L013 names the delta in lobo's favour: nginx resolves a static
 `proxy_pass` name once at load and ignores `resolver` for it (trac
 #1064); lobo re-resolves under the TTL. Every other delta (TCP-only,
 A-only, first address, failures held 1 s, a 0-TTL held 1 s) is a
@@ -1122,39 +1123,39 @@ the directive so the oracle and lobo prove they parse the same line
 (`lobo_upstream_resolutions_total{result}`, 22 families), the
 `$upstream_addr` log variable names the resolved address.
 
-**The cap adoption — built, witnessed, and gated by codegen.** s132's
+The cap adoption, built, witnessed, and gated by codegen. s132's
 `region r(cap: n)` and D68's proc-boundary fault are in the pin, and
 ws13 consumed them: a budgeted request's regioned body work runs
-inside a `spawn proc` under `cap: 16 × memory_budget` — the #203
-ledger envelope, and the directive documents the arithmetic — and
-the join maps the reason to 200 / close / **503 `site=region`** /
+inside a `spawn proc` under `cap: 16 × memory_budget` (the #203
+ledger envelope, and the directive documents the arithmetic), and
+the join maps the reason to 200 / close / 503 `site=region` /
 500; ws12's measured `region_bytes` comes back out of the proc
 through a loopback self-pipe, because a proc's `normal(value)` is
 unreadable at the join and a channel cannot be a proc argument on
 wolfc. Green on the native tier, and the RELEASE tier refuses to
 emit it: any proc spawned from a non-entry module lands its entry
 shim outside its object (`func.addr of @budget.run_small.task0.entry
-outside this object's subset` — #136's shape for a PROC), a 30-line
-reproducer filed as **wolf-lang#219** with a second finding
+outside this object's subset`, #136's shape for a PROC), a 30-line
+reproducer filed as wolf-lang#219 with a second finding
 (`conform-run --checked` answers `unsupported@mem` with an empty
 diagnostic for every proc spawn, wolf-lang's own conformance files
 included, while `run --checked` runs them). A proc the release tier
 cannot emit is not a proc lobo can ship, so the adoption lives whole
-on branch **`ws13-cap`** (the flip is a merge the day #219 closes),
-and trunk carries `tests/serve/cap_shape.lu` — the exact program a
-budgeted request runs, in one module, on native and lupin — plus
+on branch `ws13-cap` (the flip is a merge the day #219 closes),
+and trunk carries `tests/serve/cap_shape.lu` (the program a
+budgeted request runs, in one module, on native and lupin) plus
 BUDGET.md's theorem that at this pin the cap cannot fire on any
 request the meter admits (the head site's charge puts every cap
 above every ledger reading lobo's shapes produce), which is the
-property the contract asked for stated as an inequality rather than
-a hope. The membudget suite holds its marks unchanged (the trunk
+property the contract asked for stated as an inequality. The
+membudget suite holds its marks unchanged (the trunk
 binary has no proc in it).
 
-**#197's Tier-2 shapes, stated.** Four, re-read against s132 and
+#197's Tier-2 shapes, stated. Four, re-read against s132 and
 posted upstream: a capture is written on the JOIN side (a killed
 proc runs no writer); the reason class is a stable key (a closed
 set); the record boundary is the proc argument record (s87 copies
-it at spawn — record at the proc boundary, replay the proc); and
+it at spawn: record at the proc boundary, replay the proc); and
 what a proc can say back bounds what a capture can carry (a token
 made inside a proc cannot leave it). docs/REPLAY.md has the text.
 
