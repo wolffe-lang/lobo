@@ -109,6 +109,11 @@ host's result and carries that host's name.
     generator's own cpu seconds ÷ wall for every run; a run where
     that exceeds **0.90** is a measurement of `ab` and the set is
     refused (split the load across k generators and take it again).
+    Operationally: the tool starts **k `ab` processes together, each
+    with c ÷ k connections** (k = 4 by default, so eight connections
+    each at c = 32); req/s is their sum, and EVERY generator's own
+    cpu ÷ wall is held under the ceiling. k is printed in the set's
+    header; the total concurrency c is the bar's number, not k.
   - *the oracle is stable*: the five nginx numbers on a shape must
     satisfy max ÷ min ≤ **1.15**, else the box was not quiet and the
     set is discarded.
