@@ -188,5 +188,13 @@ jobs:
           sudo apt-get install -y -qq apache2-utils
           mkdir -p target
           sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          # the bar's quiet-rig rule (load(1m) under 3.0) — the build
+          # that just finished is the runner's own load; let it decay,
+          # bounded, and let the tool refuse if it does not
+          for i in $(seq 1 18); do
+            l=$(cut -d' ' -f1 /proc/loadavg); echo "load(1m) $l"
+            awk -v l="$l" 'BEGIN { exit (l < 2.0) ? 0 : 1 }' && break
+            sleep 10
+          done
           nproc; uptime
           tools/lobo-parity
