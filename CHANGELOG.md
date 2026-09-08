@@ -282,18 +282,18 @@ executes, and CLAUDE.md's host-tool list gains GNU tar and curl.
 
 wsc07's first sprint, and a maintenance one by contract: the human's
 W7 charter (*someone other than us can run it*) is settled but does
-not gate this work — ws19 and ws20 take it. What this sprint owed was
-a pin bump, a deletion, a rig-hygiene fix, and **the headline table
-re-run with the workaround gone**. The table is the point, and it
-came back bigger than the fix was predicted to be worth.
+not gate this work; ws19 and ws20 take it. What this sprint owed was
+a pin bump, a deletion, a rig-hygiene fix, and the headline table
+re-run with the workaround gone. The table came back bigger than the
+fix was predicted to be worth.
 
-**THE MEASUREMENT, first.** ws17 shipped an accept turn — nginx's
-`accept_mutex` without a mutex — because `net_accept` parked a losing
+THE MEASUREMENT, first. ws17 shipped an accept turn (nginx's
+`accept_mutex` without a mutex) because `net_accept` parked a losing
 hand in a blocking `accept(2)` after its readiness wait
 (wolf-lang#242, filed by ws17 with the number the fix was worth:
 11,622 req/s with the turn against 17,347 free-for-all, a predicted
-**1.49x**). s138 closed #242. ws18 deleted the turn and measured the
-same shape on the same box in one session — the same source built
+1.49x). s138 closed #242. ws18 deleted the turn and measured the
+same shape on the same box in one session: the same source built
 twice, once at the commit before the deletion and once after (three
 hands, `ab -n 6000 -c 32`, a connection per request, three runs each):
 
@@ -302,7 +302,7 @@ hands, `ab -n 6000 -c 32`, a connection per request, three runs each):
 | with the accept turn | 13,417 · 12,866 · 12,863 | **12,866 req/s** |
 | free-for-all (ws18) | 25,470 · 23,663 · 21,443 | **23,663 req/s** |
 
-**1.84x.** And the full table, both binaries, N=18, `ab -n 20000 -c
+1.84x. And the full table, both binaries, N=18, `ab -n 20000 -c
 32`, a 1 KiB file, the pinned nginx/1.30.4 as the control:
 
 | server | shape | with the turn | **free-for-all** | cores (turn → free) |
@@ -314,29 +314,29 @@ hands, `ab -n 6000 -c 32`, a connection per request, three runs each):
 | nginx, 1 worker | close | 27,656.32 | 27,731.17 | 0.48 → 0.45 |
 | nginx, 18 workers | keepalive | 72,960.48 | 86,432.66 | 1.95 → 2.04 |
 
-Read four times. **(1) The deletion is worth more than the accept
-path.** Eighteen hands on a KEEPALIVE load — which contains almost no
-accepting at all — go from 9,554 to **38,961 req/s, 4.1x**. That is
-not the thundering herd; it is `shell.accept_wait_ms`, the turn's
-other half, which capped the hand's WHOLE `net_wait` budget at the
+Four readings. (1) The deletion is worth more than the accept
+path. Eighteen hands on a KEEPALIVE load, which contains almost no
+accepting at all, go from 9,554 to 38,961 req/s, 4.1x. The cause is
+`shell.accept_wait_ms`, the turn's other half, not the thundering
+herd; it capped the hand's WHOLE `net_wait` budget at the
 turn boundary, so a hand serving thirty-two established connections
 woke on the ROUND instead of on its own sockets. The workaround was
 throttling the serving path to keep the accept path correct, and
 nothing in ws17 could see it, because with the turn there was no other
-posture to compare against. **(2) `worker_processes N` is N-ish at
-last**: cores-used 0.84 → **3.08** on close and 0.65 → **4.54** on
-keepalive. **(3) One process did not move** — 13,204 → 13,508 close,
+posture to compare against. (2) `worker_processes N` is N-ish at
+last: cores-used 0.84 → 3.08 on close and 0.65 → 4.54 on
+keepalive. (3) One process did not move: 13,204 → 13,508 close,
 inside the noise, which is the control: `accept_turn` short-circuited
 at `hands <= 1`, so a single-process lobo never paid for the turn.
-**(4) On this shape lobo now passes this box's nginx at the same
-count**: three hands free-for-all serve 23,663 against nginx's 19,553
+(4) On this shape lobo now passes this box's nginx at the same
+count: three hands free-for-all serve 23,663 against nginx's 19,553
 at eighteen workers. The keepalive gap (38,961 against 86,433) is
 real, and it is W8's.
 
-**THE DELETION, inventoried.** `shell.accept_turn`,
-`shell.accept_wait_ms` and `shell.accept_slice_ms` are gone — **84
+THE DELETION, inventoried. `shell.accept_turn`,
+`shell.accept_wait_ms` and `shell.accept_slice_ms` are gone: 84
 lines of pure surface (three functions and their clauses) and, with
-the plumbing, `src/shell/shell.lu` net −106**, three items out of
+the plumbing, `src/shell/shell.lu` net −106, three items out of
 `shell.wolfi`
 (77 → 74; the item key sets diffed BOTH ways, exactly three removed
 and three signatures re-recorded, nothing else moved), the `--hands N`
@@ -345,89 +345,89 @@ flag off the hand's argv (14 elements → 12) and out of `Cli`, the
 sites out of the serving loop, and 57 lines of turn assertions out of
 `tests/shell/worker_surface.lu`. What is left in `main.lu` is one
 sentence: every hand keeps both listeners in its wait set on every
-pass. **What replaced the tests** is the DELETION asserted (an argv
-carrying `--hands` takes the ordinary unknown-option road; `--inherit`
-— the one internal flag that outlived it — still refuses by name when
+pass. What replaced the tests is the DELETION asserted (an argv
+carrying `--hands` takes the ordinary unknown-option road; `--inherit`,
+the one internal flag that outlived it, still refuses by name when
 it rides alone) plus a new gauntlet check.
 
-**THE CHECK THAT REPLACED THE TURN** is `tools/lobo-prefork`'s **quiet
-server**, and it is the one #242 would fail: three hands free-for-all,
-**one** GET, then two seconds of SILENCE, then every hand must still
+THE CHECK THAT REPLACED THE TURN is `tools/lobo-prefork`'s quiet
+server, and it is the one #242 would fail: three hands free-for-all,
+one GET, then two seconds of SILENCE, then every hand must still
 answer its OWN control endpoint and the master must still read three
-serving hands with no replacement. That is exactly how #242 was found
+serving hands with no replacement. That is how #242 was found
 (two hands, one GET, one hand never spoke again) and it is asserted at
-the level lobo cares about instead of quoted from upstream. prefork
-**35/35 → 38/38**, and it is a gauntlet step, so linux CI runs it too.
+the level lobo cares about. prefork
+35/35 → 38/38, and it is a gauntlet step, so linux CI runs it too.
 The distribution was re-checked and SURVIVES the deletion: 90
-connections over three hands, **36/29/26** on macOS and **26/34/31**
+connections over three hands, 36/29/26 on macOS and 26/34/31
 on the linux runner, free-for-all, against ws17's 28/32/31 through the
-turn — the turn assigned slices by ordinal and the kernel does not, so
-this had to be measured rather than assumed. **Linux CI (9m45s) is
-GREEN at the ws18 head**: corpus 253/253, prefork 38/38 including the
+turn; the turn assigned slices by ordinal and the kernel does not, so
+this had to be measured rather than assumed. Linux CI (9m45s) is
+GREEN at the ws18 head: corpus 253/253, prefork 38/38 including the
 quiet server (3/3 hands answering after the silence), the failover gap
 1 ms.
 
-**Pins.** wolf → **trunk `32f66bf` dev-stamped** (`0.2.5+dev.32f66bf`;
-r09 had not tagged v0.2.6 at the pin step — checked, `git tag` tops
-out at v0.2.5, seventeen commits behind this rev — so the either/or
-takes the sha), lupin → **v0.1.26** (is37, the byte has a domain), std
-→ **trunk `bd12ef5`** (sc37's `std.net.listen_with`/`adopt_listener`/
+Pins. wolf → trunk `32f66bf` dev-stamped (`0.2.5+dev.32f66bf`;
+r09 had not tagged v0.2.6 at the pin step, checked: `git tag` tops
+out at v0.2.5, seventeen commits behind this rev, so the either/or
+takes the sha), lupin → v0.1.26 (is37, the byte has a domain), std
+→ trunk `bd12ef5` (sc37's `std.net.listen_with`/`adopt_listener`/
 `wait` and `std.os.cpus`). Twenty-one commits over two trains.
-**Deltas classed: ONE BEHAVIORAL (#242, and lobo consumes it as a
-deletion), two DIAGNOSTIC-ONLY (#243, #238 — lobo's sources draw
+Deltas classed: ONE BEHAVIORAL (#242, and lobo consumes it as a
+deletion), two DIAGNOSTIC-ONLY (#243, #238; lobo's sources draw
 neither), one MECHANICAL (the `.wolfi` toolchain stamp 0.2.4 → 0.2.5,
 fourteen snapshots re-recorded with ZERO item motion), and zero source
-motion predicted and ZERO MEASURED** — the first pin bump in this
+motion predicted and ZERO MEASURED, the first pin bump in this
 repo's history that moves no source for the pin's own sake. The
 PAIRING GAP is zero for the second time (wolf@32f66bf declares lupin
-0.1.26); the LANE GAP is not — lupin 0.1.26 still conforms to
+0.1.26); the LANE GAP is not: lupin 0.1.26 still conforms to
 `982f857` (v0.2.4), so none of s137's builtins exist on the reference
 lane and every test that names one still declares `lanes: native` (or
-native+checked). wolf-lang#146 re-probed at this pin, the **ELEVENTH**
+native+checked). wolf-lang#146 re-probed at this pin, the ELEVENTH
 measurement: still open (the `sc_muladd` dominance ICE, reproduced
 here), `WOLF_MIDEND=0` stays.
 
-**wolf-std#6, answered and DECLINED on purpose.** sc37 wrapped the
-acquisition half — `std.net.listen_with`, `adopt_listener`, `wait`,
-and a new `std.os.cpus` — and asked whether lobo would move. It does
+wolf-std#6, answered and DECLINED. sc37 wrapped the
+acquisition half (`std.net.listen_with`, `adopt_listener`, `wait`,
+and a new `std.os.cpus`) and asked whether lobo would move. It does
 not, and the reason is the loop's own shape rather than inertia: the
 serving loop is raw-fd end to end (one `net_wait` over a `List[int]`
 holding the control listener, both http listeners and every open
 connection, with the connection table as parallel lists indexed by
 position), so a `Listener` would be built and immediately unwrapped
 through `.fd` to enter the same set; the inherit PAIR would split
-across tiers, because `os_spawn_with` is deliberately not wrapped
+across tiers, because `os_spawn_with` is not wrapped
 (std.process's `Command` question is open) and a master would spawn
 through the builtin while its hand adopted through std; and every one
 of the four is a pure delegate, so the move buys a spelling. The
 posture is uniform and written into `wolf-toolchain.toml` where the
 next lane will read it. lobo's preference on the `os_spawn_with`
-shape — which sc37 asked for by name — is posted on the issue.
+shape, which sc37 asked for, is posted on the issue.
 
-**lobo#1 — the rig reaps itself.** `tools/lib-rigproc.sh` is new: a
+lobo#1, the rig reaps itself. `tools/lib-rigproc.sh` is new: a
 reap at START of anything a previous run left behind and a reap at
 EXIT of the run's own, armed by `rig_arm` in all eighteen tools that
 start a process, on `EXIT`/`INT`/`TERM` so a red step, a Ctrl-C and
-the 600 s tool ceiling are all covered — sc12's idempotency rule
-applied to processes. **The leak was not the trap you would guess**:
+the 600 s tool ceiling are all covered, sc12's idempotency rule
+applied to processes. The leak was not where you would guess:
 `wolf run tests/rig/dnssrv/dnssrv.lu &` makes `$!` the DRIVER and the
 listener its child, so the tools' `kill "$dnspid"` reaped wrappers and
 orphaned helpers. MEASURED before the fix: three orphaned `dnssrv`
-processes on this box, one **45 hours** old and one from each of the
-two gauntlet runs this sprint opened with — **exactly one leaked per
-run**. After it: `rigproc: own, at exit — reaping 1 process(es)` and a
+processes on this box, one 45 hours old and one from each of the
+two gauntlet runs this sprint opened with: exactly one leaked per
+run. After it: `rigproc: own, at exit — reaping 1 process(es)` and a
 clean census; a deliberately planted orphan is met with `rigproc:
 stale from an earlier run — reaping 1 process(es)` on the next tool's
-first line. The marker is **argv[0], never the rest of the command
-line**, and this repo paid for that distinction in the same hour: a
+first line. The marker is argv[0], never the rest of the command
+line, and this repo paid for that distinction in the same hour: a
 first cut matched the whole cmdline and killed the shell that had
 merely TYPED `target/lobo-release` in a command. Every rig launch site
 now passes an ABSOLUTE program path so the marker names THIS checkout
 and can never reach another tree.
 
-**Suites.** corpus **253/253** lane-runs (unchanged — the deletion
+Suites. corpus 253/253 lane-runs (unchanged; the deletion
 removes assertions from an existing file rather than a file), prefork
-**35/35 → 38/38**, differential 3/3, proxy-differential 8/8,
+35/35 → 38/38, differential 3/3, proxy-differential 8/8,
 control-differential 9/9, signal 20/20, membudget 17/17, resolver 9/9,
 shell 15 probes (14 parity, 1 named delta, 0 red), and
 metrics/logdiff/dryrun/confcheck/tls-interop/tls-renewal/acme green.
@@ -437,8 +437,8 @@ push, with a live watch. The gauntlet's own last line is now
 measurement stated as a running total: one leak per run, and none
 after.
 
-**One finding recorded as a negative.** A single-process witness for
-#242 was written, measured — and thrown away. It asserted that a take
+One finding recorded as a negative. A single-process witness for
+#242 was written, measured, and thrown away. It asserted that a take
 against an emptied queue returns inside the listener's budget rather
 than parking, which is true; it is also true at the OLD pin, because
 one process cannot make the kernel say READY and then empty the queue
