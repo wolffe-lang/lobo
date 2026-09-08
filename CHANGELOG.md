@@ -2,17 +2,16 @@
 
 ## 0.1.0 — 2026-09-07 — the first artifact
 
-The first release of **lobo**, a web server written from parts in
+The first release of lobo, a web server written from parts in
 [wolf](https://github.com/wolffe-lang/wolf-lang). It reads an
 `nginx.conf`, serves static files and proxies, drains on reload
 without dropping a connection, acquires its own certificates over
-ACME, and is checked on every commit against a **pinned real
-nginx/1.30.4** running the same config — the differential harness is
-the test suite, not a comparison chart.
+ACME, and is checked on every commit against a pinned real
+nginx/1.30.4 running the same config.
 
 ### Install
 
-Download the archive for your host, unpack it, and run it in place —
+Download the archive for your host, unpack it, and run it in place;
 there is nothing to install and no dependency to resolve:
 
 ```sh
@@ -24,7 +23,7 @@ cd lobo-0.1.0-<host>
 ```
 
 `GETTING-STARTED.md` in the archive is the whole learner path, and it
-is the same script this release's CI runs against **this** archive on
+is the same script this release's CI runs against this archive on
 a clean runner before the release page is published.
 
 ### The hosts, and the two that are refused by name
@@ -36,9 +35,9 @@ a clean runner before the release page is published.
 | `x86_64-pc-windows-msvc` | **no** — named refusal until s60c |
 | `aarch64-unknown-linux-gnu` | **no** — named refusal until s60c |
 
-lobo ships exactly the hosts wolf's **release tier** serves. The other
-two are not an oversight and not a silence: wolf's LLVM release tier
-does not build them yet (upstream s60c), and `tools/lobo-dist` refuses
+lobo ships the hosts wolf's release tier serves. For the other
+two, wolf's LLVM release tier does not build them yet (upstream
+s60c), and `tools/lobo-dist` refuses
 to produce an archive for a host whose binary would not run. The gap
 closes when the tier does.
 
@@ -48,18 +47,17 @@ closes when the tier does.
 lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)
 ```
 
-A binary that cannot name the toolchain that built it is a binary
-nobody can debug. `-V` adds the standard-library pin, the tier and the
-module set. A build that is not this release says so with a `+dev`
-suffix — the archive's name carries it too, so a rehearsal build can
-never be mistaken for a release.
+`-V` adds the standard-library pin, the tier and the module set. A
+build that is not this release says so with a `+dev` suffix, and the
+archive's name carries it too, so a rehearsal build cannot be
+mistaken for a release.
 
 ### Reproducible from the pin, not from the runner
 
-`wolf-toolchain.toml` pins the exact wolf (`v0.2.6`, `398e5f5`), lupin
+`wolf-toolchain.toml` pins the wolf (`v0.2.6`, `398e5f5`), lupin
 (`v0.1.27`) and wolf-std (`bd12ef5`) this binary was built with, and
 the release workflow builds that toolchain from source on every dist
-host before it compiles a line of lobo — never the wolf a runner
+host before it compiles a line of lobo, never the wolf a runner
 happens to have. The archive's `BUILD` file records all of it, and the
 pack is byte-reproducible (`--sort=name`, one `SOURCE_DATE_EPOCH`,
 `gzip -n`), proven by packing twice and comparing digests. Each
@@ -78,54 +76,54 @@ Prometheus metrics endpoint; a memory budget; and `-t --request`, a
 config dry-run that answers *what would this config actually do*.
 
 `docs/directives.md` is the directive-by-directive table, and every
-place lobo deliberately differs from nginx is a **named delta** in it.
+place lobo differs from nginx is a named delta in it.
 
 ## ws22 — 2026-09-08 — the gap measured (the bar first, then the profile; nothing optimized)
 
-W8 is nginx parity, and a bar chosen after the results are in has
-measured nothing — so this sprint wrote the bar down first
+W8 is nginx parity. This sprint wrote the bar down first
 (`docs/PARITY.md`, committed before the tool existed), built the tool
-that measures it exactly as written (`tools/lobo-parity`; a `parity`
+that measures it as written (`tools/lobo-parity`; a `parity`
 workflow_dispatch input runs it on the CI runner), and only then asked
 where the time goes (`docs/PROFILE.md`, `sample(1)`, six profiles).
 
-- **The bar:** both shapes (close, keepalive) gate; N = cpus at
+- The bar: both shapes (close, keepalive) gate; N = cpus at
   c = 32; five interleaved pairs of `ab -t 5`; the median per-pair
   ratio nginx ÷ lobo ≤ 1.10; on linux x86-64 AND macOS arm64; a set
-  refused by name on load, generator ceiling, oracle spread or any
-  failure. The first set on each host was refused — one `ab` is the
+  refused with its reason on load, generator ceiling, oracle spread or
+  any failure. The first set on each host was refused: one `ab` is the
   ceiling on keepalive (0.93–1.04 cores), so the load is split across
   four generators now.
-- **linux x86-64, a valid set (the runner, 4 cpus):** close **2.27x**,
-  keepalive **110.9x** — NOT MET. lobo's keepalive on linux is
-  **781 req/s**: one request per 41 ms per connection, the 40 ms
+- linux x86-64, a valid set (the runner, 4 cpus): close 2.27x,
+  keepalive 110.9x, NOT MET. lobo's keepalive on linux is
+  781 req/s: one request per 41 ms per connection, the 40 ms
   delayed ACK meeting Nagle on lobo's two-write response. Nobody had
   taken lobo's req/s on linux before; macOS hides it (lobo#3).
-- **macOS arm64, the quiet box (load 2.55, after the last sibling lane
-  left):** close **1.15x** [1.13, 1.19], keepalive **2.76x** [2.65,
-  2.77] at N = 18 — NOT MET on both; 0.1.0's 1.50x/2.15x were one
+- macOS arm64, the quiet box (load 2.55, after the last sibling lane
+  left): close 1.15x [1.13, 1.19], keepalive 2.76x [2.65,
+  2.77] at N = 18, NOT MET on both; 0.1.0's 1.50x/2.15x were one
   20k-request run and an `ab`-bound nginx. Two earlier macOS sets,
   taken under sibling-lane load, are in the ledger as REFUSED with
   their loads.
-- **Where the time goes, one process, keepalive, 63 µs/request:**
+- Where the time goes, one process, keepalive, 63 µs/request:
   ~30 µs is the runtime's reactor round-trip (the serving thread
   parked in `__psynch_cvwait` 38% of the time, waiting for
   `wolf-reactor` to confirm a readiness `net_wait` had already
-  reported — three times per request; the syscalls are 12%); ~16 µs
+  reported, three times per request; the syscalls are 12%); ~16 µs
   file syscalls (one `open`, THREE `stat`); ~8 µs two `sendto`; ~7 µs
   user space of which lobo's own code is ~1.5. At eighteen hands on
   the close shape a hand is 64% parked in the accept herd. nginx's
-  whole request on the same box is 19 µs. Profiled twice — loaded and
-  quiet — and every proportion held within two points.
-- **wolf's vs lobo's:** ~35 µs the language's, ~12 lobo's, ~16 the
+  whole request on the same box is 19 µs. Profiled twice, loaded and
+  quiet, and every proportion held within two points.
+- wolf's vs lobo's: ~35 µs the language's, ~12 lobo's, ~16 the
   kernel's that nginx pays too. Filed: wolf-lang#257 (optimistic I/O
   in the runtime), wolf-lang#254 (no `TCP_NODELAY`, no `writev`),
   lobo#3 (the linux stall; one write per response is ws23's first
   change).
-- **The mid-end** (`WOLF_MIDEND=0`, #146, re-probed: the thirteenth
-  measurement, same ICE) is worth **nothing measurable** on lobo's
+- The mid-end (`WOLF_MIDEND=0`, #146, re-probed: the thirteenth
+  measurement, same ICE) is worth nothing measurable on lobo's
   parse + response-head path: 534/527/534 ms vs 546/542/536 ms per
-  300k iterations, and 563/555/558 vs 570/571/555 on the quiet box. The compiler is not where the gap is.
+  300k iterations, and 563/555/558 vs 570/571/555 on the quiet box.
+  The compiler is not where the gap is.
 - Trunk was RED at the stamp step before this sprint: `be46c61`
   landed past the `v0.1.0` tag without flipping the channel to
   `+dev`. Flipped here, as `lobo-stamp` prescribes.
