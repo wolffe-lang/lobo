@@ -1,26 +1,24 @@
 # Where the time goes (ws22, measured 2026-09-08)
 
-The bar is `docs/PARITY.md`; this page is the profile that says what
-stands between lobo and it. The tool is `sample(1)` (macOS's sampling
+`docs/PARITY.md` sets the bar; this page is the profile that says
+what stands between lobo and it. The tool is `sample(1)` (macOS's sampling
 profiler, no root needed for one's own process): ten seconds at one
 millisecond on ONE serving process while `ab -t 20 -c 32` drives it,
 the same 1 KiB file, the same loopback, the same session for every
-row. Numbers are the MAIN THREAD's — `sample` counts parked threads
+row. Numbers are the MAIN THREAD's. `sample` counts parked threads
 too, and lobo has three (main, `wolf-reactor`, `wolf-signal`); the
 two helpers sit 95–99% in `kevent` and `read` respectively and are
 not where the time goes. Host: nomad-1, Apple M5 Pro (12P+6E),
 macOS 26.4.1; lobo 0.1.0+dev at wolf 0.2.6 pin 398e5f5,
-`WOLF_MIDEND=0`; nginx 1.30.4 (the pin). **Taken twice**: once at
+`WOLF_MIDEND=0`; nginx 1.30.4 (the pin). Taken twice: once at
 load(1m) 6.3 → 16.8 while sibling lanes held the box, and again on
-the box idle (**load 2.55** at the set's start, is39 the last lane
-out — the coordinator's quiet-rig call). Every proportion below
+the box idle (load 2.55 at the set's start, with is39 the last lane
+out, per the coordinator's quiet-rig call). Every proportion below
 reproduced within two points between the two; the numbers quoted are
-the QUIET run's, and the loaded run is the evidence that a one-thread
-profile's shape survives a busy neighbour even though a req/s ratio
-does not.
+the QUIET run's. The loaded run shows that a one-thread profile's
+shape survives a busy neighbour, while a req/s ratio does not.
 
-The guess has been wrong twice in this repo (ws17, ws18). This is
-not a guess.
+Guesses about this have been wrong twice in this repo (ws17, ws18).
 
 ## One process, keepalive — lobo 15,822 req/s (63 µs/request) beside nginx 53,158 (19 µs)
 
@@ -71,48 +69,48 @@ In microseconds of the 63 (lobo) and 19 (nginx):
 | user space (wolf `strbuf`/list/malloc ~5; lobo's own code ~1.5) | ~7 | ~0.6 | mostly the runtime's string materialization (wolf-lang#191's seam); lobo's parser and loop are ~1.5 µs |
 | `net_wait` | 0.8 | 0.1 | — |
 
-**The split: of lobo's 63 µs, ~35 are the language's (the reactor
-handoff ~30, the string runtime ~5, and the missing writev/nodelay
-behind the second write), ~12 are lobo's own choices (two extra
-stats ~4, the second write and its reactor trip ~10 counted above,
-no open cache), and ~16 are what nginx pays too (one open, one stat,
-one receive, one send).** lobo's own code — the parser, the loop, the
-config table — is about 1.5 µs of 63. Nothing in lobo's user
-space is worth optimizing before the two shapes above are.
+Of lobo's 63 µs, ~35 are the language's (the reactor handoff ~30, the
+string runtime ~5, and the missing writev/nodelay behind the second
+write), ~12 are lobo's own choices (two extra stats ~4, the second
+write and its reactor trip ~10 counted above, no open cache), and ~16
+are what nginx pays too (one open, one stat, one receive, one send).
+lobo's own code (the parser, the loop, the config table) is about
+1.5 µs of 63. Nothing in lobo's user space is worth optimizing before
+the two shapes above are.
 
 ## One process, close — lobo 11,667 (86 µs) beside nginx 32,700 (31 µs)
 
-Same picture plus the accept: lobo main thread cvwait **39.7%**,
+Same picture plus the accept: lobo main thread cvwait 39.7%,
 `net_accept` 10.1% inclusive with `accept(2)` itself 1.1%, `net_wait`
 6.3%, `net_close` 1.6%; `open` 11.1%, `stat` 7.7%, `sendto` 7.1%.
-nginx: `open` ~35%, `kevent` ~31% (its idle wait — one worker is not
+nginx: `open` ~35%, `kevent` ~31% (its idle wait; one worker is not
 saturated at 32 connections of connect/close), `writev` ~10%,
 `close` ~9%, `accept` ~5%.
 
 ## Eighteen hands — one hand sampled
 
-**close, 19,300 req/s across 18 hands:** the sampled hand is
-**63.6% in cvwait and `net_accept` is 58.5% inclusive with
-`accept(2)` at 2.4%.** Every hand wakes on the level-triggered
-listener (`net_wait` is a `poll` over a shared fd; macOS distributes
-nothing — s137), every hand calls `net_accept`, and N−1 park in the
-reactor against the 5 ms accept budget for each connection. That is
-why the close shape burns 7–8 cores for 20k req/s while nginx's
+close, 19,300 req/s across 18 hands: the sampled hand is 63.6% in
+cvwait and `net_accept` is 58.5% inclusive with `accept(2)` at 2.4%.
+Every hand wakes on the level-triggered listener (`net_wait` is a
+`poll` over a shared fd; macOS distributes nothing, s137), every hand
+calls `net_accept`, and N−1 park in the reactor against the 5 ms
+accept budget for each connection. So the close shape burns 7–8 cores
+for 20k req/s while nginx's
 `accept_mutex`-free kqueue workers burn 3. The posture is lobo's
 (free-for-all, ws18); the park's cost per loser is the runtime's
 (#257); the missing `EPOLLEXCLUSIVE`/`reuse_port`-distribution is the
 host's.
 
-**keepalive, 48,400 req/s across 18 hands:** cvwait 38.7%, `poll`
-18.6% (idle — 32 connections over 18 hands), and **`os_signal_wait`
-7.2% + `signal::raise` 3.0% ≈ 10%**: the self-raise signal poll the
-loop runs every pass (the header note in `src/main.lu`), which is
-cheap per pass and not cheap when a hand's passes are short. lobo's.
+keepalive, 48,400 req/s across 18 hands: cvwait 38.7%, `poll` 18.6%
+(idle, 32 connections over 18 hands), and `os_signal_wait` 7.2% +
+`signal::raise` 3.0% ≈ 10%: the self-raise signal poll the loop runs
+every pass (the header note in `src/main.lu`), cheap per pass and
+expensive when a hand's passes are short. That one is lobo's.
 
 ## The mid-end: worth nothing here, measured
 
 `WOLF_MIDEND=0` is the shipped posture (wolf-lang#146). Re-probed at
-this pin — the THIRTEENTH measurement — still the dominance ICE in
+this pin (the THIRTEENTH measurement), still the dominance ICE in
 `std.x.crypto.curve25519.sc_muladd` (`%19 is not dominated by its
 definition`), reached from `config`'s `use std.x.crypto.curve25519`,
 so no lobo module graph builds with the mid-end on. What it would be
@@ -127,16 +125,16 @@ pairs, taken twice (load(1m) 2.9, and again in the quiet re-measure):
 | `WOLF_MIDEND=0` (shipped) | 534 · 527 · 534 | 563 · 555 · 558 |
 | mid-end on | 546 · 542 · 536 | 570 · 571 · 555 |
 
-**~1.8 µs per request either way; the mid-end is within noise and
-slightly negative on this path, both times.** Which is the same
-finding as the profile from the other side: lobo's user-space work is
-~1.5 µs of a 63 µs request, and no compiler pass moves the other 60.
+~1.8 µs per request either way; the mid-end is within noise and
+slightly negative on this path, both times. The profile says the same
+thing from the other side: lobo's user-space work is ~1.5 µs of a
+63 µs request, and no compiler pass moves the other 60.
 
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
   numbers in the parity ledger came from the CI runner, where lobo's
-  keepalive is **780 req/s** — the two-write response meeting Nagle
+  keepalive is 780 req/s: the two-write response meeting Nagle
   and linux's 40 ms delayed ACK (lobo#3), a stall this profile
   cannot see because macOS acks differently. A `perf`/`strace -c` leg
   on the runner is ws23's first instrument.
