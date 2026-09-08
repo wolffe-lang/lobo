@@ -221,7 +221,12 @@ done
 [ "$served" = 0 ] || { cat logs/serve.out >&2; fail "smoke: nothing answered on 127.0.0.1:$port within 10 s"; }
 head -1 logs/headers | grep -q "^HTTP/1.1 200" || fail "smoke: the page answered $(head -1 logs/headers | tr -d '\r'), not 200"
 cmp -s logs/body html/index.html || fail "smoke: the served bytes differ from html/index.html"
-grep -qi "^Server: lobo/$version\r*$" logs/headers || fail "smoke: the Server header is $(grep -i '^Server:' logs/headers | tr -d '\r'), not lobo/$version"
+# STRIP the CR, never match it: `\r` in a POSIX BRE is a literal `r`
+# under GNU grep, so `\r*$` silently means "zero or more r" and the
+# header never matches on Linux. Caught by CI's linux leg against a
+# macOS-green tree — the exact reason the archive is built on both.
+srv=$(tr -d '\r' < logs/headers | grep -i '^Server:' | head -1)
+[ "$srv" = "Server: lobo/$version" ] || fail "smoke: the Server header is \"$srv\", not \"Server: lobo/$version\""
 echo "lobo-dist: smoke — GET / on 127.0.0.1:$port answered 200, $(wc -c < logs/body | tr -d ' ') bytes, byte-identical to html/index.html, Server: lobo/$version"
 
 if ! ./lobo -s stop -c conf/smoke.conf > logs/stop.out 2>&1; then
