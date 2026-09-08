@@ -37,6 +37,12 @@ if ! "$WOLF" fmt --check wolf.pkg; then
 fi
 echo "wolf.pkg ok"
 
+step "stamp (ws19: every version site equal, the channel honest against the tags, the toolchain the pin's)"
+if ! tools/lobo-stamp --check; then
+    echo "lobo-gauntlet: FAILED at stamp — see above for the ritual" >&2
+    exit 1
+fi
+
 step "fmt --check (src, tests)"
 if ! "$WOLF" fmt --check src tests; then
     echo "lobo-gauntlet: FAILED at fmt — run \`$WOLF fmt src tests\` and re-check" >&2
@@ -186,6 +192,12 @@ fi
 step "acme (cert auto end-to-end vs a loopback CA: cold/renew/CA-down/coexist; ws06)"
 if ! tools/lobo-acme; then
     echo "lobo-gauntlet: FAILED at acme — the ACME end-to-end rig (ws06)" >&2
+    exit 1
+fi
+
+step "dist (ws19: the release archive — built from the pin, packed twice, unpacked elsewhere with the host's tar, smoked: -v against BUILD, -t, a served page byte-compared, -s stop)"
+if ! tools/lobo-dist; then
+    echo "lobo-gauntlet: FAILED at dist — the archive a stranger would download does not hold (ws19)" >&2
     exit 1
 fi
 

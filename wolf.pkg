@@ -7,6 +7,6 @@
 // (D15-spirit, the ws00 contract's reading).
 pkg {
     name:    "local/lobo",
-    version: "0.0.1",
+    version: "0.1.0",
     edition: "1",
 }

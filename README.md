@@ -37,6 +37,22 @@ from a bug report.
 
 ## Status
 
+ws19 (wsc07): **lobo is 0.1.0, and it ships.** `lobo -v` prints
+`lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)` — the
+version AND the toolchain that built it, because a binary that cannot
+name its own provenance is one nobody can debug. `tools/lobo-dist`
+builds the release archive with the toolchain `wolf-toolchain.toml`
+pins (never the one a runner happens to have), packs it reproducibly,
+then unpacks it somewhere else and smokes it: `-v` against the
+archive's own `BUILD` record, `-t` on the stock config, a page fetched
+and byte-compared, `-s stop`. `.github/workflows/release.yml` does the
+same on both hosts wolf's release tier serves (linux x86-64, macOS
+aarch64 — windows x86-64 and linux aarch64 are named refusals until
+s60c), publishes only when both archives are present, and then a job
+with no checkout at all downloads the PUBLISHED archive on a clean
+runner and repeats the smoke. A release nobody has installed is a
+claim, not a fact.
+
 ws18 (wsc07): **`worker_processes N` is N-ish at last.** The master
 binds the listeners and hands them down (`os_spawn_with` +
 `net_adopt_listener`); every hand accepts on ONE socket, free-for-all,

@@ -34,6 +34,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           path: lobo
+          fetch-depth: 0   # the stamp step holds the channel against the tags (ws19)
 
       - name: read toolchain pins
         id: pins

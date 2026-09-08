@@ -1,5 +1,233 @@
 # Changelog
 
+## 0.1.0 — 2026-09-07 — the first artifact
+
+The first release of **lobo**, a web server written from parts in
+[wolf](https://github.com/wolffe-lang/wolf-lang). It reads an
+`nginx.conf`, serves static files and proxies, drains on reload
+without dropping a connection, acquires its own certificates over
+ACME, and is checked on every commit against a **pinned real
+nginx/1.30.4** running the same config — the differential harness is
+the test suite, not a comparison chart.
+
+### Install
+
+Download the archive for your host, unpack it, and run it in place —
+there is nothing to install and no dependency to resolve:
+
+```sh
+tar -xzf lobo-0.1.0-<host>.tar.gz
+cd lobo-0.1.0-<host>
+./lobo -v
+./lobo -t -c conf/lobo.conf
+./lobo -c conf/lobo.conf serve      # then: curl -i http://127.0.0.1:8080/
+```
+
+`GETTING-STARTED.md` in the archive is the whole learner path, and it
+is the same script this release's CI runs against **this** archive on
+a clean runner before the release page is published.
+
+### The hosts, and the two that are refused by name
+
+| host | archive |
+|---|---|
+| `x86_64-unknown-linux-gnu` | yes |
+| `aarch64-apple-darwin` | yes |
+| `x86_64-pc-windows-msvc` | **no** — named refusal until s60c |
+| `aarch64-unknown-linux-gnu` | **no** — named refusal until s60c |
+
+lobo ships exactly the hosts wolf's **release tier** serves. The other
+two are not an oversight and not a silence: wolf's LLVM release tier
+does not build them yet (upstream s60c), and `tools/lobo-dist` refuses
+to produce an archive for a host whose binary would not run. The gap
+closes when the tier does.
+
+### `lobo -v` names its own provenance
+
+```
+lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)
+```
+
+A binary that cannot name the toolchain that built it is a binary
+nobody can debug. `-V` adds the standard-library pin, the tier and the
+module set. A build that is not this release says so with a `+dev`
+suffix — the archive's name carries it too, so a rehearsal build can
+never be mistaken for a release.
+
+### Reproducible from the pin, not from the runner
+
+`wolf-toolchain.toml` pins the exact wolf (`v0.2.6`, `398e5f5`), lupin
+(`v0.1.27`) and wolf-std (`bd12ef5`) this binary was built with, and
+the release workflow builds that toolchain from source on every dist
+host before it compiles a line of lobo — never the wolf a runner
+happens to have. The archive's `BUILD` file records all of it, and the
+pack is byte-reproducible (`--sort=name`, one `SOURCE_DATE_EPOCH`,
+`gzip -n`), proven by packing twice and comparing digests. Each
+archive ships a `.sha256` beside it.
+
+### What is in it
+
+Static serving with nginx's `root`/`index`/`try_files` resolution and
+its MIME map; a reverse proxy with upstreams, a resolver and the
+gateway error surface; TLS, including `cert auto` (built-in ACME)
+beside a working certbot symlink layout; `worker_processes N` prefork
+with inherited listeners and per-hand control sockets; reload/quit/
+stop/reopen over a unix-domain control endpoint; nginx-format access
+and error logs (byte-compared against nginx's own output in CI); a
+Prometheus metrics endpoint; a memory budget; and `-t --request`, a
+config dry-run that answers *what would this config actually do*.
+
+`docs/directives.md` is the directive-by-directive table, and every
+place lobo deliberately differs from nginx is a **named delta** in it.
+
+## ws19 — 2026-09-07 — the artifact (lobo gets a version, and an archive a stranger could run)
+
+wsc07's second sprint, and the one W7 is actually about: *someone
+other than us can run it*. What this sprint owed was a version, a
+release workflow that builds from the pin, an archive that carries
+what a first-time user needs, and a job that installs the PUBLISHED
+archive on a clean machine and proves it serves. All four landed.
+
+**THE PIN, first, because the archive is reproduced from it.** ws18
+pinned wolf at a DEV-STAMPED trunk sha (`0.2.5+dev.32f66bf`) because
+r09 had not tagged v0.2.6 yet. It has now, so this sprint takes the
+**v0.2.6 RELEASE TAG (`398e5f5`)** — a released tag is what a stranger
+can reproduce and a dev stamp is not. The contract asked for the delta
+to be measured rather than assumed, and it was: `32f66bf → 398e5f5` is
+**five commits** (`a369b22` spec, `6919280` ledger, `b2880a4`
+CHANGELOG, `e257914` release sites, `398e5f5` merge), ten files,
++325/−89, and under `crates/` **exactly one** — the interface-pretty
+test snapshot re-recording its own toolchain stamp 0.2.5 → 0.2.6. Zero
+compiler source, zero runtime source. So the tag cost this sprint no
+source motion at all: what moved in lobo is the `.wolfi` toolchain
+stamp (0.2.6, fourteen modules, **ZERO item motion**) and the pin
+file's `version_line` losing its `+dev`. lupin went v0.1.26 → v0.1.27
+(is38) alongside; **the lupin lane gap narrows and this sprint does
+not spend it** — `net_wait`, `net_listen_with` and `os_cpus` now exist
+on the reference machine, so tests that declared `lanes: native` for
+those calls alone could widen, but widening a lane is a measurement
+per test, routed as residue to the next maintenance sprint. Deltas
+classed: ZERO behavioral, ZERO diagnostic, one mechanical.
+
+**THE VERSION, and the hole underneath it.** lobo is **0.1.0** and
+`-v` prints
+
+```
+lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)
+```
+
+— nginx's prefix, wolf's parenthetical, and W7's acceptance criterion
+met literally. `-V` adds the std tree, the tier posture and the module
+set. The hole: **a wolf program cannot ask what compiled it.** `wolf
+--version` gets its own stamp from a compile-time env its driver
+reads; a wolf PROGRAM has no such input — `wolf build` takes no
+define, the language has no compile-time environment read, and D33
+forbids the build script that would write one. So lobo's provenance is
+**SOURCE**: five constants at the top of `shell.lu`
+(`release_version`, `release_channel`, `toolchain_version`,
+`toolchain_pin`, `std_rev`). A source stamp is a lie waiting to
+happen, so `tools/lobo-stamp` — a gauntlet step — is what keeps it
+true: it holds every version site equal (`wolf.pkg`, the wire token in
+`serve.default_opts`, the five constants, `wolf-toolchain.toml`'s
+`[wolf] version_line` and `[std] rev`), and it holds the **channel**
+against git's own tags. `""` claims to BE `v<version>` and is admitted
+only when no such tag exists yet or it points at HEAD; `"+dev"` is the
+honest answer everywhere else, and the gate is RED between the tag and
+the commit that flips the channel — **that red is the design.** Filed
+upstream as **wolf-lang#247**: a builtin naming the compiling
+toolchain, D57 for programs. The day it lands, two of the five
+constants become that call and this tool stops holding them.
+
+**THE ARCHIVE.** `tools/lobo-dist` builds with the toolchain
+`wolf-toolchain.toml` names — `lib-toolchain.sh` refuses identity
+drift before a line compiles, which is what "reproducible from the pin
+file" *means*, and the failure the target exists to prevent is
+building with whatever wolf a runner has. The build is the gauntlet's
+release tier flag for flag (`WOLF_MIDEND=0` while wolf-lang#146
+stands, TWELFTH measurement, still open). The archive is flat: the
+binary, `conf/lobo.conf` (an nginx.conf serving `html/` on loopback
+8080), `html/index.html`, an empty `logs/`, `GETTING-STARTED.md`,
+README, CHANGELOG, `docs/`, LICENSE, and **BUILD** — the provenance
+record the smoke reads back against the binary. The pack is the
+reproducible-builds recipe (`--sort=name`, one `SOURCE_DATE_EPOCH`,
+`--numeric-owner`, `gzip -n`) and the tool **proves the pack half by
+packing twice and comparing digests** rather than claiming it. GNU tar
+is required for the pack and refused by name when absent (macOS ships
+bsdtar); UNPACKING needs nothing special, because a learner has
+nothing special.
+
+Measured on nomad-1 (aarch64-apple-darwin): just under **3 MB**,
+packed twice identical, and the whole build-pack-unpack-smoke cycle
+runs in **7 seconds** — cheap enough that it is a gauntlet step, so
+the archive a stranger would download is proven on every commit rather
+than at the tag. (No digest is quoted here on purpose: this file is
+*inside* the archive, so an entry naming the archive's own sha256
+would be a fixed point that does not exist. The `.sha256` beside each
+asset on the release page is the one that means anything.)
+
+**THE SMOKE, twice.** `tools/lobo-dist` ends by unpacking its own
+archive somewhere else with the HOST's tar and running it as a learner
+would: `-v` compared against the archive's own BUILD line, `-t -c
+conf/lobo.conf`, serve, `GET /`, the body **byte-compared to
+`html/index.html`**, the `Server:` header, then `-s stop` and a
+liveness check that it actually went down. First run: `200`, **934
+bytes, byte-identical**, `Server: lobo/0.1.0`, `stop: shutting down
+(generation 1)`. `.github/workflows/release.yml` then does it a second
+time on a runner with **no checkout at all** — no lobo source, no
+wolf, nothing but the published archive, curl and tar — after
+verifying the `.sha256`. A release nobody has installed is a claim,
+not a fact.
+
+**THE WORKFLOW.** A dist matrix over the two hosts wolf's RELEASE tier
+serves (linux x86-64, macOS aarch64); windows x86-64 and linux
+aarch64 are **named refusals until s60c**, in the release notes and
+in `lobo-dist`, which refuses to produce an archive for a host whose
+binary would not run. Every leg clones the pinned siblings and builds
+the pinned wolf exactly as `ci.yml` does — and **if `WOLF_CI_TOKEN` is
+absent this job FAILS, loudly.** ci.yml may loud-skip because local
+runs remain its gate; a release job that publishes nothing while
+reporting green is a different thing, and it is a lie. The release is
+a DRAFT until a `publish` job counts the assets and refuses at fewer
+than two archives and two digests (#226's shape, twice-proven
+upstream). Notes are cut from this file by `tools/lobo-release-notes`
+(#214's mechanism: wolf's own v0.2.1 and v0.2.2 shipped empty bodies
+for want of it), and `workflow_dispatch` runs the same dist and smoke
+jobs from any ref — because a release workflow that has never run is
+the worst kind of untested code, and the tag is not a lane's to press.
+
+**A BUG THE SMOKE FOUND, of a shape this repo has seen before.**
+`lobo-dist`'s smoke `cd`s into the unpacked archive, and
+`lib-toolchain.sh` resolves the toolchain as `.wolf-bin/wolf` —
+RELATIVE. From inside the archive that is a bare `No such file or
+directory`. It is ws18/lobo#1's shape exactly (a tool that names its
+binary relatively cannot be used from anywhere else), and it was
+caught by RUNNING the smoke rather than reasoning about it. Fixed:
+`lobo-dist` absolutizes `$WOLF` and `$LUPIN` before it goes anywhere.
+
+**AND A SECOND ONE, which only the other kernel could find.** The
+smoke asserted the `Server:` header with `grep -qi "^Server:
+lobo/$version\r*$"`. In a POSIX **basic** regex `\r` is a literal
+`r`, so under GNU grep that pattern silently reads *zero or more
+`r`* and never matches a real CRLF header — macOS was green, linux
+was red, and the archive built and served correctly on both. The
+assertion now strips the CR instead of trying to match it. Two bugs
+this sprint, both in the CHECKING code rather than the server, and
+both found by running the thing on a machine that was not the one it
+was written on. That is the entire argument for the learner smoke.
+
+**WHAT W7 STILL WAITS ON, said plainly.** lobo is the only PRIVATE
+repo in the org. The learner smoke is a clean-MACHINE test today — it
+downloads with the workflow token — but not yet a clean-STRANGER
+test, because an unauthenticated download of a private repo's release
+404s. Making lobo public is the human's decision and no lane's to
+take. Nothing in the workflow changes when it flips; the smoke simply
+stops needing a token.
+
+**Also**: lobo carries a **LICENSE** at last (GPL-3.0, byte-identical
+to every sibling repo in the org — it was the only one without),
+`docs/GETTING-STARTED.md` is the learner path the release's own CI
+executes, and CLAUDE.md's host-tool list gains GNU tar and curl.
+
 ## ws18 — 2026-09-06 — the turn deletes itself (and it was worth more than the accept path)
 
 wsc07's first sprint, and a maintenance one by contract: the human's
