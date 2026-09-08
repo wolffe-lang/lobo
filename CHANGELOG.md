@@ -1170,42 +1170,42 @@ no module.
 
 Pins advance first, gauntlet green at the trio before a line changed
 (suite counts IDENTICAL to the old pin, deltas classed): wolf
-**e6cf24e** — trunk, D57 dev-stamped `0.2.1+dev.e6cf24e`, because the
-number this sprint came for landed in s131 AFTER the v0.2.1 tag —
-lupin **v0.1.20** (wsm04's named fallback retires; lobo, wolf-std and
+e6cf24e (trunk, D57 dev-stamped `0.2.1+dev.e6cf24e`, because the
+number this sprint came for landed in s131 AFTER the v0.2.1 tag),
+lupin v0.1.20 (wsm04's named fallback retires; lobo, wolf-std and
 the driver's own pairing line name the same interpreter for the first
-time) and wolf-std **a62a5d4** for sc31. #146 re-probed at the new
+time) and wolf-std a62a5d4 for sc31. #146 re-probed at the new
 pin, FIFTH measurement, ICE unchanged, `WOLF_MIDEND=0` stays; #192's
 misleading W1001 is GONE (r04 fixed it). The interface re-record moves
 every header and export-hash with ZERO item motion in eleven modules.
 
-**The measured half.** `region_bytes(r)` / `live_region_bytes()`
+The measured half. `region_bytes(r)` / `live_region_bytes()`
 ([mem.region.account.1/.2]) reach lobo: `serve` reads the ledger
 inside the per-response and per-chunk regions the ws10 audit put
 there, and the entry high-waters it per generation BESIDE ws10's
-metered figure — two numbers answering two questions, published
+metered figure: two numbers answering two questions, published
 together and never subtracted from each other (`mem-rt-hw` and
 `live-region-bytes:` in status text, `mem_rt_high_water` and
 `live_region_bytes` in the JSON; additive, schema stays 1). ws10 could
 only argue the streaming path was O(1) in file size from RSS noise;
-the runtime now states it as an EQUALITY — 128 KiB and 256 KiB stream
+the runtime now states it as an EQUALITY: 128 KiB and 256 KiB stream
 to the same high water, pinned in `tests/serve/region_measured.lu`.
 The same measurement found what BUDGET.md now teaches: a 64 KiB chunk
-charges its region **1,048,560 bytes**, 16× the payload — 8× because a
+charges its region 1,048,560 bytes, 16× the payload, 8× because a
 byte buffer is a `List[int]` and 2× because the ledger is cumulative
-by contract. Not a lobo bug, not absorbed: **wolf-lang#203** filed
+by contract. Not a lobo bug, not absorbed: wolf-lang#203 filed
 with the numbers, and #187 commented because the gap bears on the cap
 half's units. The cap arm itself: s132 had not merged at Act-2 start,
-so the contract's **named-gate defer** was taken — the meter ships
-query-only and honest, #187 owns the adoption.
+so the contract's named-gate defer was taken: the meter ships
+query-only, and #187 owns the adoption.
 
-**`/metrics`, in core.** A new `metrics` module holds ONE registry —
-name, type, label shape and help for every family — and `sample`
+`/metrics`, in core. A new `metrics` module holds ONE registry
+(name, type, label shape and help for every family) and `sample`
 asserts the labels it was handed are exactly the ones declared, so a
 per-URI or per-client series is not discouraged or linted but
 UNWRITEABLE. `tools/lobo-metrics` (a gauntlet step) measures the
 consequence on a live server: four more distinct URIs add exactly zero
-series. Twenty-one families cover every landed sibling — connections,
+series. Twenty-one families cover every landed sibling: connections,
 requests by status class, a fixed 5ms..10s duration histogram, the
 proxy leg, TLS handshake failures by reason, generation info as the
 Prometheus info-metric idiom, ws09's dropped lines, ws11's event
@@ -1214,22 +1214,22 @@ plain ints in the poll loop's own frame, which is the MEASURED
 hot-path answer for a spawn-free server: one mutator needs neither
 shards nor atomics, an increment is one checked add, and the module
 header names the day that stops being true. The endpoint is two
-phase — `serve` recognises the path, `main` renders it — because
+phase (`serve` recognises the path, `main` renders it) because
 rendering per pass would leak megabytes an hour into #191's root arena
 to answer a scrape a minute. `/status.json` serves ws08's object on
 the same listener, proving its design-once note. The scrape is an
 ORDINARY request: it counts itself one behind, it logs, and under a
-tiny `memory_budget` it 503s (site `admin`, the fifth) — which is
+tiny `memory_budget` it 503s (site `admin`, the fifth), which is
 correct, and a rig case. `metrics on|off` is lobo-native, `-t`
 validated in nginx's own flag wording, and linted twice: L010 for the
-one-way door, L011 when the endpoint sits on a routable listen —
+one-way door, L011 when the endpoint sits on a routable listen,
 because at v0 the bind address IS the access posture, and the docs say
 so in four lines. `docs/metrics.md` is generated from the registry
 (`tools/lobo-metricsdoc`, a gauntlet step), so a Grafana panel and a
 live scrape cannot disagree; the exposition is checked clause by
 clause against the vendored Prometheus text format spec.
 
-**The row gets a name.** wolf-std#3's `named`/`row_name` are adopted
+The row gets a name. wolf-std#3's `named`/`row_name` are adopted
 at both TLS-client error sites: forty arms re-listing a twenty-one-row
 vocabulary lobo does not own become two `named(...) else |Row(name)|`
 handlers plus a per-site hint table keyed by the row's stable NAME.
@@ -1242,17 +1242,17 @@ Corpus 203 → 213. wsc03 closes here; the closeout declares W5.
 ## ws11 — 2026-09-01 — replay the race
 
 A scheduling bug becomes an artifact. The rig gains the seeded
-half of lupin's determinism surface (pin HELD at 0.1.19 — v0.1.20
-is match-arms, no explore change; probed day one): the corpus
+half of lupin's determinism surface (pin HELD at 0.1.19; v0.1.20
+is match-arms, no explore change, probed day one): the corpus
 runner takes `//! explore: N` (the file's whole schedule space,
-every gauntlet run, green only on agreement WITH a closed frontier
-— an open one is red, tense discipline) and `LOBO_SEED` (every
+every gauntlet run, green only on agreement WITH a closed frontier;
+an open one is red, tense discipline) and `LOBO_SEED` (every
 lupin-lane run under a bug report's seed, failures printing the
 replay command). The witness pair keeps the ws08 drain-finish
 hazard alive as a specimen: `drain_finish_race.lu` decides
 retirement by racing the timeout message against the closes in one
-select — FIFO-clean (a laptop never sees it), 3 distinct outcomes
-across 16 schedules under explore — while `drain_finish_fixed.lu`
+select, FIFO-clean (a laptop never sees it), with 3 distinct outcomes
+across 16 schedules under explore, while `drain_finish_fixed.lu`
 is the real loop's shape (retirement is a STATE check) and closes a
 24-schedule frontier on one outcome, held by `explore: 64` forever.
 `tools/lobo-replay` (a gauntlet step) walks the whole story every
@@ -1260,39 +1260,39 @@ run: the finding, the `.loborace` artifact (schema 1: seed +
 decision stream + pinned bytes + lupin identity), three
 byte-identical replays FROM the artifact (2× seed, 1× stream), the
 fix's closed frontier. The server side stays honest: lobo is
-spawn-free, so it never prints a seed — instead every vocabulary
+spawn-free, so it never prints a seed. Instead every vocabulary
 event now carries `seq=` (stamped at the emission seam; builders
 and prefix pins untouched) and status carries `events:` (additive,
 schema stays 1), making an attached log an ordered, GAP-VISIBLE
 event stream with a completeness anchor. docs/REPLAY.md states the
-boundary exactly (values, real time, the membrane; no production
-flight recorder — Tier 2 deferred, asks filed). Corpus 200 → 203
+boundary (values, real time, the membrane; no production
+flight recorder, Tier 2 deferred with the asks filed). Corpus 200 → 203
 (the specimen pair's lupin lanes plus the fixed twin's explore run).
 
 ## wsm04 — 2026-08-31 — the doors open inward
 
 Lobo consumes its own library's TLS client. Pins advance to wolf
 b80d239 (D57 dev-stamped; no v0.2.1 tag existed at acquisition), the
-lupin v0.1.19 tag, and wolf-std 26f0588 — the bump that carries
-sc29's `std.x.tls.client` — with the full gauntlet green at the trio
+lupin v0.1.19 tag, and wolf-std 26f0588 (the bump that carries
+sc29's `std.x.tls.client`) with the full gauntlet green at the trio
 before a line changed (corpus 195/195; #146 re-probed byte-identical,
 the midend stays off). Then the last two named refusals in the config
-surface retire: **`proxy_pass https://`** (D21's upstream leg) dials
-through the std client — trust anchors via `proxy_ssl_trusted_
+surface retire: `proxy_pass https://` (D21's upstream leg) dials
+through the std client, with trust anchors via `proxy_ssl_trusted_
 certificate` (REQUIRED: lobo has no unverified mode, nginx's
 verify-off default is a named delta), SNI always, chain+hostname+
 CertificateVerify before a request byte leaves, TLS failures mapped
 to 502 (504 for a mid-handshake deadline) with the row named in the
-error log — and the differential grows an https case where nginx and
+error log; and the differential grows an https case where nginx and
 lobo both proxy a VERIFIED fixture-cert upstream, client legs
-byte-equal (8/8). **https `cert_ca`** (D25) follows: the ACME client
+byte-equal (8/8). https `cert_ca` (D25) follows: the ACME client
 dials an https directory verified against `cert_ca_root`, the
 harness CA serves its whole RFC 8555 directory through lobo's own
 TLS server half behind the conn seam (`--tls`), and cold issuance +
 renewal run over TLS end to end. The loopback law is UNCHANGED and
 forever: only the https *transport* gate retired; a non-loopback CA
-is still a named -t refusal. Measured honestly: the std client's
-handshake costs ~3.6s on this rig (native tier, WOLF_MIDEND=0 —
+is still a named -t refusal. Measured: the std client's
+handshake costs ~3.6s on this rig (native tier, WOLF_MIDEND=0,
 #146's residue), stated where it moves deadlines, asserted nowhere
 tighter. Corpus 195 → 200.
 
@@ -1306,7 +1306,7 @@ as the `budget-exceeded` error event and the status stanza's per-gen
 `mem-hw`/`budget-503s` aggregates. The perimeter fence lands
 nginx-named: `client_max_body_size` and `large_client_header_buffers`
 implemented with the oracle's own invalid-value spellings. The
-structure audit — the sprint's soul — found lobo held ZERO region
+structure audit found lobo held ZERO region
 blocks (every allocation process-lifetime): response bodies now die
 in per-response regions (~290 → ~25 KB/request, the
 `lobo-membudget` gauntlet witness pins bodies-O(1) differentially),
