@@ -138,6 +138,35 @@ cannot see is not a bar. Not met is any gating cell above 1.10.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · QUIET BOX · **NOT MET on both shapes** (the set refused on the non-gating cell only)
+
+Taken after the last sibling lane (is39) left the box: load(1m)
+**2.55** at the start, 5 pairs × `ab -t 5`, c=32 over 4 generators,
+lobo 0.1.0+dev at wolf 0.2.6 pin 398e5f5, nginx 1.30.4
+(`ws22-quiet-remeasure.log`):
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo cores | nginx cores | ab max |
+|---|---|---|---|---|---|---|---|
+| **N=18 c=32** | close | 18,126 | 20,869 | **1.151x** [1.128, 1.189] | 8.17 | 3.65 | 0.36 |
+| **N=18 c=32** | keepalive | 44,622 | 121,942 | **2.761x** [2.652, 2.771] | 12.73 | 11.95 | 0.36 |
+| N=1 c=32 | close | 13,102 | 31,788 | 2.419x [2.243, 2.645] | 0.95 | 0.64 | 0.30 |
+| N=1 c=32 | keepalive | 17,704 | 69,902 | 3.991x [3.056, 4.018] | 0.99 | 0.94 | 0.30 |
+
+The tool refused the set on exactly one count: nginx's five N=1
+keepalive numbers spread 1.298 max/min — the non-gating cell, and the
+single-process P-core/E-core swing this box has shown in every set
+today. Both gating cells were stable (spreads under 1.15), the
+generators were at 0.36 cores, nothing failed, the load was under
+the rule. The verdict on the gating cells is therefore reported:
+**close 1.151x and keepalive 2.761x at N=18 — NOT MET on macOS**,
+with the caveat that the tool's refusal scope (any cell vs the
+gating cells) is a definition question ws23 should settle BEFORE its
+next set, in writing, and not by looking at this table. Read against
+0.1.0's table: the close gap on this host narrowed from 1.50x to
+1.15x with nothing changed in lobo — the old number was one
+20,000-request run — and the keepalive gap is 2.76x, not 2.15x,
+because the old nginx number was `ab`'s ceiling.
+
 ### 2026-09-08 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · **VALID** · **NOT MET on both shapes**
 
 `ci.yml` run 34251691870 (workflow_dispatch, `parity=true`), load(1m)
@@ -164,7 +193,7 @@ answers 25,031 on the same cell, and the close gap on linux is
 2.27x, not the 1.26x the refused set had suggested. That is what the
 generator rule is for.
 
-### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · **REFUSED** (one generator; the oracle unstable at N=1)
+### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · **REFUSED** (one generator; the oracle unstable at N=1) · TAKEN UNDER SIBLING-LANE LOAD
 
 Not a result; recorded because it is the first set ever taken against
 the bar and the refusal is the bar working. load(1m) 2.52, 5 pairs ×
@@ -186,7 +215,7 @@ which looks like the scheduler landing one process on an efficiency
 core or a performance core, and is a host fact the N=1 cell will
 have to live with here (the bar does not gate on N=1).
 
-### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · **REFUSED** (load 4.35; four generators)
+### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · **REFUSED** (load 4.35; four generators) · TAKEN UNDER SIBLING-LANE LOAD
 
 The k=4 set, armed behind a waiter for load < 2.9 that a sibling
 lane's corpus loop never let clear; taken after a bounded wait at
