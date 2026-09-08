@@ -60,19 +60,18 @@ and the kernel distributes the work — measured at 36/29/26 over three
 hands, with `accepted=` on every row of `lobo status` so an operator
 can see it. The serving loop blocks on `net_wait` instead of
 time-slicing with deadlines, which took one lobo process from **37 to
-13,508 req/s** on a connection-per-request load. ws17 had to serialize
-accepts behind nginx's own `accept_mutex` shape because `net_accept`
-parked in a blocking syscall after its readiness wait (wolf-lang#242,
-filed by that sprint); the fix landed upstream and **ws18 deleted the
-workaround** — three hands go from 12,866 to **23,663 req/s** (1.84x)
+13,508 req/s** on a connection-per-request load. Accepts first had to
+be serialized behind nginx's own `accept_mutex` shape, because
+`net_accept` parked in a blocking syscall after its readiness wait
+(wolf-lang#242, filed from here); once the fix landed upstream **that
+workaround was deleted** — three hands go from 12,866 to **23,663 req/s** (1.84x)
 and eighteen hands on a keepalive load from 9,554 to **38,961**
 (4.1x), because the turn had been capping the SERVING path as well as
 the accept path. The control endpoint takes orders over a
 **unix-domain socket** where the host has one, so file permissions are
 the boundary, and each hand gets its own. The whole table, both
 distribution shapes measured, and the three gates in the order they
-were found are in docs/WORKERS.md. See the track plan
-(Track 6) in the planning repo; sprints are contracts. This is also, deliberately, a flagship
-codebase for reading production wolf: many agents, frozen `.wolfi`
+were found are in docs/WORKERS.md. This is also, deliberately, a
+flagship codebase for reading production wolf: frozen `.wolfi`
 interfaces between modules, and every language pothole filed
 upstream as an issue.
