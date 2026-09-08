@@ -11,18 +11,24 @@
 # prints is what docs/PARITY.md's ledger and the campaign closeout
 # carry, dated and named by host.
 #
-#   tools/lobo-parity [pairs] [seconds] [concurrency] [N]
+#   tools/lobo-parity [pairs] [seconds] [concurrency] [N] [gens]
 #     pairs        interleaved pairs per cell (default 5 — the bar's)
 #     seconds      ab -t per run (default 5 — the bar's)
-#     concurrency  ab -c (default 32 — the bar's)
+#     concurrency  TOTAL concurrent connections (default 32 — the bar's)
 #     N            worker count for the gating cell (default: this
 #                  box's cpu count — the bar's); the N=1 cell is
 #                  always taken too and never gates
+#     gens         ab processes the load is split across (default 4;
+#                  each runs -c concurrency/gens) — see below
 #
 # The generator is ab(1) — single-threaded, on every macOS and in
-# apache2-utils on linux — and its own cpu ÷ wall is printed for
-# every run because a single thread can be the ceiling on the
-# keepalive shape (docs/PARITY.md names why). "cores" is Σ cpu time
+# apache2-utils on linux — and ONE ab is the ceiling on the keepalive
+# shape: the first set ever taken against the bar (ws22, this box)
+# had nginx at 114k req/s with ab at 0.93 cores, refused by the rule
+# below. So the load is split across `gens` ab processes started
+# together, each with its share of the connections; req/s is their
+# SUM, wall the longest, and every one's own cpu ÷ wall is checked
+# against the ceiling (the max is printed). "cores" is Σ cpu time
 # over the server's process tree ÷ the run's wall, read off ps(1)
 # after each run: the host's accounting, not the server's claim.
 set -u
@@ -52,6 +58,9 @@ PAIRS=${1:-5}
 SECS=${2:-5}
 CONC=${3:-32}
 N=${4:-$cores}
+GENS=${5:-4}
+PERGEN=$((CONC / GENS))
+[ "$PERGEN" -ge 1 ] || { echo "lobo-parity: REFUSED — concurrency $CONC cannot split across $GENS generators" >&2; exit 1; }
 scratch="$(pwd)/target/parity"
 rm -rf "$scratch"
 mkdir -p "$scratch/www" "$scratch/logs"
@@ -61,10 +70,22 @@ load1=$(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ 
 host="$(uname -sm)"
 stamp=$(date -u +%Y-%m-%dT%H:%MZ)
 
-cpu_seconds() { # cpu_seconds <pids...> — Σ ps cputime, in seconds
-    ps -o time= -p "$(echo "$@" | tr ' ' ',')" 2>/dev/null | awk '
-        { n = split($1, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; t += s }
-        END { printf "%.2f", t }'
+cpu_seconds() { # cpu_seconds <pids...> — Σ cpu time over the pids, in seconds
+    if [ -r /proc/self/stat ]; then
+        # linux: ps -o time= is WHOLE seconds there (the first linux
+        # set printed nginx at 0.00 cores over a 5 s run), so read
+        # utime+stime in clock ticks off /proc instead
+        tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+        t=0
+        for p in "$@"; do
+            [ -r "/proc/$p/stat" ] && t=$(awk -v t="$t" -v tck="$tck" '{ sub(/.*\) /, ""); print t + ($12 + $13) / tck }' "/proc/$p/stat")
+        done
+        printf '%.2f' "$t"
+    else
+        ps -o time= -p "$(echo "$@" | tr ' ' ',')" 2>/dev/null | awk '
+            { n = split($1, p, ":"); s = 0; for (i = 1; i <= n; i++) s = s * 60 + p[i]; t += s }
+            END { printf "%.2f", t }'
+    fi
 }
 wait_port() { # wait_port <port> — up to ~8s
     i=0
@@ -79,24 +100,46 @@ wait_port() { # wait_port <port> — up to ~8s
     return 1
 }
 
-# run_ab <port> <keepalive:0|1> <tag> — one run; sets rps, wall,
-# failed, non2xx, gen (ab's own cpu ÷ wall). The subshell's `times`
-# is POSIX and its second line is the children's — ab's — user and
-# system time.
+# run_ab <port> <keepalive:0|1> <tag> — one run: GENS ab processes
+# started together, each with CONC/GENS connections; sets rps (their
+# sum), wall (the longest), failed and non2xx (sums), gen (the LARGEST
+# single generator's own cpu ÷ wall). Each generator's subshell ends
+# with `times` — POSIX, and its second line is the children's (that
+# ab's) user and system time.
 run_ab() {
-    out="$scratch/ab-$3.txt"
-    if [ "$2" = 1 ]; then
-        ( ab -q -k -t "$SECS" -n "$REQCAP" -c "$CONC" "http://127.0.0.1:$1/index.html" > "$out" 2>&1; times ) > "$out.times"
-    else
-        ( ab -q -t "$SECS" -n "$REQCAP" -c "$CONC" "http://127.0.0.1:$1/index.html" > "$out" 2>&1; times ) > "$out.times"
-    fi
-    rps=$(awk '/^Requests per second/ { print $4 }' "$out")
-    wall=$(awk '/^Time taken for tests/ { print $5 }' "$out")
-    failed=$(awk '/^Failed requests/ { print $3 }' "$out")
-    non2xx=$(awk '/^Non-2xx responses/ { print $3 }' "$out")
-    : "${rps:=0}" "${wall:=0}" "${failed:=?}" "${non2xx:=0}"
-    gencpu=$(awk 'NR == 2 { s = 0; for (i = 1; i <= 2; i++) { split($i, a, "m"); sub("s", "", a[2]); s += a[1] * 60 + a[2] } printf "%.2f", s }' "$out.times")
-    gen=$(awk -v c="$gencpu" -v w="$wall" 'BEGIN { if (w > 0) printf "%.2f", c / w; else print "?" }')
+    g=1
+    genpids=""
+    while [ $g -le "$GENS" ]; do
+        out="$scratch/ab-$3-g$g.txt"
+        if [ "$2" = 1 ]; then
+            ( ab -q -k -t "$SECS" -n "$REQCAP" -c "$PERGEN" "http://127.0.0.1:$1/index.html" > "$out" 2>&1; times ) > "$out.times" &
+        else
+            ( ab -q -t "$SECS" -n "$REQCAP" -c "$PERGEN" "http://127.0.0.1:$1/index.html" > "$out" 2>&1; times ) > "$out.times" &
+        fi
+        genpids="$genpids $!"
+        g=$((g + 1))
+    done
+    # the generators only — a bare `wait` would also wait on the
+    # server this shell started with `&`
+    wait $genpids
+    rps=0; wall=0; failed=0; non2xx=0; gen=0
+    g=1
+    while [ $g -le "$GENS" ]; do
+        out="$scratch/ab-$3-g$g.txt"
+        r=$(awk '/^Requests per second/ { print $4 }' "$out")
+        w=$(awk '/^Time taken for tests/ { print $5 }' "$out")
+        f=$(awk '/^Failed requests/ { print $3 }' "$out")
+        x=$(awk '/^Non-2xx responses/ { print $3 }' "$out")
+        [ -z "$r" ] && { failed="?"; r=0; }
+        : "${w:=0}" "${f:=0}" "${x:=0}"
+        gencpu=$(awk 'NR == 2 { s = 0; for (i = 1; i <= 2; i++) { split($i, a, "m"); sub("s", "", a[2]); s += a[1] * 60 + a[2] } printf "%.2f", s }' "$out.times")
+        rps=$(awk -v a="$rps" -v b="$r" 'BEGIN { printf "%.2f", a + b }')
+        wall=$(awk -v a="$wall" -v b="$w" 'BEGIN { print (b > a) ? b : a }')
+        [ "$failed" != "?" ] && failed=$((failed + f))
+        non2xx=$((non2xx + x))
+        gen=$(awk -v c="$gencpu" -v w="$w" -v m="$gen" 'BEGIN { g = (w > 0) ? c / w : 0; printf "%.2f", (g > m) ? g : m }')
+        g=$((g + 1))
+    done
 }
 
 # measure <port> <pids> <tag> — both shapes against one fresh server;
@@ -206,7 +249,7 @@ cell() {
     return 0
 }
 
-echo "lobo-parity: $stamp host $host, $cores cpus, load(1m) $load1; bar N=$N c=$CONC; $PAIRS pairs × ab -t $SECS; file $(wc -c < "$scratch/www/index.html") bytes"
+echo "lobo-parity: $stamp host $host, $cores cpus, load(1m) $load1; bar N=$N c=$CONC over $GENS generators (-c $PERGEN each); $PAIRS pairs × ab -t $SECS; file $(wc -c < "$scratch/www/index.html") bytes"
 [ "$(awk -v l="$load1" -v m="$LOADMAX" 'BEGIN { print (l > m) ? 1 : 0 }')" = 1 ] &&
     refused="$refused
   rig not quiet: load(1m) $load1 before the set (> $LOADMAX)"
@@ -217,7 +260,7 @@ if [ "$N" != 1 ]; then
 fi
 
 echo ""
-echo "set: $stamp · $host · $cores cpus · load(1m) $load1 · $PAIRS pairs × ab -t $SECS -c $CONC · lobo $("$LOBO" -v 2>&1 | head -1) · nginx $("$NGINX" -v 2>&1 | head -1)"
+echo "set: $stamp · $host · $cores cpus · load(1m) $load1 · $PAIRS pairs × ab -t $SECS · c=$CONC over $GENS generators · lobo $("$LOBO" -v 2>&1 | head -1) · nginx $("$NGINX" -v 2>&1 | head -1)"
 echo ""
 echo "| cell | shape | lobo req/s (median) | nginx req/s (median) | nginx ÷ lobo median [min, max] | lobo cores | nginx cores | ab cores max |"
 echo "|---|---|---|---|---|---|---|---|"
