@@ -72,23 +72,33 @@ claims ratchet; they are not hand-waved.
 ## Performance
 
 One process went from 37 to 13,508 req/s when the serving loop learned
-to block on readiness instead of time-slicing. Workers then made it a
-real prefork server — the master binds the listeners and hands them
+to block on readiness instead of time-slicing, and workers then made it
+a real prefork server: the master binds the listeners and hands them
 down, every worker accepts on one socket, and the kernel distributes
-the work:
+the work.
 
-| workers | shape | req/s |
+**lobo is not at parity with nginx, and on linux it is badly off it.**
+The bar is defined in [`docs/PARITY.md`](docs/PARITY.md) — written
+before any measurement, so the number could not be chosen after the
+fact — and measured as the ratio nginx ÷ lobo on the same box, workers
+= cpus, five interleaved pairs, sets refused under load:
+
+| host | connection-per-request | keepalive |
 |---|---|---|
-| 3 | connection per request | 23,663 |
-| 18 | connection per request | 16,120 |
-| 18 | keepalive | 38,961 |
+| macOS arm64, 18 cpus | 1.15x | 2.76x |
+| linux x86-64, 4 cpus | 2.27x | **110.9x** |
 
-Measured on macOS arm64 (18 cores) against the same box's pinned
-nginx, which does 24,158 and 83,831 on the last two rows. **lobo is
-not at parity yet** — roughly 1.5x on connection-per-request and 2.2x
-on keepalive. Closing that is the current campaign, and the numbers
-above will move; `docs/PARITY.md` defines what "parity" has to mean
-before any of it is claimed.
+The linux keepalive number is a stall, not a slowness: lobo answers one
+request per ~41 ms per connection, because the kernel's 40 ms delayed
+ACK meets Nagle's algorithm on lobo's two-write response. It is
+invisible on macOS, which is why 0.1.0 shipped with it. The one-buffer
+write that removes it is the next change.
+
+Where the rest of the time goes is in [`docs/PROFILE.md`](docs/PROFILE.md):
+63 µs per request against nginx's 19 on the same box, and about half of
+the difference is the runtime parking on its reactor thread before
+syscalls on sockets already reported ready — the language's cost, filed
+upstream, not lobo's. These numbers will move; the bar will not.
 
 ## Compatibility
 
