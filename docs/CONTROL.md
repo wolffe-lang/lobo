@@ -303,7 +303,7 @@ s60c's work) and is a ws16-class decision.
   reload/reopen/stop over the channel, the routing swap, listener
   survival, and the four auth cases (right secret, no secret, wrong
   secret, `ping` exempt) with a status read proving the refused verbs
-  changed nothing; `upgrade` answering by name.
+  changed nothing; `upgrade` answering with its own name.
 - `tools/lobo-signal`: the two doors' event blocks diffed line by line.
 - `tools/lobo-control-differential`: the rows above, against the pinned
   oracle.

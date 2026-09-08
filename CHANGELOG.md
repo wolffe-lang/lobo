@@ -416,7 +416,7 @@ orphaned helpers. MEASURED before the fix: three orphaned `dnssrv`
 processes on this box, one 45 hours old and one from each of the
 two gauntlet runs this sprint opened with: exactly one leaked per
 run. After it: `rigproc: own, at exit — reaping 1 process(es)` and a
-clean census; a deliberately planted orphan is met with `rigproc:
+clean census; a planted orphan is met with `rigproc:
 stale from an earlier run — reaping 1 process(es)` on the next tool's
 first line. The marker is argv[0], never the rest of the command
 line, and this repo paid for that distinction in the same hour: a
@@ -1260,7 +1260,7 @@ is the real loop's shape (retirement is a STATE check) and closes a
 run: the finding, the `.loborace` artifact (schema 1: seed +
 decision stream + pinned bytes + lupin identity), three
 byte-identical replays FROM the artifact (2× seed, 1× stream), the
-fix's closed frontier. The server side stays honest: lobo is
+fix's closed frontier. On the server side lobo is
 spawn-free, so it never prints a seed. Instead every vocabulary
 event now carries `seq=` (stamped at the emission seam; builders
 and prefix pins untouched) and status carries `events:` (additive,
