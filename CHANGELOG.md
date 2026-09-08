@@ -101,16 +101,23 @@ where the time goes (`docs/PROFILE.md`, `sample(1)`, six profiles).
   **781 req/s**: one request per 41 ms per connection, the 40 ms
   delayed ACK meeting Nagle on lobo's two-write response. Nobody had
   taken lobo's req/s on linux before; macOS hides it (lobo#3).
-- **Where the time goes, one process, keepalive, 82 µs/request:**
-  ~38 µs is the runtime's reactor round-trip (the serving thread
-  parked in `__psynch_cvwait` 40% of the time, waiting for
+- **macOS arm64, the quiet box (load 2.55, after the last sibling lane
+  left):** close **1.15x** [1.13, 1.19], keepalive **2.76x** [2.65,
+  2.77] at N = 18 — NOT MET on both; 0.1.0's 1.50x/2.15x were one
+  20k-request run and an `ab`-bound nginx. Two earlier macOS sets,
+  taken under sibling-lane load, are in the ledger as REFUSED with
+  their loads.
+- **Where the time goes, one process, keepalive, 63 µs/request:**
+  ~30 µs is the runtime's reactor round-trip (the serving thread
+  parked in `__psynch_cvwait` 38% of the time, waiting for
   `wolf-reactor` to confirm a readiness `net_wait` had already
-  reported — three times per request; the syscalls are 11%); ~22 µs
-  file syscalls (one `open`, THREE `stat`); ~9 µs two `sendto`; ~9 µs
-  user space of which lobo's own code is ~2. At eighteen hands on the
-  close shape a hand is 60% parked in the accept herd. nginx's whole
-  request on the same box is 17 µs.
-- **wolf's vs lobo's:** ~45 µs the language's, ~20 lobo's, ~15 the
+  reported — three times per request; the syscalls are 12%); ~16 µs
+  file syscalls (one `open`, THREE `stat`); ~8 µs two `sendto`; ~7 µs
+  user space of which lobo's own code is ~1.5. At eighteen hands on
+  the close shape a hand is 64% parked in the accept herd. nginx's
+  whole request on the same box is 19 µs. Profiled twice — loaded and
+  quiet — and every proportion held within two points.
+- **wolf's vs lobo's:** ~35 µs the language's, ~12 lobo's, ~16 the
   kernel's that nginx pays too. Filed: wolf-lang#257 (optimistic I/O
   in the runtime), wolf-lang#254 (no `TCP_NODELAY`, no `writev`),
   lobo#3 (the linux stall; one write per response is ws23's first
@@ -118,7 +125,7 @@ where the time goes (`docs/PROFILE.md`, `sample(1)`, six profiles).
 - **The mid-end** (`WOLF_MIDEND=0`, #146, re-probed: the thirteenth
   measurement, same ICE) is worth **nothing measurable** on lobo's
   parse + response-head path: 534/527/534 ms vs 546/542/536 ms per
-  300k iterations. The compiler is not where the gap is.
+  300k iterations, and 563/555/558 vs 570/571/555 on the quiet box. The compiler is not where the gap is.
 - Trunk was RED at the stamp step before this sprint: `be46c61`
   landed past the `v0.1.0` tag without flipping the channel to
   `+dev`. Flipped here, as `lobo-stamp` prescribes.
