@@ -1015,7 +1015,8 @@ asked for falsified it: the ledger's growth law is `charge(N) =
 ledger keeps every abandoned buffer), so #203's 16× holds exactly AT
 a power of two and reaches 32× just past one, and a budgeted small
 body is refused by the runtime whenever
-`memory_budget < pow2ceil(body)` though the meter admitted it. `tools/lobo-membudget` now runs a
+`memory_budget < pow2ceil(body)` though the meter admitted it.
+`tools/lobo-membudget` now runs a
 second server under `memory_budget 40k` on the release binary:
 rounds A'/B' RE-BASELINED through the capped proc (A' 10,800 KB, B'
 11,696 KB, difference 896 KB, 29 KB/req, the same two gates as
@@ -1320,9 +1321,9 @@ region-cap half). docs/BUDGET.md is the model. Corpus 184 → 195.
 probed byte-for-byte against the oracle, and the access-log
 differential (identical directives, identical adversarial requests on
 both servers) reads 4/4 identical modulo timestamps. `format=json` is
-the typed door — RFC 8259-validated lines, numbers as numbers, the
-ws08 drain vocabulary decoded. Sinks are bounded and loud-dropping in
-the spawn-free loop; logrotate's reopen cycle works end to end. Three
+the typed door: RFC 8259-validated lines, numbers as numbers, the
+ws08 drain vocabulary decoded. Sinks are bounded and drop-and-report
+in the spawn-free loop; logrotate's reopen cycle works end to end. Three
 new lints (L005 inert level, L006 native doors, L007 what a text
 format loses). Corpus 166 → 184.
 
@@ -1330,7 +1331,7 @@ format loses). Corpus 166 → 184.
 
 Built-in ACME: RFC 8555 HTTP-01 end to end, hot-swap issuance with no
 reload, a renewal daemon, and `lobo cert status`. The certbot dance
-still works — the coexistence test serves a certbot block live beside
+still works: the coexistence test serves a certbot block live beside
 a `cert auto` block. The fixture CA is a pebble-class RFC 8555 server
 written in wolf, verifying account JWS on every POST with real
 dial-backs; it caught two client bugs a vendored oracle would have
@@ -1340,10 +1341,11 @@ key files at umask not 0600 (D26). Corpus 158 → 166.
 
 ## wsm03 — 2026-08-29 — the name lands
 
-Lobo (D64) — the code stops spelling wws: 86 files, the binary's own
-voice (banner, diagnostics, `Server: lobo/0.1.0`, LOBO-L lint codes),
-zero seam motion. Pins advance to wolf addcd7f + the lupin 0.1.16
-tag, and the first macOS three-lane gauntlet runs 158/158 — two
+Lobo (D64): the code stops spelling wws over 86 files, in the
+binary's own voice (banner, diagnostics, `Server: lobo/0.1.0`,
+LOBO-L lint codes), with zero seam motion. Pins advance to wolf
+addcd7f + the lupin 0.1.16 tag, and the first macOS three-lane
+gauntlet runs 158/158, with two
 rig-side deltas fixed on the way (the TLS oracle refuses LibreSSL by
 name; the signal gate widens so a real SIGHUP drives the drain
 off-linux). wolf-lang#146 re-probed unhealed; the midend stays off.
@@ -1351,8 +1353,8 @@ off-linux). wolf-lang#146 re-probed unhealed; the midend stays off.
 ## wsm02 — 2026-08-27 — the pin pays back
 
 Pins to wolf 53f6191 + lupin is24, zero source breakage. TLS session
-keys now come from `os_random` — the OS CSPRNG, trapping loud rather
-than degrading (#143 retires) — with the interim HKDF derivation
+keys now come from `os_random`, the OS CSPRNG, which traps instead of
+degrading (#143 retires), with the interim HKDF derivation
 deleted and an entropy probe at TLS bind. The three W0305 sentinel
 dodges revert to the natural arm re-raise (is24's #44 fix). The
 midend flip-back was attempted and refused: a #142-class survivor
@@ -1364,9 +1366,9 @@ found, filed as wolf-lang#146, `WOLF_MIDEND=0` stays.
 trace: the real matcher grows a trace parameter (never a second
 implementation), effective directives filter to the winning chain
 with `-T` provenance, TLS and stat notes are opt-in, and unknowable
-headers say UNRESOLVED by name rather than guessing. Cross-checked
+headers say UNRESOLVED instead of guessing. Cross-checked
 against the live server: the predicted static path's bytes are the
-live body, and the backend records exactly the predicted proxy
+live body, and the backend records the predicted proxy
 target. Text stanzas or schema-1 JSON.
 
 ## ws05 — 2026-08-27 — TLS integrates
@@ -1416,5 +1418,5 @@ directive. The scaffolding campaign (wsc00) closes.
 
 Pins (wolf 87405ac / lupin e2dbd40, the `.wolf-bin` ritual), the
 loopback HTTP rig written in wolf, the pinned-nginx differential with
-its first byte-equal case, the gauntlet, and CI against the pins —
+its first byte-equal case, the gauntlet, and CI against the pins,
 committed ahead of any remote.
