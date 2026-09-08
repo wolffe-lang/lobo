@@ -138,5 +138,75 @@ cannot see is not a bar. Not met is any gating cell above 1.10.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
-(empty at the bar's writing — ws22's first set is appended when it
-is taken, after this file is committed)
+### 2026-09-08 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · **VALID** · **NOT MET on both shapes**
+
+`ci.yml` run 34251691870 (workflow_dispatch, `parity=true`), load(1m)
+1.89 after the settle loop, 5 pairs × `ab -t 5`, c=32 over 4
+generators, lobo 0.1.0+dev at wolf 0.2.6 pin 398e5f5, nginx 1.30.4:
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo cores | nginx cores |
+|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 11,067 | 25,031 | **2.269x** [2.198, 2.339] | 2.52 | 1.56 |
+| **N=4 c=32** | keepalive | **781** | 86,528 | **110.9x** [110.0, 112.7] | 0.2 | — |
+| N=1 c=32 | close | 4,461 | 15,006 | 3.394x [3.258, 3.584] | 0.99 | 0.99 |
+| N=1 c=32 | keepalive | 781 | 34,445 | 44.1x [43.5, 44.8] | 0.17 | — |
+
+The keepalive row is not a throughput number, it is a stall: 781
+req/s over 32 connections is one request per 41 ms per connection —
+linux's 40 ms delayed ACK meeting Nagle on lobo's two-write response
+(lobo#3, wolf-lang#254). The cores column on this host is the
+first-run `ps` whole-second reading; later sets read `/proc`. The
+FIRST linux set (run 34250530750, one generator) was REFUSED — load
+3.01 at start and `ab` at 1.00–1.04 cores — and its lobo keepalive
+number was the same 780; its nginx close number (13,394) was the
+single generator's ceiling, not nginx's: with four generators nginx
+answers 25,031 on the same cell, and the close gap on linux is
+2.27x, not the 1.26x the refused set had suggested. That is what the
+generator rule is for.
+
+### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · **REFUSED** (one generator; the oracle unstable at N=1)
+
+Not a result; recorded because it is the first set ever taken against
+the bar and the refusal is the bar working. load(1m) 2.52, 5 pairs ×
+`ab -t 5 -c 32`, ONE generator:
+
+| cell | shape | lobo | nginx | median [min, max] | lobo cores | nginx cores | ab max |
+|---|---|---|---|---|---|---|---|
+| N=18 c=32 | close | 19,426 | 20,993 | 1.167x [1.063, 1.270] | 7.40 | 3.26 | 0.93 |
+| N=18 c=32 | keepalive | 43,927 | 112,100 | 2.533x [2.212, 3.480] | 12.48 | 8.46 | **0.93** |
+| N=1 c=32 | close | 9,191 | 28,691 | 3.049x [2.250, 5.117] | 0.86 | 0.71 | 0.84 |
+| N=1 c=32 | keepalive | 10,463 | 39,813 | 3.874x [2.422, 6.083] | 0.82 | 0.80 | 0.84 |
+
+Refused on: `ab` at 0.93 cores on the N=18 keepalive runs (the
+generator was the ceiling — nginx's 112k is `ab`'s number); nginx's
+five N=18 close runs spread 1.215 max/min; nginx's N=1 runs spread
+1.52 (close) and 2.05 (keepalive) — single-worker numbers on this box
+swing 2x run to run (20.7k → 31.4k close; 28.6k → 58.7k keepalive),
+which looks like the scheduler landing one process on an efficiency
+core or a performance core, and is a host fact the N=1 cell will
+have to live with here (the bar does not gate on N=1).
+
+### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · **REFUSED** (load 4.35; four generators)
+
+The k=4 set, armed behind a waiter for load < 2.9 that a sibling
+lane's corpus loop never let clear; taken after a bounded wait at
+load(1m) 4.35 so the sprint would have the shape of the number rather
+than nothing, and refused by the tool on that load and on nginx's
+spread (N=18 close 1.204, N=1 keepalive 1.819). Indicative, not a
+result:
+
+| cell | shape | lobo | nginx | median [min, max] | lobo cores | nginx cores | ab max |
+|---|---|---|---|---|---|---|---|
+| N=18 c=32 | close | 18,210 | 18,515 | **1.017x** [0.941, 1.099] | 7.59 | 3.21 | 0.33 |
+| N=18 c=32 | keepalive | 43,205 | 117,023 | **2.593x** [2.587, 2.866] | 10.82 | 11.06 | 0.33 |
+| N=1 c=32 | close | 11,628 | 27,925 | 2.373x [2.181, 2.502] | 0.91 | 0.65 | 0.30 |
+| N=1 c=32 | keepalive | 16,123 | 58,744 | 3.734x [2.413, 3.927] | 0.95 | 0.90 | 0.30 |
+
+Two things this refused set still says, to be confirmed on a quiet
+box: with the generator out of the way nginx's keepalive at eighteen
+workers is ~117k on this box (the 0.1.0 table's 83k was `ab`'s
+ceiling), so the macOS keepalive gap is ~2.6x, not 2.15x; and on the
+close shape at eighteen hands lobo and nginx are within noise of each
+other here (1.02x, min 0.94) at 2.4x nginx's cpu — the herd
+(`docs/PROFILE.md`) is what that cpu is. A valid macOS set needs a box
+nobody else is using; the tool refuses until it gets one.
