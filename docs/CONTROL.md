@@ -133,7 +133,7 @@ spawn-free signal wait), so a real outside `SIGUSR2` is
 indistinguishable from the probe and is ignored (the wsm01 residue). On
 windows there is no external RELOAD or UPGRADE at all. Naming the verb
 here puts the binary swap at this endpoint when it lands, and the
-reply says as much.
+reply says so instead of answering `unknown verb`.
 
 With no `control` directive, `lobo -s reload` refuses and says why:
 
