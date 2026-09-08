@@ -320,7 +320,7 @@ jobs:
           fi
           ./lobo -V 2>&1
 
-      - name: the stock config: test, serve, fetch, compare, stop
+      - name: "the stock config: test, serve, fetch, compare, stop"
         shell: bash
         working-directory: ${{ env.LOBO_DIR }}
         run: |
