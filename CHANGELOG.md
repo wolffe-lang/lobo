@@ -132,9 +132,53 @@ read on ONE runner VM by the instrument this sprint built.
   corpus on `prefork_e2e [checked]` — a `trap(assert)` under load
   8 — and the per-file census named the master and two hands the
   trap had left, and reaped them; that is the red the issue asked
-  for. (`prefork_e2e` is load-flaky on this box — the previous wave's
-  G2/G3 saw it at the 60 s ceiling — and its stderr now rides with
-  the red.)
+  for. Then the flake itself, chased for two hours because the gate
+  kept catching it: `prefork_e2e` went red INSIDE the corpus runner
+  5 times in 14 invocations (G1, G3, a sanity run, two runner loops;
+  `trap(assert)` on either lane, or the native lane at the ceiling)
+  and 1 time in 57 outside it (`conform-run` foreground and
+  background, `wolf run`, with and without a re-stage, at loads 4–21).
+  What the chase established, each with its instrument: (a)
+  `conform-run --native` SWALLOWS the child's stderr (0 server lines
+  on every native run, 45 on every checked one), so a ceiling kill
+  on the native lane leaves no account; (b) neither rung surfaces an
+  `assert`'s MESSAGE — `wolf run` prints the location only, the
+  record carries the kind (and the checked machine a byte span),
+  filed as a comment on wolf-lang#150 — so the test now prints a
+  `step N` marker before each step (the record keeps stdout) and the
+  runner maps a checked-lane `x-trap-span` to a line; (c) the two
+  reds that carried server events trapped at two different steps
+  (once with the hands just up, once right after step 4's `stop`),
+  which is load meeting one-shot asserts and 6–10 s bounds, not one
+  mechanism: the step-2 GET is a poll now and every bound in the
+  file is ~2.5x wider (ceilings for a hung server, on a box at load
+  5–20). Then G5 named it: with the markers and the span-to-line in
+  place, the red said `step 3: distribution` and `prefork_e2e.lu:300`
+  — the assertion that sixty connection-per-request GETs reach BOTH
+  hands. This host distributes nothing over the shared listener
+  (s137: the hands race, and a hand the scheduler has parked loses
+  every race while it is parked), so on a loaded box all sixty went
+  to one hand and the 2 s status poll that followed sent no more.
+  The check keeps sending while it polls now, up to ~600 more; the
+  assertion is unchanged. The runner-only concentration is recorded, not explained;
+  what IS explained is the native lane's ceiling — the runner remakes
+  the stage every run, so the native lane's compile is cold and
+  inside its ceiling, and under this box's load the compile-plus-run
+  passed 60 s five times (G3, G4, and three loop runs; the census
+  found nothing behind any of them and the next lane ran at once),
+  so the native lane's ceiling is 3x and a lane past 20 s prints
+  its wall beside its verdict. And one more thing the short-ceiling
+  proofs found: `timeout -k` TERMs the group and returns the moment
+  its own child dies, so its KILL never reaches the REST of the
+  group, and a master that took the TERM mid-`quit` absorbed it
+  (master and two hands alive after a 3 s ceiling, caught by the
+  census); the runner now TERMs and KILLs the group itself after a
+  ceiling — at `LOBO_LANE_CEILING=2` both lanes die and the census is
+  empty.
+  Beside all that, `os_kill` being SIGKILL-only and no process-group
+  surface existing in the language is the reason the whole gate had
+  to live in sh: commented on wolf-lang#141 with the shape a test
+  needs (`os_kill_with(h, meaning)` and a group to name).
 
 - **lobo#6: the gather, read on ONE VM.** `tools/lobo-parity` takes
   `LOBO_REF=<binary>`: every pair then runs THREE fresh servers —
@@ -165,7 +209,32 @@ read on ONE runner VM by the instrument this sprint built.
   the SHARES sit beside the ratio: predicted, `writev` at the same
   count `sendto` had, the byte loop's self time present in the copy
   tree's profile and absent from the gather's, syscall shares
-  otherwise identical. MEASURED: (pending)
+  otherwise identical. MEASURED, linux x86-64, run 34355608599, a
+  VALID set (load 1.81, nginx close 28,337 — the pin run's class of
+  VM): gather ÷ copy N=4 close **1.005x** [1.003, 1.017] (21,924 vs
+  21,696; nginx ÷ gather 1.301x, ÷ copy 1.310x), N=4 keepalive
+  **1.020x** [1.001, 1.034] (53,509 vs 52,708; 1.820x / 1.857x), N=1
+  close 0.998x [0.977, 1.031], N=1 keepalive 1.014x [0.971, 1.058].
+  The delta's own spread inside one VM is ±1.5% on the gating cells:
+  the instrument reads to ~2%, the ~10% lobo#6 was filed on would
+  have been plain, and it is not there — the gather is +0.5% / +2%,
+  the two-and-two reading was two VM classes. **The prediction was
+  wrong** (1.10–1.15x), and wrong for a reason worth writing down:
+  it was made from macOS N=1 cells that the tool had REFUSED (the
+  single-process P/E-core swing is 30%+ there), and this sprint's
+  own indicative macOS set reads gather ÷ copy 0.989x [0.976, 1.036]
+  / 0.999x [0.986, 1.095] at N=18 and 1.126x [0.618, 1.176] on the
+  refused N=1 keepalive cell — a refused cell is not a number in
+  either direction. **The number came from the parity leg.** The
+  profile leg's `strace -c` (same run, `docs/PROFILE.md`) confirms
+  the shape without a rate: 10,972 `writev` where the copy has
+  11,065 `sendto`, every other count per request identical — and
+  counts FOUR `statx` per file request, the fourth the runtime's own
+  inside `fs_read_bytes`, which ws22 could not see and item 3
+  removes. Its `perf report` tables were empty by a tool bug (the
+  data file chowned away from the user that reads it), fixed the
+  same day and re-run with the fstat pair. lobo#6 closed with the
+  table.
 
 - **`fs_fstat` consumed (wolf-lang#261, item 3).** `serve_file`
   opens FIRST and asks the handle — kind, size, mtime in one

@@ -154,6 +154,62 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws25: TWO TREES ON ONE VM · **VALID** · the gather read (lobo#6 closed)
+
+The instrument ws24 said nobody had: `tools/lobo-parity` with
+`LOBO_REF` (and `ci.yml`'s `ref_tree`) builds two lobos beside each
+other with the same staged toolchain and runs THREE fresh servers per
+pair on one VM — this tree, the reference, nginx, the two lobos
+alternating their order pair by pair — so the delta this ÷ ref is a
+same-box statistic with its own min and max, read against that VM's
+own nginx. Run 34355608599 (`parity=true ref_tree=ws25-copy-arm`),
+load 1.81, 5 pairs × `ab -t 5`, c=32 over 4 generators, nginx 1.30.4;
+`gather` is trunk `7c99905` (ws24's `net_writev`), `copy` is the
+throwaway `ws25-copy-arm` `965ddda` (the same tree with ws23's
+byte-by-byte copy back on the plaintext small arm), both at wolf
+0.2.8:
+
+| cell | shape | gather req/s | copy req/s | nginx req/s | nginx ÷ gather median [min, max] | nginx ÷ copy | **gather ÷ copy** median [min, max] | gather / copy / nginx cores |
+|---|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 21,924 | 21,696 | 28,337 | **1.301x** [1.282, 1.315] | 1.310x [1.286, 1.334] | **1.005x** [1.003, 1.017] | 2.00 / 2.01 / 1.60 |
+| **N=4 c=32** | keepalive | 53,509 | 52,708 | 97,812 | **1.820x** [1.809, 1.876] | 1.857x [1.843, 1.900] | **1.020x** [1.001, 1.034] | 2.95 / 2.95 / 2.43 |
+| N=1 c=32 | close | 13,255 | 13,206 | 18,984 | 1.433x [1.424, 1.553] | 1.447x [1.399, 1.520] | 0.998x [0.977, 1.031] | 1.00 / 1.00 / 0.99 |
+| N=1 c=32 | keepalive | 23,571 | 23,063 | 43,651 | 1.846x [1.820, 1.881] | 1.872x [1.825, 1.926] | 1.014x [0.971, 1.058] | 1.00 / 1.00 / 1.00 |
+
+The delta's own pair spread on the gating cells is ±1.5%: this
+instrument reads to ~2% where the six-VM series spread 13%. The
+gather is +0.5% (close) and +2.0% (keepalive) over the copy on this
+host, within noise at N=1 — not the ~10% worse lobo#6 was filed on
+(two VM classes, as ws24's correction said) and not the +10–15%
+this sprint predicted from macOS's refused N=1 cells. The number is
+the PARITY leg's; the profile leg (`tools/lobo-profile`, `strace -c`
+on the one serving process under the close shape, same run) confirms
+the shape without a rate: 10,972 `writev` where the copy has 11,065
+`sendto`, every other count per request identical. Beside the ws24
+series: this VM's nginx close 28.3k is the pin run's class, and the
+ratio 1.301x is that run's 1.300x to a thousandth. NOT MET on both
+shapes; W8's linux standing is unchanged by a lane that built an
+instrument and moved two path stats.
+
+### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · ws25's two-tree sets · **ALL REFUSED** (load 7.8–8.2; indicative, not a result)
+
+The same two-tree tool on this box, `LOBO_THIS`/`LOBO_REF` naming
+two scratch worktrees' binaries, taken under the other lanes'
+gauntlets with no window announced (the orchestrator said the floor
+had not moved). The N=1 cells refused on their own spread as ever:
+
+| trees (this ÷ ref) | load(1m) | N=18 close | N=18 keepalive | this ÷ ref N=18 close | this ÷ ref N=18 keepalive | N=1 close (refused) | N=1 keepalive (refused) |
+|---|---|---|---|---|---|---|---|
+| gather `7c99905` ÷ copy `965ddda` | 7.81 | 0.991x · 20,085 vs nginx 19,403 | 1.375x · 85,599 vs 115,830 | **0.989x** [0.976, 1.036] | **0.999x** [0.986, 1.095] | 0.998x [0.491, 1.109] | 1.126x [0.618, 1.176] |
+| fstat (ws25, `fs_fstat` on the small and streamed arms) ÷ gather `7c99905` | 9.77 | 1.008x · 11,781 vs nginx 11,723 | 1.145x · 58,502 vs 69,980 | **1.016x** [0.998, 1.026] | 1.102x [0.628, 1.544] | 0.980x [0.920, 1.019] | 1.082x [1.002, 1.104] |
+
+Read for shape only: the gather is nothing at eighteen hands here
+(ws24's reading, again), and the fstat arm is +1.6% on the close
+cell with a tight spread and unreadable on the keepalive cell (the
+box was at load 9.8 with nginx's own numbers swinging 2x between
+pairs). The linux rows above are the result; these say the two hosts
+do not disagree.
+
 ### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · the ws24 baseline window · **REFUSED at the bound** (the box never quieted; one indicative set)
 
 The first deliverable of ws24 was a QUIET set at trunk `1318cfe`

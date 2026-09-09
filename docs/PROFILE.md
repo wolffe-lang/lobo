@@ -206,6 +206,48 @@ shape (watch the listener every 2nd/4th pass, a 1 ms budget) is not
 re-run: it priced the wake-fewer and shorter-budget knobs at a park
 cost that has not changed, and its answer stands.
 
+## ws25's addendum — the first linux profile: what one request costs the kernel, counted (2026-09-09)
+
+The instrument is `tools/lobo-profile` (the profile leg lobo#6 asked
+for): `worker_processes 1` — one process, the master serving alone —
+the parity file, the close shape under four `ab -c 8` generators, and
+on linux `perf record -F 997 -g` on that process for eight seconds in
+the middle of the drive, then `strace -c -f` on a SEPARATE drive
+(ptrace slows the process several-fold and the shares must not carry
+that). Run 34355608599 on the CI runner (4 vcpus, load 1.9), both
+trees of the lobo#6 read side by side — `gather` (trunk `7c99905`)
+and `copy` (`ws25-copy-arm`, ws23's byte loop back on the small
+arm). The drive under perf: **13,135 req/s** (gather) vs **13,064**
+(copy), +0.5%, the same reading the parity leg gave. The syscalls per
+request, `strace -c` over eight seconds (the calls column divided by
+the requests the drive counted):
+
+| syscall | gather, per request | copy, per request | what it is |
+|---|---|---|---|
+| `statx` | **4.0** | 4.0 | `fs_is_file` (the router) + `fs_size` + `fs_modified_ms` + **one inside the runtime's `fs_read_bytes`** (`std::fs::read` sizes its buffer with a metadata call) — ws22 counted three from the leaves; the runtime's own was invisible to `sample` |
+| `read` | 2.0 | 2.0 | the file's bytes, then the read that answers 0 (`fs::read` reads to EOF) |
+| `close` | 2.0 | 2.0 | the file, the socket |
+| `openat` | 1.0 | 1.0 | the file |
+| `writev` / `sendto` | **1.0 `writev`** | **1.0 `sendto`** | the response — the gather, or the copy; one call either way |
+| `accept4`, `recvfrom`, `setsockopt`, `ioctl`, `poll` | 1.0 each (`poll` 1.06) | 1.0 each | the accept, the request, `TCP_NODELAY` (the runtime's default), non-blocking, `net_wait` |
+| `futex`, `brk`, `write`/`kill`/`getpid`/`rt_sigreturn` | 0.04, 0.06, 0.02 each | same | the reactor is idle at N=1 (no park); the signal self-raise runs every ~50 requests |
+
+Every count identical between the trees but the one syscall that
+changed its name, which is what "the gather costs nothing on linux"
+looks like from the kernel's side. `read` under the tracer is
+131 µs/call and 68% of the traced time — that is ptrace's cost on a
+call that blocks (the socket read shares the name), not the file's;
+the counts are the number, the times are not. What the count says
+for item 3: a file request pays FOUR `statx` and TWO `read` where
+nginx pays one `fstat` and one `pread`; `fs_open` + `fs_fstat` +
+`fs_read_chunk(fd, size)` + `fs_close` is 1 `statx` (the router's
+guard) + 1 `fstat` + 1 `read` + the same `openat`/`close`, which the
+fstat run below counts.
+
+The `perf report` tables of that run are empty: the tool chowned the
+data file to the caller and then read it as root, which perf refuses
+(fixed the same day; the fstat run carries the shares).
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
