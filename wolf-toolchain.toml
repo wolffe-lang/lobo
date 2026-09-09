@@ -14,83 +14,79 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang at TRUNK bd7caff (the s141 CHANGELOG commit atop the s141
-# merge, "the syscall goes first") — D57 DEV-STAMPED
-# `0.2.7+dev.bd7caff`, because r11 had not tagged v0.2.8 when ws24
-# reached its pin step (checked: `git tag` tops out at v0.2.7, and
-# v0.2.7 (b482c52) is SIX commits behind this rev and carries neither
-# #257 nor #254 — the ws23 closeout says so); the contract's either/or
-# takes the trunk sha the way ws18 did, and the re-pin to the v0.2.8
-# tag rides r11's landing. Build in a scratch worktree at the sha,
-# stamping the commit ONLY (no WOLF_RELEASE: a release stamp for a
-# version the tag does not point at claims nothing — D57's rule, and
-# `build_is_release` would refuse it anyway):
-#   git worktree add <scratch> bd7caff
-#   WOLF_COMMIT=bd7caff cargo build --release -p wolf_driver -p wolf_rt
+# wolf-lang at the **v0.2.8 RELEASE TAG** (5c729e8, "the syscall goes
+# first" — s141 (#257, #254) and s142 (#263 `str.to_int`, #261
+# `fs_fstat`) on the r11 train). ws24 pinned the dev-stamped trunk sha
+# bd7caff first (r11 had not tagged when the sprint reached its pin
+# step; the contract's either/or, the ws18 shape) and RE-PINNED here
+# the same day the tag landed. D57: built AT the tag the driver claims
+# the bare version, no +dev suffix. Build in a scratch worktree at the
+# tag with the release stamp (xtask's own rule: granted only when that
+# exact tag points at HEAD, `build_is_release`):
+#   git worktree add <scratch> v0.2.8
+#   WOLF_RELEASE=v0.2.8 WOLF_COMMIT=5c729e8 \
+#     cargo build --release -p wolf_driver -p wolf_rt
 # and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ — the
-# native tier needs the staticlib beside the driver. ci.yml's stage
-# step builds exactly this (a trunk pin has no tag at HEAD, so the
-# stamp stays `+dev.<short>`).
+# native tier needs the staticlib beside the driver. ci.yml stages
+# exactly this (the tag at HEAD grants the release stamp).
 #
-# 398e5f5 → bd7caff is FORTY-FIVE commits over three trains (s139,
-# s140, r10's v0.2.7, fa01, s141). What the bump brings this repo,
-# each classed at the bump and measured after it:
+# 398e5f5 (v0.2.6) → bd7caff → 5c729e8 is fifty-four commits over four
+# trains. What the bump brings this repo, each classed at the bump and
+# measured after it (the ws24 CHANGELOG entry carries the numbers):
 #   * s141 — **wolf-lang#257 CLOSES** (`[os.net.io]`, the syscall goes
-#     first): every parking net call tries the syscall before it
-#     waits and parks on WouldBlock only, against the budget computed
-#     at entry. The rows are unchanged; the COST moves — ws22's
-#     profile put the pre-syscall park at ~30 of lobo's 63 µs per
-#     keepalive request, and s141 measured 53.3 → 21.2 µs/request at
-#     N=1 on this box (under load; the quiet number is ws24's). One
-#     stated consequence a program can build on: a write's budget now
-#     covers the whole drain. BEHAVIORAL-COST-ONLY: zero source motion
-#     for the pin's own sake.
+#     first): every parking net call tries the syscall before it waits
+#     and parks on WouldBlock only, against the budget computed at
+#     entry. The rows are unchanged; the COST moves (ws22's profile:
+#     ~30 of 63 µs per keepalive request was the pre-syscall park).
+#     BEHAVIORAL-COST-ONLY. Measured at ws24: linux N=4 keepalive
+#     3.178x → 1.862x, close 1.981x → 1.300x (VALID sets); macOS N=1
+#     keepalive 46 → 23 µs/request (indicative).
 #   * s141 — **wolf-lang#254 CLOSES** (`[os.net.writev]`,
 #     `[os.net.nodelay]`): `net_writev(fd, List[List[byte]]) -> () !
-#     {closed, io}` (a gathered write, `net_write`'s rows) and
-#     `net_nodelay(fd, bool) -> () ! {io}`, and **TCP_NODELAY is ON by
-#     default** on every stream the runtime hands out. TWO NEW
-#     BUILTINS (consumed by ws24: the plaintext small-file arm gathers
-#     head and body, `tcp_nodelay` is served) and ONE BEHAVIORAL
-#     DEFAULT (Nagle off on every accepted stream — the posture nginx
-#     takes by `tcp_nodelay on`, its default; nothing lobo serves
-#     changes shape, and the linux delayed-ACK stall lobo#3 worked
-#     around by copying can no longer arise on any write pattern).
-#   * s140 — the stranger's `--help`, a man page, completions; the
-#     compile-failure footer names the code actually reported (#249);
-#     a `use std.…` miss with no std root configured says so (#251,
-#     E0301 gains a NOTE — lobo's build sees it only when WOLF_STD is
-#     unset, which lib-toolchain.sh never allows). DIAGNOSTIC-ONLY.
-#   * s139 — spec/07 (sched) ruled normative and admitted to
-#     [conf.anchor.ns]; xtask only. Nothing lobo cites moved.
-#   * r10 — v0.2.7 itself (the workspace version 0.2.6 → 0.2.7, the
-#     pairing to lupin 0.1.27); fa01 and the unslop pass — docs.
-#     MECHANICAL: the `.wolfi` toolchain stamp reads the VERSION and
-#     moves 0.2.6 → 0.2.7+dev.bd7caff in every header.
-# Deltas classed at this bump: ONE BEHAVIORAL DEFAULT (#254's
-# TCP_NODELAY), ONE BEHAVIORAL-COST-ONLY (#257), TWO NEW BUILTINS
-# (#254), DIAGNOSTIC-ONLY (s140), one MECHANICAL (the stamp). Source
-# motion predicted for the pin's own sake: ZERO. Source motion this
-# sprint takes ON the pin: `serve` (the gather), `config`/`http`/
-# `serve`/the entry (`tcp_nodelay`).
-# Pairing note (F-0064, reported never gated): wolf@bd7caff declares
+#     {closed, io}` and `net_nodelay(fd, bool) -> () ! {io}`, and
+#     **TCP_NODELAY ON by default** on every stream the runtime hands
+#     out. TWO NEW BUILTINS (consumed by ws24: the plaintext small-file
+#     arm gathers head and body; `tcp_nodelay` is served) and ONE
+#     BEHAVIORAL DEFAULT (Nagle off on every accepted stream — the
+#     posture nginx's `tcp_nodelay on` takes; the linux delayed-ACK
+#     stall lobo#3 worked around by copying cannot arise on any write
+#     pattern now).
+#   * s142 — `str.to_int() -> int ! {NotAnInt}` (#263) and
+#     `fs_fstat(fd) -> List[int] ! {not_found, denied, io}` (#261:
+#     kind, size and mtime from ONE metadata read on an open handle —
+#     lobo's own filing from ws23, the answer to the two path stats
+#     `serve_file` still pays; consuming it is the next lane's, not a
+#     pin bump's side effect). TWO NEW BUILTINS, neither called here.
+#   * s140 — `--help`, a man page, completions; the compile-failure
+#     footer names the code reported (#249); a `use std.…` miss with
+#     no std root says so (#251). DIAGNOSTIC-ONLY.
+#   * s139 — spec/07 (sched) admitted to [conf.anchor.ns]; xtask only.
+#   * r10/r11 — v0.2.7 and v0.2.8 themselves, fa01 and the unslop
+#     passes (docs). MECHANICAL: the `.wolfi` toolchain stamp reads the
+#     VERSION — 0.2.6 → 0.2.7+dev.bd7caff → 0.2.8 in every header.
+# bd7caff → 5c729e8 in particular (the re-pin): s142's two builtins,
+# the version sites, CHANGELOG, the interface-pretty snapshot. Source
+# motion in lobo for the re-pin's own sake: ZERO predicted, zero
+# measured (the `.wolfi` stamp only); the numbers between the two pins
+# are in the ledger side by side.
+# Pairing note (F-0064, reported never gated): wolf@v0.2.8 declares
 # lupin **0.1.27** as its pairing and [lupin] below names 0.1.27 —
-# the PAIRING GAP IS ZERO again (it was one at ws19/v0.2.6). THE LANE
-# GAP, named: lupin 0.1.27's conformance pin is v0.2.5, so
-# `net_writev`/`net_nodelay` do not exist on the lupin lane at this
-# trio (the mirror is filed as wolf-interp#67). lupin resolves a
-# builtin at the CALL, not at load (probed at the bump: a program
-# naming `net_writev` on an unreached path runs), so the lupin-lane
-# tests that stage `serve` and never drive its static small-file arm
-# keep their lanes; the corpus at the bump is the measurement.
-# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, FOURTEENTH
+# the PAIRING GAP IS ZERO. THE LANE GAP, named: lupin 0.1.27's
+# conformance pin is v0.2.5, so `net_writev`/`net_nodelay`/`to_int`/
+# `fs_fstat` are not on the lupin lane at this trio (the mirrors are
+# wolf-interp#67 and is40's). lupin resolves a builtin at the CALL,
+# not at load (probed at ws24: a program naming `net_writev` on an
+# unreached path runs), so the lupin-lane tests that stage `serve`
+# and never drive its static small-file arm keep their lanes; the
+# corpus at the bump is the measurement (255/255 lane-runs).
+# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, FIFTEENTH
 # measurement — still OPEN (the issue's state read at the bump), so
 # the gauntlet's release step and the release archive's build both
 # keep WOLF_MIDEND=0. See [std]'s note. The shipped binary is the
 # gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "bd7caff78a3002d1b9c24ec1b062b54474231115"
-version_line = "wolf 0.2.7+dev.bd7caff (wolfgang, pin bd7caff)"
+rev = "5c729e8779a83611a66f47a63a5276b158ecdec1"
+version_line = "wolf 0.2.8 (wolfgang, pin 5c729e8)"
 
 [lupin]
 # lupin at the v0.1.27 RELEASE TAG (4d64d90, the is38 merge; D57: build
