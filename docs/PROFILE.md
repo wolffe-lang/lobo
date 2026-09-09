@@ -157,6 +157,55 @@ to the profile above, measured rather than sampled:
   it costs is ~1.8 ns per byte (2 µs at 1 KiB), which is why a
   `Connection: close` response over 4 KiB keeps two writes.
 
+## ws24's addendum — the herd at the syscall-first pin (2026-09-09)
+
+The pin moved to wolf bd7caff (wolf-lang#257: the syscall goes
+first, a park on WouldBlock only) and the question ws23 left was
+whether the accept herd's cost moved with it. The probe is ws22's
+own: lobo at eighteen hands, the close shape under four `ab -t 20
+-c 8` generators (20,546 req/s summed; ws22 saw 19,300), `sample(1)`
+ten seconds at one millisecond on ONE serving hand, main thread.
+Taken at load(1m) 7.7 (the box carried other lanes' gauntlets; a
+one-thread profile's proportions survive that — ws22 measured it),
+lobo at `8859ac9` (the pin, lobo's source untouched):
+
+| samples | share | where | ws22 (v0.2.6) |
+|---|---|---|---|
+| 5,508 | **69.4%** | `net_accept` inclusive | 58.5% |
+| 5,074 | **64.0%** | … of which `__psynch_cvwait` under `reactor::submit` → `wait_on` — the park | 63.6% (cvwait, whole thread) |
+| 206 | 2.6% | … `accept_ready`: the syscall itself (`accept(2)` leaf 192) | 2.4% |
+| 201 | 2.5% | … the caller's own `kevent` (arm + wake) | — |
+| 1,448 | 18.3% | `net_wait` (`poll`) | — |
+| ~400 | ~5% | `serve_file`, `handle_request`, `conn_step` — serving | — |
+
+**The herd is still 64% of a hand's time, to the tenth of a point.**
+#257 removed the park a call made BEFORE its syscall; a losing hand
+never had a use for that one — its syscall answers EAGAIN and it
+parks AFTER, against the 5 ms accept budget, and that park is the
+same reactor round-trip (a waiter cell, a `kevent` to arm, a
+condvar, a `kevent` to wake) it always was. The `wolf-reactor`
+thread, which the keepalive shape at N=1 no longer starts, is
+running in every hand here: the losers start it. What #257 bought
+this cell is the WINNER's path (the accepted stream's read and write
+no longer park), which is why the close ratio moved 1.981x → 1.300x
+on linux and the cores column fell 6.24 → 5.35 here, and not the
+herd, which is the same seventeen parks per connection.
+
+What would move it, named and not built (lobo#5, wolf-lang#267): a
+lost race that answers WITHOUT parking. The listener's budget is
+armed once (`arm_accept`, 5 ms) and `[os.net.accept]` says a
+budgeted accept returns within it, but `net_deadline(fd, 0)` CLEARS
+the budget (net.rs, `ms <= 0`), so nothing in the language today
+asks for "try once, `timeout` on EAGAIN" — the shape a
+level-triggered `net_wait` loop wants, since the loop is back in
+`net_wait` within a pass and the next SYN wakes it there. That is
+a runtime surface, filed upstream with this table; the other lever
+is a wake the kernel distributes (`EPOLLEXCLUSIVE` on linux;
+`reuse_port` distributes on linux and not here, s137). ws23's probe
+shape (watch the listener every 2nd/4th pass, a 1 ms budget) is not
+re-run: it priced the wake-fewer and shorter-budget knobs at a park
+cost that has not changed, and its answer stands.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
