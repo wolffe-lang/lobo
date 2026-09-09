@@ -154,6 +154,86 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · ws26: THE QUIET SET · **VALID (3 of 4)** · **MET on both shapes** (close 1.033x, keepalive 1.072x)
+
+The set this ledger has owed since ws22. The box went quiet at
+20:20Z — the first time in three waves — and four sets were taken at
+trunk `d0a1e67` (lobo 0.1.0+dev, wolf 0.2.8 pin 5c729e8, nginx
+1.30.4), load(1m) read and recorded before each, the box let back
+down to under 3.0 between them. THREE were VALID and one was
+REFUSED by the tool on the gating cell's oracle spread; the refused
+set is named below and is not averaged into anything:
+
+| set | load(1m) at start | N=18 close | N=18 keepalive | N=1 close | N=1 keepalive | verdict |
+|---|---|---|---|---|---|---|
+| 1 · 20:32Z | **1.83** | **1.033x** [1.026, 1.074] · 21,476 vs 22,183 | **1.071x** [1.052, 1.093] · 114,063 vs 122,499 | 0.985x [0.965, 1.042] | 1.474x [1.437, 1.517] | **VALID** |
+| 2 · 20:38Z | **2.71** | **1.032x** [1.010, 1.077] · 21,508 vs 22,206 | **1.084x** [1.066, 1.090] · 112,123 vs 121,937 | 0.989x [0.959, 0.998] | 1.483x [1.469, 1.529] | **VALID** |
+| 3 · 20:43Z | **2.65** | **1.056x** [1.014, 1.060] · 21,173 vs 22,352 | **1.072x** [1.069, 1.075] · 113,241 vs 121,333 | 0.964x [0.909, 1.051] | 1.431x [1.338, 1.928] | **VALID** |
+| 4 · 20:49Z | 2.81 | 1.009x [0.908, 1.114] | 1.064x [1.027, 1.160] | 0.986x | 1.482x | **REFUSED** — nginx N=18 close spread 1.168 > 1.15 |
+
+Cores (Σ cpu ÷ wall over the server's tree, `ps(1)`), the three
+valid sets: N=18 close lobo 6.04–6.10 against nginx 4.15–4.26; N=18
+keepalive lobo 9.93–10.37 against nginx **12.46–12.62**; N=1 both
+shapes lobo 0.78–0.99, nginx 0.58–0.97. Every generator sat at
+0.26–0.38 cores, far under the 0.90 ceiling; nothing failed on any
+run of any set.
+
+**The standing, from the VALID rows only.** Median of the three set
+medians, with the across-set range and the per-pair envelope beside it:
+
+| cell | shape | nginx ÷ lobo (median of 3 sets) | across-set range | per-pair envelope | bar | verdict |
+|---|---|---|---|---|---|---|
+| **N=18 c=32** | close | **1.033x** | [1.032, 1.056] | [1.010, 1.077] | 1.10 | **MET** |
+| **N=18 c=32** | keepalive | **1.072x** | [1.071, 1.084] | [1.052, 1.093] | 1.10 | **MET** |
+| N=1 c=32 | close | 0.985x | [0.964, 0.989] | [0.909, 1.051] | — | (does not gate) |
+| N=1 c=32 | keepalive | 1.474x | [1.431, 1.483] | [1.338, 1.928] | — | (does not gate) |
+
+**W8 is MET on macOS arm64, on both shapes**: close 1.033x is 6.1%
+inside the 1.10 bar, keepalive 1.072x is 2.5% inside it. Three
+independent sets agree to ±1.2% (close) and ±0.6% (keepalive), which
+is tighter than the bar's own margin on the keepalive cell — the
+verdict does not rest on one set landing well.
+
+Read against every macOS row below it, the finding is that **the load
+was the whole story on this host.** lobo's N=18 keepalive rate is
+113k req/s here against ~85k in ws24's and ws25's indicative sets on
+a box at load 5–11, while nginx's own number moved only 115k → 122k;
+the keepalive gap that read 2.76x (ws22, load 2.55), 1.62x (ws24's
+baseline) and 1.36–1.39x (ws24's pin and gather rows) is **1.07x**
+when nobody else is on the box. Nothing in lobo changed between
+ws25's macOS sets and these — trunk `d0a1e67` is ws25's docs commit,
+and the last source commit under it is ws25's `0f2aa93`. The prior
+macOS numbers were a measurement of the other lanes, which is
+precisely what the quiet-rig rule was written to refuse, and it
+refused them.
+
+Two things on this table are new and are not the bar's business:
+on the keepalive gating cell lobo reaches 1.07x while burning
+**fewer** cores than nginx (10.2 against 12.5), the first cell in
+this ledger where it is nearer on both axes at once; and at N=1 on
+the close shape lobo is **faster** than nginx (0.985x median, 34.4k
+against 34.0k), the first sub-1.0 cell the informative row has held.
+The N=1 keepalive cell remains the one place this host is 1.47x
+adrift, and it is the per-request read/serve cost with no
+distribution in the way — the number a profile leg should take next.
+
+**W8 overall is NOT met**, because W8 is both hosts and linux is not
+met: ws25's rows read close 1.258x and keepalive 1.652x on the CI
+runner's VM class. macOS is met; linux is the gap, and the keepalive
+cell there is the larger half of it.
+
+*The oracle had to be rebuilt to take these sets.* The pinned
+nginx binary was absent from this box (`tests/differential/bin/` is
+gitignored and the machine's copy was gone; the cached source tree
+under the shared scratchpad had been emptied by a disk reclaim), and
+`tools/lobo-parity` refused every set by name — `REFUSED — pinned
+nginx missing`, exit 1 — until it was restored. It was rebuilt by
+`docs/DIFFERENTIAL.md`'s one-time recipe at the pinned version, the
+tarball's SHA-256 verified against `tests/differential/NGINX-PIN`
+(`4261dc9…a08b`, exact match) and `bin/nginx -v` reading
+`nginx/1.30.4`. The build was `make -j6` and cost the box under a
+minute at load 2.3; the sets began from load 1.83.
+
 ### 2026-09-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws25: TWO TREES ON ONE VM · **VALID** · the gather read (lobo#6 closed)
 
 The instrument ws24 said nobody had: `tools/lobo-parity` with
