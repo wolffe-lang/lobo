@@ -140,14 +140,20 @@ in this session): see the ledger rows dated 2026-09-09.
   fifo, device or socket under the root still never reaches an
   `open` that could block. The other two cannot go without a
   runtime call that answers kind, size and mtime at once, or an
-  fstat on the open fd; filed upstream with the number. Measured on
+  fstat on the open fd; filed as wolf-lang#261 with the number. Measured on
   this box at 100k iterations: two path stats cost 1.05 ms per
   100k, ~0.5 µs each, and a read-first shape (`fs_open` +
   `fs_read_chunk` + a confirming read + `fs_close`, the size taken
   from the read) costs the same as `fs_read_bytes` within noise,
   which is why the folding stops here. Predicted: within the bar's
   noise on every cell (one stat of ~0.5 µs in a 63 µs request; the
-  method sees nothing under ten percent). Measured: (pending).
+  method sees nothing under ten percent). Measured, linux x86-64
+  (run 34296624364, load 1.85, VALID, against the one-write run):
+  close 1.971x → 1.952x [1.925, 1.983], keepalive 3.315x → 3.297x
+  [3.066, 3.522], N=1 close 2.695x → 2.684x, N=1 keepalive 4.525x →
+  4.519x: within noise, as predicted (lobo's req/s rose 2–3% on
+  every cell and nginx's rose with it). Measured, macOS arm64:
+  (pending a quiet box).
 
 - The signal poll, on a budget. Every pass of a serving hand raised
   the probe meaning to itself and waited once on the runtime's
@@ -165,7 +171,42 @@ in this session): see the ledger rows dated 2026-09-09.
   moves little (the cell is accept-bound); N=1: within noise (one
   poll amortized over the many connections a saturated hand serves
   per pass). Predicted, linux N=4: keepalive a few percent, close
-  within noise. Measured: (pending).
+  within noise. Measured, linux x86-64 (run 34297057715, load 1.71,
+  VALID, against the stats run): keepalive 3.297x → 3.258x [3.183,
+  3.525], close 1.952x → 2.038x [1.939, 2.156], N=1 close 2.684x →
+  2.968x, N=1 keepalive 4.519x → 4.419x — within the spreads on the
+  gating cells, as predicted; this run landed on a faster runner VM
+  (nginx's own close went 25.9k → 36.9k req/s, lobo's 13.3k →
+  18.2k), which is why the statistic is a same-box ratio. Measured,
+  macOS arm64: (pending a quiet box).
+- The accept herd, measured and not changed. ws22's profile put a
+  hand at eighteen hands on the close shape 64% parked in
+  `net_accept`: every hand wakes on the level-triggered listener,
+  one wins, the rest park in the reactor against the 5 ms accept
+  budget. Two knobs were probed on a throwaway branch
+  (`ws23-herd-probe`, run 34297109312, linux N=4, 3 pairs each, the
+  same runner VM; the second, third and fifth sets carry the
+  previous set's load, 3.07–3.38, and are refused by the rule, but
+  the direction is not in doubt): a hand joining the listener to
+  its wait set every second pass took close from 1.954x to 2.225x
+  and keepalive from 3.17x to 3.44x; every fourth pass took close
+  to 19.2x (1,474 req/s) and N=1 close to 33.7x, because a hand
+  that is not watching the listener leaves connections queued while
+  the watchers serve; and the accept budget at 1 ms instead of 5
+  changed nothing (1.955x / 3.19x against 1.954x / 3.17x), because a
+  parked loser is woken by the next connection, not by its
+  deadline. So wake-fewer costs and the budget is inert, on the
+  host with four hands; the eighteen-hand cell is macOS's and is in
+  the ledger when the box is quiet. The win the profile priced needs
+  the runtime not to park a loser at all (wolf-lang#257, the
+  optimistic accept; numbers posted there) or a wake the kernel
+  distributes (`EPOLLEXCLUSIVE`, or `reuse_port` where it
+  distributes), and lobo's free-for-all posture stands.
+- Not done, by name: `TCP_NODELAY` and `writev` (wolf-lang#254,
+  s141's); no `open_file_cache`; no stat cache (nginx's default has
+  none, and a cached mtime is a different thing to serve); the
+  budgeted arm's two writes (D40's envelope would need re-deriving
+  first); no pin bump (no v0.2.7 landed during the sprint).
 
 ## ws22 — 2026-09-08 — the gap measured (the bar first, then the profile; nothing optimized)
 
