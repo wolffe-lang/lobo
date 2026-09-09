@@ -78,6 +78,49 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws23 — 2026-09-09 — the gap closes (ws22's list, in its order, a number beside each)
+
+The bar is `docs/PARITY.md` (ws22, unchanged); every change below
+was predicted in this entry BEFORE it was measured, then measured
+by `tools/lobo-parity` on both hosts, the load quoted beside the
+number. The definition question ws22 left open is settled first,
+in `docs/PARITY.md` under *Refusal scope*: the validity rules are
+read per cell, a refused N=1 cell marks its own rows and leaves the
+gating verdict standing, and the tool implements it.
+
+The baseline this entry measures against (trunk `023ec64`, taken
+in this session): see the ledger rows dated 2026-09-09.
+
+- One buffer, one write (lobo#3). A small static response's head
+  and body left as two `net_write`s; on linux the second, small
+  segment waited behind Nagle for a delayed ACK, 40 ms per keepalive
+  request. Now the head's bytes are materialized in the response
+  region and the body pushed behind them (~1.8 ns per byte: 2 µs
+  for a 1 KiB body, measured at 300k iterations), one
+  `net_write_bytes`, one reactor round-trip fewer. The rule
+  (`serve.one_write`): every keepalive response up to the 64 KiB
+  small-file bound takes the copy (40 ms against at most ~120 µs);
+  a `Connection: close` response, which never stalls, takes it up to
+  4 KiB where the copy costs about what the second round-trip did.
+  The TLS arm writes one record the same way. The budgeted arm keeps
+  its two writes: its region cap is exactly the ledger's charge for
+  one body copy at a power-of-two budget (D40), and a second copy
+  would breach a cap the meter had admitted. Named delta until
+  wolf-lang#254's `writev`: a keepalive response between 4 and
+  64 KiB pays the copy on every host, including the two that never
+  stalled.
+  `tests/serve/keepalive_one_write.lu` is the witness: eight
+  keepalive requests inside 100 ms (stalled, they take 320+).
+  Predicted, linux N=4: keepalive 110.9x → 3–4x (the stall is
+  the whole number; lobo's keepalive lands at 2–2.5x its own close
+  rate, 22–28k req/s against nginx's 86k), close 2.27x → ~2.1x (one
+  reactor trip fewer of three). Predicted, macOS N=18: keepalive
+  2.76x → 2.3x [2.1, 2.5] (one of three reactor round-trips per
+  request gone, and at eighteen hands the round-trips are most of
+  the 285 µs of cpu a request burns), close 1.15x → ~1.10x (a
+  herd-bound cell; little of it is the write); N=1 keepalive 3.99x →
+  ~3.5x, N=1 close 2.42x → ~2.2x. Measured: (pending).
+
 ## ws22 — 2026-09-08 — the gap measured (the bar first, then the profile; nothing optimized)
 
 W8 is nginx parity. This sprint wrote the bar down first
