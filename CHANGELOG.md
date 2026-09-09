@@ -83,8 +83,9 @@ place lobo differs from nginx is a named delta in it.
 The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
 applies). Every change below was predicted in this entry BEFORE it
 was measured, then measured by `tools/lobo-parity` on both hosts,
-the load quoted beside the number. The linux series is VALID sets on
-the CI runner, one per step, against a baseline taken at trunk
+the load quoted beside the number. The linux series is six VALID sets on
+the CI runner (one per step, a control at the pin, one at the
+v0.2.8 tag), against a baseline taken at trunk
 `1318cfe` in this session (run 34307802770, load 1.97): close
 **1.981x** [1.962, 2.028] (14,380 vs 28,783 req/s), keepalive
 **3.178x** [2.954, 3.496] (30,361 vs 97,902), N=1 close 2.917x, N=1
@@ -230,19 +231,23 @@ on load, for the reason the first item states.
   (85,193 vs 178,211). A CONTROL at the pin commit, dispatched after both
   (run 34318089358, load 1.92, VALID, the slowest VM of the series:
   nginx close 25.6k), read close **1.296x** [1.283, 1.313] and
-  keepalive 1.928x [1.860, 1.991]: the pin's two runs agree to 0.3%
-  on the close cell across VMs of different speed, the gather's two
-  read 1.41x and 1.44x — **on the linux close shape the gather is
-  ~10% WORSE than ws23's copy, and the VM lottery does not explain
-  it**; the keepalive cell's +0–8% sits inside the pin's own VM
-  spread and is not a finding. The prediction (~1.85x, close within
-  noise) was WRONG on linux and right on macOS's N=1 cell, and the
-  entry says so: the change stands as measured, filed as lobo#6 with
-  the four-VM table and the instrument nobody has run (a `strace -c`
-  / `perf stat` leg on the runner: `writev` vs `sendto`, and whether
-  `wolf_rt`'s `drain_vectored` costs more on that host than the byte
-  loop it replaced); reverting the arm is one hunk if the linux
-  number is wanted back before the cause is known. Measured, macOS arm64 (REFUSED on
+  keepalive 1.928x [1.860, 1.991] — two pin runs agreeing to 0.3%,
+  two gather runs ~10% above them, and this entry filed that as a
+  regression (lobo#6). Then the re-pin at the v0.2.8 tag (the next
+  item: the same lobo source) read close **1.273x** on a sixth VM,
+  the best close ratio of the whole series, with the gather in
+  place. CORRECTED, in this entry rather than by rewriting it: six
+  VALID sets on six VMs (nginx's own close 25.6k–75.4k req/s) spread
+  1.27x–1.44x on close and 1.78x–2.09x on keepalive with no change
+  to lobo, which is wider than any delta a 2 µs byte loop against
+  one list and one syscall could carry. The prediction (~1.85x,
+  close within noise) is neither confirmed nor refuted on linux —
+  the runner cannot see a change of this size in either direction —
+  and it is confirmed on macOS at N=1 (+13–16%, indicative). lobo#6
+  stays open, downgraded from a regression to the instrument nobody
+  has run (a linux profile leg: `strace -c` / `perf stat`, `writev`
+  vs `sendto`, `drain_vectored` vs the byte loop); the change stands
+  as measured. Measured, macOS arm64 (REFUSED on
   load 7.43 — 16.0 during — indicative, against the session's pin
   set): N=18 keepalive 1.355x → **1.369x** [1.352, 1.404], lobo
   85,375 → 84,154 req/s at 10.67 cores (nginx 115,005 at 11.18) —
@@ -258,6 +263,36 @@ on load, for the reason the first item states.
   user-space cost at all — it is what a hand does between
   requests (the `poll` over a shared set, the parks), which the N=1
   cell never pays.
+
+- The re-pin, at the tag. r11 tagged **v0.2.8** (`5c729e8`, trunk
+  HEAD: s141 and s142) while this sprint was measuring, and the pin
+  moved to it the same day as its own commit, the D57 release stamp
+  granted at the tag (`wolf 0.2.8 (wolfgang, pin 5c729e8)`; lobo's
+  `-v` says `built with wolf 0.2.8`; the channel stays `+dev`).
+  bd7caff → 5c729e8 is nine commits: s142's `str.to_int` (#263) and
+  `fs_fstat(fd)` (#261 — lobo's own ws23 filing, answered: kind,
+  size and mtime from one metadata read on an open handle; the two
+  path stats `serve_file` still pays are now foldable, and that is
+  the next lane's line, not this pin's), the version sites, the
+  CHANGELOG and the interface-pretty snapshot. Predicted source
+  motion for the re-pin's own sake: zero; measured: zero (the
+  `.wolfi` stamp 0.2.7+dev.bd7caff → 0.2.8 in fourteen headers,
+  not one item line). Predicted numbers: none move — nothing on
+  lobo's request path is in the nine commits. Measured, linux
+  x86-64 (run 34321060660, load 1.88, VALID, a sixth VM — nginx
+  close 45.3k): close **1.273x** [1.245, 1.303] (35,472 vs 45,342),
+  keepalive **1.784x** [1.754, 1.860] (90,675 vs 163,157), N=1
+  close 1.485x, N=1 keepalive 1.870x — nothing moved that the
+  runner's own VM spread does not cover, and the close cell read
+  the best ratio of the series with the gather in place (see the
+  previous item's correction). Measured, macOS arm64 (REFUSED on load 5.26 —
+  14.3 during — indicative): N=18 close 1.016x [0.804, 1.035]
+  (20,781 vs 20,496), keepalive 1.387x [1.363, 1.458] (85,373 vs
+  118,260), N=1 close 1.044x (31,469 vs 32,394), N=1 keepalive
+  1.664x (52,104 vs 82,012) — against the dev-sha pin's 1.014x /
+  1.369x / 0.987x / 1.627x, nothing moved, as predicted. wolf-lang#146 re-probed at the tag (the
+  FIFTEENTH measurement): still open, `WOLF_MIDEND=0` stays. The
+  pairing gap is zero (wolf@v0.2.8 declares lupin 0.1.27).
 
 - The herd, re-probed only as far as the park cost moved — and it
   did not. ws22's probe shape on the pin tree (`8859ac9`, lobo's
@@ -293,9 +328,9 @@ on load, for the reason the first item states.
   carries the table.
 
 - Not done, by name: the linux profile leg lobo#6 asks for (the
-  close cell's ~10% is the first unexplained number in this series
-  and it is on the stranger's host); the re-pin to v0.2.8 (not tagged during the
-  sprint; the file says how); the streamed arm's head still leaves
+  runner's VM spread is wider than the gather's delta, and only a
+  profile on that host reads under it); consuming `fs_fstat` (the
+  two path stats, wolf-lang#261 answered at the tag); the streamed arm's head still leaves
   before its first chunk (one more syscall per streamed response,
   no stall now that Nagle is off — a gather of head + first chunk
   is a dozen lines for the next lane that measures a large-file
