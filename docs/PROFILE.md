@@ -130,6 +130,33 @@ slightly negative on this path, both times. The profile says the same
 thing from the other side: lobo's user-space work is ~1.5 µs of a
 63 µs request, and no compiler pass moves the other 60.
 
+## ws23's addendum — what the list bought, and what it corrected (2026-09-09)
+
+The changes ws22 priced were taken in its order on branch `ws23`,
+each predicted before it was measured and measured with
+`tools/lobo-parity` on both hosts; the numbers are beside each
+change in the CHANGELOG and in the parity ledger. Three corrections
+to the profile above, measured rather than sampled:
+
+- **Four stats, not three.** The router asked `fs_is_dir` and then
+  `fs_is_file` before `serve_file` asked `fs_size` and
+  `fs_modified_ms`; the `__wolf_rt_fs_is` row above (425 samples) is
+  two calls. A path stat costs ~0.5 µs on this box (100k pairs in
+  1.05 ms), so the four were ~2 µs, not the 5.9 the leaf count
+  attributed under load. ws23 removed one (the router asks the file
+  first); the last two need a runtime call (wolf-lang#261).
+- **The read shape is not where a stat hides.** `fs_open` +
+  `fs_read_chunk` + a confirming read + `fs_close`, with the size
+  taken from the read, costs the same as `fs_read_bytes` within
+  noise (830–1,091 ms vs 841–1,218 ms per 100k iterations of a
+  1 KiB file on the loaded box), so the size stat cannot be folded into the
+  read without an fstat.
+- **The second write was the linux number, whole.** One buffer per
+  small response took the linux keepalive cell from 781 to 26,189
+  req/s (110.7x → 3.3x) and the close cell 2.27x → 1.97x; the copy
+  it costs is ~1.8 ns per byte (2 µs at 1 KiB), which is why a
+  `Connection: close` response over 4 KiB keeps two writes.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux

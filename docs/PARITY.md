@@ -154,6 +154,31 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · four VALID sets, one per ws23 change · **NOT MET on both shapes** (keepalive 110.7x → 3.26x)
+
+ws23's series, each set a `parity=true` dispatch of `ci.yml` on
+branch `ws23` at the named commit, 5 pairs × `ab -t 5`, c=32 over 4
+generators, lobo 0.1.0+dev at wolf 0.2.6 pin 398e5f5, nginx 1.30.4.
+Every set VALID (load under 2.0 after the settle loop, generators
+at 0.69–0.73 cores, oracle spreads under 1.15, nothing failed). The
+runner is a shared VM and the fourth set landed on a faster host
+(nginx's own close went 25.9k → 36.9k req/s between the third and
+fourth), which is the reason the statistic is a same-box ratio:
+
+| commit (change) | run | load | N=4 close | N=4 keepalive | N=1 close | N=1 keepalive |
+|---|---|---|---|---|---|---|
+| `023ec64` (trunk, the baseline) | 34294755111 | 1.91 | **2.267x** [2.203, 2.298] · 11,127 vs 25,221 | **110.7x** [110.1, 111.2] · **781** vs 86,329 | 3.410x | 44.1x |
+| `092dbf8` (one buffer, one write) | 34296065145 | 1.90 | **1.971x** [1.941, 1.985] · 12,891 vs 25,281 | **3.315x** [3.215, 3.503] · 26,189 vs 86,903 | 2.695x | 4.525x |
+| `2c393b3` (three stats, not four) | 34296624364 | 1.85 | **1.952x** [1.925, 1.983] · 13,253 vs 25,890 | **3.297x** [3.066, 3.522] · 27,102 vs 89,083 | 2.684x | 4.519x |
+| `0e36225` (the signal poll on a budget) | 34297057715 | 1.71 | **2.038x** [1.939, 2.156] · 18,224 vs 36,935 | **3.258x** [3.183, 3.525] · 39,190 vs 127,701 | 2.968x | 4.419x |
+
+lobo's cores on the N=4 keepalive cell went 0.18 (the stall: the
+hands were idle) → 3.13–3.14; on close 2.52 → 2.35–2.45; nginx's
+held at 1.56–1.59 and 2.45–2.46. The keepalive row is a throughput
+number for the first time on linux; what remains there is the
+runtime's reactor round-trip (wolf-lang#257) and, on the close
+shape, the accept path.
+
 ### 2026-09-08 · macOS arm64 · nomad-1 (18 cpus) · QUIET BOX · **NOT MET on both shapes** (the set refused on the non-gating cell only)
 
 Taken after the last sibling lane (is39) left the box: load(1m)
