@@ -43,7 +43,9 @@
 # a delta between two trees measured in ONE job on ONE VM, against
 # that VM's own nginx, is the only linux delta this repo can read.
 # `LOBO_NAME` / `LOBO_REF_NAME` label the columns (default `lobo` /
-# `ref`). Single-tree runs print exactly what they printed before.
+# `ref`), and `LOBO_THIS=<binary>` names this side when it is not
+# this tree's `target/lobo-release` (two OTHER trees measured from
+# here). Single-tree runs print exactly what they printed before.
 #
 # The generator is ab(1) — single-threaded, on every macOS and in
 # apache2-utils on linux — and ONE ab is the ceiling on the keepalive
@@ -72,7 +74,7 @@ if ! command -v ab > /dev/null 2>&1; then
     echo "lobo-parity: REFUSED — ab(1) is not on PATH (macOS ships it; linux: apache2-utils)" >&2
     exit 1
 fi
-LOBO="${LOBO_BIN_OVERRIDE:-$(pwd)/target/lobo-release}"
+LOBO="${LOBO_THIS:-$(pwd)/target/lobo-release}"
 NGINX="$(pwd)/tests/differential/bin/nginx"
 [ -x "$LOBO" ] || { echo "lobo-parity: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
 [ -x "$NGINX" ] || { echo "lobo-parity: REFUSED — pinned nginx missing at $NGINX (docs/DIFFERENTIAL.md)" >&2; exit 1; }
