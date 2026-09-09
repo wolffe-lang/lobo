@@ -1264,8 +1264,38 @@ fn handle_request(
         return true
     }
 
-    if fs_is_dir(d.fs_path) {
-        if !norm_path.ends_with("/") {
+    // ws23 (the stats): the REGULAR FILE is asked first, because it is
+    // what nearly every request names and the path stats are where
+    // a file request's syscalls went beyond nginx's (docs/PROFILE.md
+    // counted three; there were four — `fs_is_dir`, `fs_is_file`,
+    // `fs_size`, `fs_modified_ms` — against nginx's one `fstat` on the
+    // fd it opened). Asking `fs_is_dir` first cost every file request
+    // a stat that only a directory request needed; now a file pays
+    // one classification stat, a directory request pays the same two
+    // it did, and what any request OBSERVES is unchanged: the fifo,
+    // device and socket a `fs_is_file` guard exists for still never
+    // reach an `open` that could block. The remaining two — size and
+    // mtime, each its own `stat(2)` — need a runtime call that
+    // answers kind, size and mtime at once, or an fstat on the fd
+    // the read opens (wolf-lang, filed from ws23 with the number:
+    // ~0.5 µs per path stat on this box).
+    if fs_is_file(d.fs_path) {
+        return serve_file(
+            mut cn,
+            c,
+            req,
+            d.fs_path,
+            token,
+            keep,
+            is_head,
+            local_port,
+            mut acc,
+            mut chg,
+        )
+    }
+
+    if !norm_path.ends_with("/") {
+        if fs_is_dir(d.fs_path) {
             // 301 to the trailing-slash form (nginx's dir redirect)
             let loc = "http://{hostport(req.host, local_port)}{norm_path}/"
             let body = error_body(301, token)
@@ -1282,48 +1312,43 @@ fn handle_request(
             write_all(mut cn, h)?
             return !keep
         }
-        // directory with a trailing slash: try the index files
-        var idxs = d.index
-        if idxs.is_empty() {
-            (mut idxs).push("index.html")
+        acc.status = 404
+        acc.body_bytes = err_len(404, false, token)
+        send_err(mut cn, 404, false, token)
+        return true
+    }
+
+    // a trailing slash: try the index files first, without a stat on
+    // the directory itself (nginx's index module opens the candidate
+    // directly, too); the directory is asked about only when no index
+    // served, to tell 403 (a directory, autoindex off) from 404
+    var idxs = d.index
+    if idxs.is_empty() {
+        (mut idxs).push("index.html")
+    }
+    for name in idxs {
+        let cand = join_fs(d.fs_path, name)
+        if fs_is_file(cand) {
+            return serve_file(
+                mut cn,
+                c,
+                req,
+                cand,
+                token,
+                keep,
+                is_head,
+                local_port,
+                mut acc,
+                mut chg,
+            )
         }
-        for name in idxs {
-            let cand = join_fs(d.fs_path, name)
-            if fs_is_file(cand) {
-                return serve_file(
-                    mut cn,
-                    c,
-                    req,
-                    cand,
-                    token,
-                    keep,
-                    is_head,
-                    local_port,
-                    mut acc,
-                    mut chg,
-                )
-            }
-        }
+    }
+    if fs_is_dir(d.fs_path) {
         // no index, autoindex off → 403 (nginx)
         acc.status = 403
         acc.body_bytes = err_len(403, false, token)
         send_err(mut cn, 403, false, token)
         return true
-    }
-
-    if fs_is_file(d.fs_path) {
-        return serve_file(
-            mut cn,
-            c,
-            req,
-            d.fs_path,
-            token,
-            keep,
-            is_head,
-            local_port,
-            mut acc,
-            mut chg,
-        )
     }
 
     acc.status = 404
