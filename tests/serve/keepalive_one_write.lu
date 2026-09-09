@@ -1,0 +1,129 @@
+//! check: run(exit=0, stdout="ok=8\nfast=yes\n")
+//! phase: run
+//! lanes: native
+//! conforms: conc.task.spawn, err.union, err.propagate
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws23 (lobo#3): a small static response is ONE write. Before this
+//! sprint serve_file wrote the head and the body as two `net_write`s,
+//! and on linux the second, small segment sat behind Nagle waiting
+//! for an ACK the peer delays 40 ms on a keepalive connection — every
+//! keepalive request cost a round trip, 781 req/s over 32 connections
+//! on the CI runner (docs/PARITY.md). The language has no TCP_NODELAY
+//! (wolf-lang#254), so the witness is the CLOCK: eight keepalive
+//! requests on one connection, each response read whole, and the
+//! eight together must finish inside 100 ms. Stalled they take at
+//! least 320 ms (eight delayed ACKs); unstalled they take a few
+//! milliseconds on any host, loaded or not — the margin is what makes
+//! ten runs give one verdict. macOS acks differently and never
+//! stalled; the linux runner is where this line bites. Native only:
+//! net + fs + a spawned server task meet on no other lane.
+
+use config
+use http
+use serve
+
+fn recv_one(cli: int) -> str ! {io} {
+    // read one response: headers then exactly Content-Length bytes
+    var buf = ""
+    loop {
+        let cut = buf.find("\r\n\r\n") else -1
+        if cut >= 0 {
+            let head = buf[0..cut]
+            let clh = header_len(head)
+            let body_start = cut + 4
+            while buf.len < body_start + clh {
+                let piece = net_read(cli, 4096) else |_| {
+                    return io
+                }
+                buf = "{buf}{piece}"
+            }
+            return buf[0..body_start + clh]
+        }
+        let piece = net_read(cli, 4096) else |_| {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+fn header_len(head: str) -> int {
+    for line in head.lines() {
+        let low = line.lower()
+        if low.starts_with("content-length:") {
+            let v = line[15..line.len]
+            let t = v.trim()
+            var n: int = 0
+            for b_raw in t.bytes() {
+                let b = b_raw as int
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                }
+            }
+            return n
+        }
+    }
+    0
+}
+
+fn main() -> !int {
+    let root = "ws23_onewrite"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/www")?
+    // the parity workload's file: sixteen 64-byte lines, 1 KiB
+    var body = ""
+    var i = 0
+    while i < 16 {
+        body = "{body}line {i} ........................................................\n"
+        i = i + 1
+    }
+    fs_write_text("{root}/www/index.html", body)?
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws23_onewrite/www; index index.html; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let cli = net_connect("127.0.0.1:{port}")?
+    var ok = 0
+    var elapsed = 0
+    scope s {
+        s.spawn(fn() {
+            let conn = net_accept(l) else |_| -1
+            if conn >= 0 {
+                serve.serve_conn(conn, c, opts, lim, port)
+            }
+        })
+        net_deadline(cli, 3000)?
+        // one warm-up exchange so the first request's accept and the
+        // file cache are not on the clock
+        net_write(cli, "GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")?
+        let r0 = recv_one(cli)?
+        assert(r0.starts_with("HTTP/1.1 200 OK"), "warm-up served")
+        let t0 = time_unix_ms()
+        var n = 0
+        while n < 8 {
+            net_write(cli, "GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")?
+            let r = recv_one(cli)?
+            if r.starts_with("HTTP/1.1 200 OK") && r.ends_with(body) {
+                ok = ok + 1
+            }
+            n = n + 1
+        }
+        elapsed = time_unix_ms() - t0
+        net_write(cli, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+        let r9 = recv_one(cli)?
+        assert(r9.starts_with("HTTP/1.1 200 OK"), "closing request served")
+    }
+    net_close(cli) else |_| {}
+    net_close(l) else |_| {}
+    fs_remove_dir_all(root) else |_| {}
+    print("ok={ok}")
+    if elapsed < 100 {
+        print("fast=yes")
+    } else {
+        print("fast=no ({elapsed} ms for eight keepalive requests: the two-write stall, lobo#3)")
+    }
+    0
+}

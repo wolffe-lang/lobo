@@ -798,6 +798,16 @@ fn serve_file(
                 send_err(mut cn, 500, false, token)
                 return true
             }
+            // ws23 (lobo#3): ONE buffer, one record, on the same rule
+            // as the plaintext arm below (which says why)
+            if one_write(keep, body.len) {
+                var buf = head.bytes()
+                for b in body {
+                    (mut buf).push(b)
+                }
+                write_bytes_all(mut cn, buf)?
+                return !keep
+            }
             write_all(mut cn, head)?
             write_bytes_all(mut cn, body)?
             return !keep
@@ -866,7 +876,33 @@ fn serve_file(
             // docs quote it as measured-per-tier and never compare it
             // to `chg.used`.
             chg.rt = region_bytes(resp)
-            if !failed {
+            if !failed && one_write(keep, body.len) {
+                // ws23 (lobo#3): ONE buffer, ONE write — the head's
+                // bytes materialized in this region (F-0072), the body
+                // pushed behind them, one syscall and one reactor
+                // round-trip instead of two. `one_write` says when the
+                // copy is worth it; the budgeted arm
+                // (`budget.body_small`) keeps its two writes on
+                // purpose: its cap is exactly the ledger's charge for
+                // ONE body copy at a power-of-two budget (D40's
+                // envelope, `ledger_cap`), and a second copy in that
+                // region would breach it.
+                var buf = head.bytes()
+                for b in body {
+                    (mut buf).push(b)
+                }
+                net_write_bytes(sock, buf) else |e| match e {
+                    closed => {
+                        wcode = 1
+                    },
+                    invalid => {
+                        wcode = 2
+                    },
+                    io => {
+                        wcode = 2
+                    },
+                }
+            } else if !failed {
                 net_write(sock, head) else |e| match e {
                     closed => {
                         wcode = 1
@@ -1049,6 +1085,23 @@ fn serve_file(
     }
     fs_close(fd) else |_| {}
     !keep
+}
+
+/// ws23 (lobo#3): does this small response go out as ONE buffer? The
+/// head and the body used to leave as two writes, and on linux the
+/// second, small segment sat behind Nagle waiting for an ACK the peer
+/// delays 40 ms on a keepalive connection: lobo's keepalive on linux
+/// was 781 req/s, one request per 41 ms per connection (docs/PARITY.md,
+/// the ws22 set). The language has no `TCP_NODELAY` and no `writev`
+/// (wolf-lang#254), so the fix is a copy: the body pushed behind the
+/// head's bytes at ~1.8 ns per byte (measured, 300k iterations). On a
+/// KEEPALIVE response the copy is always worth it — 40 ms against at
+/// most ~120 µs for a 64 KiB body. On a `Connection: close` response
+/// nothing stalls (the close flushes) and the copy buys only the
+/// second reactor round-trip, ~10 µs, so it is taken up to 4 KiB and
+/// the two writes stay above that. Pure and total.
+fn one_write(keep: bool, body_len: int) -> bool {
+    keep || body_len <= 4096
 }
 
 /// The Connection header token for a keepalive decision. Total.
