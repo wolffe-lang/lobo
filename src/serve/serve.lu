@@ -287,6 +287,12 @@ pub fn resolve_limits(c: config.Conf) -> http.Limits {
         lim.max_header_total = hb.0 * hb.1
     }
     lim.memory_budget = config.mem_budget(c)
+    // ws24: `tcp_nodelay off` is the only value that moves anything —
+    // `on` is what every accepted stream already is ([os.net.nodelay]),
+    // and absent means nginx's default, which is also on.
+    if config.nodelay(c) == 0 {
+        lim.nodelay = false
+    }
     lim
 }
 

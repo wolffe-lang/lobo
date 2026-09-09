@@ -124,8 +124,35 @@ pub fn limits_check(c: Conf) -> str {
             if size_bytes(c.argp[c.args_at[i]]) < 0 {
                 return "\"memory_budget\" directive invalid value in {c.files[i]}:{c.lines[i]}"
             }
+        } else if name == "tcp_nodelay" && c.args_n[i] >= 1 {
+            // ws24: a flag directive — the oracle's own wording for
+            // ngx_conf_set_flag_slot, the shape metricsconf probed
+            let v = c.argp[c.args_at[i]]
+            if !(v == "on" || v == "off") {
+                return "invalid value \"{v}\" in \"tcp_nodelay\" directive, it must be \"on\" or \"off\" in {c.files[i]}:{c.lines[i]}"
+            }
         }
         i = i + 1
     }
     ""
+}
+
+/// The effective `tcp_nodelay` (ws24): 1 for `on`, 0 for `off`, -1
+/// when absent or invalid (the -t half named it; load stays
+/// tolerant, and absent is nginx's default, `on`). First-server-else-
+/// http like the rest of the family; a location-level row parses and
+/// does not apply at v0 (the L009 posture). Total.
+pub fn nodelay(c: Conf) -> int {
+    let r = eff_row(c, "tcp_nodelay")
+    if r < 0 {
+        return -1
+    }
+    let v = c.argp[c.args_at[r]]
+    if v == "on" {
+        return 1
+    }
+    if v == "off" {
+        return 0
+    }
+    -1
 }

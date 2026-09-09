@@ -264,8 +264,8 @@ pub fn table() -> Table {
         "",
         1,
         1,
-        "planned(ws02)",
-        "TCP_NODELAY on keepalive. Delta, named (ws23): the language cannot set the option (wolf-lang#254), so neither value is honored; since ws23 every small static response is ONE write (lobo#3), so the keepalive stall the option exists to prevent (linux: 40 ms delayed ACK meeting Nagle on a two-write response) does not arise on the small-file path — streamed responses over 64 KiB and budgeted responses still write more than once",
+        "implemented",
+        "TCP_NODELAY on every accepted connection (ws24; wolf-lang#254 closed at the pin). Delta, named: nginx defaults to `on` but applies it to keepalive connections only; lobo's `on` (the default, the runtime's own posture — [os.net.nodelay]) covers every accepted stream, and `off` puts Nagle back on every stream. Since ws24 a small static response is ONE gathered write (`net_writev`), so `off` re-exposes nothing on that path; a streamed (over 64 KiB) or budgeted response still writes more than once and `off` stalls those on a delayed-ACK host (linux: 40 ms per response). Resolved http/server (first-server-else-http, D29); a location-level row parses and does not apply at v0 (the L009 posture)",
     )
     row(
         mut t,

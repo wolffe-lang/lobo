@@ -77,6 +77,30 @@ fn main() -> !int {
     assert(config.mem_budget(c4) == 0, "0 budget = off")
     assert(config.limits_check(c4).is_empty(), "0 budget passes -t")
 
+    // ---- tcp_nodelay (ws24): a flag, first-server-else-http, the
+    // oracle's own -t wording for a bad value
+    assert(config.nodelay(c0) == -1, "no tcp_nodelay -> -1 (serve keeps the runtime's on)")
+    assert(config.nodelay(conf_of("  tcp_nodelay off;")) == 0, "http-level off -> 0")
+    assert(config.nodelay(conf_of("  tcp_nodelay on;")) == 1, "http-level on -> 1")
+    let c4s = config.
+        parse_str(
+        "http {{\n  tcp_nodelay off;\n  server {{ listen 8080; tcp_nodelay on; }}\n}}\n",
+        "t.conf",
+    )
+    assert(config.nodelay(c4s) == 1, "the first server's own row wins over http's")
+    let c4b = conf_of("  tcp_nodelay maybe;")
+    assert(config.ok(c4b), "a bad flag value is the -t half's, not the parser's")
+    assert(config.nodelay(c4b) == -1, "invalid value -> -1 (load stays tolerant)")
+    let e4 = config.limits_check(c4b)
+    assert(
+        e4.
+            starts_with(
+            "invalid value \"maybe\" in \"tcp_nodelay\" directive, it must be \"on\" or \"off\"",
+        ),
+        "-t names the flag the oracle's way: {e4}",
+    )
+    assert(config.limits_check(conf_of("  tcp_nodelay off;")).is_empty(), "off passes -t")
+
     // ---- lints: L008 native one-way door, L009 location-inert
     let l1 = config.lint(conf_of("  memory_budget 64k;"))
     assert(l1.contains("LOBO-L008"), "memory_budget lints L008: {l1}")

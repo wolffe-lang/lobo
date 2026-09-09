@@ -171,7 +171,11 @@ pub fn has_control(s: str) -> bool {
 /// fence bounds inputs with input-shaped statuses (400/413/414), the
 /// budget bounds a request's admitted memory with a 503; the fence
 /// fires first at every site (docs/BUDGET.md). serve/ enforces it;
-/// the parser never reads it.
+/// the parser never reads it. `nodelay` (ws24) is the third rider:
+/// `tcp_nodelay` resolved — true (the default, the runtime's own
+/// posture since wolf-lang#254) leaves TCP_NODELAY set on every
+/// accepted stream, false puts Nagle back on accept. The entry's
+/// accept sites read it; nothing in the parser does.
 pub struct Limits {
     max_request_line: int,
     max_header_line: int,
@@ -180,6 +184,7 @@ pub struct Limits {
     max_chunk_digits: int,
     max_body: int,
     memory_budget: int,
+    nodelay: bool,
 }
 
 /// nginx-compatible defaults: 8k request line and header field
@@ -201,6 +206,7 @@ pub fn default_limits() -> Limits {
         max_chunk_digits: 15,
         max_body: 1048576,
         memory_budget: 0,
+        nodelay: true,
     }
 }
 

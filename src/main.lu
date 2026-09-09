@@ -1787,6 +1787,13 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 let curgen = current_gen(gens)
                 counters.accepted = counters.accepted + 1
                 gens = bump_live(gens, curgen, 1)
+                // ws24: `tcp_nodelay off` is the one value that moves
+                // anything — every accepted stream is already NODELAY
+                // ([os.net.nodelay]); a host that declines is an
+                // unchanged socket, which is what `on` means
+                if !lim_for(gens, curgen).nodelay {
+                    net_nodelay(conn, false) else |_| {}
+                }
                 (mut cfds).push(conn)
                 (mut cgens).push(curgen)
                 (mut ccarry).push("")
@@ -1820,6 +1827,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 let tconf = conf_for(gens, tgen)
                 var aborted_t = false
                 counters.accepted = counters.accepted + 1
+                if !lim_for(gens, tgen).nodelay {
+                    net_nodelay(tconn, false) else |_| {}
+                }
                 var z = tls.accept(tconn, ssl0, opts.read_timeout_ms) else |e| match e {
                     refused => {
                         aborted_t = true
