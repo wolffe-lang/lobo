@@ -238,10 +238,15 @@ ws04 built:
   (`reload`/`quit`/`stop`/`reopen`/`status`/`upgrade`/`ping`), an
   optional shared-secret arm, and `lobo control <verb>` as its CLI
   door. docs/CONTROL.md is that page: the measured per-host
-  listener posture (loopback TCP everywhere; wolf has no
-  unix-domain socket at this pin, wolf-lang#227), the auth story and
-  why lobo reads its token file rather than writing one
-  (wolf-std#5), and the nginx differential's rows. Both triggers
+  listener posture (TWO transports since ws17 — `unix:<path>` and
+  loopback TCP — with the unix-domain socket the recommended default
+  where the host has it, because file permissions are a uid boundary
+  and a loopback port is not), the auth story and why lobo reads its
+  token file rather than writing one (wolf-std#5), and the nginx
+  differential's rows. This paragraph was written at ws15, when wolf
+  had no unix-domain socket on any host and every spelling answered a
+  bare `io`; that was wolf-lang#227, and `[os.net.unix]` landed at the
+  ws17 pin (s136, wrapped by `std.net.unix` at wolf-std sc36). Both triggers
   emit through one site, so a verb and a signal write the same log
   but for `source`.
 
