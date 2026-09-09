@@ -11,6 +11,15 @@
 # prints is what docs/PARITY.md's ledger and the campaign closeout
 # carry, dated and named by host.
 #
+# Refusal SCOPE (ws23, settled in docs/PARITY.md before ws23's first
+# set): the quiet-rig rule is the set's — a loaded box refuses every
+# cell. The generator, oracle-spread and failure rules are read PER
+# CELL: a refusal on the gating cell refuses the set (exit 3); a
+# refusal on the informative N=1 cell marks that cell's rows REFUSED
+# in the table and leaves the gating verdict standing (exit 0) — the
+# single-process P/E-core swing on macOS is a fact about that cell,
+# not about the eighteen-hand one.
+#
 #   tools/lobo-parity [pairs] [seconds] [concurrency] [N] [gens]
 #     pairs        interleaved pairs per cell (default 5 — the bar's)
 #     seconds      ab -t per run (default 5 — the bar's)
@@ -199,12 +208,15 @@ minmax() { # minmax <numbers> — "min max"
 maxof() { echo "$@" | tr ' ' '\n' | sort -n | tail -1; }
 
 refused=""
+irefused=""
 rows=""
 verdicts=""
 
 # cell <workers> <gates:1|0>
 cell() {
     W=$1
+    gate=$2
+    crefused=""
     L0=""; L1=""; X0=""; X1=""; R0=""; R1=""
     LC0=""; LC1=""; XC0=""; XC1=""; G=""; F=0
     p=1
@@ -233,19 +245,31 @@ cell() {
         rows="$rows| N=$W c=$CONC | $shape | $(median $L) | $(median $X) | **${rmed}x** [$rmin, $rmax] | $(median $LC) | $(median $XC) | $genmax |
 "
         [ "$(awk -v s="$spread" -v m="$ORACLE_SPREAD" 'BEGIN { print (s > m) ? 1 : 0 }')" = 1 ] &&
-            refused="$refused
+            crefused="$crefused
   oracle not stable: nginx N=$W $shape max/min = $spread (> $ORACLE_SPREAD)"
-        if [ "$2" != "" ] && [ "$W" = "$N" ]; then
+        if [ "$gate" = 1 ] && [ "$W" = "$N" ]; then
             met=$(awk -v r="$rmed" -v b="$BAR" 'BEGIN { print (r <= b) ? "MET" : "NOT MET" }')
             verdicts="$verdicts
   parity($shape, N=$W, c=$CONC): median ${rmed}x [$rmin, $rmax] — $met on $host (bar ${BAR}x)"
         fi
     done
     [ "$(awk -v g="$genmax" -v m="$GENMAX" 'BEGIN { print (g > m) ? 1 : 0 }')" = 1 ] &&
-        refused="$refused
+        crefused="$crefused
   generator was the ceiling: ab reached $genmax cores at N=$W (> $GENMAX) — split the load across k generators"
-    [ "$F" -gt 0 ] && refused="$refused
+    [ "$F" -gt 0 ] && crefused="$crefused
   $F run(s) at N=$W had failed or non-2xx requests"
+    # the scope rule: a gating cell's refusal is the set's; the
+    # informative cell's refusal is its own, and its rows say so
+    if [ -n "$crefused" ]; then
+        if [ "$gate" = 1 ]; then
+            refused="$refused$crefused"
+        else
+            irefused="$irefused$crefused"
+            rows=$(printf '%s' "$rows" | sed "s/^| N=$W c=$CONC | \([a-z]*\) | /| N=$W c=$CONC (REFUSED) | \1 | /")
+            rows="$rows
+"
+        fi
+    fi
     return 0
 }
 
@@ -270,4 +294,5 @@ if [ -n "$refused" ]; then
     echo "lobo-parity: SET REFUSED — not a result (docs/PARITY.md validity):$refused"
     exit 3
 fi
+[ -n "$irefused" ] && echo "lobo-parity: the N=1 cell is REFUSED — its rows are not a result (docs/PARITY.md validity, per-cell scope):$irefused"
 echo "lobo-parity: VALID SET$verdicts"

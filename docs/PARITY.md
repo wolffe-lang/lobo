@@ -118,6 +118,25 @@ host's result and carries that host's name.
   - *nothing failed*: `ab`'s `Failed requests` and `Non-2xx` are
     zero on every run, or the set is refused.
 
+#### Refusal scope (ws23, written 2026-09-09 before ws23's first set)
+
+ws22's quiet-box set was refused by the tool on exactly one count,
+nginx's N=1 keepalive spread, and left the question of scope open.
+Settled here, before any ws23 number exists: the *quiet rig* rule
+is the set's, since a loaded box loads every cell. The *generator*,
+*oracle* and *nothing failed* rules are read **per cell**. A refusal
+on the gating cell (N = cpus) refuses the set. A refusal on the
+informative cell (N = 1) refuses that cell: its rows are marked
+`(REFUSED)` in the table, they are not a result, and the gating
+verdict stands. The reason is the one ws22 saw: a single process on
+this box lands on a performance core or an efficiency core run to
+run and its numbers swing 1.3–2x, which is a fact about the N=1 cell
+and says nothing about the eighteen-hand cell it was refused beside.
+`tools/lobo-parity` implements the scope (exit 3 only on a set-wide
+or gating-cell refusal; the N=1 refusal is printed by name and exits
+0). Every ledger row from ws23 on is read under this rule; ws22's
+macOS row above was reported the same way by hand.
+
 ### What counts as met
 
 W8 is met when, on both hosts, on both shapes, at N = cpus and
