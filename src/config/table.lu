@@ -265,7 +265,7 @@ pub fn table() -> Table {
         1,
         1,
         "planned(ws02)",
-        "TCP_NODELAY on keepalive",
+        "TCP_NODELAY on keepalive. Delta, named (ws23): the language cannot set the option (wolf-lang#254), so neither value is honored; since ws23 every small static response is ONE write (lobo#3), so the keepalive stall the option exists to prevent (linux: 40 ms delayed ACK meeting Nagle on a two-write response) does not arise on the small-file path — streamed responses over 64 KiB and budgeted responses still write more than once",
     )
     row(
         mut t,

@@ -30,7 +30,7 @@ Status counts: **45 implemented** / **50 planned** / **13 named_error** (108 row
 | `log_headers` | http server | at_least(1) | implemented | lobo-native (ws09, linted): request headers the JSON door nests under "headers" |
 | `sendfile` | http server location | exact(1) | planned(ws02) | kernel file send |
 | `tcp_nopush` | http server location | exact(1) | planned(ws02) | TCP_CORK on sendfile |
-| `tcp_nodelay` | http server location | exact(1) | planned(ws02) | TCP_NODELAY on keepalive |
+| `tcp_nodelay` | http server location | exact(1) | planned(ws02) | TCP_NODELAY on keepalive. Delta, named (ws23): the language cannot set the option (wolf-lang#254), so neither value is honored; since ws23 every small static response is ONE write (lobo#3), so the keepalive stall the option exists to prevent (linux: 40 ms delayed ACK meeting Nagle on a two-write response) does not arise on the small-file path — streamed responses over 64 KiB and budgeted responses still write more than once |
 | `keepalive_timeout` | http server location | 1..2 | planned(ws02) | keepalive close timer |
 | `keepalive_requests` | http server location | exact(1) | planned(ws02) | keepalive request budget |
 | `client_max_body_size` | http server location | exact(1) | implemented | request body cap -> 413; 0 = unlimited (nginx's rule), default 1m (ws10). Location-level rows are named-inert at v0 (L009) — limits resolve at http/server while server selection is host-blind |
