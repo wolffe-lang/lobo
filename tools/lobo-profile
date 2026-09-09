@@ -1,0 +1,173 @@
+#!/bin/sh
+# lobo-profile — THE PROFILE LEG (ws25, lobo#6): where one hand's time
+# goes under the close shape, read with the host's sampling profiler,
+# so that two trees can be compared on ONE box by SHARE rather than by
+# req/s — the number a shared VM cannot hold still (docs/PARITY.md:
+# six runner VMs spread 1.27x–1.44x on the close cell with no change
+# to lobo). NOT a gauntlet step and never a gate.
+#
+#   tools/lobo-profile [binary] [label] [seconds]
+#     binary   the lobo to profile (default target/lobo-release)
+#     label    names the scratch dir and the report (default: lobo)
+#     seconds  the sampling window (default 8)
+#
+# The shape is ws22's probe (docs/PROFILE.md): `worker_processes 1`,
+# the parity file (1 KiB), the close shape under four `ab -c 8`
+# generators, and the profiler on the ONE serving process (at
+# `worker_processes 1` the master serves alone — docs/WORKERS.md) for
+# the window, in the middle of the drive. Two instruments,
+# one per host, the same driver:
+#   linux  — `perf record -F 997 -g -p <hand>` then `perf report
+#            --no-children --sort sym` (the leaf shares: the syscalls,
+#            the runtime's calls, lobo's own frames) and `--sort dso`
+#            (kernel vs runtime vs lobo). A second, separate drive
+#            runs `strace -c -f -p <hand>` for the syscall COUNTS per
+#            request (ptrace perturbs, so it is never in the perf
+#            window). Both need root on a stock runner
+#            (perf_event_paranoid, yama ptrace_scope); the tool uses
+#            sudo when it is not root and SKIPS loudly, by name, when
+#            perf is absent — a skip is not a number.
+#   macOS  — `sample(1)` on the hand (ws22's instrument), its
+#            "top of stack" table.
+# The report ends with the drive's own req/s (the generators' sum) so
+# a profile is never read without the throughput it was taken at.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
+
+BIN="${1:-$(pwd)/target/lobo-release}"
+case "$BIN" in /*) ;; *) BIN="$(pwd)/$BIN" ;; esac
+LABEL="${2:-lobo}"
+SECS="${3:-8}"
+GENS=4
+PERGEN=8
+[ -x "$BIN" ] || { echo "lobo-profile: REFUSED — $BIN is not an executable" >&2; exit 1; }
+command -v ab > /dev/null 2>&1 || { echo "lobo-profile: REFUSED — ab(1) is not on PATH" >&2; exit 1; }
+scratch="$(pwd)/target/profile-$LABEL"
+rm -rf "$scratch"
+mkdir -p "$scratch/www"
+awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
+host="$(uname -sm)"
+SUDO=""
+[ "$(id -u)" = 0 ] || SUDO="sudo -n"
+
+wait_port() {
+    i=0
+    while [ $i -lt 80 ]; do
+        printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
+        "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null | grep -q "200 OK" && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+start() { # start — one master, one hand; sets hp, mpid, hand, lconf
+    hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    lconf="$scratch/lobo.conf"
+    printf 'worker_processes 1;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$scratch" "$cp" "$hp" "$scratch" > "$lconf"
+    "$BIN" serve -p . -c "$lconf" 2>> "$scratch/lobo.log" &
+    mpid=$!
+    wait_port "$hp" || { echo "lobo-profile: $LABEL never served" >&2; kill "$mpid"; return 1; }
+    sleep 1
+    # at `worker_processes 1` lobo is ONE process — the master serves
+    # (docs/WORKERS.md), so the hand is the master itself
+    hand=$(pgrep -f -- "^$BIN .*--worker 1 --worker-control" | head -1)
+    [ -n "$hand" ] || hand=$mpid
+}
+stop() {
+    "$BIN" -s stop -p . -c "$lconf" > /dev/null 2>&1
+    wait "$mpid" 2>/dev/null
+}
+drive() { # drive <seconds> <tag> — the close shape, GENS generators; sets rps
+    g=1
+    genpids=""
+    while [ $g -le $GENS ]; do
+        ab -q -t "$1" -n 1000000 -c $PERGEN "http://127.0.0.1:$hp/index.html" > "$scratch/ab-$2-g$g.txt" 2>&1 &
+        genpids="$genpids $!"
+        g=$((g + 1))
+    done
+}
+drive_wait() { # drive_wait <tag> — sets rps (sum) and failed
+    wait $genpids
+    rps=0; failed=0
+    for f in "$scratch"/ab-$1-g*.txt; do
+        r=$(awk '/^Requests per second/ { print $4 }' "$f")
+        x=$(awk '/^Failed requests/ { print $3 }' "$f")
+        rps=$(awk -v a="$rps" -v b="${r:-0}" 'BEGIN { printf "%.0f", a + b }')
+        failed=$((failed + ${x:-0}))
+    done
+}
+
+echo "lobo-profile: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); $LABEL = $("$BIN" -v 2>&1 | head -1); one hand, close shape, $GENS × ab -c $PERGEN, a $SECS s window"
+
+case "$(uname -s)" in
+Linux)
+    if ! command -v perf > /dev/null 2>&1; then
+        echo "lobo-profile: SKIPPED — perf(1) is not on PATH (linux-tools for this kernel); no profile for $LABEL" >&2
+        exit 0
+    fi
+    start || exit 1
+    drive $((SECS + 5)) perf
+    sleep 2
+    $SUDO perf record -q -F 997 -g -p "$hand" -o "$scratch/perf.data" -- sleep "$SECS" 2> "$scratch/perf.err" || {
+        echo "lobo-profile: perf record failed:" >&2; cat "$scratch/perf.err" >&2
+    }
+    drive_wait perf
+    stop
+    echo "lobo-profile: $LABEL perf window: $rps req/s summed over the drive, failed=$failed, hand pid $hand"
+    if [ -s "$scratch/perf.data" ]; then
+        $SUDO chown "$(id -u)" "$scratch/perf.data" 2>/dev/null
+        echo ""
+        echo "=== $LABEL — perf report, leaves (self), --sort sym, over 0.4%"
+        $SUDO perf report -i "$scratch/perf.data" --stdio --no-children --sort sym --percent-limit 0.4 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -E '^ +[0-9]' | head -45
+        echo ""
+        echo "=== $LABEL — perf report, by dso (kernel / runtime+lobo / libc)"
+        $SUDO perf report -i "$scratch/perf.data" --stdio --no-children --sort dso 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -E '^ +[0-9]' | head -12
+        echo ""
+        echo "=== $LABEL — perf report, inclusive (children), --sort sym, over 3%"
+        $SUDO perf report -i "$scratch/perf.data" --stdio --children --sort sym --percent-limit 3 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -E '^ +[0-9]' | head -40
+    fi
+    # the syscall COUNTS, on a separate drive: ptrace slows the hand
+    # several-fold and the shares above must not carry that
+    if command -v strace > /dev/null 2>&1; then
+        start || exit 1
+        drive $((SECS + 3)) strace
+        sleep 1
+        $SUDO strace -c -f -p "$hand" -o "$scratch/strace.txt" 2> "$scratch/strace.err" &
+        spid=$!
+        sleep "$SECS"
+        $SUDO kill -INT "$spid" 2>/dev/null
+        wait "$spid" 2>/dev/null
+        drive_wait strace
+        stop
+        echo ""
+        echo "=== $LABEL — strace -c over $SECS s (the hand, ptraced: $rps req/s under the tracer, not a rate)"
+        n=$(awk '/^Requests per second/ { s += $4 } END { printf "%.0f", s }' "$scratch"/ab-strace-g*.txt)
+        cat "$scratch/strace.txt" 2>/dev/null | head -30
+        echo "lobo-profile: $LABEL — read the calls column against the requests the drive counted ($(awk '/^Complete requests/ { s += $3 } END { print s }' "$scratch"/ab-strace-g*.txt) complete over the whole drive)"
+    else
+        echo "lobo-profile: strace(1) absent — no syscall counts for $LABEL"
+    fi
+    ;;
+Darwin)
+    start || exit 1
+    drive $((SECS + 5)) sample
+    sleep 2
+    sample "$hand" "$SECS" 1 -file "$scratch/sample.txt" > /dev/null 2>&1
+    drive_wait sample
+    stop
+    echo "lobo-profile: $LABEL sample window: $rps req/s summed over the drive, failed=$failed, hand pid $hand"
+    echo ""
+    echo "=== $LABEL — sample(1), top of stack (the main thread's leaves), the first 40"
+    awk '/^Sort by top of stack/ { p = 1; next } p' "$scratch/sample.txt" | grep -E '^ +[0-9]' | head -40
+    ;;
+*)
+    echo "lobo-profile: SKIPPED — no profiler named for $(uname -s)"
+    exit 0
+    ;;
+esac
