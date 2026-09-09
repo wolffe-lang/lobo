@@ -202,22 +202,25 @@ changes:
 | `a61faee` (one gathered write; `tcp_nodelay` served) | wolf 0.2.7+dev.bd7caff | 34316912557 | 1.91 | **1.413x** [1.396, 1.421] · 53,768 vs 75,387 | **1.929x** [1.892, 1.943] · 118,854 vs 229,209 | 1.510x · 31,097 vs 46,548 | 2.081x · 42,871 vs 89,191 |
 | `a61faee` (the same, a second dispatch) | wolf 0.2.7+dev.bd7caff | 34317432651 | 1.79 | **1.439x** [1.436, 1.450] · 39,205 vs 56,515 | **2.086x** [2.056, 2.117] · 85,193 vs 178,211 | 1.649x (cell refused) | 2.318x (cell refused) |
 | `8859ac9` (the pin again — a CONTROL dispatched after the gather's two, throwaway branch) | wolf 0.2.7+dev.bd7caff | 34318089358 | 1.92 | **1.296x** [1.283, 1.313] · 19,661 vs 25,612 | **1.928x** [1.860, 1.991] · 45,136 vs 87,368 | 1.317x · 11,480 vs 15,072 | 2.023x · 16,956 vs 35,176 |
+| `56fa6b2` (the re-pin at the v0.2.8 TAG; the gather tree, lobo's source unchanged) | wolf 0.2.8 (5c729e8) | 34321060660 | 1.88 | **1.273x** [1.245, 1.303] · 35,472 vs 45,342 | **1.784x** [1.754, 1.860] · 90,675 vs 163,157 | 1.485x · 21,342 vs 31,676 | 1.870x · 35,358 vs 66,868 |
 
-The two post-gather runs landed on runner VMs 2.0–2.6x faster than
-the pin's (nginx's own close 28.5k → 75.4k and 56.5k), and every
-ratio on them reads HIGHER than the pin's row (close 1.30x → 1.41x
-and 1.44x; keepalive 1.86x → 1.93x and 2.09x). A control set at the pin, dispatched after them, landed on the
-slowest VM of the series (nginx close 25.6k) and read close 1.296x
-— the pin's two runs agree to 0.3% across VMs of different speed,
-the gather's two read 1.41x and 1.44x, so on the close shape the
-gather is ~10% WORSE on linux and the VM lottery does not explain
-it; on keepalive the pin's own VM-to-VM spread (1.86x → 1.93x)
-covers the gather's 1.93x and most of its 2.09x, so that cell is
-not a finding on its own. Filed as lobo#6 with the four-VM table
-and the instrument (a linux profile leg, which nobody has run); the
-gather stands as measured — better on macOS at N=1, worse on the
-linux close cell — and reverting the arm is one hunk if the
-orchestrator wants the linux number back before the cause is known.
+Six VALID sets on six runner VMs whose own nginx close rate ran
+25.6k–75.4k req/s. Read in the order they were taken, the gather's
+first two runs (1.41x, 1.44x on the two fastest VMs) sat ~10% above
+the pin's two (1.300x, 1.296x), and the entry filed that as lobo#6;
+the re-pin at the v0.2.8 tag — the same lobo source, nine wolf-lang
+commits that touch nothing on the request path — then read 1.273x
+on a 45k VM, the best close ratio of the series. So the honest
+statement is the one ws23 made: the ratio is a same-box statistic,
+and across this runner's VMs it spreads 1.27x–1.44x on close and
+1.78x–2.09x on keepalive with NO change to lobo, wider than any
+delta the gather could carry (a 2 µs byte loop against one list and
+one syscall). No linux delta for the gather is readable off this
+runner, in either direction; lobo#6 stands as the instrument that
+would read one (a profile leg on linux, which nobody has run),
+downgraded from a regression to an unknown. The macOS N=1 cells
+(+13–16% with the gather, indicative) are the only per-request
+number this sprint has for it.
 
 lobo's cores on the N=4 close cell went 2.39 → 2.01 at the pin
 (the winner's path stopped parking) while its req/s rose 52%;
@@ -241,12 +244,14 @@ generators, nginx 1.30.4, the load beside every row:
 | `1318cfe` (trunk, the baseline) | 0.2.6 | 3.92 → 20.3 | 1.096x [0.937, 1.183] · 19,093 vs 20,919 | 1.623x [1.508, 1.971] · 60,950 vs 113,353 | 6.24/3.28 · 8.57/9.38 | 2.271x (cell refused) | 3.180x (cell refused) |
 | `8859ac9` (the pin) | 0.2.7+dev.bd7caff | 7.53 → 14.7 | **1.010x** [0.998, 1.043] · 19,829 vs 20,210 | **1.355x** [1.322, 1.385] · 85,375 vs 117,096 | 5.35/3.40 · 10.23/11.12 | 1.039x (cell refused) | 1.775x (cell refused) |
 | `a61faee` (one gathered write; `tcp_nodelay` served) | 0.2.7+dev.bd7caff | 7.43 → 16.0 | **1.014x** [0.982, 1.025] · 20,100 vs 20,497 | **1.369x** [1.352, 1.404] · 84,154 vs 115,005 | 5.37/3.51 · 10.67/11.18 | 0.987x (cell refused) · 31,321 vs 31,165 | 1.627x (cell refused) · 50,842 vs 80,576 |
+| `56fa6b2` (the re-pin at the v0.2.8 TAG) | 0.2.8 (5c729e8) | 5.26 → 14.3 | **1.016x** [0.804, 1.035] · 20,781 vs 20,496 | **1.387x** [1.363, 1.458] · 85,373 vs 118,260 | 5.23/3.46 · 10.34/11.69 | 1.044x · 31,469 vs 32,394 | 1.664x · 52,104 vs 82,012 |
 
 Read against the refused baseline: the pin took the N=18 keepalive
 cell 1.62x → 1.36x and N=1 keepalive 3.18x → 1.78x; the gather
 moved the N=1 cells (keepalive lobo +16%, close +13% — the copy's
 share of a single hand's request) and the N=18 cells not at all
-(1.355x → 1.369x, within the pair spread): at eighteen hands on
+(1.355x → 1.369x, within the pair spread); the re-pin at the tag
+moved nothing (1.387x / 1.016x, the same source): at eighteen hands on
 this box lobo answers ~85k keepalive req/s at ~10.5 cores against
 nginx's ~115k at ~11.2 either way, so what separates them there is
 not the copy. Indicative, every row; a quiet set is owed.
