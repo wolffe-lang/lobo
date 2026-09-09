@@ -78,6 +78,230 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws24 — 2026-09-09 — the quiet box (refused at the bound), the syscall-first pin, one gathered write
+
+The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
+applies). Every change below was predicted in this entry BEFORE it
+was measured, then measured by `tools/lobo-parity` on both hosts,
+the load quoted beside the number. The linux series is VALID sets on
+the CI runner, one per step, against a baseline taken at trunk
+`1318cfe` in this session (run 34307802770, load 1.97): close
+**1.981x** [1.962, 2.028] (14,380 vs 28,783 req/s), keepalive
+**3.178x** [2.954, 3.496] (30,361 vs 97,902), N=1 close 2.917x, N=1
+keepalive 4.475x. The macOS series is INDICATIVE, every set refused
+on load, for the reason the first item states.
+
+- The quiet macOS baseline, owed since ws22, is REFUSED at the
+  bound. The sprint's first deliverable was a set at `1318cfe`
+  under the quiet-rig rule before any code moved: the window was
+  announced to the orchestrator at 03:38Z with its bound (fifty
+  minutes of waiting, then a refusal), the sibling lanes held their
+  gauntlets, and a waiter polled `uptime` for load(1m) < 3.0. It
+  never saw it — 4.98, 11.37, 8.48, 7.07, 5.41, 4.09, 6.14, 5.06,
+  7.74, 8.00, 7.08 … 4.81 at 04:28Z — and the residents were the
+  user's own `mediaanalysisd` (15–123% cpu the whole window) and
+  `XprotectService` (~50%), plus one sibling's `cargo xtask ci`. So
+  the set was refused by name, W8 stays UNMEASURED on macOS, and
+  the orchestrator's call at the bound was no further window that
+  night. One INDICATIVE set was taken at the bound (04:29Z, load
+  3.92 at the start, 20 during it as the other lanes resumed; the
+  tool refused it on load and on nginx's N=18 keepalive spread
+  1.278): close 1.096x [0.937, 1.183] (19,093 vs 20,919), keepalive
+  1.623x [1.508, 1.971] (60,950 vs 113,353), N=1 close 2.271x, N=1
+  keepalive 3.180x (cells refused on their own spread). Beside
+  ws23's four refused sets (1.067x / 1.637x) it is the same shape.
+  The ledger carries the load beside every row. A quiet macOS set
+  is still the first thing the next lane on this box owes; this
+  sprint's macOS rows are indicative by the same rule and are never
+  averaged in.
+
+- The pin moves to the syscall-first runtime: wolf 398e5f5 (v0.2.6)
+  → **bd7caff** (trunk, `0.2.7+dev.bd7caff`, D57 dev-stamped the way
+  ws18 pinned 32f66bf), because r11 had not tagged v0.2.8 when this
+  sprint reached its pin step (`git tag` tops out at v0.2.7, six
+  commits behind, carrying neither #257 nor #254); the re-pin to the
+  tag rides r11's landing. Forty-five commits over three trains,
+  classed in `wolf-toolchain.toml`: **#257 closes** (`[os.net.io]`,
+  every parking net call tries the syscall first and parks on
+  WouldBlock only — BEHAVIORAL-COST-ONLY, the rows unchanged);
+  **#254 closes** (`net_writev`, `net_nodelay`, and **TCP_NODELAY on
+  by default** on every stream — two new builtins and one behavioral
+  default); s140's `--help` and the E0301 std-root note
+  (DIAGNOSTIC-ONLY); s139's sched admission (spec/xtask); r10's
+  v0.2.7 and the docs passes (MECHANICAL: the `.wolfi` toolchain
+  stamp). Predicted source motion for the pin's own sake: ZERO;
+  measured: zero — the re-record moves every `.wolfi` header's stamp
+  (0.2.6 → 0.2.7+dev.bd7caff), the export/pkg hashes and the six
+  std dep-hashes (re-derived under the new driver, the ws18 shape),
+  and NOT ONE item line in fourteen modules. lupin stays 0.1.27
+  (the pairing gap is ZERO again — wolf@bd7caff declares 0.1.27; the
+  LANE gap is named: `net_writev`/`net_nodelay` are not on the lupin
+  lane until wolf-interp#67, and lupin resolves a builtin at the
+  call, probed, so the lupin-lane tests that stage `serve` keep
+  their lanes). wolf-lang#146 re-probed at this pin (the FOURTEENTH
+  measurement): still the `sc_muladd` dominance ICE, `WOLF_MIDEND=0`
+  stays. Predicted, from ws22's arithmetic (three reactor trips per
+  request ~30 of 63 µs; ws23's one write took one; s141 measured
+  53.3 → 21.2 µs at N=1 on this box under load with the two-write
+  lobo): linux N=4 keepalive 3.178x → ~2.0x [1.8, 2.3] (lobo's hands
+  are not idle — 3.16 cores — so the two trips' share of a request's
+  cpu, ~35–40%, comes back as throughput), N=4 close 1.981x → ~1.7x
+  [1.5, 1.9] (the accept keeps its park; the read/write trips go);
+  macOS N=18 keepalive ~1.62x → ~1.25x [1.15, 1.4] (s141's 2.45x →
+  1.60x and ws23's 2.55x → 1.64x remove overlapping trips, so the
+  sum is less than the product), N=18 close ~1.10x → ~1.03x [0.98,
+  1.08] (herd-bound; the losers still park), N=1 keepalive ~3.2x →
+  ~1.6x [1.4, 1.9], N=1 close ~2.3x → ~1.15x [1.0, 1.3]. The
+  TCP_NODELAY default gets no number of its own: lobo already wrote
+  once on the measured path (ws23), so there is no second segment
+  for Nagle to hold; on linux it retires the CLASS of stall.
+  Measured, linux x86-64 (run 34311866103, load 1.99, a VALID set, against the session's baseline run 34307802770): keepalive **3.178x → 1.862x** [1.852, 1.870], lobo 30,361 → 52,818 req/s at 2.97 cores (nginx 98,529); close **1.981x → 1.300x** [1.290, 1.310], 14,380 → 21,879 at 2.01 cores (was 2.39; nginx 28,454 at 1.58); N=1 close 2.917x → 1.464x (6,545 → 13,150); N=1 keepalive 4.475x → 1.821x (9,558 → 23,748). Keepalive landed inside its prediction; close landed BELOW it (1.30x against ~1.7x [1.5, 1.9]): the winner of the accept race no longer parks either, and at four hands the winner's path is more of the cell than the losers' parks — the prediction charged the whole accept path to the herd. Measured, macOS arm64
+  (REFUSED on load 7.53 — 14.7 during — and on nginx's N=18 keepalive
+  spread 1.317; indicative, against the session's own refused
+  baseline): keepalive 1.623x → **1.355x** [1.322, 1.385], lobo
+  60,950 → 85,375 req/s at 10.23 cores (nginx 117,096 at 11.12);
+  close 1.096x → **1.010x** [0.998, 1.043], 19,093 → 19,829 at 5.35
+  cores (was 6.24; nginx 20,210 at 3.40); N=1 close 2.271x → 1.039x
+  (12,083 → 27,807); N=1 keepalive 3.180x → 1.775x (21,513 →
+  43,968). Every cell inside its prediction; the N=1 keepalive cell
+  is the profile's own number — 21.5k → 44.0k is 46 → 23 µs, the
+  ~20 µs two reactor trips were priced at.
+
+- One gathered write, no copy (wolf-lang#254 consumed). ws23's
+  `serve.one_write` copied the body behind the head's bytes at
+  ~1.8 ns per byte (2 µs on the 1 KiB parity body) on keepalive up
+  to 64 KiB and on close up to 4 KiB, and wrote twice above that,
+  because the copy was priced against the stall and the second
+  reactor trip. `net_writev` costs neither: the plaintext small-file
+  arm now materializes the head's bytes in the response region
+  (F-0072), MOVES the body behind them into a two-part gather (a
+  push moves the list header, not its bytes — checked against the
+  runtime: `__wolf_rt_net_writev` reads the part headers through the
+  outer list, nothing is copied), and hands both to the kernel as
+  one `writev(2)`. `one_write` and its size rules are RETIRED: every
+  small plaintext response, either shape, any size to 64 KiB, is one
+  syscall. Two arms keep their shape, each with its reason in the
+  source: the TLS arm keeps the copy (the record layer seals a
+  contiguous plaintext; the gather cannot reach a sealed socket, and
+  the copy is ~1.8 ns/byte beside the seal's own per-byte work), and
+  the budgeted arm (`budget.body_small`) keeps its two writes,
+  because the gather's two-part list must live in the capped region
+  beside the body (E1010 forbids storing it outside) and D40's
+  envelope leaves that region exactly sixteen ledger units at a
+  power-of-two body — `charge(N) = 16 × pow2ceil(N) − 16` under a
+  cap of `16 × pow2ceil(budget)` — which is less than one list
+  header; with TCP_NODELAY the runtime's default and a write into
+  an empty buffer parking nowhere, its second write is one syscall
+  on the budgeted path only, and re-deriving D40 with a constant for
+  the gather is named residue. `tcp_nodelay` moves from
+  `planned(ws02)` — twenty-two waves — to **implemented**, with the
+  delta named in the table: nginx's default is `on` and applies to
+  keepalive connections only; lobo's `on` is the runtime's posture on
+  every accepted stream, and `off` puts Nagle back (`net_nodelay`
+  on accept, both listeners), resolved first-server-else-http like
+  the rest of the limits family, the -t half refusing a bad flag in
+  the oracle's own words, a location-level row parsing and not
+  applying (the L009 posture). Witnesses:
+  `tests/serve/writev_sizes.lu` (four files at the retired bounds'
+  edges — 4095, 4097, 65536, 65537 — served on both shapes and
+  compared byte for byte; `tcp_nodelay` resolved through
+  `serve.resolve_limits`), `tests/config/limits_directives.lu`
+  (the flag's resolution and its -t diagnostic), and
+  `tests/serve/keepalive_one_write.lu` kept as the clock. Predicted:
+  the copy is ~2 µs of a ~21 µs post-pin request at N=1, so linux
+  N=4 keepalive ~2.0x → ~1.85x and N=1 keepalive lobo +5–10%; close
+  cells within noise (2 µs against an accept-bound request); macOS
+  N=18 keepalive ~1.25x → ~1.15x [1.05, 1.25]. Measured, linux
+  x86-64 (run 34316912557, load 1.91, a VALID set — on a runner VM
+  2.3–2.6x faster than the pin's, nginx's own close 28.5k → 75.4k
+  req/s): keepalive 1.862x → **1.929x** [1.892, 1.943], lobo 52,818
+  → 118,854 (nginx 229,209); close 1.300x → **1.413x** [1.396,
+  1.421], 21,879 → 53,768 (nginx 75,387); N=1 close 1.464x →
+  1.510x; N=1 keepalive 1.821x → 2.081x. NOT the predicted ~1.85x:
+  every ratio reads a few percent higher, and the VM change is the
+  larger effect by an order of magnitude (the gather replaces a
+  2 µs byte loop with one list and one syscall, and moved the
+  macOS N=1 cells +13–16%), so the linux delta for this change is
+  not readable off these two runs and this entry does not claim
+  one; the same-box ratio is the statistic, and the runner is not
+  the same box run to run. A second dispatch (run 34317432651, load 1.79, VALID on the gating
+  cells, a third VM: nginx close 56.5k) read close **1.439x** [1.436,
+  1.450] (39,205 vs 56,515) and keepalive **2.086x** [2.056, 2.117]
+  (85,193 vs 178,211). A CONTROL at the pin commit, dispatched after both
+  (run 34318089358, load 1.92, VALID, the slowest VM of the series:
+  nginx close 25.6k), read close **1.296x** [1.283, 1.313] and
+  keepalive 1.928x [1.860, 1.991]: the pin's two runs agree to 0.3%
+  on the close cell across VMs of different speed, the gather's two
+  read 1.41x and 1.44x — **on the linux close shape the gather is
+  ~10% WORSE than ws23's copy, and the VM lottery does not explain
+  it**; the keepalive cell's +0–8% sits inside the pin's own VM
+  spread and is not a finding. The prediction (~1.85x, close within
+  noise) was WRONG on linux and right on macOS's N=1 cell, and the
+  entry says so: the change stands as measured, filed as lobo#6 with
+  the four-VM table and the instrument nobody has run (a `strace -c`
+  / `perf stat` leg on the runner: `writev` vs `sendto`, and whether
+  `wolf_rt`'s `drain_vectored` costs more on that host than the byte
+  loop it replaced); reverting the arm is one hunk if the linux
+  number is wanted back before the cause is known. Measured, macOS arm64 (REFUSED on
+  load 7.43 — 16.0 during — indicative, against the session's pin
+  set): N=18 keepalive 1.355x → **1.369x** [1.352, 1.404], lobo
+  85,375 → 84,154 req/s at 10.67 cores (nginx 115,005 at 11.18) —
+  NOT the predicted ~1.15x, within the pair spread of no change;
+  N=18 close 1.010x → 1.014x [0.982, 1.025] (19,829 → 20,100), as
+  predicted within noise; N=1 keepalive 1.775x → **1.627x** (43,968
+  → 50,842, +16%) and N=1 close 1.039x → **0.987x** (27,807 →
+  31,321, +13%) — the copy's share of a single hand's request,
+  larger than the ~10% predicted. The two cells disagree for a
+  reason worth stating: at eighteen hands on this box lobo answers
+  ~85k keepalive req/s at ~10.5 cores against nginx's ~115k at ~11.2
+  with or without the copy, so the gap there is not per-request
+  user-space cost at all — it is what a hand does between
+  requests (the `poll` over a shared set, the parks), which the N=1
+  cell never pays.
+
+- The herd, re-probed only as far as the park cost moved — and it
+  did not. ws22's probe shape on the pin tree (`8859ac9`, lobo's
+  source untouched): eighteen hands, the close shape under four `ab
+  -t 20 -c 8` generators (20,546 req/s summed; ws22 saw 19,300),
+  `sample(1)` ten seconds at 1 ms on one hand's main thread, 7,931
+  samples, load 7.7 (a one-thread profile's proportions survive a
+  loaded box — ws22 measured that twice). Predicted: cvwait falls
+  but stays the largest leaf, ~45–55% of the hand. Measured:
+  `net_accept` **69.4%** inclusive (ws22: 58.5%), of which
+  `__psynch_cvwait` under `reactor::submit → wait_on` is **64.0%**
+  (ws22: 63.6%), `accept(2)` itself 2.6%, the caller's `kevent`
+  2.5%, `net_wait` 18.3%, serving ~5%. **The herd is still 64% of a
+  hand, to the tenth of a point** — above the prediction, because
+  #257 removed the park a call made BEFORE its syscall, and a losing
+  hand never had a use for that one: its `accept(2)` answers EAGAIN
+  and it parks AFTER, against the 5 ms budget, and that park is the
+  same reactor round-trip it always was. The `wolf-reactor` thread
+  the N=1 keepalive shape no longer starts is running in every hand
+  of a herd; what #257 bought the close cell is the WINNER's path
+  (linux 1.981x → 1.300x, the cores 6.24 → 5.35 here), not the
+  seventeen parks per connection. ws23's probe shape (watch the
+  listener every 2nd/4th pass, a 1 ms budget) was not re-run: it
+  priced knobs against a park cost that has not changed. What would
+  move it, named and FILED, not built: a lost race that answers
+  without parking — and `net_deadline(fd, 0)` CLEARS a budget
+  (net.rs, `ms <= 0`), so nothing in the language asks for "try
+  once, `timeout` on EAGAIN", the shape a level-triggered `net_wait`
+  loop wants; that is wolf-lang#267, with lobo#5 holding lobo's
+  side (the posture, the table, and the other lever: a wake the
+  kernel distributes — `EPOLLEXCLUSIVE`, or `reuse_port` where it
+  distributes, which is linux and not here). `docs/PROFILE.md`
+  carries the table.
+
+- Not done, by name: the linux profile leg lobo#6 asks for (the
+  close cell's ~10% is the first unexplained number in this series
+  and it is on the stranger's host); the re-pin to v0.2.8 (not tagged during the
+  sprint; the file says how); the streamed arm's head still leaves
+  before its first chunk (one more syscall per streamed response,
+  no stall now that Nagle is off — a gather of head + first chunk
+  is a dozen lines for the next lane that measures a large-file
+  shape); D40's re-derivation; no `open_file_cache`; no stat cache;
+  no quiet macOS set (the box, not the lane).
+
 ## ws23 — 2026-09-09 — the gap closes (ws22's list, in its order, a number beside each)
 
 The bar is `docs/PARITY.md` (ws22, unchanged); every change below
