@@ -24,6 +24,22 @@ on:
         description: "ws22: run tools/lobo-parity (the W8 bar, docs/PARITY.md) INSTEAD of the gauntlet — a number on linux x86-64, never a gate; the table is the step's log"
         type: boolean
         default: false
+      ref_tree:
+        description: "ws25 (lobo#6): a SECOND lobo ref (branch, tag or sha) built beside this one with this checkout's toolchain; with parity=true the set is three fresh servers per pair on ONE VM and the table carries this ÷ ref against the VM's own nginx"
+        type: string
+        default: ""
+      ref_name:
+        description: "ws25: the column label for ref_tree (default: ref)"
+        type: string
+        default: "ref"
+      this_name:
+        description: "ws25: the column label for this checkout (default: lobo)"
+        type: string
+        default: "lobo"
+      profile:
+        description: "ws25 (lobo#6): the profile leg — tools/lobo-profile (perf record + strace -c on one hand under the close shape) on this checkout, and on ref_tree when given; runs after the parity set, or alone"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -169,7 +185,7 @@ jobs:
           openssl version
 
       - name: lobo-gauntlet
-        if: steps.acquire.outputs.toolchain == 'full' && inputs.parity != true
+        if: steps.acquire.outputs.toolchain == 'full' && inputs.parity != true && inputs.profile != true
         shell: bash
         working-directory: lobo
         run: tools/lobo-gauntlet
@@ -179,10 +195,34 @@ jobs:
       # as the reason the statistic is a same-box ratio; a refused set
       # (load, the generator as ceiling, an unstable oracle) is a red
       # step with the reason in the log, never a vacuous green.
+      # ws25 (lobo#6): a second tree, built beside this one with the
+      # SAME staged toolchain, so the parity set (and the profile leg)
+      # can read two lobos on ONE VM against that VM's own nginx — the
+      # only linux delta the runner can hold still. The ref tree's own
+      # pin file must name the same wolf (its toolchain library refuses
+      # otherwise, which is the right answer).
+      - name: "build the ref tree (ws25)"
+        if: steps.acquire.outputs.toolchain == 'full' && (inputs.parity == true || inputs.profile == true) && inputs.ref_tree != ''
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C lobo worktree add ../lobo-ref "${{ inputs.ref_tree }}"
+          ln -s "$PWD/lobo/.wolf-bin" lobo-ref/.wolf-bin
+          ln -s "$PWD/lobo/tests/differential/bin" lobo-ref/tests/differential/bin
+          cd lobo-ref
+          echo "ref tree: $(git rev-parse --short HEAD) $(git log -1 --format=%s | cut -c1-90)"
+          mkdir -p target
+          sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          ./target/lobo-release -v
+
       - name: lobo-parity (the W8 bar — a number, never a gate)
         if: steps.acquire.outputs.toolchain == 'full' && inputs.parity == true
         shell: bash
         working-directory: lobo
+        env:
+          LOBO_REF: ${{ inputs.ref_tree != '' && format('{0}/lobo-ref/target/lobo-release', github.workspace) || '' }}
+          LOBO_REF_NAME: ${{ inputs.ref_name }}
+          LOBO_NAME: ${{ inputs.this_name }}
         run: |
           set -euo pipefail
           sudo apt-get install -y -qq apache2-utils
@@ -197,4 +237,33 @@ jobs:
             sleep 10
           done
           nproc; uptime
+          [ -z "$LOBO_REF" ] || echo "two trees: $LOBO_NAME = $PWD/target/lobo-release, $LOBO_REF_NAME = $LOBO_REF"
           tools/lobo-parity
+
+      # ws25 (lobo#6): the profile leg. perf needs the kernel's own
+      # linux-tools; the azure kernel's package is in the archive
+      # under its exact release, and when it is not the tool SKIPS by
+      # name (a skip is not a number). strace is the syscall counter.
+      - name: "lobo-profile (ws25 — perf record + strace -c on one hand, close shape)"
+        if: steps.acquire.outputs.toolchain == 'full' && inputs.profile == true
+        shell: bash
+        working-directory: lobo
+        run: |
+          set -uo pipefail
+          sudo apt-get install -y -qq apache2-utils strace > /dev/null
+          sudo apt-get install -y -qq linux-tools-common "linux-tools-$(uname -r)" > /dev/null 2>&1 \
+            || sudo apt-get install -y -qq linux-tools-common linux-tools-generic > /dev/null 2>&1 \
+            || echo "::warning::no linux-tools package for $(uname -r); the profile leg will skip by name"
+          if ! command -v perf > /dev/null 2>&1; then
+            p=$(ls -d /usr/lib/linux-tools/*/perf 2>/dev/null | head -1 || true)
+            [ -n "$p" ] && sudo ln -sf "$p" /usr/local/bin/perf
+          fi
+          perf --version || true
+          sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 > /dev/null || true
+          mkdir -p target
+          [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          nproc; uptime
+          tools/lobo-profile target/lobo-release "${{ inputs.this_name }}"
+          if [ -n "${{ inputs.ref_tree }}" ]; then
+            tools/lobo-profile "$GITHUB_WORKSPACE/lobo-ref/target/lobo-release" "${{ inputs.ref_name }}"
+          fi
