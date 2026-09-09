@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="intact=8\nnodelay_default=on nodelay_off=off\n")
+//! check: run(exit=0, stdout="intact=10\nnodelay_default=on nodelay_off=off\n")
 //! phase: run
 //! lanes: native
 //! conforms: conc.task.spawn, err.union, err.propagate
@@ -19,6 +19,12 @@
 //! `serve.resolve_limits`: absent is the runtime's default (on), and
 //! `off` is the one value that reaches an accept site. Native only:
 //! net + fs + a spawned server task meet on no other lane.
+//!
+//! ws25 (wolf-lang#261 consumed): a fifth file, EMPTY — the small
+//! arm now reads exactly the size `fs_fstat` answered off the handle
+//! it opened (`serve.read_exact`), and zero is the edge where a read
+//! answers `eof` before a byte: served as `Content-Length: 0` on both
+//! shapes, the head intact, no body.
 
 use config
 use http
@@ -88,6 +94,7 @@ fn main() -> !int {
     (mut sizes).push(4097)
     (mut sizes).push(65536)
     (mut sizes).push(65537)
+    (mut sizes).push(0)
     var bodies = List[str]()
     var k = 0
     while k < sizes.len {
@@ -109,7 +116,7 @@ fn main() -> !int {
         // the close shape, one keepalive carrying all four
         s.spawn(fn() {
             var served = 0
-            while served < 5 {
+            while served < sizes.len + 1 {
                 let conn = net_accept(l) else |_| -1
                 if conn >= 0 {
                     serve.serve_conn(conn, c, opts, lim, port)
@@ -124,7 +131,9 @@ fn main() -> !int {
             net_write(cli, "GET /f{i}.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
             let r = recv_one(cli)?
             if r.starts_with("HTTP/1.1 200 OK") && r.ends_with(bodies[i]) {
-                intact = intact + 1
+                if sizes[i] > 0 || r.contains("\r\nContent-Length: 0\r\n") {
+                    intact = intact + 1
+                }
             }
             net_close(cli) else |_| {}
             i = i + 1
@@ -136,7 +145,9 @@ fn main() -> !int {
             net_write(ka, "GET /f{j}.html HTTP/1.1\r\nHost: x\r\n\r\n")?
             let r = recv_one(ka)?
             if r.starts_with("HTTP/1.1 200 OK") && r.ends_with(bodies[j]) {
-                intact = intact + 1
+                if sizes[j] > 0 || r.contains("\r\nContent-Length: 0\r\n") {
+                    intact = intact + 1
+                }
             }
             j = j + 1
         }

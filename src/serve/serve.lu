@@ -701,7 +701,19 @@ fn serve_file(
     mut acc: obs.Access,
     mut chg: Charge,
 ) -> bool ! {closed, io} {
-    let size = fs_size(path) else |e| match e {
+    // ws25 (wolf-lang#261 consumed): ONE open, ONE fstat — nginx's
+    // shape. The handle is opened FIRST and `fs_fstat` answers kind,
+    // size and mtime off it in one metadata read, where ws23 left
+    // two path stats (`fs_size`, `fs_modified_ms`) ahead of a read
+    // that opened the file again (and, inside the runtime's
+    // `fs_read_bytes`, fstat'd it a third time for its buffer). The
+    // router's `fs_is_file` stays: it is the guard against a
+    // blocking `open` on a fifo or a device, which no stat AFTER the
+    // open can provide. Every arm below reads through this handle and
+    // closes it on its own way out; the budgeted arms hand the PATH
+    // to their proc as before (the proc opens under its own cap) and
+    // close it first.
+    let fd = fs_open(path) else |e| match e {
         not_found => {
             acc.status = 404
             acc.body_bytes = err_len(404, false, token)
@@ -721,8 +733,25 @@ fn serve_file(
             return true
         },
     }
+    let st = fs_fstat(fd) else |_| {
+        fs_close(fd) else |_| {}
+        acc.status = 500
+        acc.body_bytes = err_len(500, false, token)
+        send_err(mut cn, 500, false, token)
+        return true
+    }
+    if st[0] != 0 {
+        // the router classified a regular file a moment ago; the handle
+        // says otherwise (a swap under us) — the path's answer is 404
+        fs_close(fd) else |_| {}
+        acc.status = 404
+        acc.body_bytes = err_len(404, false, token)
+        send_err(mut cn, 404, false, token)
+        return true
+    }
+    let size = st[1]
     var secs: int = 0
-    let mms = fs_modified_ms(path) else |_| 0
+    let mms = st[2]
     secs = mms / 1000
     let lm = http_date(secs)
     let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
@@ -732,6 +761,7 @@ fn serve_file(
     // conditional GET: a matching If-Modified-Since → 304, no body
     let ims = http.header(req, "if-modified-since") else ""
     if !ims.is_empty() && ims == lm {
+        fs_close(fd) else |_| {}
         acc.status = 304
         acc.body_bytes = 0
         var h304 = "HTTP/1.1 304 Not Modified\r\n"
@@ -755,6 +785,7 @@ fn serve_file(
         fcharge = if size <= 65536 { size } else { 65536 }
     }
     if chg.limit > 0 && chg.used + fcharge > chg.limit {
+        fs_close(fd) else |_| {}
         chg.site = "file"
         chg.would = chg.used + fcharge
         acc.status = 503
@@ -778,6 +809,7 @@ fn serve_file(
     head = "{head}\r\n"
 
     if is_head {
+        fs_close(fd) else |_| {}
         write_all(mut cn, head)?
         return !keep
     }
@@ -798,12 +830,14 @@ fn serve_file(
             // record layer buffers through `sess`), so the body cannot
             // die in a per-response region — the TLS region story
             // rides the D24 stepper refactor, named residue.
-            let body = fs_read_bytes(path) else |_| {
+            let body = read_exact(fd, size) else |_| {
+                fs_close(fd) else |_| {}
                 acc.status = 500
                 acc.body_bytes = err_len(500, false, token)
                 send_err(mut cn, 500, false, token)
                 return true
             }
+            fs_close(fd) else |_| {}
             // ws23 (lobo#3): ONE buffer, one record. ws24 keeps the
             // copy HERE, and only here: the record layer seals a
             // contiguous plaintext, so the head and the body must be
@@ -833,7 +867,9 @@ fn serve_file(
             // ws13: BUDGETED — the body work runs in a proc under the
             // region cap; the join maps the reason (see the cap block
             // above). The meter already admitted this body; the cap is
-            // the runtime's own word on it.
+            // the runtime's own word on it. The proc reads by PATH
+            // under its own cap (ws25: the handle is closed first).
+            fs_close(fd) else |_| {}
             let oc = budget.run_small(sock, path, head, chg.cap, chg.pipe_w, chg.pipe_r)
             let cls = oc.cls
             if cls == 2 {
@@ -871,7 +907,9 @@ fn serve_file(
         // region boundary as a scalar (heap values must not escape it)
         var wcode = 0
         region resp {
-            let body = fs_read_bytes(path) else |_| {
+            // ws25: the body off the handle the fstat answered from —
+            // exactly `size` bytes, in this region
+            let body = read_exact(fd, size) else |_| {
                 failed = true
                 List[byte]()
             }
@@ -918,6 +956,7 @@ fn serve_file(
             // the checker (E1010), and nothing here escapes
             wcode = wcode
         }
+        fs_close(fd) else |_| {}
         if failed {
             acc.status = 500
             acc.body_bytes = err_len(500, false, token)
@@ -937,12 +976,23 @@ fn serve_file(
     // stream in bounded byte chunks (fs_read_chunk has no utf8 row —
     // a lone 0x80 is data). A mid-stream read error can only close —
     // bytes are already on the wire.
-    write_all(mut cn, head)?
+    write_all(mut cn, head) else |e| match e {
+        closed => {
+            fs_close(fd) else |_| {}
+            return closed
+        },
+        io => {
+            fs_close(fd) else |_| {}
+            return io
+        },
+    }
     if chg.limit > 0 {
         // ws13: BUDGETED — the chunks stream inside a proc, each in a
         // capped region; a breach is contained at the boundary and,
         // with the head already on the wire, can only CLOSE (the
-        // event still names site=region)
+        // event still names site=region). The proc opens by PATH
+        // under its own cap (ws25: the handle is closed first).
+        fs_close(fd) else |_| {}
         let oc = budget.run_stream(conn.fd(cn), path, chg.cap, chg.pipe_w, chg.pipe_r)
         let cls = oc.cls
         if cls == 2 {
@@ -966,11 +1016,8 @@ fn serve_file(
         }
         return !keep
     }
-    let fd = fs_open(path) else |_| {
-        // could not even open after stat: nothing sent yet past head,
-        // but Content-Length is committed, so close
-        return true
-    }
+    // ws25: the stream reads the handle the fstat answered from (ws24
+    // opened it here, a second time, after the head)
     var streaming = true
     if conn.is_tls(cn) {
         // TLS: unregioned, as the small path (the session may retain;
@@ -1073,6 +1120,37 @@ fn serve_file(
     }
     fs_close(fd) else |_| {}
     !keep
+}
+
+/// ws25 (wolf-lang#261): exactly `n` bytes off an open handle, the
+/// size `fs_fstat` answered a moment ago — a regular file answers a
+/// whole read in one `fs_read_chunk` and the loop is for the host
+/// that does not; a file that shrank under us (eof short of `n`)
+/// is `io`, since the Content-Length that `n` became is not yet on
+/// the wire on the small arms that call this. The list is minted in
+/// the ambient region: inside `serve_file`'s per-response region
+/// on the plaintext arm, the caller's on TLS.
+fn read_exact(fd: int, n: int) -> List[byte] ! {io} {
+    var out = fs_read_chunk(fd, n) else |e| match e {
+        eof => {
+            if n == 0 {
+                return List[byte]()
+            }
+            return io
+        },
+        io => {
+            return io
+        },
+    }
+    while out.len < n {
+        let more = fs_read_chunk(fd, n - out.len) else |_| {
+            return io
+        }
+        for b in more {
+            (mut out).push(b)
+        }
+    }
+    out
 }
 
 /// The Connection header token for a keepalive decision. Total.

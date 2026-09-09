@@ -612,10 +612,13 @@ pub fn stat_note(v: Verdict, req_path: str) -> str {
         return "  stat: directory; no index file exists — the live answer is 403 (autoindex off)"
     }
     if fs_is_file(v.fs_path) {
-        let size = fs_size(v.fs_path) else -1
+        // ws25: the size off the handle (`fs_fstat`), as the live path
+        // reads it — one open, one fstat; the path stat is gone
         let fd = fs_open(v.fs_path) else |_| {
-            return "  stat: file, {size} bytes, NOT readable — the live answer is 403"
+            return "  stat: file, NOT readable — the live answer is 403"
         }
+        let st = fs_fstat(fd) else |_| List[int]()
+        let size = if st.len == 3 { st[1] } else { -1 }
         fs_close(fd) else |_| {}
         return "  stat: file, {size} bytes, readable"
     }
