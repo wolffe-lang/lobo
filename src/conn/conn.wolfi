@@ -1,9 +1,9 @@
 module pkg :: conn
   wolfi v0 · toolchain 0.2.7 · edition v1
-  export_hash 52e3a3513152bb8a975e10cb81821af1bc7e750c90f550952195501dce209cbe
-  pkg_hash    52e3a3513152bb8a975e10cb81821af1bc7e750c90f550952195501dce209cbe
+  export_hash 34f284f7f51babac6d01fe89359214b356f43997fd72bcc0b67397d60197c544
+  pkg_hash    34f284f7f51babac6d01fe89359214b356f43997fd72bcc0b67397d60197c544
   deps:
-    tls  2a18ee51d3bb12147c6448bf685d0348d7950be466947c1f6f9cc7f2c033e0bf
+    tls  5ce48276960e83cf16ea5d2bb67bd4aa2b822b7c635352f1fc2c19feec214276
   items:
     [0] pub conn_close — fn conn_close(mut cn: self.Conn) · regions (ρ1) -> -
     [1] pub conn_deadline — fn conn_deadline(cn: self.Conn, ms: int) -> () ! {io} · regions (ρ1, -) -> -
