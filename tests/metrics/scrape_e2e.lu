@@ -146,7 +146,13 @@ fn value_of(text: str, needle: str) -> int {
 
 fn spawn_lobo(conf_path: str) -> int {
     var argv = List[str]()
-    (mut argv).push("target/lobo-debug")
+    // ws25 (lobo#1): the ABSOLUTE path. A master this test leaves behind
+    // (a failure path's `os_kill` is SIGKILL; the runner's ceiling) then
+    // carries this checkout's root in argv[0], where the rig's reaper
+    // (tools/lib-rigproc.sh) looks; a relative `target/lobo-debug` named
+    // every lobo tree on the box and none.
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
     (mut argv).push("serve")
     (mut argv).push("-p")
     (mut argv).push(".")

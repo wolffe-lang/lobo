@@ -239,7 +239,13 @@ fn main() -> !int {
     fs_write_text("{d}/lobo.conf", conf)?
 
     var argv = List[str]()
-    (mut argv).push("target/lobo-debug")
+    // ws25 (lobo#1): the ABSOLUTE path. A master this test leaves behind
+    // (a failure path's `os_kill` is SIGKILL; the runner's ceiling) then
+    // carries this checkout's root in argv[0], where the rig's reaper
+    // (tools/lib-rigproc.sh) looks; a relative `target/lobo-debug` named
+    // every lobo tree on the box and none.
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
     (mut argv).push("serve")
     (mut argv).push("-p")
     (mut argv).push(".")
@@ -355,7 +361,14 @@ fn main() -> !int {
     assert(mok.ends_with(" 1"), "ok count: {mok}")
     assert(mfail.ends_with(" 1"), "failed count: {mfail}")
 
-    os_kill(child) else |_| {}
+    // ws25 (lobo#1): `stop` through the master's desk, then reap it —
+    // `os_kill` is SIGKILL, and a master killed that way leaves its
+    // hand running with nobody to tell it; the kill stays for the
+    // desk that does not answer.
+    shell.control_send(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        ""
+    }
     let _ = os_wait(child) else |_| 0
     net_close(dl)?
     net_close(bl)?
