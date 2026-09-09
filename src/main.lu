@@ -43,11 +43,13 @@
 //! endpoint, every log line stamped `worker=N`, and a listener it
 //! RETRIES rather than dies for (the measured accept-distribution
 //! posture at this pin — docs/WORKERS.md). D7 is KEPT inside every
-//! process. Signals are polled by SELF-RAISE: each pass
-//! raises the UPGRADE meaning as a probe and waits once — the
-//! runtime's queue is FIFO, so a real pending SIGHUP/TERM/QUIT comes
-//! back BEFORE the probe and the probe bounds the wait (never a
-//! park on a signal that may not come). The clean parked-forwarder
+//! process. Signals are polled by SELF-RAISE: a hand raises the
+//! UPGRADE meaning as a probe and waits once — the runtime's queue
+//! is FIFO, so a real pending SIGHUP/TERM/QUIT comes back BEFORE the
+//! probe and the probe bounds the wait (never a park on a signal
+//! that may not come) — on the wait budget's cadence since ws23, not
+//! every pass (a loaded hand's pass is one request; docs/PROFILE.md
+//! measured the per-pass poll at ~10% of a hand at eighteen hands). The clean parked-forwarder
 //! task ([os.signal.wait]'s intended shape) is blocked at this pin by
 //! an upstream release-tier bug — s43's cluster partition follows
 //! CALL edges only, so a task-entry shim can land in a different
@@ -1377,6 +1379,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     os_signal_listen(shell.sig_mask() + sprobe) else |_| {
         sig_on = false
     }
+    // ws23: when the self-raise poll last ran (unix ms). The poll is
+    // a real signal to self plus a wait on the runtime's queue — a
+    // cross-thread handoff — and it ran EVERY pass, which at eighteen
+    // hands on the keepalive shape was ~10% of a hand's time
+    // (docs/PROFILE.md: `os_signal_wait` 7.2% + `signal::raise` 3.0%)
+    // because a loaded hand's passes are one request long. Now it
+    // runs on the wait's own budget instead (`sig_poll_ms`).
+    var sig_polled: int = 0
     if sig_on {
         ev_log(
             mut elog,
@@ -1590,7 +1600,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             net_close(cc) else |_| {}
             cc = -1
         }
-        if sig_on && cc < 0 {
+        if sig_on && cc < 0 && now - sig_polled >= sig_poll_ms() {
             // The self-raise poll: enqueue the probe meaning, then
             // wait ONCE. The runtime queue is FIFO, so a real
             // pending signal comes back before the probe and the
@@ -1599,6 +1609,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             // parked forwarder when the upstream cluster fix
             // lands). A failed raise skips the wait: without a
             // probe in the queue the wait could park forever.
+            // ws23: ON A BUDGET, not every pass — `sig_poll_ms` is the
+            // wait's own floor, so an idle hand polls exactly as
+            // often as before and a loaded one stops paying a signal
+            // round-trip per request; an operator's signal is seen
+            // within one budget plus one pass either way.
+            sig_polled = now
             var m = 0
             os_signal_raise(sprobe) else |_| {
                 m = -1
@@ -2269,6 +2285,16 @@ fn ready_has(ready: List[int], fd: int) -> bool {
         }
     }
     false
+}
+
+/// ws23: how often a serving hand runs the self-raise signal poll, in
+/// milliseconds — `wait_budget`'s signal floor, so an idle hand's
+/// cadence is unchanged and a loaded hand (whose passes are one
+/// request long) polls once per budget instead of once per request.
+/// Signal latency is bounded by this plus one pass, as it was by the
+/// wait budget plus one pass before. Pure and total.
+fn sig_poll_ms() -> int {
+    25
 }
 
 /// How long this pass's `net_wait` may block, in milliseconds.
