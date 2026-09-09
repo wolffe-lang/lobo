@@ -1277,8 +1277,8 @@ fn handle_request(
     // reach an `open` that could block. The remaining two — size and
     // mtime, each its own `stat(2)` — need a runtime call that
     // answers kind, size and mtime at once, or an fstat on the fd
-    // the read opens (wolf-lang, filed from ws23 with the number:
-    // ~0.5 µs per path stat on this box).
+    // the read opens (wolf-lang#261, filed from ws23 with the
+    // number: ~0.5 µs per path stat on this box).
     if fs_is_file(d.fs_path) {
         return serve_file(
             mut cn,
