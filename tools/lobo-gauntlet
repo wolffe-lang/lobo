@@ -15,6 +15,10 @@
 #                     and building the oracle once per
 #                     docs/DIFFERENTIAL.md is part of entering this
 #                     repo — see CLAUDE.md)
+#   …  the witnesses, one tool each (proxy, control, log, …, dist)
+#   Z. census    — (ws25, lobo#1) nothing of this checkout's is still
+#                  running; a leak is red BY NAME before the exit trap
+#                  reaps it
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
@@ -200,6 +204,13 @@ if ! tools/lobo-dist; then
     echo "lobo-gauntlet: FAILED at dist — the archive a stranger would download does not hold (ws19)" >&2
     exit 1
 fi
+
+step "census (ws25, lobo#1: nothing of this checkout's is still running — a step that left a process is RED here, by name; the exit trap reaps it after)"
+if ! rig_census "at the gauntlet's end"; then
+    echo "lobo-gauntlet: FAILED at census — a step left process(es) behind (lobo#1); see the names above" >&2
+    exit 1
+fi
+echo "nothing left behind"
 
 echo ""
 echo "lobo-gauntlet: GREEN"
