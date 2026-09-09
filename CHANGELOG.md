@@ -119,7 +119,15 @@ in this session): see the ledger rows dated 2026-09-09.
   request gone, and at eighteen hands the round-trips are most of
   the 285 µs of cpu a request burns), close 1.15x → ~1.10x (a
   herd-bound cell; little of it is the write); N=1 keepalive 3.99x →
-  ~3.5x, N=1 close 2.42x → ~2.2x. Measured: (pending).
+  ~3.5x, N=1 close 2.42x → ~2.2x. Measured, linux x86-64 (the
+  runner, load 1.90, a VALID set, run 34296065145 against the
+  session's baseline run 34294755111 at load 1.91): keepalive
+  **110.7x → 3.315x** [3.215, 3.503], lobo 781 → 26,189 req/s;
+  close **2.267x → 1.971x** [1.941, 1.985], 11,127 → 12,891; N=1
+  close 3.410x → 2.695x; N=1 keepalive 44.1x → 4.525x (781 →
+  7,667). The stall is gone; what is left on linux is the reactor
+  round-trip (wolf-lang#257) and the accept path. Measured, macOS
+  arm64: (pending a quiet box).
 
 - The stats. ws22 counted three per file request; there were four:
   `fs_is_dir` and `fs_is_file` in the router, `fs_size` and
@@ -140,6 +148,24 @@ in this session): see the ledger rows dated 2026-09-09.
   which is why the folding stops here. Predicted: within the bar's
   noise on every cell (one stat of ~0.5 µs in a 63 µs request; the
   method sees nothing under ten percent). Measured: (pending).
+
+- The signal poll, on a budget. Every pass of a serving hand raised
+  the probe meaning to itself and waited once on the runtime's
+  queue, a real signal plus a cross-thread handoff, and a loaded
+  hand's pass is one request long: at eighteen hands on the
+  keepalive shape that was ~10% of a hand's time (`os_signal_wait`
+  7.2% + `signal::raise` 3.0%, docs/PROFILE.md). The poll now runs
+  when 25 ms have passed since the last one, the wait budget's own
+  signal floor, so an idle hand polls exactly as often as before, a
+  loaded one polls once per budget instead of once per request, and
+  an operator's `kill -HUP` is seen within one budget plus one pass
+  either way. Predicted, macOS N=18: keepalive 2.3x (after the one
+  write) → ~2.1x and about one core fewer burned; close: the poll
+  ran once per herd wake, so the cores column falls and the ratio
+  moves little (the cell is accept-bound); N=1: within noise (one
+  poll amortized over the many connections a saturated hand serves
+  per pass). Predicted, linux N=4: keepalive a few percent, close
+  within noise. Measured: (pending).
 
 ## ws22 — 2026-09-08 — the gap measured (the bar first, then the profile; nothing optimized)
 
