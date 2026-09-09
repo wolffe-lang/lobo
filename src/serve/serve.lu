@@ -885,28 +885,23 @@ fn serve_file(
             // to `chg.used`.
             chg.rt = region_bytes(resp)
             if !failed {
-                // ws24 (wolf-lang#254): ONE syscall, NO copy. The head's
-                // bytes are materialized in this region (F-0072) and
-                // the body is MOVED behind them into a two-part gather
-                // (a push moves the list header, not its bytes), and
-                // `net_writev` hands both to the kernel as one
-                // `writev(2)`: one segment where ws23's copy made one
-                // buffer at ~1.8 ns per byte (2 µs for this 1 KiB
-                // body, 120 µs for a 64 KiB one). ws23's `one_write`
-                // rule — copy on keepalive up to 64 KiB, on close up
-                // to 4 KiB, two writes above — priced the copy against
-                // the stall and the second reactor trip; a gather
-                // costs neither, so the rule is retired and every
-                // small response takes this arm. The budgeted arm
-                // (`budget.body_small`) keeps its two writes; its doc
-                // says why (D40's margin is sixteen ledger units).
-                let hb = head.bytes()
-                var parts = List[List[byte]]()
-                (mut parts).push(hb)
-                (mut parts).push(body)
-                net_writev(sock, parts) else |e| match e {
+                // ws25-copy-arm (THROWAWAY, lobo#6's reference tree):
+                // ws23's copy — the body pushed byte by byte behind
+                // the head's bytes, one `net_write_bytes` — put back on
+                // the plaintext small arm at the v0.2.8 pin, so the
+                // gather and the copy can be measured side by side on
+                // ONE box with ONE toolchain. Nothing else differs from
+                // trunk 7c99905.
+                var buf = head.bytes()
+                for b in body {
+                    (mut buf).push(b)
+                }
+                net_write_bytes(sock, buf) else |e| match e {
                     closed => {
                         wcode = 1
+                    },
+                    invalid => {
+                        wcode = 2
                     },
                     io => {
                         wcode = 2
