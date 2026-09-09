@@ -191,6 +191,33 @@ ratio 1.301x is that run's 1.300x to a thousandth. NOT MET on both
 shapes; W8's linux standing is unchanged by a lane that built an
 instrument and moved two path stats.
 
+### 2026-09-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws25: `fs_fstat` ÷ the gather, ONE VM · **VALID** · **NOT MET on both shapes** (close 1.258x, keepalive 1.652x)
+
+The same instrument, run 34362397588 (`parity=true ref_tree=7c99905`),
+load 1.95, nginx close 28,860 (the same VM class as the row above),
+`fstat` = ws25 `0f2aa93` (open first, kind/size/mtime off the handle,
+every arm reads through it), `gather` = trunk `7c99905`:
+
+| cell | shape | fstat req/s | gather req/s | nginx req/s | nginx ÷ fstat median [min, max] | nginx ÷ gather | **fstat ÷ gather** median [min, max] | fstat / gather / nginx cores |
+|---|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 22,956 | 22,094 | 28,860 | **1.258x** [1.240, 1.277] | 1.306x [1.288, 1.326] | **1.038x** [1.036, 1.041] | 1.94 / 2.00 / 1.60 |
+| **N=4 c=32** | keepalive | 59,626 | 53,985 | 98,291 | **1.652x** [1.638, 1.671] | 1.832x [1.806, 1.846] | **1.105x** [1.094, 1.111] | 2.86 / 2.95 / 2.43 |
+| N=1 c=32 | close | 14,277 | 13,286 | 19,190 | 1.347x [1.304, 1.396] | 1.434x [1.401, 1.487] | 1.090x [1.023, 1.100] | 1.00 / 1.00 / 0.99 |
+| N=1 c=32 | keepalive | 26,887 | 23,318 | 42,806 | 1.601x [1.576, 1.633] | 1.841x [1.779, 1.883] | 1.129x [1.127, 1.171] | 1.00 / 1.00 / 1.00 |
+
+Three syscalls fewer per file request (`strace -c`, same run: `statx`
+4 → 2, `read` 2 → 1, ~15.3 → ~12.2 calls per request) read as
+**+3.8% on the close cell and +10.5% on the keepalive cell** at
+N=4, +9–13% at N=1, every delta's spread under ±2%. ws23's "within
+noise" does NOT hold on the syscall-first runtime on linux: with
+the reactor trips gone, three kernel entries are a tenth of a
+keepalive request. Above this sprint's prediction (~1.03x) by the
+same reasoning error as lobo#6's, in the other direction — a
+syscall on this VM costs more of a request than a macOS `sample`
+leaf share suggested. W8's linux cells move 1.301x → 1.258x and
+1.820x → 1.652x on this VM class; NOT MET on both, the keepalive
+cell still the larger gap.
+
 ### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · ws25's two-tree sets · **ALL REFUSED** (load 7.8–8.2; indicative, not a result)
 
 The same two-tree tool on this box, `LOBO_THIS`/`LOBO_REF` naming

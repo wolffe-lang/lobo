@@ -246,7 +246,47 @@ fstat run below counts.
 
 The `perf report` tables of that run are empty: the tool chowned the
 data file to the caller and then read it as root, which perf refuses
-(fixed the same day; the fstat run carries the shares).
+(fixed the same day; the next run carries the shares).
+
+### The fstat arm beside the gather (run 34362397588, the same VM class)
+
+`fstat` = ws25 `0f2aa93`, `gather` = trunk `7c99905`; one process,
+the close shape, `perf record -F 997 -g` over eight seconds while the
+drive answered **13,896 req/s** (fstat) vs **13,143** (gather), +5.7%
+— and `tools/lobo-parity` on the same VM read +3.8% on the N=4 close
+cell and +10.5% on keepalive (docs/PARITY.md). The kernel's count
+per request, `strace -c` on a separate drive:
+
+| syscall | fstat | gather | what moved |
+|---|---|---|---|
+| `statx` | **2.0** | 4.0 | the router's `fs_is_file` and `fs_fstat` — `fs_size`, `fs_modified_ms` and the runtime's own inside `fs_read_bytes` are gone |
+| `read` | **1.0** | 2.0 | `read_exact(fd, size)` reads the size the fstat named; `fs::read`'s read-to-EOF is gone |
+| `openat`, `close` ×2, `writev`, `accept4`, `recvfrom`, `poll`, `setsockopt`, `ioctl` | 1 each (`close` 2) | the same | — |
+| **calls per request** | **~12.2** | ~15.3 | three fewer |
+
+Where the process's time goes on this host (`perf`, the whole
+process, leaves and inclusive), the first linux profile lobo has:
+
+| | fstat | gather |
+|---|---|---|
+| kernel / lobo-release / libc (by dso) | 76.3% / 14.5% / 9.0% | 77.1% / 13.6% / 9.1% |
+| in a syscall, inclusive (`entry_SYSCALL_64`) | 66.8% | 68.3% |
+| `writev` inclusive — the response's whole transmit path (`tcp_sendmsg` → `ip_output` → the loopback's receive softirq, ~20 points of it) | 24.9% | 22.2% |
+| `close(2)` inclusive — the socket's teardown (`__fput`, the FIN) | 17.7% | 15.2% |
+| `link_path_walk` leaf — the path stats' walks | 0.67% | 1.50% |
+| top leaf: `_raw_spin_unlock_irqrestore` (the loopback's softirq handoff) | 9.0% | 7.1% |
+| lobo's own frames (`_Wserve_main`, leaf) | 0.70% | 0.82% |
+
+Two thirds of one process on this host is the kernel serving the
+socket, a quarter of it the response's transmit and a sixth the
+close — the close SHAPE's own cost, which nginx pays too (its N=1
+close on this VM is 19.2k against lobo's 14.3k, 1.35x). The path
+walks halved with the fstat and were never large; what the fstat
+bought is three kernel entries at ~1 µs each on a ~70 µs request at
+N=1 close and a ~17 µs one at N=4 keepalive, which is why the
+keepalive cell moved most. lobo's user space is under 15% of the
+process here, of which lobo's own code is under 1%: the ws22 reading
+holds on linux.
 
 ## What this does NOT say
 

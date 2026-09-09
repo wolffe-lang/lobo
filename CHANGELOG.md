@@ -254,13 +254,44 @@ read on ONE runner VM by the instrument this sprint built.
   1.02x [0.99, 1.05], both N=4 cells inside the pair spread — ws23's
   "within noise" still holds on the gating cells with the
   syscall-first runtime; `strace -c` shows `newfstatat` per request
-  3 → 1. macOS indicative: N=1 keepalive +2–5%. MEASURED: (pending)
+  3 → 1. macOS indicative: N=1 keepalive +2–5%. MEASURED, linux
+  x86-64, run 34362397588, a VALID set on the same VM class as the
+  lobo#6 read (load 1.95, nginx close 28,860), fstat ÷ gather: N=4
+  close **1.038x** [1.036, 1.041] (22,956 vs 22,094), N=4 keepalive
+  **1.105x** [1.094, 1.111] (59,626 vs 53,985), N=1 close 1.090x
+  [1.023, 1.100], N=1 keepalive 1.129x [1.127, 1.171] — every spread
+  under ±2%, and ABOVE the prediction: three syscalls fewer per
+  request (`strace -c`, same run: `statx` 4 → 2 — the fourth was the
+  runtime's own inside `fs_read_bytes` — and `read` 2 → 1, ~15.3 →
+  ~12.2 calls per request) is a tenth of a keepalive request on this
+  host once the reactor trips are gone. ws23's "within noise" does
+  not hold with the syscall-first runtime on linux. W8's linux cells
+  read **close 1.258x** [1.240, 1.277] and **keepalive 1.652x**
+  [1.638, 1.671] on this VM class (1.301x / 1.820x before it), NOT
+  MET on both. The profile leg's `perf` tables came through this
+  time (`docs/PROFILE.md`): the process is 76% kernel, `writev`'s
+  transmit path a quarter and `close(2)` a sixth of it,
+  `link_path_walk` halved, lobo's own frames under 1%. macOS
+  (REFUSED on load 9.77, indicative): fstat ÷ gather N=18 close
+  1.016x [0.998, 1.026], N=18 keepalive 1.102x [0.628, 1.544]
+  (unreadable), N=1 close 0.980x, N=1 keepalive 1.082x [1.002,
+  1.104] — the same sign, not a number.
 
 - **The herd (item 4): nothing to build.** wolf-lang#267 has no
   surface this wave; ws24's number stands (64% of a hand at N=18,
   the losers' park is the reactor round-trip). Not re-probed.
 
-- Gates: (pending)
+- Gates, exit-code checked, none piped: G1 RED (exit 1 — the leak
+  gate proving itself on `prefork_e2e`'s trapped checked lane; the
+  census named and reaped its master and two hands), G2 **GREEN**
+  (exit 0, 255/255, nothing left behind) → the lobo#1 and instrument
+  commits; G3 RED, G4 RED, G5 RED (exit 1 each — `prefork_e2e` at
+  the native ceiling, at the native ceiling, and the checked trap
+  that G5's instrumentation finally named: step 3, line 300), G6
+  **GREEN** (exit 0, 255/255, differentials 3/3, 8/8, 9/9, nothing
+  left behind) → the fstat and hardening commits. CI: 34355608599
+  (lobo#6's read, VALID) and 34362397588 (the fstat pair, VALID),
+  both success, watched once each at `--interval 120`.
 
 ## ws24 — 2026-09-09 — the quiet box (refused at the bound), the syscall-first pin, one gathered write
 
