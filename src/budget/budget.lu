@@ -69,6 +69,21 @@ fn read_pipe(pipe_r: int, errored: bool) -> (int, int) {
 /// the read — before any byte is on the wire — and is contained at
 /// this proc's boundary. Row: io on any non-clean outcome (the join
 /// reads the pipe for which).
+///
+/// TWO WRITES, on purpose (ws24). The plaintext arm in `serve` now
+/// gathers head and body into one `net_writev`; this arm does not,
+/// because the gather's two-part list must live in the capped region
+/// beside the body (a region value cannot be stored outside it,
+/// E1010), and D40's envelope leaves that region exactly sixteen
+/// ledger units at a power-of-two body — `charge(N) = 16 ×
+/// pow2ceil(N) − 16` against a cap of `16 × pow2ceil(budget)`
+/// (docs/BUDGET.md, the theorem) — which is less than one list
+/// header. The second write stopped costing anything worth a
+/// re-derivation at the ws24 pin: `TCP_NODELAY` is the runtime's
+/// default (no stall, [os.net.nodelay]) and a write into an empty
+/// send buffer parks nowhere ([os.net.io]), so it is one extra
+/// syscall on the budgeted path only. Re-deriving D40 with a
+/// constant for the gather is a named residue, not this sprint's.
 fn body_small(sock: int, path: str, head: str, cap: int, pipe: int) -> int ! {io} {
     var failed = false
     var wcode = 0

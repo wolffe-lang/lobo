@@ -804,18 +804,20 @@ fn serve_file(
                 send_err(mut cn, 500, false, token)
                 return true
             }
-            // ws23 (lobo#3): ONE buffer, one record, on the same rule
-            // as the plaintext arm below (which says why)
-            if one_write(keep, body.len) {
-                var buf = head.bytes()
-                for b in body {
-                    (mut buf).push(b)
-                }
-                write_bytes_all(mut cn, buf)?
-                return !keep
+            // ws23 (lobo#3): ONE buffer, one record. ws24 keeps the
+            // copy HERE, and only here: the record layer seals a
+            // contiguous plaintext, so the head and the body must be
+            // one buffer before `sess_write` can make them one record,
+            // and `net_writev` (which the plaintext arm below takes)
+            // gathers only what reaches the socket unsealed. The copy
+            // is ~1.8 ns per byte beside the seal's own per-byte work;
+            // what it buys is one record and one syscall instead of
+            // two, on every size the small path serves.
+            var buf = head.bytes()
+            for b in body {
+                (mut buf).push(b)
             }
-            write_all(mut cn, head)?
-            write_bytes_all(mut cn, body)?
+            write_bytes_all(mut cn, buf)?
             return !keep
         }
         // plaintext: the body bytes live in a per-response REGION and
@@ -882,53 +884,33 @@ fn serve_file(
             // docs quote it as measured-per-tier and never compare it
             // to `chg.used`.
             chg.rt = region_bytes(resp)
-            if !failed && one_write(keep, body.len) {
-                // ws23 (lobo#3): ONE buffer, ONE write — the head's
-                // bytes materialized in this region (F-0072), the body
-                // pushed behind them, one syscall and one reactor
-                // round-trip instead of two. `one_write` says when the
-                // copy is worth it; the budgeted arm
-                // (`budget.body_small`) keeps its two writes on
-                // purpose: its cap is exactly the ledger's charge for
-                // ONE body copy at a power-of-two budget (D40's
-                // envelope, `ledger_cap`), and a second copy in that
-                // region would breach it.
-                var buf = head.bytes()
-                for b in body {
-                    (mut buf).push(b)
-                }
-                net_write_bytes(sock, buf) else |e| match e {
-                    closed => {
-                        wcode = 1
-                    },
-                    invalid => {
-                        wcode = 2
-                    },
-                    io => {
-                        wcode = 2
-                    },
-                }
-            } else if !failed {
-                net_write(sock, head) else |e| match e {
+            if !failed {
+                // ws24 (wolf-lang#254): ONE syscall, NO copy. The head's
+                // bytes are materialized in this region (F-0072) and
+                // the body is MOVED behind them into a two-part gather
+                // (a push moves the list header, not its bytes), and
+                // `net_writev` hands both to the kernel as one
+                // `writev(2)`: one segment where ws23's copy made one
+                // buffer at ~1.8 ns per byte (2 µs for this 1 KiB
+                // body, 120 µs for a 64 KiB one). ws23's `one_write`
+                // rule — copy on keepalive up to 64 KiB, on close up
+                // to 4 KiB, two writes above — priced the copy against
+                // the stall and the second reactor trip; a gather
+                // costs neither, so the rule is retired and every
+                // small response takes this arm. The budgeted arm
+                // (`budget.body_small`) keeps its two writes; its doc
+                // says why (D40's margin is sixteen ledger units).
+                let hb = head.bytes()
+                var parts = List[List[byte]]()
+                (mut parts).push(hb)
+                (mut parts).push(body)
+                net_writev(sock, parts) else |e| match e {
                     closed => {
                         wcode = 1
                     },
                     io => {
                         wcode = 2
                     },
-                }
-                if wcode == 0 {
-                    net_write_bytes(sock, body) else |e| match e {
-                        closed => {
-                            wcode = 1
-                        },
-                        invalid => {
-                            wcode = 2
-                        },
-                        io => {
-                            wcode = 2
-                        },
-                    }
                 }
             }
             // the block's tail is a scalar on purpose: a call-tailed
@@ -1091,23 +1073,6 @@ fn serve_file(
     }
     fs_close(fd) else |_| {}
     !keep
-}
-
-/// ws23 (lobo#3): does this small response go out as ONE buffer? The
-/// head and the body used to leave as two writes, and on linux the
-/// second, small segment sat behind Nagle waiting for an ACK the peer
-/// delays 40 ms on a keepalive connection: lobo's keepalive on linux
-/// was 781 req/s, one request per 41 ms per connection (docs/PARITY.md,
-/// the ws22 set). The language has no `TCP_NODELAY` and no `writev`
-/// (wolf-lang#254), so the fix is a copy: the body pushed behind the
-/// head's bytes at ~1.8 ns per byte (measured, 300k iterations). On a
-/// KEEPALIVE response the copy is always worth it — 40 ms against at
-/// most ~120 µs for a 64 KiB body. On a `Connection: close` response
-/// nothing stalls (the close flushes) and the copy buys only the
-/// second reactor round-trip, ~10 µs, so it is taken up to 4 KiB and
-/// the two writes stay above that. Pure and total.
-fn one_write(keep: bool, body_len: int) -> bool {
-    keep || body_len <= 4096
 }
 
 /// The Connection header token for a keepalive decision. Total.

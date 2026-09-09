@@ -4,20 +4,24 @@
 //! conforms: conc.task.spawn, err.union, err.propagate
 //! stage-src: serve budget conn tls proxy http config obs metrics resolver
 //!
-//! ws23 (lobo#3): a small static response is ONE write. Before this
+//! ws23 (lobo#3): a small static response is ONE write. Before that
 //! sprint serve_file wrote the head and the body as two `net_write`s,
 //! and on linux the second, small segment sat behind Nagle waiting
 //! for an ACK the peer delays 40 ms on a keepalive connection — every
 //! keepalive request cost a round trip, 781 req/s over 32 connections
-//! on the CI runner (docs/PARITY.md). The language has no TCP_NODELAY
-//! (wolf-lang#254), so the witness is the CLOCK: eight keepalive
-//! requests on one connection, each response read whole, and the
-//! eight together must finish inside 100 ms. Stalled they take at
-//! least 320 ms (eight delayed ACKs); unstalled they take a few
-//! milliseconds on any host, loaded or not — the margin is what makes
-//! ten runs give one verdict. macOS acks differently and never
-//! stalled; the linux runner is where this line bites. Native only:
-//! net + fs + a spawned server task meet on no other lane.
+//! on the CI runner (docs/PARITY.md). The witness is the CLOCK: eight
+//! keepalive requests on one connection, each response read whole,
+//! and the eight together must finish inside 100 ms. Stalled they
+//! take at least 320 ms (eight delayed ACKs); unstalled they take a
+//! few milliseconds on any host, loaded or not — the margin is what
+//! makes ten runs give one verdict. macOS acks differently and never
+//! stalled; the linux runner is where this line bites. ws24: the one
+//! write is one GATHERED write (`net_writev`, wolf-lang#254) and the
+//! runtime sets TCP_NODELAY on every stream, so this clock is guarded
+//! twice over; it stays because it is the line that moves first if
+//! either guard slips (`tests/serve/writev_sizes.lu` is the bytes
+//! half). Native only: net + fs + a spawned server task meet on no
+//! other lane.
 
 use config
 use http
