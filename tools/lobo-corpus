@@ -90,9 +90,11 @@
 #     returned and left a process of this checkout's running (a master
 #     it forgot to stop, a hand its SIGKILL orphaned) is RED by name,
 #     and reaped. Three seconds of grace, because a `stop` fans out.
-# The 60 s ceiling is the runner's own; LOBO_LANE_CEILING=<s> lowers it
-# — the proof in the ws25 CHANGELOG entry kills prefork_e2e mid-run at
-# LOBO_LANE_CEILING=4 and shows an empty census.
+# The 60 s ceiling is the runner's own (the native lane's is 3x, its
+# cold compile being inside it — see run_lane); LOBO_LANE_CEILING=<s>
+# lowers it — the proof in the ws25 CHANGELOG entry kills prefork_e2e
+# mid-run at LOBO_LANE_CEILING=4 and shows an empty census. A lane
+# that took 20 s or more prints its wall beside its verdict.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
@@ -131,6 +133,17 @@ run_group() {
     rig_group_add "$_rg_g"
     wait "$_rg_g"
     grc=$?
+    # at the ceiling timeout(1) TERMs the group and returns as soon as
+    # its own child dies — its -k KILL never fires for the REST of
+    # the group, and a master that took the TERM mid-`quit` absorbs it
+    # (measured at LOBO_LANE_CEILING=3: master and two hands alive
+    # after the ceiling, caught by the census). The runner finishes
+    # the job: TERM again, a moment, KILL, the whole group.
+    if [ "$grc" = 124 ] || [ "$grc" = 137 ]; then
+        kill -s TERM -- "-$_rg_g" 2> /dev/null
+        sleep 0.5
+        kill -s KILL -- "-$_rg_g" 2> /dev/null
+    fi
     rig_group_del "$_rg_g"
 }
 
@@ -155,14 +168,23 @@ expected_stdout() { # unescape \n \" \\ from the directive's stdout=
     }'
 }
 
-run_lane() { # run_lane <lane> <file> — the observation record in $rec, the exit in $grc, the lane's stderr in target/corpus-run/stderr.txt
+run_lane() { # run_lane <lane> <file> — the observation record in $rec, the exit in $grc, the wall in $lane_secs, the lane's stderr in target/corpus-run/stderr.txt
     _rl_o="target/corpus-run/record.json"
     _rl_e="target/corpus-run/stderr.txt"
+    _rl_s=$(date +%s)
     case "$1" in
-    native) run_group "$ceiling" "$_rl_o" "$_rl_e" "$WOLF" conform-run --native "$2" ;;
+    # the native lane COMPILES the staged entry inside its ceiling
+    # (the stage is remade every run, so the compile is cold), and on
+    # this box under other lanes' load that compile-plus-run has
+    # passed 60 s five times in a day (ws25: every one a re-staged
+    # native lane, none a hung server — the census found nothing and
+    # the next lane ran at once). A ceiling is for a HUNG test; the
+    # native lane's is 3x so a slow compile is a number, not a red.
+    native) run_group $((ceiling * 3)) "$_rl_o" "$_rl_e" "$WOLF" conform-run --native "$2" ;;
     checked) run_group "$ceiling" "$_rl_o" "$_rl_e" "$WOLF" conform-run --checked "$2" ;;
     lupin) run_group "$ceiling" "$_rl_o" "$_rl_e" "$LUPIN" conform-run --json ${lobo_seed:+--seed="$lobo_seed"} "$2" ;;
     esac
+    lane_secs=$(( $(date +%s) - _rl_s ))
     rec=$(cat "$_rl_o")
 }
 
@@ -172,15 +194,30 @@ run_lane() { # run_lane <lane> <file> — the observation record in $rec, the ex
 # flake under load unreadable (ws25: G1 went red on prefork_e2e's
 # checked lane with `trap(assert)` and nothing else).
 lane_stderr() {
+    if [ -n "$rec" ]; then
+        printf '%s' "$rec" | jq -r '(.diagnostics // [])[] | "corpus:   diagnostic: \(.)"' 2>/dev/null | cut -c1-300 >&2
+        printf '%s' "$rec" | jq -r '.stdout_inline // ""' 2>/dev/null | tail -3 | sed 's|^|corpus:   stdout: |' >&2
+        # the checked machine records the trap's SPAN (bytes into the
+        # entry) and neither machine records the assert's message
+        # (wolf-lang#150): the line is what a runner in sh can give
+        _span=$(printf '%s' "$rec" | jq -r '(.["x-trap-span"] // [])[0] // ""' 2>/dev/null)
+        if [ -n "$_span" ] && [ -f "$entry" ]; then
+            _line=$(head -c "$_span" "$entry" | wc -l | tr -d ' ')
+            echo "corpus:   trap at $entry:$((_line + 1)) (x-trap-span byte $_span; the assert's message is not in the record — wolf-lang#150)" >&2
+        fi
+    fi
     [ -s target/corpus-run/stderr.txt ] || return 0
-    grep -v '^lobo: \[notice\]' target/corpus-run/stderr.txt | tail -6 | sed 's|^|corpus:   stderr: |' >&2
+    grep -v '^lobo: \[notice\]' target/corpus-run/stderr.txt | tail -6 | cut -c1-300 | sed 's|^|corpus:   stderr: |' >&2
+    # a spawned server's last events, when it wrote any (a ceiling
+    # kill leaves them as the only account of where the run stood)
+    grep '^lobo: \[notice\]' target/corpus-run/stderr.txt | tail -4 | cut -c1-200 | sed 's|^|corpus:   server: |' >&2
 }
 
 # ceiling_note — the words for an empty record, by the exit
 ceiling_note() {
     case "$grc" in
-    124 | 137) echo "the ${ceiling}s ceiling (exit $grc) — its process group was killed" ;;
-    *) echo "crash, exit $grc" ;;
+    124 | 137) echo "the ceiling after ${lane_secs}s (exit $grc) — its process group was killed" ;;
+    *) echo "crash, exit $grc after ${lane_secs}s" ;;
     esac
 }
 
@@ -234,6 +271,7 @@ for f in $(find $roots -name '*.lu' | sort); do
         run_lane "$lane" "$entry"
         if [ -z "$rec" ]; then
             echo "corpus: FAILED — $f [$lane]: no observation record ($(ceiling_note))" >&2
+            lane_stderr
             red=$((red + 1))
             continue
         fi
@@ -271,7 +309,13 @@ for f in $(find $roots -name '*.lu' | sort); do
                 continue
             fi
         fi
-        echo "corpus: ok — $f [$lane] $verdict"
+        # the wall is printed past 20 s only: a slow lane is a fact
+        # about the box worth a line, a fast one is not
+        if [ "$lane_secs" -ge 20 ]; then
+            echo "corpus: ok — $f [$lane] $verdict (${lane_secs}s)"
+        else
+            echo "corpus: ok — $f [$lane] $verdict"
+        fi
     done
 
     # ws14: the checked-refuses directive — the UB machine's refusal,
