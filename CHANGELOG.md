@@ -89,7 +89,17 @@ read per cell, a refused N=1 cell marks its own rows and leaves the
 gating verdict standing, and the tool implements it.
 
 The baseline this entry measures against (trunk `023ec64`, taken
-in this session): see the ledger rows dated 2026-09-09.
+in this session): see the ledger rows dated 2026-09-09. The linux
+series is four VALID sets. The macOS series is four sets the tool
+REFUSED on the quiet-rig rule, every one: the box carried other
+lanes' work for the whole sprint (a fuzzer at four cores, a VM, a
+`rustc`, s141's own lobo bench, `mediaanalysisd`), the quiet-box
+waiter never saw load(1m) under 2.8 in two hours, and the sets
+were taken at loads 7.24 / 4.19 / 9.84 / 8.25 so the sprint would
+have the shape of the number rather than nothing. They are
+indicative, named as refused, and not in the ledger as results; a
+quiet-box re-measure is the first thing the next lane on this box
+owes. Read with that caveat, they move the same way linux did.
 
 - One buffer, one write (lobo#3). A small static response's head
   and body left as two `net_write`s; on linux the second, small
@@ -127,7 +137,15 @@ in this session): see the ledger rows dated 2026-09-09.
   close 3.410x → 2.695x; N=1 keepalive 44.1x → 4.525x (781 →
   7,667). The stall is gone; what is left on linux is the reactor
   round-trip (wolf-lang#257) and the accept path. Measured, macOS
-  arm64: (pending a quiet box).
+  arm64 (REFUSED on load, indicative; load 4.19, the oracle stable
+  on both gating cells, against the session's own refused baseline
+  at load 7.24 and ws22's quiet set): keepalive 2.550x → **1.990x**
+  [1.986, 2.044], lobo 44,864 → 61,082 req/s against nginx's
+  121,715 (ws22's quiet 2.761x); close 1.105x → **1.085x** [1.029,
+  1.097] (ws22's quiet 1.151x); N=1 close 2.875x → 2.018x, N=1
+  keepalive 3.083x → 3.240x (the N=1 cell refused on its own
+  spread in both sets). Predicted 2.3x and ~1.10x on the gating
+  cells; the write was worth more than one round-trip in three.
 
 - The stats. ws22 counted three per file request; there were four:
   `fs_is_dir` and `fs_is_file` in the router, `fs_size` and
@@ -152,8 +170,11 @@ in this session): see the ledger rows dated 2026-09-09.
   close 1.971x → 1.952x [1.925, 1.983], keepalive 3.315x → 3.297x
   [3.066, 3.522], N=1 close 2.695x → 2.684x, N=1 keepalive 4.525x →
   4.519x: within noise, as predicted (lobo's req/s rose 2–3% on
-  every cell and nginx's rose with it). Measured, macOS arm64:
-  (pending a quiet box).
+  every cell and nginx's rose with it). Measured, macOS arm64
+  (REFUSED on load 9.84, indicative): close 1.085x → 1.079x [1.057,
+  1.113], keepalive 1.990x → 2.007x [1.917, 2.053], N=1 close 2.018x
+  → 1.890x, N=1 keepalive 3.240x → 3.369x: within noise, as
+  predicted.
 
 - The signal poll, on a budget. Every pass of a serving hand raised
   the probe meaning to itself and waited once on the runtime's
@@ -178,7 +199,16 @@ in this session): see the ledger rows dated 2026-09-09.
   gating cells, as predicted; this run landed on a faster runner VM
   (nginx's own close went 25.9k → 36.9k req/s, lobo's 13.3k →
   18.2k), which is why the statistic is a same-box ratio. Measured,
-  macOS arm64: (pending a quiet box).
+  macOS arm64 (REFUSED on load 8.25, indicative, the N=1 cell valid
+  on its own rules for the first time today): keepalive 2.007x →
+  **1.637x** [1.602, 1.695], lobo 60,996 → 75,482 req/s against
+  nginx's 123,477, at 11.66 cores to nginx's 11.53; close 1.079x →
+  **1.067x** [1.064, 1.076] at 6.78 cores (was 7.13); N=1 close
+  1.890x → 1.934x, N=1 keepalive 3.369x → 3.259x. Predicted ~2.1x
+  and "the cores fall, the ratio moves little": the keepalive cell
+  moved 18%, twice the prediction, because at eighteen hands a
+  pass IS a request and the poll was a full cross-thread handoff
+  on every one of them.
 - The accept herd, measured and not changed. ws22's profile put a
   hand at eighteen hands on the close shape 64% parked in
   `net_accept`: every hand wakes on the level-triggered listener,
@@ -206,7 +236,11 @@ in this session): see the ledger rows dated 2026-09-09.
   s141's); no `open_file_cache`; no stat cache (nginx's default has
   none, and a cached mtime is a different thing to serve); the
   budgeted arm's two writes (D40's envelope would need re-deriving
-  first); no pin bump (no v0.2.7 landed during the sprint).
+  first); no pin bump: no v0.2.7 was tagged during the sprint, and
+  the one being cut carries neither wolf-lang#257 nor #254 (s141's
+  PR #262, the syscall first and `net_writev` + `TCP_NODELAY` by
+  default, landed after its release commit, unmeasured, and is
+  0.2.8's), so the two-numbers-per-row re-measure rides that tag.
 
 ## ws22 — 2026-09-08 — the gap measured (the bar first, then the profile; nothing optimized)
 

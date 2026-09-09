@@ -154,6 +154,32 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · four sets, one per ws23 change · **ALL REFUSED** (load 4.2–9.8; indicative, not a result)
+
+Not results; recorded, as ws22's refused sets were, so the two
+hosts' series can be read side by side. The box carried other
+lanes' work for the whole sprint (a four-core fuzzer, a VM, a
+`rustc`, s141's own lobo bench, `mediaanalysisd`); the quiet-box
+waiter never saw load(1m) under 2.8 in two hours, and the sets were
+taken at the loads shown. The first set was also refused on nginx's
+N=18 keepalive spread (1.526); in the other three the oracle held
+on both gating cells (spreads under 1.15) and only the load rule
+refused. `tools/lobo-parity` under the ws23 refusal scope; 5 pairs ×
+`ab -t 5`, c=32 over 4 generators, lobo 0.1.0+dev at wolf 0.2.6 pin
+398e5f5, nginx 1.30.4:
+
+| commit (change) | load(1m) | N=18 close | N=18 keepalive | lobo / nginx cores (keepalive) | N=1 close | N=1 keepalive |
+|---|---|---|---|---|---|---|
+| `023ec64` (trunk, the baseline) | 7.24 | 1.105x [1.048, 1.229] · 17,232 vs 19,043 | 2.550x [2.370, 2.737] · 44,864 vs 110,366 | 9.98 / 8.91 | 2.875x (cell refused) | 3.083x (cell refused) |
+| `092dbf8` (one buffer, one write) | 4.19 | 1.085x [1.029, 1.097] · 18,606 vs 20,179 | **1.990x** [1.986, 2.044] · 61,082 vs 121,715 | 12.09 / 11.82 | 2.018x (cell refused) | 3.240x (cell refused) |
+| `2c393b3` (three stats, not four) | 9.84 | 1.079x [1.057, 1.113] · 18,417 vs 19,891 | 2.007x [1.917, 2.053] · 60,996 vs 123,422 | 11.09 / 11.00 | 1.890x (cell refused) | 3.369x (cell refused) |
+| `0e36225` (the signal poll on a budget) | 8.25 | **1.067x** [1.064, 1.076] · 18,962 vs 20,200 | **1.637x** [1.602, 1.695] · 75,482 vs 123,477 | 11.66 / 11.53 | 1.934x | 3.259x |
+
+Against ws22's quiet set (close 1.151x, keepalive 2.761x): the
+keepalive cell on this host reads 1.64x after the three changes,
+the close cell 1.07x, on a loaded box. A quiet-box set is owed
+before either number is a result.
+
 ### 2026-09-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · four VALID sets, one per ws23 change · **NOT MET on both shapes** (keepalive 110.7x → 3.26x)
 
 ws23's series, each set a `parity=true` dispatch of `ci.yml` on
