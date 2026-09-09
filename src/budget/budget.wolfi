@@ -1,7 +1,7 @@
 module pkg :: budget
-  wolfi v0 · toolchain 0.2.7 · edition v1
-  export_hash 708340c8bfecd4c2ccca9d077fe190a7cb9f014e7d1d038e72f5bc977fedbdc6
-  pkg_hash    708340c8bfecd4c2ccca9d077fe190a7cb9f014e7d1d038e72f5bc977fedbdc6
+  wolfi v0 · toolchain 0.2.8 · edition v1
+  export_hash 1c41c0afe015bb4bc622d9d73d17f7a82e8408ed979f05f0a509427c4cc3a535
+  pkg_hash    1c41c0afe015bb4bc622d9d73d17f7a82e8408ed979f05f0a509427c4cc3a535
   deps: (none)
   items:
     [0] pub run_small — fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -, -) -> ρ_caller

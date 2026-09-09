@@ -1,10 +1,10 @@
 module pkg :: config
-  wolfi v0 · toolchain 0.2.7 · edition v1
-  export_hash 3ad9f2b832a951e671e865f6cd0c5e9b77112ca48c68472066c30cd0cac237b5
-  pkg_hash    3ad9f2b832a951e671e865f6cd0c5e9b77112ca48c68472066c30cd0cac237b5
+  wolfi v0 · toolchain 0.2.8 · edition v1
+  export_hash fe1a5f8e7a3a66678b13f4c0eae28fe55f3403b9ee4a779b779a710087b0111c
+  pkg_hash    fe1a5f8e7a3a66678b13f4c0eae28fe55f3403b9ee4a779b779a710087b0111c
   deps:
-    std.x.crypto.curve25519  7f9a4184b6249d2e0bed33216f61aef8ee4c9752dfcca0662a2a91696b912618
-    std.x.tls.cert  286259321593080228f02f946f6b7bc2bc42b07ea0296d7b29ec220e3511b556
+    std.x.crypto.curve25519  1afb06a2a31bafb8001cd0fccdae030c68a1d8e340a9e705d893402d11ddb94f
+    std.x.tls.cert  2a577ca362be2275aa469a194fd5a167755b500419d10b2fb55a5b9b0effd4f5
   items:
     [0] pub access_out_buffer — fn access_out_buffer(c: self.Conf, i: int) -> int · regions (ρ1, -) -> -
     [1] pub access_out_count — fn access_out_count(c: self.Conf) -> int · regions (ρ1) -> -

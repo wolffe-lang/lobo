@@ -1,16 +1,16 @@
 module pkg :: serve
-  wolfi v0 · toolchain 0.2.7 · edition v1
-  export_hash 3ccf8a3103800aedb7ad761e0f8b174d7f6fc52a6deede412a1087f452f12e07
-  pkg_hash    3ccf8a3103800aedb7ad761e0f8b174d7f6fc52a6deede412a1087f452f12e07
+  wolfi v0 · toolchain 0.2.8 · edition v1
+  export_hash b3740f3d19af032a0969cfac4783791abd6750bf9d77e0c221928914d04faf4d
+  pkg_hash    b3740f3d19af032a0969cfac4783791abd6750bf9d77e0c221928914d04faf4d
   deps:
-    budget  708340c8bfecd4c2ccca9d077fe190a7cb9f014e7d1d038e72f5bc977fedbdc6
-    config  3ad9f2b832a951e671e865f6cd0c5e9b77112ca48c68472066c30cd0cac237b5
-    conn  34f284f7f51babac6d01fe89359214b356f43997fd72bcc0b67397d60197c544
-    http  4d0abf8eb3023ee98e3fd9a7ac3fea72ac09edab304baba9c1e64d4924c591bd
-    metrics  f5348ad119a84f16fdb39e483171843ffd266f20f4561aa4f45585a38f7d68a6
-    obs  aea12d5156bad61877e641a4d25b267a4a1fa2cc9170a299a8fc9a57ef62c391
-    proxy  54ff15c8b327dc14c74b84cf34b5f3476a15cb5e5211661d84f5558812592b59
-    resolver  f95d3c7565cb3623714320977c3230fb33b8b795ac66194ef7768d1ad3bef646
+    budget  1c41c0afe015bb4bc622d9d73d17f7a82e8408ed979f05f0a509427c4cc3a535
+    config  fe1a5f8e7a3a66678b13f4c0eae28fe55f3403b9ee4a779b779a710087b0111c
+    conn  a8dce48cfb72135361db68214a3e5b84192eb97bc6dd277495bde6d78dc68c8f
+    http  e87ea50e617d19c43dae3ce6fe36266fec54f74f9c393a61b1f7cc151625ad80
+    metrics  49975c8dd41ef069fb77d1b3f5f138d4e2f852b91fbf913afe1f01d9e52df616
+    obs  c62583017fcfb635886dd75940b314283288fecb483d047e265f2a31f03b65a8
+    proxy  42ee542a973ec86d40f2ab5a327561a9e6550ac295ac40ad9c97749e17216937
+    resolver  addc0a3a214e8cff5ad322209a2a981d6999e7de0b5b963d0964b21535afb586
   items:
     [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
     [1] pub admin_err_len — fn admin_err_len(token: str) -> int
