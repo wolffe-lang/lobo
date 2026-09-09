@@ -154,6 +154,103 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · the ws24 baseline window · **REFUSED at the bound** (the box never quieted; one indicative set)
+
+The first deliverable of ws24 was a QUIET set at trunk `1318cfe`
+before any code moved. The window was announced to the orchestrator
+at 03:38Z, the other lanes held their gauntlets, and a waiter polled
+`uptime` for load(1m) < 3.0 for fifty minutes (03:38–04:28Z, the
+bound stated in the announcement). It never saw it: the one-minute
+load read 4.98, 11.37, 8.48, 7.07, 5.41, 4.09, 6.14, 5.06, 7.74,
+8.00, 7.08 … 4.81 at the bound, and the residents were not lanes —
+`mediaanalysisd` (the user's photo indexer, 15–123% cpu for the
+whole window) and `XprotectService` (root, ~50%) — plus one sibling
+lane's `cargo xtask ci` the orchestrator named. The quiet baseline
+is therefore REFUSED, W8 stays UNMEASURED on macOS, and no macOS
+number in the ws24 series is a result. ONE indicative set was taken
+at the bound (04:29Z, load 3.92 at the start, rising to 20 as the
+other lanes' gauntlets resumed during it), so the two hosts' series
+can be read side by side; the tool refused it on load and on
+nginx's N=18 keepalive spread (1.278). lobo 0.1.0+dev at wolf 0.2.6
+pin 398e5f5, nginx 1.30.4 (`ws24-parity-baseline-macos-indicative.log`):
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo cores | nginx cores | ab max | load(1m) during |
+|---|---|---|---|---|---|---|---|---|
+| N=18 c=32 | close | 19,093 | 20,919 | 1.096x [0.937, 1.183] | 6.24 | 3.28 | 0.34 | 3.92 → 20.3 |
+| N=18 c=32 | keepalive | 60,950 | 113,353 | 1.623x [1.508, 1.971] | 8.57 | 9.38 | 0.34 | 3.92 → 20.3 |
+| N=1 c=32 (REFUSED) | close | 12,083 | 28,110 | 2.271x [1.833, 2.990] | 0.85 | 0.60 | 0.27 | 16.8 → 8.4 |
+| N=1 c=32 (REFUSED) | keepalive | 21,513 | 68,406 | 3.180x [2.450, 4.585] | 0.94 | 0.93 | 0.27 | 16.8 → 8.4 |
+
+Read beside ws23's four refused sets (close 1.067x, keepalive
+1.637x at loads 4.2–9.8): the same shape, on a box that has not
+been quiet for two sprints. The orchestrator's call at the bound
+was no further window that night; ws24's items 2–4 are measured on
+the linux runner, and the macOS rows below are indicative by the
+same rule.
+
+### 2026-09-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws24's series, one VALID set per step · **NOT MET on both shapes**
+
+Each set a `parity=true` dispatch of `ci.yml` on branch `ws24` at
+the named commit, 5 pairs × `ab -t 5`, c=32 over 4 generators,
+nginx 1.30.4; the pin is named per row because it is what row two
+changes:
+
+| commit (change) | pin | run | load | N=4 close | N=4 keepalive | N=1 close | N=1 keepalive |
+|---|---|---|---|---|---|---|---|
+| `1318cfe` (trunk, the baseline) | wolf 0.2.6 (398e5f5) | 34307802770 | 1.97 | **1.981x** [1.962, 2.028] · 14,380 vs 28,783 | **3.178x** [2.954, 3.496] · 30,361 vs 97,902 | 2.917x · 6,545 vs 18,999 | 4.475x · 9,558 vs 42,625 |
+| `8859ac9` (the pin: #257 syscall-first, #254 TCP_NODELAY default) | wolf 0.2.7+dev.bd7caff | 34311866103 | 1.99 | **1.300x** [1.290, 1.310] · 21,879 vs 28,454 | **1.862x** [1.852, 1.870] · 52,818 vs 98,529 | 1.464x · 13,150 vs 19,208 | 1.821x · 23,748 vs 43,052 |
+| `a61faee` (one gathered write; `tcp_nodelay` served) | wolf 0.2.7+dev.bd7caff | 34316912557 | 1.91 | **1.413x** [1.396, 1.421] · 53,768 vs 75,387 | **1.929x** [1.892, 1.943] · 118,854 vs 229,209 | 1.510x · 31,097 vs 46,548 | 2.081x · 42,871 vs 89,191 |
+| `a61faee` (the same, a second dispatch) | wolf 0.2.7+dev.bd7caff | 34317432651 | 1.79 | **1.439x** [1.436, 1.450] · 39,205 vs 56,515 | **2.086x** [2.056, 2.117] · 85,193 vs 178,211 | 1.649x (cell refused) | 2.318x (cell refused) |
+| `8859ac9` (the pin again — a CONTROL dispatched after the gather's two, throwaway branch) | wolf 0.2.7+dev.bd7caff | 34318089358 | 1.92 | **1.296x** [1.283, 1.313] · 19,661 vs 25,612 | **1.928x** [1.860, 1.991] · 45,136 vs 87,368 | 1.317x · 11,480 vs 15,072 | 2.023x · 16,956 vs 35,176 |
+
+The two post-gather runs landed on runner VMs 2.0–2.6x faster than
+the pin's (nginx's own close 28.5k → 75.4k and 56.5k), and every
+ratio on them reads HIGHER than the pin's row (close 1.30x → 1.41x
+and 1.44x; keepalive 1.86x → 1.93x and 2.09x). A control set at the pin, dispatched after them, landed on the
+slowest VM of the series (nginx close 25.6k) and read close 1.296x
+— the pin's two runs agree to 0.3% across VMs of different speed,
+the gather's two read 1.41x and 1.44x, so on the close shape the
+gather is ~10% WORSE on linux and the VM lottery does not explain
+it; on keepalive the pin's own VM-to-VM spread (1.86x → 1.93x)
+covers the gather's 1.93x and most of its 2.09x, so that cell is
+not a finding on its own. Filed as lobo#6 with the four-VM table
+and the instrument (a linux profile leg, which nobody has run); the
+gather stands as measured — better on macOS at N=1, worse on the
+linux close cell — and reverting the arm is one hunk if the
+orchestrator wants the linux number back before the cause is known.
+
+lobo's cores on the N=4 close cell went 2.39 → 2.01 at the pin
+(the winner's path stopped parking) while its req/s rose 52%;
+keepalive held at 3.0–3.2 cores and rose 74%. nginx's own numbers
+held within 2% across the series. NOT MET on both shapes, and the
+keepalive cell is now the larger gap on this host for the first
+time since the stall: what remains there is the accept path's
+share of nothing (this is the read/serve shape) — it is the
+request itself, `open` + stat + the syscalls, side by side with
+nginx's `open_file_cache`-less request at ~2x.
+
+### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · ws24's series, one INDICATIVE set per step · **ALL REFUSED** (load 3.9–7.5 at the start, 14–20 during)
+
+Not results (the first section of the ledger says why); recorded
+so the two hosts' series read side by side. `tools/lobo-parity`
+under the ws23 refusal scope, 5 pairs × `ab -t 5`, c=32 over 4
+generators, nginx 1.30.4, the load beside every row:
+
+| commit (change) | pin | load(1m) start → peak | N=18 close | N=18 keepalive | lobo / nginx cores (close · keepalive) | N=1 close | N=1 keepalive |
+|---|---|---|---|---|---|---|---|
+| `1318cfe` (trunk, the baseline) | 0.2.6 | 3.92 → 20.3 | 1.096x [0.937, 1.183] · 19,093 vs 20,919 | 1.623x [1.508, 1.971] · 60,950 vs 113,353 | 6.24/3.28 · 8.57/9.38 | 2.271x (cell refused) | 3.180x (cell refused) |
+| `8859ac9` (the pin) | 0.2.7+dev.bd7caff | 7.53 → 14.7 | **1.010x** [0.998, 1.043] · 19,829 vs 20,210 | **1.355x** [1.322, 1.385] · 85,375 vs 117,096 | 5.35/3.40 · 10.23/11.12 | 1.039x (cell refused) | 1.775x (cell refused) |
+| `a61faee` (one gathered write; `tcp_nodelay` served) | 0.2.7+dev.bd7caff | 7.43 → 16.0 | **1.014x** [0.982, 1.025] · 20,100 vs 20,497 | **1.369x** [1.352, 1.404] · 84,154 vs 115,005 | 5.37/3.51 · 10.67/11.18 | 0.987x (cell refused) · 31,321 vs 31,165 | 1.627x (cell refused) · 50,842 vs 80,576 |
+
+Read against the refused baseline: the pin took the N=18 keepalive
+cell 1.62x → 1.36x and N=1 keepalive 3.18x → 1.78x; the gather
+moved the N=1 cells (keepalive lobo +16%, close +13% — the copy's
+share of a single hand's request) and the N=18 cells not at all
+(1.355x → 1.369x, within the pair spread): at eighteen hands on
+this box lobo answers ~85k keepalive req/s at ~10.5 cores against
+nginx's ~115k at ~11.2 either way, so what separates them there is
+not the copy. Indicative, every row; a quiet set is owed.
+
 ### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · four sets, one per ws23 change · **ALL REFUSED** (load 4.2–9.8; indicative, not a result)
 
 Not results; recorded, as ws22's refused sets were, so the two
