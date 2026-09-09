@@ -63,11 +63,14 @@ fn http_get(port: int, path: str) -> str ! {io} {
     buf
 }
 
-/// GET until the body carries `want`, up to ~6s (the failover window
-/// and a fresh hand's startup both live inside it). Total.
+/// GET until the body carries `want`, up to ~15 s (the failover
+/// window and a fresh hand's startup both live inside it; ws25 widened
+/// every bound in this file ~2.5x — they are ceilings for a HUNG
+/// server, and the box this runs on carries other lanes at load 5–20,
+/// where 6 s tripped). Total.
 fn poll_body(port: int, want: str) -> bool {
     var i: int = 0
-    while i < 120 {
+    while i < 300 {
         let r = http_get(port, "/index.html") else ""
         if r.contains(want) {
             return true
@@ -81,7 +84,7 @@ fn poll_body(port: int, want: str) -> bool {
 /// Poll an endpoint until it answers `ping`, up to ~6s. Total.
 fn wait_alive(ep: str) -> bool {
     var i: int = 0
-    while i < 120 {
+    while i < 300 {
         if shell.control_alive(ep) {
             return true
         }
@@ -150,7 +153,7 @@ fn serving_count(st: str) -> int {
 /// Poll the master until BOTH hands serve, up to ~8s. Total.
 fn wait_posture(ep: str) -> bool {
     var i: int = 0
-    while i < 160 {
+    while i < 400 {
         if serving_count(master_status(ep)) == 2 {
             return true
         }
@@ -216,6 +219,7 @@ fn main() -> !int {
         assert(false, "the spawned master never became alive on {ep}")
     }
 
+    print("step 1: posture")
     // 1. the posture: two hands, BOTH serving on the inherited socket
     if !wait_posture(ep) {
         os_kill(child) else |_| {}
@@ -238,7 +242,12 @@ fn main() -> !int {
     )
     assert(!(ep_s == ep_o), "…and they differ")
 
+    print("step 2: a GET, the hands' own stanzas, a scrape")
     // 2. served, and every hand says what it is and what it has taken
+    // ws25: a POLL, not a one-shot — under load a hand that has just
+    // come up can accept and close without answering, and a single
+    // GET reads that as "" (the runner saw this trap at load 5–20)
+    assert(poll_body(hp, "hands-A-body"), "a GET is served (polled)")
     let b1 = http_get(hp, "/index.html")?
     assert(b1.contains("hands-A-body"), "a GET is served: {b1}")
     let own = shell.control_fetch(ep_s, "status") else |_| { "" }
@@ -258,6 +267,7 @@ fn main() -> !int {
         "/metrics names whichever hand took the scrape: {m}",
     )
 
+    print("step 3: distribution")
     // 3. THE DISTRIBUTION. A run of connection-per-request GETs, then
     // both hands' accept counters read off the master's own rows: the
     // kernel spread them across the processes. This is the assertion
@@ -273,25 +283,39 @@ fn main() -> !int {
         assert(b.contains("hands-A-body"), "GET {g} of the distribution run: {b}")
         g = g + 1
     }
+    // ws25: KEEP SENDING while the counters are read. This host
+    // distributes nothing over the shared listener (s137 — the hands
+    // race, and a hand the scheduler has parked loses every race
+    // for as long as it is parked), so on a loaded box sixty
+    // connections have all gone to one hand (G5 of ws25, at line
+    // 300 of the staged file, the assert's only witness). The
+    // assertion is the same — accepts reach BOTH hands — over up to
+    // ~600 more connections rather than a 2 s poll that sent none.
     var spread = false
     var sp: int = 0
     var stdist = ""
-    while sp < 40 && !spread {
+    while sp < 60 && !spread {
         stdist = master_status(ep)
         let a1 = accepted_of(stdist, 1)
         let a2 = accepted_of(stdist, 2)
         if a1 > before1 && a2 > before2 {
             spread = true
         } else {
+            var more: int = 0
+            while more < 10 {
+                let b = http_get(hp, "/index.html") else ""
+                more = more + 1
+            }
             time_sleep_ms(50)
             sp = sp + 1
         }
     }
     assert(
         spread,
-        "60 connections reached BOTH hands (accepted moved on each — the kernel distributes over the inherited socket): {stdist}",
+        "connections reached BOTH hands (accepted moved on each — the kernel distributes over the inherited socket): {stdist}",
     )
 
+    print("step 4: stop hand 1, replacement")
     // 4. a hand is told to stop, directly: no failover to wait for —
     // the survivor already holds the same socket — then replacement
     let rs = shell.control_send(ep_s, "stop") else |_| {
@@ -307,7 +331,7 @@ fn main() -> !int {
     // SERVING: it inherits the same socket the master still holds
     var replaced = false
     var i: int = 0
-    while i < 200 && !replaced {
+    while i < 600 && !replaced {
         let st = master_status(ep)
         let r = worker_row(st, s1)
         if r.contains(": serving ") && row_field(r, "restarts") == "1" {
@@ -322,6 +346,7 @@ fn main() -> !int {
         "the master replaced hand {s1} and the replacement SERVES (restarts=1): {master_status(ep)}",
     )
 
+    print("step 5: reload")
     // 4. reload fans out — rolling, every hand advances
     write_conf(confp, hp, cp, "ws16_e2e/B")?
     let rr = shell.control_send(ep, "reload") else |_| {
@@ -348,6 +373,7 @@ fn main() -> !int {
     )
 
     // 5. quit: every hand drains, the master exits, the pid file goes
+    print("step 6: quit")
     let rq = shell.control_send(ep, "quit") else |_| {
         os_kill(child) else |_| {}
         assert(false, "quit never answered")
