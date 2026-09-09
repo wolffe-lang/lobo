@@ -78,6 +78,121 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws25 — 2026-09-09 — the profile leg (the leak gate, the gather read on one VM, the fstat)
+
+The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
+applies). Every number below was PREDICTED in this entry before it
+was measured. The macOS box was never quiet this sprint (load 5–11,
+the other lanes' gauntlets and the user's own daemons; no window was
+announced because the orchestrator said the floor had not moved), so
+every macOS set is INDICATIVE and named so; the linux numbers are
+read on ONE runner VM by the instrument this sprint built.
+
+- **lobo#1 closed: a test that leaves a process is red, by name.**
+  ws18's reaper matched argv[0] absolute under this root, and the
+  corpus TESTS never met it: they spawn `target/lobo-debug` relative
+  (no root in the command line), and `os_kill` is SIGKILL, so a test
+  that trapped an assertion, or died at the runner's ceiling, left a
+  master the reaper could not see and hands the master RESPAWNED as
+  the reaper killed them — three lanes killed such masters by hand
+  last wave, and one was alive at this sprint's open (5 h 30 m old,
+  `target/lobo-debug serve -p . -c ws16_e2e/lobo.conf`, cwd
+  `/private/tmp/ws24` — a worktree already deleted — two loopback
+  listeners held). Four changes, one gate: (1) `tools/lib-rigproc.sh`
+  gains the second arm of the marker — a RELATIVE argv[0] with a
+  slash whose working directory is under this root (`/proc` on
+  linux, one `lsof` on macOS, for those candidates only; a bare name
+  and the pinned toolchain are never candidates) — reaps MASTERS
+  FIRST and waits for them (a hand killed under a live master is
+  replaced), then TERM, then KILL, then scans once more; and gains
+  `rig_census` (name what is left, fail, kill nothing) and a
+  process-group registry the exit trap takes down whole. (2)
+  `tools/lobo-corpus` runs every lane under `timeout -k 5
+  $LOBO_LANE_CEILING` (60 s) in the process group `timeout` leads,
+  registered for the life of the run — the ceiling kills the group
+  (TERM, KILL after 5 s), a signal to the runner returns from `wait`
+  at once and its trap kills the same group — and after EVERY test
+  file takes the census with three seconds of grace: a test that
+  returned and left a process is red by name and reaped. It also
+  keeps a lane's stderr and prints its tail on a red (an `assert`
+  names itself there, and the runner used to throw it away). (3) The
+  thirteen spawning tests spawn `{os_cwd()}/target/lobo-debug`, so a
+  master they leave carries the root in argv[0]; `proxy_e2e` and
+  `budget_cap_e2e` stop their master through its desk and WAIT
+  instead of SIGKILLing it (the kill stays for a desk that does not
+  answer). (4) The gauntlet's last step is the census: a step that
+  leaked is RED there, by name, before the exit trap reaps. Proved
+  by killing `prefork_e2e` mid-run four ways, the census empty after
+  each: TERM to the runner (its trap killed the group), the ceiling
+  at `LOBO_LANE_CEILING=4` (exit 124, group killed), `kill -9` on
+  the runner then the next tool's `rig_reap_stale` (collected at
+  once — the master is absolute now), and `kill -9` on the runner
+  with nothing else run (the group died at the ceiling + grace).
+  And proved by the gate itself: G1 of this sprint went red at
+  corpus on `prefork_e2e [checked]` — a `trap(assert)` under load
+  8 — and the per-file census named the master and two hands the
+  trap had left, and reaped them; that is the red the issue asked
+  for. (`prefork_e2e` is load-flaky on this box — the previous wave's
+  G2/G3 saw it at the 60 s ceiling — and its stderr now rides with
+  the red.)
+
+- **lobo#6: the gather, read on ONE VM.** `tools/lobo-parity` takes
+  `LOBO_REF=<binary>`: every pair then runs THREE fresh servers —
+  this tree, the reference, nginx — the two lobos alternating their
+  order pair by pair, and the table carries nginx ÷ each and the
+  DELTA this ÷ ref with its min and max. `ci.yml` grows `ref_tree`
+  (a second ref built beside the checkout with the SAME staged
+  toolchain, in a worktree) and `profile` (the profile leg).
+  The reference is a THROWAWAY branch, `ws25-copy-arm` (`965ddda`):
+  trunk `7c99905` with ws23's copy back on the plaintext small arm
+  — the body pushed byte by byte behind the head, one
+  `net_write_bytes` — and nothing else, at the v0.2.8 pin. PREDICTED
+  before the dispatch: gather ÷ copy on one 4-vcpu runner VM —
+  N=1 keepalive **1.15x** [1.08, 1.25], N=1 close **1.08x** [1.03,
+  1.15], N=4 keepalive **1.10x** [1.04, 1.18], N=4 close **1.04x**
+  [0.98, 1.10]; the per-pair spread of the delta inside one VM under
+  ±3%, so the delta is READABLE from the parity leg and lobo#6's
+  "worse on linux" was the VM lottery (ws24's own correction). The
+  reasoning: on macOS at N=1 the copy cost 13–16% of a 21–32 µs
+  request — ~4 µs in situ, twice the 1.8 ns/byte microbench, the
+  buffer's doubling reallocations and the cache being the rest — and
+  the runner's core is ~2x slower per byte on a request ~2x longer,
+  so the share is the same order; at N=4 the close cell is
+  accept-bound and dilutes it, keepalive does not. The profile leg
+  (`tools/lobo-profile`: `perf record` on the one serving process
+  under the close shape, `perf report` by symbol and by dso, then
+  `strace -c` on a separate drive) is dispatched in the same job so
+  the SHARES sit beside the ratio: predicted, `writev` at the same
+  count `sendto` had, the byte loop's self time present in the copy
+  tree's profile and absent from the gather's, syscall shares
+  otherwise identical. MEASURED: (pending)
+
+- **`fs_fstat` consumed (wolf-lang#261, item 3).** `serve_file`
+  opens FIRST and asks the handle — kind, size, mtime in one
+  `fs_fstat` — where ws23 left `fs_size` and `fs_modified_ms` as
+  two path stats ahead of a `fs_read_bytes` that opened the file
+  again (and, inside the runtime's `fs::read`, fstat'd it once more
+  for its buffer). Every arm reads through that handle (`read_exact`,
+  the size the fstat named) and closes it on its own way out; the
+  budgeted arms close it and hand the PATH to their proc as before;
+  the streamed arm no longer opens a second time after the head. The
+  router's `fs_is_file` stays (the guard against a blocking open on
+  a fifo, which no stat after the open can be). `dryrun`'s probe
+  takes the same shape. Per file request: three path stats → one,
+  plus one fstat (nginx: one open, one fstat). PREDICTED: on the
+  runner VM, fstat ÷ ref at N=1 keepalive **1.03x** [1.00, 1.06]
+  (two `newfstatat` at ~1 µs each of a ~30 µs request), N=1 close
+  1.02x [0.99, 1.05], both N=4 cells inside the pair spread — ws23's
+  "within noise" still holds on the gating cells with the
+  syscall-first runtime; `strace -c` shows `newfstatat` per request
+  3 → 1. macOS indicative: N=1 keepalive +2–5%. MEASURED: (pending)
+
+- **The herd (item 4): nothing to build.** wolf-lang#267 has no
+  surface this wave; ws24's number stands (64% of a hand at N=18,
+  the losers' park is the reactor round-trip). Not re-probed.
+
+- Gates: (pending)
+
 ## ws24 — 2026-09-09 — the quiet box (refused at the bound), the syscall-first pin, one gathered write
 
 The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
