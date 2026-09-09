@@ -1,4 +1,4 @@
-# Architecture (ws00 — honest edition: mostly stubs)
+# Architecture — the module map, measured against the tree
 
 lobo is a from-parts wolf program: zero dependencies, net/fs/process
 via the language's builtin tiers. The pinned nginx under
@@ -7,57 +7,93 @@ module (D32); every module's public surface is a checked-in `.wolfi`
 snapshot beside it (the many-hands rule: internals are yours,
 surfaces are contracts; see `tools/lobo-interface` and CLAUDE.md).
 
-## The module map, and who calls whom
+This page used to be the ws00 map — six stub territories and an
+"intended call direction once real". It was never re-read after the
+stubs shipped. Everything below is read off the tree at v0.1.0 / ws22:
+the modules are `find src -name '*.lu'`, the arrows are the `use`
+lines, and no arrow here is an intention.
+
+## The modules
+
+Thirteen, plus `src/main.lu`. `src/root.wolfi` names the twelve `main`
+imports; `budget` is the thirteenth and is reached through `serve`.
+
+| module | what it owns | landed |
+| --- | --- | --- |
+| `config/` | nginx.conf: lexer, parser, include graph, directive tables, the load-time lints, and `-T`'s provenance | ws01 |
+| `http/` | request/response types and the RFC 9112 MUST-checklist HTTP/1.1 parser | ws02 |
+| `serve/` | listeners, connection lifecycle, static serving, the per-connection step the poll loop drives | ws02 |
+| `proxy/` | upstream pools, `proxy_pass`, hop-by-hop header discipline | ws03 |
+| `shell/` | the CLI grammar, the text builders, the pid lifecycle, the control channel and the reload verbs | ws04 |
+| `tls/` | what travels on the fd: TLS records off a socket, ClientHello parse, the server flight (`std.x.tls` owns the schedule) | ws05 |
+| `conn/` | THE SEAM — a connection read/written/deadlined/closed without knowing whether bytes are in the clear or inside TLS 1.3 records | ws05 |
+| `acme/` | the RFC 8555 client: DER writers, Ed25519 keys, PEM both ways, the atomic store, and the issuance flow | ws06 |
+| `dryrun/` | what a config would DO with a request — matched server, matched location with a why-it-lost trace, effective directives with provenance. Offline, no sockets, no fs | ws07 |
+| `obs/` | logging: the format compiler, the variable table, the oracle-pinned escapers, the JSON doors, bounded sinks | ws09 |
+| `metrics/` | the counter registry, the cardinality fence, the Prometheus text exposition. PURE: no io, fs, net or clock | ws12 |
+| `resolver/` | async upstream DNS: a stub client over TCP the one poll loop multiplexes, plus the TTL cache `resolver … valid=` names | ws13 |
+| `budget/` | the proc boundary D68's region cap needs — a budgeted request's regioned work runs inside `spawn proc` here, and the join maps the exit reason for `serve` | ws13 |
+
+`src/main.lu` is not thin and this page should stop saying it is. It is
+the largest single file in the tree (~3,500 lines) because it owns the
+things that cannot live in a module: the ONE spawn-free poll loop that
+multiplexes the http listener, the control channel, the signal queue
+and every open connection; the per-generation drain bookkeeping ws08
+made watchable; the prefork master and its per-worker control endpoints
+(ws16/ws17, D73 — D7 kept inside every process); and the two-phase
+`/metrics` render. The CLI grammar it dispatches over is `shell/`'s.
+
+## Who calls whom
+
+Read from the `use` lines, both directions:
 
 ```
-src/
-  main.lu    entry — version print + arg dispatch ONLY, forever thin;
-             calls: every module's version() (banner), shell/ (ws04+)
-  config/    nginx.conf loading: lexer, parser, include graph,
-             directive tables            [stub; ws01]
-  http/      request/response types, HTTP/1.1 parsing (RFC 9112 MUST
-             checklist)                  [stub; ws02]
-  serve/     listeners, connection lifecycle, static serving
-             (thread/task-per-connection — the honest v0; the s35
-             reactor is the C10k phase)  [stub; ws02]
-  proxy/     upstream pools, proxy_pass  [stub; ws03]
-  shell/     CLI verbs, signals, reload (split on the upstream
-             signal-reception ask)       [stub; ws04]
-  obs/       logging (ws09: format compiler, variable table,
-             oracle-pinned escapers, JSON doors, bounded sinks)
-                                          [real; wsc03]
-  resolver/  async upstream DNS (ws13): the DNS-over-TCP wire half
-             (pure), the TTL cache, and the pending-query table the
-             poll loop ticks like any other socket — a leaf that calls
-             nobody; docs/RESOLVER.md   [real; wsc05]
-  metrics/   the counter registry and the Prometheus text exposition
-             (ws12: names/types/help/label shapes in ONE table, the
-             cardinality fence in `sample`, the fixed histogram
-             ladder). PURE — the counters themselves live in main's
-             poll loop, because lobo is spawn-free and one mutator
-             needs neither shards nor atomics
-                                          [real; wsc03]
+main    → acme config conn dryrun http metrics obs proxy resolver
+          serve shell tls          (everything but budget)
+serve   → budget config conn http metrics obs proxy resolver
+proxy   → config http resolver
+dryrun  → config http proxy
+conn    → tls
+http    → config
+shell   → config
+tls     → config
+acme budget config metrics obs resolver → nobody in lobo
 ```
 
-Intended call direction once real, as the sprint contracts lock it:
-`main → shell → {config, serve}`;
-`serve → {http, proxy, obs, resolver}`; `proxy → {http, obs,
-resolver}`; `config` and `http` call nobody above the builtin tiers.
-`resolver` (ws13) is the third leaf: `proxy` asks it which name a
-request must wait for and what a cached name expands to, `serve`
-carries its state through the step, and `main` owns that state and
-ticks it once per pass. The arrows `main → resolver`, `serve →
-resolver`, `proxy → resolver` come from ws13, declared in its
-contract's closeout. `obs` is called by everyone and calls nobody.
-`metrics` (ws12) is the second leaf beside `obs`: it calls nobody.
-`main` calls it for the exposition; `serve` calls it only for the two
-endpoint PATH constants, never for a number: the exposition cannot
-reach into a serving module, and a serving module cannot render one.
-The `/metrics` endpoint is TWO PHASE for that reason (`serve`
-recognises the request, `main` renders it); and
-`src/metrics/metrics.lu`'s header and the seam in `serve` both say
-so. A dependency arrow not in this list is a contract change: record
-it in the sprint file as well as in the code.
+Six modules call no other lobo module: `acme`, `budget`, `config`,
+`metrics`, `obs` and `resolver`. `config` is the one of those every
+layer above reads.
+
+Two arrows the ws00 map predicted and the tree does not have. `proxy`
+does not call `obs`: it is not "called by everyone", it is called by
+`main` and `serve`. And `serve` does not call `tls`; it calls `conn`,
+which is the seam holding. `serve → {http, proxy, obs, resolver}` from
+the old page is right as far as it goes and short by `budget`, `config`,
+`conn` and `metrics`.
+
+`metrics` stays two-phase for the reason the ws00 page gave, and that
+reason survives the re-read: `serve` calls `metrics` only for the two
+endpoint PATH constants, never for a number — the exposition cannot
+reach into a serving module and a serving module cannot render one.
+`src/metrics/metrics.lu`'s header and the seam in `serve` both say so.
+
+A dependency arrow not in this list is a contract change: record it in
+the sprint file as well as in the code, and re-read this page when you
+do.
+
+## Where the detail lives
+
+| page | for |
+| --- | --- |
+| [CONTROL.md](CONTROL.md) | the control channel: transports, verbs, auth |
+| [DRAIN.md](DRAIN.md) | reload, drain and the signal/verb split |
+| [WORKERS.md](WORKERS.md) | prefork, the master, accept distribution |
+| [RESOLVER.md](RESOLVER.md) | the DNS stub client and its cache |
+| [BUDGET.md](BUDGET.md) | the region cap and its proc boundary |
+| [LOGGING.md](LOGGING.md) · [log-variables.md](log-variables.md) | `obs` |
+| [metrics.md](metrics.md) | the registry, generated |
+| [directives.md](directives.md) | the config surface, generated |
+| [DRYRUN.md](DRYRUN.md) · [PARITY.md](PARITY.md) · [DIFFERENTIAL.md](DIFFERENTIAL.md) | what lobo promises against nginx |
 
 ## Test infrastructure (not part of the server)
 
