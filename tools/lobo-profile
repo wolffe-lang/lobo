@@ -121,16 +121,21 @@ Linux)
     stop
     echo "lobo-profile: $LABEL perf window: $rps req/s summed over the drive, failed=$failed, hand pid $hand"
     if [ -s "$scratch/perf.data" ]; then
-        $SUDO chown "$(id -u)" "$scratch/perf.data" 2>/dev/null
-        echo ""
-        echo "=== $LABEL — perf report, leaves (self), --sort sym, over 0.4%"
-        $SUDO perf report -i "$scratch/perf.data" --stdio --no-children --sort sym --percent-limit 0.4 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -E '^ +[0-9]' | head -45
-        echo ""
-        echo "=== $LABEL — perf report, by dso (kernel / runtime+lobo / libc)"
-        $SUDO perf report -i "$scratch/perf.data" --stdio --no-children --sort dso 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -E '^ +[0-9]' | head -12
-        echo ""
-        echo "=== $LABEL — perf report, inclusive (children), --sort sym, over 3%"
-        $SUDO perf report -i "$scratch/perf.data" --stdio --children --sort sym --percent-limit 3 2>/dev/null | grep -v '^#' | grep -v '^$' | grep -E '^ +[0-9]' | head -40
+        # the report reads as the user that recorded (root through
+        # sudo): perf refuses a data file another user owns, and the
+        # first cut of this tool chowned it to the caller and then
+        # asked root — three empty tables and no word why
+        report() { # report <title> <lines> <perf report args...>
+            _t=$1; _n=$2; shift 2
+            echo ""
+            echo "=== $LABEL — $_t"
+            $SUDO perf report -i "$scratch/perf.data" --stdio "$@" > "$scratch/report.txt" 2> "$scratch/report.err"
+            grep -v '^#' "$scratch/report.txt" | grep -v '^$' | grep -E '^ +[0-9]' | head -"$_n"
+            [ -s "$scratch/report.txt" ] || { echo "lobo-profile: perf report printed nothing:" >&2; cat "$scratch/report.err" >&2; }
+        }
+        report "perf report, leaves (self), --sort sym, over 0.4%" 45 --no-children --sort sym --percent-limit 0.4
+        report "perf report, by dso (kernel / runtime+lobo / libc)" 12 --no-children --sort dso
+        report "perf report, inclusive (children), --sort sym, over 3%" 40 --children --sort sym --percent-limit 3
     fi
     # the syscall COUNTS, on a separate drive: ptrace slows the hand
     # several-fold and the shares above must not carry that
