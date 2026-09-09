@@ -121,6 +121,26 @@ in this session): see the ledger rows dated 2026-09-09.
   herd-bound cell; little of it is the write); N=1 keepalive 3.99x →
   ~3.5x, N=1 close 2.42x → ~2.2x. Measured: (pending).
 
+- The stats. ws22 counted three per file request; there were four:
+  `fs_is_dir` and `fs_is_file` in the router, `fs_size` and
+  `fs_modified_ms` in `serve_file`, each a `stat(2)` of the path,
+  against nginx's one `fstat` on the fd it opened. The router now
+  asks `fs_is_file` first (what nearly every request names), so a
+  file request pays three; a directory request pays the two it did
+  (the index candidate is tried before the directory is stat'ed,
+  nginx's own order), and what any request observes is unchanged: a
+  fifo, device or socket under the root still never reaches an
+  `open` that could block. The other two cannot go without a
+  runtime call that answers kind, size and mtime at once, or an
+  fstat on the open fd; filed upstream with the number. Measured on
+  this box at 100k iterations: two path stats cost 1.05 ms per
+  100k, ~0.5 µs each, and a read-first shape (`fs_open` +
+  `fs_read_chunk` + a confirming read + `fs_close`, the size taken
+  from the read) costs the same as `fs_read_bytes` within noise,
+  which is why the folding stops here. Predicted: within the bar's
+  noise on every cell (one stat of ~0.5 µs in a 63 µs request; the
+  method sees nothing under ten percent). Measured: (pending).
+
 ## ws22 — 2026-09-08 — the gap measured (the bar first, then the profile; nothing optimized)
 
 W8 is nginx parity. This sprint wrote the bar down first
