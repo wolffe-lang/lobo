@@ -78,6 +78,199 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws28 — 2026-09-10 — the string runtime (the strings on the serving path, counted; the ones lobo stops paying)
+
+The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
+applies). ws27 left the linux keepalive cell at 1.72x–1.82x with the
+count settled (6.31 calls against nginx's 6.13) and the profile
+reading kernel 64 / lobo 22 / libc 13.5, a third of the request user
+space and most of that the runtime materializing strings
+(wolf-lang#191's seam). This entry counts those strings by source
+line, PREDICTED before any run, then says which rows lobo can stop
+paying with no new wolf surface, predicts the delta per row, and
+measures. Every number below was written before it was measured, and
+the entry says which. The macOS box was not confirmed quiet (load
+2.2–2.4 at the open with the user's daemons on it), so every macOS
+set and profile is INDICATIVE and named so; the linux numbers are
+the CI runner's.
+
+- **The toolchain, first.** The main checkout's `.wolf-bin` held the
+  0.2.8 pair (wolf 5c729e8, lupin 0.1.27), not the 0.2.9 pair the pin
+  names, so `lib-toolchain.sh` refused every tool. The pair was built
+  as `wolf-toolchain.toml` says — `cargo xtask dist` in a scratch
+  worktree of wolf-lang at the v0.2.9 tag (the D57 stamp: `wolf 0.2.9
+  (wolfgang, pin 4c60946)`, paired with lupin 0.1.29 pin e9a17cb) and
+  `cargo build --release --bin lupin` at wolf-interp's v0.1.29 tag —
+  and staged into THIS worktree's own `.wolf-bin` (the std tree
+  symlinked from the main checkout: STD-REV bd12ef5, the pin's), the
+  main checkout's staging left as it was found. Both scratch
+  worktrees removed once the pair was staged.
+
+- **Item 1 — the strings on the serving path, counted.** The unit of
+  the count is the runtime's, read from `wolf_rt` at 4c60946: a
+  materialized `str` is an `ambient_alloc` — a bump in the
+  process-lifetime arena behind a mutex, never freed (#191) — and an
+  interpolation is `strbuf_new` (a boxed Rust `String`), one
+  `push_str` per segment (the `String` growing through `malloc`/
+  `realloc`), then `strbuf_finish` (a second copy of the whole result
+  into the arena, then the `String` and its box freed). So one
+  interpolation of n bytes is **1 arena alloc, ~5 libc calls, 2n bytes
+  copied**; `lower()` is a `String` + an arena copy; a slice, `find`,
+  `starts_with`, `trim` and `bytes()` in a consuming position are
+  views and cost nothing; a `List[byte]` built from `bytes()` in a
+  `let` is a copy (`[mem.str.view.lend]`); every list header and
+  every list growth outside a `region` is an arena alloc too. The
+  request is the parity file's: `ab -k`'s 117-byte head (`GET
+  /index.html HTTP/1.0`, Host, User-Agent, Accept, `Connection:
+  Keep-Alive`), a 1 KiB `text/html` file, a 241-byte response head
+  (nine lines, `lobo/0.1.0` as the token). PREDICTED per keepalive
+  request, one row per operation, read from `serve.lu`, `http.lu`,
+  `proxy.lu`, `obs.lu` and `main.lu` at c58b4f1 — A = arena allocs,
+  M = libc malloc/realloc/free calls, B = bytes copied:
+
+  | # | where | what materializes | A | M | B | what removes it |
+  |---|---|---|---|---|---|---|
+  | 1 | `net_read(fd, 4096)` | the runtime's zeroed 4 KiB `Vec`, then the 117-byte head copied into the arena | 1 | 2 | 117 (+4,096 zeroed) | a read into the arena or a caller buffer — RUNTIME |
+  | 2 | `conn_step`: `buf = "{buf}{piece}"` | the head again, through a strbuf, with an EMPTY carry | 1 | 5 | 234 | `buf = piece` when the carry is empty — lobo |
+  | 3 | `conn_step`: `conn_mod_plain` | `tls.no_sess()`'s six empty `List[byte]` headers, built for the error arms only | 6 | 0 | 0 | build the seam in the arms that write — lobo |
+  | 4 | `head_cut` ×2 + `carry_has_head` per pass | 4–6 `find`s (a `StrSearcher` each), the bare-LF search over the whole buffer even after CRLFCRLF hit | 0 | 0 | 0 | an emptiness guard; the LF search bounded to `[0..m1]` — lobo |
+  | 5 | `serve_request`: `conn_mod_plain`, `access_new` | six + two empty lists | 8 | 0 | 0 | the seam's is needed (the write); stays |
+  | 6 | `parse_request` | `split_lines_strict`'s list (2), `empty_request`'s two lists (2), `target.lower()` ×2 for the absolute-form probe (2 A, 22 B), `name.lower()` ×4 (4 A, 30 B), hnames/hvals growth (2), `ci_contains` ×2 lowering `Keep-Alive` (2 A, 20 B) | 14 | 8 | 72 | interned lowercase names for the common set (views into rodata), an ASCII case-insensitive prefix test, an ASCII fold when the value is ASCII — lobo; the four lists stay |
+  | 7 | `fill_req_acc` | `"{method} {target} {version}"` — a copy of the raw line the record ALREADY holds (48 B); `access_header` ×4 re-lowering names the parser lowered (4 A, 30 B); two list growths | 7 | 9 | 78 | keep the raw line; push the parser's names — lobo |
+  | 8 | `proxy.resolve_need` (the ws13 wait check, every request) | `percent_decode`: a `List[byte]` (2) + 11 byte pushes + `str_from_utf8`'s arena copy (11 B); `normalize_path`: the segment list (2) + `"{out}/{s}"` (22 B); `plan`: none | 6 | 5 | 33 | a fast path returning the INPUT as a view when it holds no `%` / is already canonical — the bytes are identical, so exact — lobo |
+  | 9 | `serve_request`: `percent_decode` + `normalize_path` again, `proxy.plan` again | the same pair a second time | 6 | 5 | 33 | the same fast path (both callers) — lobo |
+  | 10 | `http.route` | `trace_new()`: SEVEN empty lists for a trace `route` never fills; the Decision's index list (1); `index_list` ×2 (2); `join_path(root, path)` — the fs path, ~96 B through a strbuf | 11 | 5 | 192 | the matcher split from the tracer so `route` builds no trace — lobo; the join stays (a new byte sequence; a norm→fs table is config-generation-bound, not this sprint) |
+  | 11 | `is_file_warm` (warm) | a byte fold and one compare | 0 | 0 | 0 | — |
+  | 12 | `serve_file`, before the head | `fs_open`'s CString (1 M); `fs_fstat`'s `List[int]` (2 A); `http_date(mtime)`: four `pad2` + the date (5 A, 90 B); the ETag: `to_hex` ×2 = 8 + 3 one-digit interpolations, then the tag (12 A, 120 B); `mime_for`: `extension().lower()` (1 A, 4 B); `now_date()` (5 A, 90 B); `"{size}"` (1 A, 8 B) | 26 | ~117 | 312 | a head cached beside the kind table (below); `pad2` as a view into a digit table; `lower()` skipped when the extension has no uppercase — lobo |
+  | 13 | `serve_file`, the head | `hline` ×8 (8 A, 440 B); `head = "{head}{…}"` ×9, each copying the WHOLE head so far (9 A; 17+41+78+103+125+171+195+217+239 = 1,186 B into the `String` and again into the arena) | 17 | ~85 | 2,812 | the same cache: a warm file's head is one `str` for the second it is valid in — lobo |
+  | 14 | the region block | `read_exact` (the body: a region list + 1,024 B — the file read itself); `head.bytes()` in a `let`: a 241-byte `List[byte]` copy (F-0072); `parts`; `net_writev`'s `Vec` | 0 (region) | ~3 | 1,265 | a `net_writev` that takes a `str` part / a formatted write straight to the socket — RUNTIME |
+  | 15 | `main.lu` after the step | `AccRow { a: copy a2 }` — a deep copy of the record's two lists, with NO access output configured; `pass_accs` growth | 3 | 0 | 128 | push only when a sink exists — lobo |
+  | 16 | the pass's own lists (`nfds` … `nwait`, `wfds`, `ready`, `pass_accs`) | ~18 arena allocs per pass ÷ ~7 requests per pass | ~2.6 | 0 | 0 | not this sprint |
+  | | **per request** | | **~108** | **~245** | **~5.3 KB** (+4 KiB zeroed) | |
+
+  Of the ~108 arena allocs, ~43 are the response head (rows 12–13)
+  and ~200 of the ~245 libc calls are its interpolations; of the
+  5.3 KB copied, 3.1 KB are the head, 1.3 KB the region block's
+  (the body read, which is the file, and the head's byte copy), the
+  rest the parse, the record and the two decode/normalize passes.
+  The arena's 5.3 KB per request are RETAINED (#191): at 18k req/s
+  that is ~95 MB/s of arena, a fresh 64 KiB chunk every ~12
+  requests, which is the `brk` in ws27's count and the ~3% of page
+  faults in its profile. PREDICTED after the no-surface changes
+  (rows 2, 3, 4, 6, 7, 8, 9, 10, 12, 13, 15 built): **~30 A, ~10 M,
+  ~0.4 KB** per request (the read's 117 B, the region copies, the
+  route's join), the arena growing ~0.4 KB per request instead of
+  5.3. PREDICTED delta in req/s, two trees on one VM (`LOBO_REF`): the
+  string share ws27's profile read on this cell (`malloc`/`cfree`/
+  `realloc`/`finish_grow`/`reserve` ~4.7%, `ambient_alloc` +
+  `strbuf_str` 3.2%, `StrSearcher`/`to_lowercase` 2.2%, the page
+  faults ~3.1%: ~13% of a keepalive request at N=1) less what stays
+  (~20% of the allocs, ~10% of the bytes, the lists): **N=1
+  keepalive +8% [+4, +14]**, **N=4 keepalive +7% [+3, +12]** (the
+  per-hand saving, four hands on four vcpus with the generators),
+  **N=4 close +3% [0, +6]** and N=1 close +3% [0, +6] (the same
+  absolute saving on a request twice as long: accept and teardown).
+  The ratio on the fast VM class: keepalive 1.82x → ~1.70x, close
+  1.365x → ~1.33x, NOT MET on both shapes still. The syscall count:
+  unchanged on every row (nothing here touches a syscall; `brk`
+  0.04 → ~0). The head bytes on the wire: identical, byte for byte —
+  the differential harness is the guard. RSS growth over a 20k-request
+  drive at N=1: ~106 MB → ~8 MB. MEASURED: (below, per host, when
+  the sets return).
+
+- **Item 2 — the ones lobo can stop paying without a new surface,
+  built.** For each row above, does `std.strbuf`, a byte view or a
+  pre-formatted head remove the copy? `std.strbuf` removes NOTHING:
+  at this pin its `push_str` is `b.s += s` — the same interpolation
+  seam, a full copy per append (its own header says so: "O(n·m) where
+  the SSO builder is amortized O(n+m)"), so a head built through it
+  costs exactly rows 12–13. A byte view removes rows 8, 9, parts of
+  6, 7 and 12 (the answers that are the input's own bytes, or a
+  literal's). A pre-formatted head removes rows 12–13. Built, in
+  order, each its own commit:
+  1. **The head cache, beside the kind table.** `serve.FileKinds`
+     grows per slot the last head served for that path and what it
+     was built from — the file's size and mtime (the fstat's answer),
+     the second (the Date's), the keep token — and `serve_file`
+     answers a warm request's head from the slot when THIS request's
+     `fs_fstat` says the same size and mtime, the clock says the same
+     second and the connection wants the same token; a miss builds
+     the head as before and remembers it. Nothing a client sees is
+     ever stale: Content-Length, Last-Modified and the ETag are
+     validated against this request's own stat, and the Date against
+     this request's own clock — the cache is a memo of a pure
+     function of (path, size, mtime, second, keep), never a window.
+     The Date string itself is cached per second beside the table
+     (`http_date` is five interpolations), and `pad2` reads a view of
+     a 200-byte digit table instead of interpolating. The wire is
+     byte-identical (the differential and `tests/serve/static_get.lu`
+     hold it); `tests/serve/head_cache_e2e.lu` is the contract: two
+     requests in a second answer one head; a file rewritten to a
+     different size answers the new Content-Length/ETag at once; a
+     second later the Date moves.
+  2. **The reader** (rows 2, 3, 4): `conn_step` adopts the read as
+     the buffer when the carry is empty, builds the conn seam only in
+     the arms that write, and `head_cut` answers an empty buffer
+     without searching and bounds the bare-LF search to the bytes
+     before the CRLFCRLF it found (a hit past it is never the marker;
+     a hit before it lies wholly before it — exact).
+  3. **The parser and the record** (rows 6, 7): header names are
+     lowercased by an ASCII fold that answers a LITERAL for the
+     twelve names a static request carries (`host`, `user-agent`,
+     `accept`, `connection`, `content-length`, `transfer-encoding`,
+     `if-modified-since`, `accept-encoding`, `cache-control`,
+     `pragma`, `range`, `if-none-match`) and the receiver itself when
+     it is already lowercase — a token is ASCII by `is_token`, so the
+     fold IS `lower()` there; the absolute-form probe is an ASCII
+     case-insensitive prefix test; the `Connection` token tests fold
+     ASCII values and fall back to `lower()` for a non-ASCII one (the
+     Kelvin sign lowercases to `k`; the fallback keeps that path
+     exact). The access record keeps the raw line it already holds
+     (identical to the interpolation for every request that parsed:
+     the line is method SP target SP version by construction) and
+     takes the parser's names without lowering them again.
+  4. **The path** (rows 8, 9): `percent_decode` returns its input
+     when no byte is `%`; `normalize_path` returns its input when
+     every segment is non-empty and neither `.` nor `..` (a trailing
+     empty segment is the preserved slash). Both are the identity on
+     those inputs by the functions' own definitions —
+     `tests/http/path_fast.lu` pins the fast path equal to the slow
+     one on both sides of each rule, every lane.
+  5. **The route** (row 10): the location matcher is one function
+     returning what it matched; `route` builds a Decision from it and
+     no trace; `route_traced` builds the trace after it, from the
+     same match. The dry-run's trace is unchanged
+     (`tests/http/route_trace.lu`).
+  6. **The record's copy** (row 15): the entry pushes a pass record
+     only when an access output exists to render it.
+  PREDICTED per row (A / M / B removed per request): 1 → 43 / ~200 /
+  3,124; 2 → 7 / 5 / 234; 3 → 11 / 17 / 150; 4 → 12 / 10 / 66; 5 →
+  7 / 0 / 0; 6 → 3 / 0 / 128. Measured as one tree against the pin
+  tree (`LOBO_REF`): the deltas above are the sum; the per-row split
+  is by the count — `tools/lobo-strings` (new): the arena never
+  frees, so a serving hand's RSS growth over a drive at N=1, divided
+  by the requests the drive counted, IS the bytes materialized per
+  request, on either host, and it is read per tree — not by req/s,
+  which a VM cannot hold still row by row.
+
+- **The rows that need a runtime surface, filed with the bytes
+  beside them.** Row 14 (the head's 241-byte copy into a
+  `List[byte]` so `net_writev` can carry it — 1 list and 241 B per
+  request, and the only copy of the response left on the plaintext
+  path), rows 1 (the read's 4 KiB zeroed `Vec` and its second copy)
+  and the shape under rows 12–13 (an interpolation copies its result
+  twice and a chained append copies the whole accumulator every time:
+  9 appends of a 241-byte head are 2,372 B and ~45 libc calls; a
+  builder whose `+=` appends in place — D24's SSO strbuf — is the
+  surface `std.strbuf` is written to sit on) and `lower()` (eight
+  calls a request materialize 82 B that are the receiver's own bytes
+  seven times in eight; a `lower()` that answers the receiver as a
+  view when nothing changes, or an ASCII `eq_ci`) — filed on
+  wolf-lang, and the retained bytes per request posted on #191.
+
+- **Item 3 — wolf-lang#289/#290: not landed this wave.** No dev sha
+  was messaged; nothing adopted, nothing predicted.
+
 ## ws27 — 2026-09-10 — the linux half (the pin at 0.2.9, the count leg, what one syscall is worth)
 
 The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
