@@ -1,0 +1,56 @@
+//! check: run(exit=0, stdout="root=/\nplain=/index.html\ntrailing=/a/b/\nhidden=/.hidden/x\ndots3=/a/.../b\ndouble=/a/b\ndot=/a/b\ndotdot=/b\nlastdot=/a\nlastdotdot=/\nrootdot=/\nescape=malformed\ntrailingdot=/a/\npct=/a b\nplus=/a+b\ntrailpct=malformed\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! ws28: the path FAST PATHS. `percent_decode` answers its input as a
+//! view when no byte is `%`, and `normalize_path` answers its input
+//! when every segment is non-empty and neither `.` nor `..` (a trailing
+//! empty segment is the preserved slash) — the bytes the slow path
+//! would rebuild, without rebuilding them. This file pins both sides
+//! of each rule: inputs the fast path must answer unchanged, and the
+//! inputs one byte away from them that must still take the slow path
+//! and its answer. A trailing `%` with no digits is `malformed` on the
+//! slow path (and cannot be the fast one: it holds a `%`).
+
+use http
+
+fn norm(name: str, p: str) {
+    let n = http.normalize_path(p) else {
+        print("{name}=malformed")
+        return
+    }
+    print("{name}={n}")
+}
+
+fn dec(name: str, p: str) {
+    let d = http.percent_decode(p) else |_| {
+        print("{name}=malformed")
+        return
+    }
+    print("{name}={d}")
+}
+
+fn main() -> int {
+    // canonical: the input is the answer
+    norm("root", "/")
+    norm("plain", "/index.html")
+    norm("trailing", "/a/b/")
+    norm("hidden", "/.hidden/x")
+    norm("dots3", "/a/.../b")
+    // one rule away from canonical: the slow path, its answer
+    norm("double", "/a//b")
+    norm("dot", "/a/./b")
+    norm("dotdot", "/a/../b")
+    norm("lastdot", "/a/.")
+    norm("lastdotdot", "/a/..")
+    norm("rootdot", "/.")
+    norm("escape", "/..")
+    norm("trailingdot", "/a/./")
+    // decode: a `%` takes the slow path; none answers the input
+    dec("pct", "/a%20b")
+    dec("plus", "/a+b")
+    dec("trailpct", "/a+b%")
+    0
+}

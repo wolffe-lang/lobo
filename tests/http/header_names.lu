@@ -1,0 +1,79 @@
+//! check: run(exit=0, stdout="names=host,user-agent,accept,connection,x-custom-header,if-modified-since,accept-encoding,lower-already\ncustom=v5\nabs_upper=host.example:path=/p\nconn_upper=close\nconn_mixed_10=keep\nconn_kelvin_10=keep\nte_upper=chunked\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! ws28: header NAMES are lowercased through an ASCII fold that answers
+//! a literal for the common set and the receiver itself when it is
+//! already lowercase, and `lower()` only past both — so every name in
+//! `hnames` is lowercase exactly as before (a token is ASCII by
+//! `is_token`, and ASCII folding IS `lower()` on ASCII). The
+//! case-insensitive TOKEN tests (the absolute-form probe, `Connection`,
+//! `Transfer-Encoding`) fold an ASCII value through views and keep
+//! `lower()` for a non-ASCII one: the Kelvin sign (U+212A) lowercases
+//! to `k`, so `Keep-Alive` is still keep-alive on that path.
+
+use http
+
+fn ka(b: bool) -> str {
+    if b {
+        return "keep"
+    }
+    "close"
+}
+
+fn names_of(r: http.Request) -> str {
+    var out = ""
+    for h in r.hnames {
+        if out.is_empty() {
+            out = h
+        } else {
+            out = "{out},{h}"
+        }
+    }
+    out
+}
+
+fn main() -> int {
+    let lim = http.default_limits()
+    let head = "GET / HTTP/1.1\r\nHOST: x\r\nUser-Agent: t\r\nACCEPT: */*\r\nConnection: close\r\nX-Custom-Header: v5\r\nIf-Modified-Since: never\r\nAccept-Encoding: gzip\r\nlower-already: yes"
+    let r = http.parse_request(head, lim) else |_| {
+        print("parse failed")
+        return 1
+    }
+    print("names={names_of(r)}")
+    let v = http.header(r, "x-custom-header") else ""
+    print("custom={v}")
+
+    // the absolute-form probe folds ASCII: HTTP:// is absolute-form
+    let ra = http.parse_request("GET HTTP://host.example/p HTTP/1.1\r\nHost: other", lim) else |_| {
+        print("abs parse failed")
+        return 1
+    }
+    print("abs_upper={ra.host}:path={ra.path}")
+
+    // Connection tokens, folded
+    let rc = http.parse_request("GET / HTTP/1.1\r\nHost: x\r\nConnection: CLOSE", lim) else |_| {
+        print("conn parse failed")
+        return 1
+    }
+    print("conn_upper={ka(rc.keepalive)}")
+    let rk = http.parse_request("GET / HTTP/1.0\r\nHost: x\r\nConnection: Keep-Alive", lim) else |_| {
+        print("conn10 parse failed")
+        return 1
+    }
+    print("conn_mixed_10={ka(rk.keepalive)}")
+    // the non-ASCII fallback: Unicode lowercasing, as before
+    let rkv = http.parse_request("GET / HTTP/1.0\r\nHost: x\r\nConnection: Keep-Alive", lim) else |_| {
+        print("kelvin parse failed")
+        return 1
+    }
+    print("conn_kelvin_10={ka(rkv.keepalive)}")
+    let rt = http.parse_request("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: CHUNKED", lim) else |_| {
+        print("te parse failed")
+        return 1
+    }
+    print("te_upper={rt.body_mode}")
+    0
+}

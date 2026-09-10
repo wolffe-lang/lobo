@@ -352,9 +352,163 @@ fn trim_ows(s: str) -> str {
     s[lo..hi]
 }
 
+/// The byte at offset `i` of `s` (a one-byte slice read through a
+/// view — no materialization), or -1 past the end. Total.
+fn byte_at(s: str, i: int) -> int {
+    if i < 0 || i >= s.len {
+        return -1
+    }
+    for b_raw in s[i..i + 1].bytes() {
+        let b = b_raw as int
+        return b
+    }
+    -1
+}
+
+/// One byte, ASCII-folded to lowercase (`A`..`Z` → `a`..`z`, every
+/// other byte itself). Total.
+fn fold_ascii(b: int) -> int {
+    if b >= 65 && b <= 90 {
+        return b + 32
+    }
+    b
+}
+
+/// True when every byte of `s` is ASCII — the inputs on which an
+/// ASCII fold IS `lower()` (Unicode lowercasing of ASCII text is
+/// ASCII lowercasing, and a non-ASCII byte can only be part of a
+/// scalar the fold must not touch). Total.
+fn is_ascii(s: str) -> bool {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b >= 128 {
+            return false
+        }
+    }
+    true
+}
+
+/// True when `s` has no `A`..`Z` byte — `lower()` would answer the
+/// receiver's own bytes, so the receiver serves as its own lowercase
+/// (an ASCII `s`; the caller guarantees that). Total.
+fn has_no_upper(s: str) -> bool {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b >= 65 && b <= 90 {
+            return false
+        }
+    }
+    true
+}
+
+/// `s` equals the already-lowercase ASCII literal `lower` under an
+/// ASCII fold. Total; reads both through views.
+fn eq_fold(s: str, lower: str) -> bool {
+    if s.len != lower.len {
+        return false
+    }
+    var i: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if fold_ascii(b) != byte_at(lower, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+/// `s` starts with the already-lowercase ASCII literal `lower` under
+/// an ASCII fold. Total.
+fn starts_with_fold(s: str, lower: str) -> bool {
+    if s.len < lower.len {
+        return false
+    }
+    eq_fold(s[0..lower.len], lower)
+}
+
+/// `s` (ASCII — the caller checked) contains the already-lowercase
+/// ASCII literal `needle` under an ASCII fold. A short-needle scan
+/// over views; the values this serves are `Connection` tokens. Total.
+fn contains_fold(s: str, needle: str) -> bool {
+    if needle.is_empty() {
+        return true
+    }
+    if s.len < needle.len {
+        return false
+    }
+    var at: int = 0
+    let last = s.len - needle.len
+    while at <= last {
+        if eq_fold(s[at..at + needle.len], needle) {
+            return true
+        }
+        at = at + 1
+    }
+    false
+}
+
+/// The lowercase of a header NAME (an ASCII token — `is_token` held
+/// before this is called), answered WITHOUT materializing wherever
+/// the answer already exists: the name itself when it carries no
+/// uppercase byte, a literal for the names a static request carries
+/// (each a view into rodata), and `lower()` — the same bytes, built —
+/// only for an uppercase name outside that set. ws28: the parser
+/// materialized every name of every request (four arena allocations
+/// and four `String`s for `ab`'s four headers); the record then
+/// lowered them a second time. Total.
+fn lower_token(name: str) -> str {
+    if has_no_upper(name) {
+        return name
+    }
+    if eq_fold(name, "host") {
+        return "host"
+    }
+    if eq_fold(name, "user-agent") {
+        return "user-agent"
+    }
+    if eq_fold(name, "accept") {
+        return "accept"
+    }
+    if eq_fold(name, "connection") {
+        return "connection"
+    }
+    if eq_fold(name, "content-length") {
+        return "content-length"
+    }
+    if eq_fold(name, "transfer-encoding") {
+        return "transfer-encoding"
+    }
+    if eq_fold(name, "if-modified-since") {
+        return "if-modified-since"
+    }
+    if eq_fold(name, "accept-encoding") {
+        return "accept-encoding"
+    }
+    if eq_fold(name, "cache-control") {
+        return "cache-control"
+    }
+    if eq_fold(name, "pragma") {
+        return "pragma"
+    }
+    if eq_fold(name, "range") {
+        return "range"
+    }
+    if eq_fold(name, "if-none-match") {
+        return "if-none-match"
+    }
+    name.lower()
+}
+
 /// Case-insensitive ASCII equality of `s` against an already-lower
-/// literal `lower`. Total.
+/// literal `lower`. An ASCII `s` is folded through views (no
+/// materialization — ws28); a non-ASCII `s` takes `lower()`, so the
+/// Unicode mapping it always had (a Kelvin sign lowercases to `k`)
+/// still holds on that path. Total.
 fn eq_ci(s: str, lower: str) -> bool {
+    if is_ascii(s) {
+        return eq_fold(s, lower)
+    }
     let d = s.lower()
     d == lower
 }
@@ -385,6 +539,9 @@ fn parse_length(s: str, max: int) -> int ! {malformed, too_large} {
 /// comma-list token membership on Connection / Transfer-Encoding).
 /// Total.
 fn ci_contains(s: str, lower_needle: str) -> bool {
+    if is_ascii(s) {
+        return contains_fold(s, lower_needle)
+    }
     let d = s.lower()
     d.contains(lower_needle)
 }
@@ -477,12 +634,12 @@ pub fn parse_request(head: str, limits: Limits) -> Request ! {
     // ---- absolute-form: its authority WINS over Host (§3.2.2) ----
     var host_target = ""
     var origin = target
-    if target.lower().starts_with("http://") {
+    if starts_with_fold(target, "http://") {
         let rem = target[7..target.len]
         let parts = split_authority(rem)
         host_target = parts.0
         origin = parts.1
-    } else if target.lower().starts_with("https://") {
+    } else if starts_with_fold(target, "https://") {
         let rem = target[8..target.len]
         let parts = split_authority(rem)
         host_target = parts.0
@@ -547,7 +704,7 @@ pub fn parse_request(head: str, limits: Limits) -> Request ! {
         }
         let raw_val = line[colon + 1..line.len]
         let value = trim_ows(raw_val)
-        let lname = name.lower()
+        let lname = lower_token(name)
         (mut r.hnames).push(lname)
         (mut r.hvals).push(value)
         if r.hnames.len > limits.max_headers {
@@ -759,6 +916,21 @@ pub fn decode_chunked(body: str, limits: Limits) -> str ! {malformed, too_large}
 /// with a distinct cause a caller may log differently.)
 #[allow(w0602)]
 pub fn percent_decode(s: str) -> str ! {malformed, invalid} {
+    // ws28: a target with no `%` decodes to ITSELF — the loop below
+    // would push every byte and validate what is already a `str` —
+    // so the answer is the input, a view, and nothing materializes.
+    // Exact by the function's own definition (only `%xx` changes a
+    // byte); tests/http/path_fast.lu pins it beside the slow path.
+    var has_pct = false
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b == 37 {
+            has_pct = true
+        }
+    }
+    if !has_pct {
+        return s
+    }
     var raw = List[byte]()
     let n = s.len
     var i: int = 0
@@ -821,6 +993,18 @@ pub fn normalize_path(p: str) -> str ! {malformed} {
     }
     let trailing = p.ends_with("/")
     let n = p.len
+    // ws28: a path that is ALREADY canonical — every `/`-separated
+    // segment non-empty and neither `.` nor `..`, with at most one
+    // empty segment and only as the last (the preserved trailing
+    // slash) — normalizes to itself: the loop below would push each
+    // segment and rebuild the same bytes through an interpolation per
+    // segment. So the answer is the input, a view. Exact by the
+    // function's own rules (`.` and empty drop, `..` pops, everything
+    // else is kept in order); tests/http/path_fast.lu pins it beside
+    // the slow path on both sides of each rule.
+    if is_canonical(p) {
+        return p
+    }
     var segs = List[str]()
     // split on the ASCII `/` (byte 47) by offsets — slicing at those
     // offsets preserves any multi-byte content inside a segment (a
@@ -848,6 +1032,40 @@ pub fn normalize_path(p: str) -> str ! {malformed} {
         out = "{out}/"
     }
     out
+}
+
+/// Is the rooted path `p` already in normal form — no empty segment
+/// except a trailing one, no `.` and no `..` segment? The scan that
+/// lets `normalize_path` answer its input as a view (ws28). Total.
+fn is_canonical(p: str) -> bool {
+    // `start` is the offset of the current segment; a segment ends at
+    // a `/` or at the end of `p`
+    var start: int = 1
+    var i: int = 1
+    var dots: int = 0
+    var other: int = 0
+    for b_raw in p[1..p.len].bytes() {
+        let b = b_raw as int
+        if b == 47 {
+            if i == start || other == 0 && (dots == 1 || dots == 2) {
+                return false
+            }
+            start = i + 1
+            dots = 0
+            other = 0
+        } else if b == 46 {
+            dots = dots + 1
+        } else {
+            other = other + 1
+        }
+        i = i + 1
+    }
+    // the last segment: empty is the trailing slash (kept); `.` and
+    // `..` are not canonical
+    if i > start && other == 0 && (dots == 1 || dots == 2) {
+        return false
+    }
+    true
 }
 
 /// Fold one path segment into the running stack: `.` and empty drop,
@@ -1059,47 +1277,46 @@ fn server_names_join(c: config.Conf, srv: int) -> str {
 /// replaces the matched prefix (the LOBO-L003 slash class applied at
 /// runtime).
 pub fn route(c: config.Conf, path: str) -> Decision {
-    var tr = trace_new()
-    route_traced(c, path, mut tr, false)
+    // ws28: the serving path builds NO trace — the first cut delegated
+    // to `route_traced` with a fresh collector, which was seven empty
+    // lists per request for a trace nobody read
+    decide(c, path, match_location(c, path))
 }
 
-/// `route` with its trace collector exposed (ws07's dry-run seam).
-/// ONE matcher: `route` delegates here with `want` false, so the
-/// serving hot path pays a single dead branch per candidate and no
-/// allocation (pin with the ws15 bench when it lands). The trace is
-/// filled AFTER the decision, classifying every candidate RELATIVE
-/// to the matcher's own outcome — probe-shaped from the real
-/// precedence implementation, never a parallel re-derivation of the
-/// winner.
-pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -> Decision {
-    var d = Decision {
-        status: 0,
-        fs_path: "",
-        matched: "",
-        is_alias: false,
-        index: List[str](),
-        redirect: "",
-    }
-    let srv = first_server(c)
-    if srv < 0 {
-        return d
-    }
+/// What the location matcher found: the server block, the exact hit
+/// and the longest prefix hit (row indices, -1 for none), the block
+/// that won (`loc`, the server itself when no location matched) and
+/// the prefix it matched. ONE matcher (`match_location`), consumed by
+/// `decide` for the decision and by `route_traced` for the trace.
+struct LocMatch {
+    srv: int,
+    best: int,
+    exact_hit: int,
+    loc: int,
+    matched: str,
+}
 
-    // find the best-matching location under this server
-    var best: int = -1
+/// The location matcher: `=` exact takes precedence, else the longest
+/// plain (or `^~`) prefix; regex modifiers are parse-only at this pin
+/// and never win. Allocation-free. Total.
+fn match_location(c: config.Conf, path: str) -> LocMatch {
+    var m = LocMatch { srv: first_server(c), best: -1, exact_hit: -1, loc: -1, matched: "" }
+    if m.srv < 0 {
+        return m
+    }
+    m.loc = m.srv
     var best_len: int = -1
     var best_prefix = ""
-    var exact_hit: int = -1
     var i: int = 0
     let total = c.names.len
     while i < total {
-        if c.names[i] == "location" && c.kinds[i] == "b" && c.parent[i] == srv {
+        if c.names[i] == "location" && c.kinds[i] == "b" && c.parent[i] == m.srv {
             let key = location_key(c, i)
             let modi = key.0
             let prefix = key.1
             if modi == "=" {
                 if path == prefix {
-                    exact_hit = i
+                    m.exact_hit = i
                     best_prefix = prefix
                 }
             } else if modi == "" || modi == "^~" {
@@ -1108,7 +1325,7 @@ pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -
                 if path.starts_with(prefix) {
                     if prefix.len > best_len {
                         best_len = prefix.len
-                        best = i
+                        m.best = i
                         best_prefix = prefix
                     }
                 }
@@ -1116,17 +1333,35 @@ pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -
         }
         i = i + 1
     }
-
-    var loc: int = srv
-    var matched_prefix = ""
-    if exact_hit >= 0 {
-        loc = exact_hit
-        matched_prefix = best_prefix
-    } else if best >= 0 {
-        loc = best
-        let key = location_key(c, best)
-        matched_prefix = key.1
+    if m.exact_hit >= 0 {
+        m.loc = m.exact_hit
+        m.matched = best_prefix
+    } else if m.best >= 0 {
+        m.loc = m.best
+        let key = location_key(c, m.best)
+        m.matched = key.1
     }
+    m
+}
+
+/// The decision off a match: alias replaces the matched prefix, root
+/// appends the path, the index list is the location's else the
+/// server's. Total.
+fn decide(c: config.Conf, path: str, m: LocMatch) -> Decision {
+    var d = Decision {
+        status: 0,
+        fs_path: "",
+        matched: "",
+        is_alias: false,
+        index: List[str](),
+        redirect: "",
+    }
+    if m.srv < 0 {
+        return d
+    }
+    let srv = m.srv
+    let loc = m.loc
+    let matched_prefix = m.matched
     d.matched = matched_prefix
 
     // resolve alias (replaces the matched prefix) or root (appends)
@@ -1155,11 +1390,30 @@ pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -
         idx = index_list(c, srv)
     }
     d.index = idx
+    d
+}
+
+/// `route` with its trace collector exposed (ws07's dry-run seam).
+/// ONE matcher: `match_location` is the same call `route` makes, so
+/// the trace can never disagree with the serving decision. The trace
+/// is filled AFTER the decision, classifying every candidate RELATIVE
+/// to the matcher's own outcome — probe-shaped from the real
+/// precedence implementation, never a parallel re-derivation of the
+/// winner.
+pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -> Decision {
+    let m = match_location(c, path)
+    let d = decide(c, path, m)
+    let srv = m.srv
+    let loc = m.loc
+    let best = m.best
+    let exact_hit = m.exact_hit
+    let matched_prefix = m.matched
+    let total = c.names.len
 
     // ---- the trace (ws07): explain every candidate the matcher saw,
     // relative to the decision ABOVE — the winner is the matcher's,
     // never re-derived here. Skipped entirely on the serving path.
-    if want {
+    if want && srv >= 0 {
         // server candidates: the first server block wins at this pin
         // (server_name/Host selection is parse-only — a named delta)
         var si: int = 0
