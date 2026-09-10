@@ -154,6 +154,86 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws28: the head memo and the byte views ÷ the pin, ONE VM · **VALID** · **NOT MET on both shapes** (close 1.161x, keepalive 1.286x on the slow class)
+
+The ws25 instrument, run 34536710553 (`parity=true ref_tree=c58b4f1
+ref_name=pin this_name=ws28`, the profile leg on the keepalive shape
+and the count leg in the same job), load 1.72, nginx close **25.2k**
+— the runner's SLOWEST class (the ws27 pin set's, 25.2k), so the
+ratios sit where that class puts them and the DELTA is the number.
+`ws28` is `8a14d2a` (the ws28 CHANGELOG entry: the response head
+memoized beside the kind table, the path and the header names as
+views, the reader adopting the read, no trace lists on the route, no
+histogram list per observation), `pin` is trunk `c58b4f1`, both at
+wolf 0.2.9, nginx 1.30.4, 5 pairs × `ab -t 5`, c=32 over 4
+generators:
+
+| cell | shape | ws28 req/s | pin req/s | nginx req/s | nginx ÷ ws28 median [min, max] | nginx ÷ pin | **ws28 ÷ pin** median [min, max] | ws28 / pin / nginx cores |
+|---|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 21,920 | 20,273 | 25,242 | **1.161x** [1.134, 1.168] | 1.247x [1.225, 1.265] | **1.081x** [1.074, 1.089] | 1.79 / 1.92 / 1.62 |
+| **N=4 c=32** | keepalive | 66,790 | 51,044 | 85,874 | **1.286x** [1.281, 1.298] | 1.687x [1.657, 1.693] | **1.306x** [1.288, 1.322] | 2.62 / 2.84 / 2.46 |
+| N=1 c=32 | close | 14,688 | 12,028 | 14,851 | 1.021x [0.987, 1.041] | 1.240x [1.214, 1.267] | **1.218x** [1.190, 1.256] | 1.00 / 1.00 / 0.99 |
+| N=1 c=32 | keepalive | 29,307 | 18,394 | 33,748 | 1.163x [1.145, 1.190] | 1.824x [1.791, 1.870] | **1.551x** [1.534, 1.624] | 1.00 / 1.00 / 1.00 |
+
+PREDICTED before the dispatch (the CHANGELOG entry): N=1 keepalive
++8% [+4, +14], N=4 keepalive +7% [+3, +12], N=4 close +3% [0, +6],
+N=1 close +3% [0, +6]; the ratio on the fast class keepalive 1.82x →
+~1.70x. MEASURED: **+30.6% on the N=4 keepalive cell, +55.1% at N=1
+keepalive, +8.1% and +21.8% on the close cells** — every cell past
+the top of its band by a factor of two to four, with the bands
+[1.288, 1.322] and [1.534, 1.624] not touching 1.0 anywhere. The
+prediction priced the string runtime at the ~13% of a keepalive
+request ws27's `perf` leaves had summed (`malloc`/`cfree`/`realloc`
+~4.7, `ambient_alloc` + `strbuf_str` 3.2, `find`/`to_lowercase` 2.2,
+the page faults 3.1) and took ~80% of that; what it did not price is
+what those leaves were NOT counting — the inclusive cost of ~110
+arena bumps behind a mutex, ~245 libc calls and 6.4 KB of copies per
+request spread over the kernel's own `brk`/fault path and the cache
+lines they pushed out — and the profile leg in the same job says so:
+one hand under `ab -k` answered **31,047 req/s** (ws28) against
+**18,625** (pin) in the perf window, the dso split moved from kernel
+64.1 / lobo 22.6 / libc 13.1 to **74.4 / 18.2 / 6.9**, and the count
+leg read the syscalls per request UNCHANGED (keepalive 6.37 against
+nginx's 6.14, close 12.38 against 10.13; `brk` 0.04 → 0.01 is the
+arena growing slower). NOT MET on both shapes; what moved is the
+keepalive cell on this class, **1.687x → 1.286x** on one VM, and the
+close cell 1.247x → 1.161x. W8's linux standing after ws28: NOT MET,
+close ~1.16x and keepalive ~1.29x on the slow class (the fast class
+is not re-measured this sprint); macOS: ws26's MET, indicative at
+ws28 (the entry below).
+
+### 2026-09-10 · macOS arm64 · nomad-1 (18 cpus) · ws28: the head memo and the byte views ÷ the pin, two trees · **REFUSED** (load 5.26; indicative, not a result)
+
+The ws25 two-tree instrument on the box the user's daemons held all
+day (no quiet window confirmed), 22:18Z, load(1m) 5.26 at the start,
+refused by the tool on load and on nginx's N=18 keepalive spread
+(1.182), read for SHAPE only: `ws28` is `8a14d2a` (the ws28 CHANGELOG
+entry — the response head memoized beside the kind table, the path
+and the header names as views, the reader adopting the read, no
+trace lists on the route, no histogram list per observation), `pin`
+is trunk `c58b4f1`, both at wolf 0.2.9 with the same staged pair,
+nginx 1.30.4, 5 pairs × `ab -t 5`, c=32 over 4 generators:
+
+| cell | shape | ws28 req/s | pin req/s | nginx req/s | nginx ÷ ws28 median [min, max] | nginx ÷ pin | **ws28 ÷ pin** median [min, max] | ws28 / pin / nginx cores |
+|---|---|---|---|---|---|---|---|---|
+| N=18 c=32 | close | 18,752 | 18,652 | 18,382 | 0.977x [0.922, 1.004] | 0.977x [0.955, 0.995] | **1.017x** [0.973, 1.058] | 4.54 / 4.69 / 3.09 |
+| N=18 c=32 | keepalive | 101,357 | 97,668 | 103,243 | 1.007x [0.985, 1.091] | 1.045x [0.992, 1.058] | **1.038x** [0.909, 1.054] | 8.46 / 8.56 / 9.76 |
+| N=1 c=32 | close | 29,504 | 28,828 | 29,906 | 1.065x [1.002, 1.296] | 1.016x [0.957, 1.167] | 0.956x [0.868, 1.096] | 0.70 / 0.78 / 0.60 |
+| N=1 c=32 | keepalive | 68,499 | 53,528 | 75,453 | 1.115x [1.034, 1.546] | 1.419x [1.344, 1.440] | **1.280x** [0.918, 1.300] | 0.95 / 0.95 / 0.95 |
+
+PREDICTED (the CHANGELOG entry, before the set): N=1 keepalive +8%
+[+4, +14], N=4/18 keepalive +7% [+3, +12], close +3% [0, +6] on both.
+Read: the one-hand keepalive cell — the cell the profile was taken
+on — moved **+28%** (median; the band is the P/E-core swing this box
+puts on every N=1 row), past the top of its band; the eighteen-hand
+cells +1.7% and +3.8%, the shape predicted (the hands are not cpu-
+bound on this box: 8.5 cores for 100k req/s, the herd and the kernel
+in front of the strings); the N=1 close cell is noise either way.
+The cores column is the reading the load cannot fake: ws28 serves the
+same req/s with fewer cores on every cell (4.54 vs 4.69, 8.46 vs
+8.56, 0.70 vs 0.78). The macOS standing remains ws26's (MET on both
+shapes; indicative at 0.2.9 and at ws28).
+
 ### 2026-09-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws27: the warm kind table ÷ the pin, ONE VM · **VALID** · **NOT MET on both shapes** (close 1.365x, keepalive 1.822x on the fast class)
 
 The ws25 instrument, run 34506393898 (`parity=true ref_tree=9a24fde
