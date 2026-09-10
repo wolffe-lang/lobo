@@ -513,6 +513,72 @@ frame, and the cost of a retained allocation is paid elsewhere (the
 fault path, the cache), under names that read as the kernel's. The
 bytes count (`tools/lobo-strings`) is the number to predict from.
 
+## ws29's addendum — the signal probe retired, PREDICTED then measured (2026-09-10)
+
+lobo#8's count, taken at ws27 and re-taken on trunk `9a4a905` the day
+this sprint opened (CI run 34539376264, ubuntu-latest 4 vcpus, wolf
+v0.2.9): a serving hand raised a signal to ITSELF every 25 ms and
+waited once, to learn whether an operator had sent one — `kill` +
+`getpid` + `rt_sigreturn` + the runtime's self-pipe `write`, four
+syscalls a probe. It was ws08's only option: [os.signal.wait]'s
+intended parked forwarder was refused by the release tier under
+wolf-lang#136, and `src/main.lu`'s header promised the flip "the
+sprint after the fix enters the pin". #136 is closed and the pin is
+v0.2.9.
+
+**The disposition: FLIPPED, not retired.** Retiring the probe outright
+would have meant a server that does not answer `kill -HUP`, and the
+compat contract does not allow that — nginx's operator sends signals.
+So `sig_forwarder` (`src/main.lu`) parks one proc in `os_signal_wait`
+for the process's life and writes each meaning down a loopback
+self-pipe whose READ END joins the loop's ordinary wait set. A signal
+becomes readiness, like every other event the loop handles. The loop
+asks nothing and pays nothing per pass; the only self-raise left in
+lobo is the ONE that retires the forwarder at shutdown. Two
+consequences beyond the count: `wait_budget`'s 25 ms signal floor is
+gone (an armed loop now waits the same 250 ms an unarmed one does —
+this page's own note called that floor "the honest limit on how much
+of #127's win a server that must notice a SIGHUP can take"), and
+signal latency IMPROVES, from within `sig_poll_ms` plus a pass to the
+wait's own return.
+
+D7 moves and is still one sentence: the serving loop is spawn-free and
+`sig_forwarder` is the one proc beside it, holding two ints and a
+socket and touching no server state.
+
+### The prediction, written before the run
+
+The probe's cost is a cost per unit TIME divided by requests, so its
+per-request figure moves with the rate — which is why ws27 read 0.03
+each and this sprint's own before-run, at a higher traced rate, read
+0.01 each on the keepalive shape. What the flip removes is the whole
+of it.
+
+| row | before (trunk 9a4a905) | predicted after | why |
+|---|---|---|---|
+| `kill`, `getpid`, `rt_sigreturn` — keepalive | 0.01 each | **0.00 each** | four calls per PROCESS now, not per 25 ms; ~4 in 100,000 requests rounds to zero |
+| `kill`, `getpid`, `rt_sigreturn` — close | 0.03 each | **0.00 each** | same |
+| `write` — keepalive / close | 0.01 / 0.10 | **0.00 / ~0.07** | the handler's self-pipe write went with the probe; the rest of `write` is the log |
+| `futex` — keepalive / close | 0.03 / 0.25 | **down, not to zero** | the raise→drain-thread→wait handoff goes; the arena mutex (#191) and the pool stay. Low confidence on the size |
+| `poll` — keepalive / close | 0.15 / 1.28 | **unchanged, or slightly up** | this is the runtime's own drain/pool traffic, not the loop's. A permanently parked forwarder is a thread the runtime did not have; if compensation adds one, this is where it shows. LOW confidence, and the row to watch |
+| `epoll_wait` — keepalive / close | 0.00 / 0.14 | **unchanged or down** | the wait budget lengthened 25 ms → 250 ms, so fewer returns on an idle pass; under load the loop was already never idle |
+| **calls per request** — keepalive | **6.28** (nginx 6.14, +0.13) | **6.22–6.24**, gap **+0.08–0.10** | the four probe rows only |
+| **calls per request** — close | **12.27** (nginx 10.13, +2.14) | **12.15–12.20** | the four probe rows only |
+
+Named risk, priced now rather than after: the forwarder is a real
+thread parked for the process's life ([os.signal.wait] parks with
+blocking compensation). That is a per-PROCESS cost — one stack, and
+whatever the pool does about a permanently blocked task — and a
+per-request count cannot see it. It would show in RSS, not here. If
+`poll` moves up, that is the row that saw it.
+
+### The measurement
+
+MEASURED-PENDING — the count leg runs on the CI runner (`tools/
+lobo-syscalls` is linux's; strace is the counter, and the tool skips
+by name on macOS). This section is written before the run, as ws27's
+and ws28's were.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
