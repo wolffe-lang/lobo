@@ -78,6 +78,123 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws27 — 2026-09-10 — the linux half (the pin at 0.2.9, the count leg, what one syscall is worth)
+
+The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
+applies). Every number below was PREDICTED in this entry before it
+was measured, and the entry says which. The macOS box carried the
+user's own daemons all day (the Photos indexer again; load 4–6 at
+the open, per the orchestrator), no window was confirmed, so every
+macOS set is INDICATIVE and named so; the linux numbers are VALID
+sets and counts on the CI runner.
+
+- **The pin moves to wolf v0.2.9 (4c60946, the release tag) and lupin
+  0.1.29 (99feca3, the pairing wolf declares — the pairing gap is
+  zero).** Fifty-one commits over one train (r12: s143, s144, s145),
+  classed in `wolf-toolchain.toml` at the bump: s143's `parse` row
+  for `str.to_int` — the one source-breaking change in 0.2.9,
+  refused by name — is ZERO here (lobo never calls `to_int`; no
+  `NotAnInt` in src/, tests/ or the pinned std tree, grepped); s143's
+  `{x}` rendering every value and `channel[T]` in a signature are
+  ADDITIVE (every hole lobo writes is a primitive or a str); s144's
+  leading `else` is GRAMMAR-WIDENING with the formatter unchanged
+  (lobo has no leading `else`), its `closed`/`cancelled` and `pop`
+  → `none` rulings SPEC-SAYS-WHAT-THE-COMPILER-DID (lobo's `closed`
+  rows are the net tier's, its one `pop` takes the row with an
+  `else`); s145's `str + char` and closure `return` are ZERO here
+  (lobo is spawn-free, D7, has no closure body, and its `else |e| {
+  return … }` blocks are the defaulting operator, whose `return` was
+  and is the enclosing function's). Runtime motion in the whole
+  train: `str.rs` (the char-append path holes already had) and
+  `task/conc_abi.rs` (a proc's int result rides its exit reason) —
+  neither on the serving path; BEHAVIORAL-COST predicted none. The
+  pair was built as the contract says: `cargo xtask dist` in a clean
+  wolf-lang worktree at the tag (the D57 stamp: `wolf 0.2.9
+  (wolfgang, pin 4c60946)`, paired with lupin 0.1.29 pin e9a17cb),
+  lupin at its tag, both worktrees removed once the pair was staged.
+  PREDICTED source motion for the pin's own sake: the `.wolfi`
+  toolchain stamp (0.2.8 → 0.2.9 in every header, hashes re-derived)
+  and the two `shell.lu` constants, ZERO item lines; `tcp_nodelay`'s
+  row text unchanged (it cites #254 and `[os.net.nodelay]`, neither
+  respelled). MEASURED: exactly that — fourteen `.wolfi` files, 88
+  lines each way, every one a header stamp or a hash (the export,
+  pkg and the six std dep-hashes, re-derived under the new driver),
+  not one item line; `shell.lu` two lines; `tcp_nodelay`'s row byte
+  for byte. wolf-lang#146 re-probed at this pin (the SIXTEENTH
+  measurement): still the `sc_muladd` dominance ICE (`%19 is not
+  dominated by its definition`, `wir verify error [dominance]`), so
+  `WOLF_MIDEND=0` stays on the release step and the archive. THE LANE
+  GAP, named: lupin 0.1.29's conformance pin is e9a17cb (past
+  v0.2.8; s141's `net_writev`/`net_nodelay` are in its builtin table)
+  but it does not name `fs_fstat`, so the static small-file arm stays
+  native-only — lupin resolves a builtin at the call (probed at
+  ws24), no lupin-lane test drives that arm, and the corpus at the
+  bump is the measurement.
+
+- **Both hosts re-measured at the pin.** PREDICTED before the
+  dispatch: the pin carries nothing on the request path, so the linux
+  ratio is ws25's fstat row inside the VM lottery, named by the VM
+  class nginx's own close rate reports (28–29k: the ws25 class; 45k,
+  56k, 75k: the faster ones ws24 met). On the 28–29k class, a single
+  VALID set at N=4 c=32: close **1.26x** [1.22, 1.32], keepalive
+  **1.65x** [1.58, 1.75]; N=1 close 1.35x [1.28, 1.45], N=1 keepalive
+  1.60x [1.52, 1.70]; NOT MET on both shapes. macOS indicative (the
+  box at load 4–6): close ~1.03x [0.98, 1.10] and keepalive ~1.10x
+  [1.05, 1.40] at N=18, the keepalive cell the one the load moves
+  (ws26: 1.36–1.62x loaded, 1.07x quiet), refused by the tool on
+  load. MEASURED: (below, per host, when the sets return).
+
+- **The count leg (`tools/lobo-syscalls`, new): what one request costs
+  the kernel on BOTH servers, at the bar's own cell.** ws25 counted
+  lobo's syscalls on the close shape at N=1 and never nginx's, and
+  the profile leg (`tools/lobo-profile`) samples one hand under the
+  close shape only; the linux keepalive cell is the larger half of
+  the gap and nobody had counted it. The new tool attaches `strace -c
+  -f` to every serving process of one server BEFORE the drive and
+  detaches AFTER it (so the division calls ÷ completed requests is
+  exact; req/s under ptrace is printed and is not a rate), lobo then
+  nginx, `worker_processes N` both, and prints the union of syscalls
+  per request side by side with the difference — lobo's extras on
+  top. `ci.yml` grows `syscalls` (both shapes at N=nproc) and
+  `profile_shape` (the profile leg can drive `ab -k` now;
+  `tools/lobo-profile` takes the shape as its fourth argument). On
+  macOS the tool skips by name (dtruss needs SIP down). PREDICTED per
+  request at N=4 c=32 keepalive on the runner, from the source
+  (`serve.lu`'s router and `serve_file`, `main.lu`'s pass, wolf_rt's
+  `net.rs`/`fs.rs` at v0.2.9, nginx's `ngx_http_static_module` with
+  `sendfile off` and `open_file_cache off`, its defaults):
+
+  | syscall | lobo | nginx | what it is |
+  |---|---|---|---|
+  | `recvfrom` | 1 | 1 | the request; one read answers the whole head on both |
+  | `statx` / `newfstatat` | **2** | **1** | lobo: the router's `fs_is_file` PATH stat (the fifo guard) + `fs_fstat` on the handle; nginx: `fstat` on the fd it opened |
+  | `openat` | 1 | 1 | the file, both |
+  | `read` / `pread64` | 1 | 1 | lobo `read` (the size the fstat named), nginx `pread64` |
+  | `writev` | 1 | 1 | the response, one gather each |
+  | `close` | 1 | 1 | the file, both (the socket lives on) |
+  | `poll` / `epoll_wait` | ~0.5 [0.25, 1.0] | ~0.5 [0.25, 1.0] | one wait per PASS; eight connections per hand under `ab -k`, several ready per pass on both |
+  | per connection, amortized | ~0 | ~0 | lobo: `accept4` + `ioctl(FIONBIO)` + `setsockopt(TCP_NODELAY)`; nginx: `accept4(SOCK_NONBLOCK)` + `epoll_ctl` + `setsockopt(TCP_NODELAY)` on the first keepalive response — thousands of requests per connection at `-t 8` |
+  | **calls per request** | **~7.5** | **~6.5** | **lobo − nginx ≈ +1.0: the router's path stat** |
+
+  On the close shape, the same plus the accept: lobo `accept4` 1,
+  `ioctl` 1, `setsockopt` 1, `close` 2, `poll` ~1.5 (the pass's wait
+  plus the zero-budget probe before every accept after the first in a
+  burst, ws25 read 1.06 at N=1) ≈ **12.2** (ws25's number); nginx
+  `accept4` 1, `epoll_ctl` 1, `close` 2, `epoll_wait` ~1, and no
+  `setsockopt` (nginx sets `TCP_NODELAY` only when a connection goes
+  keepalive) ≈ **10**; lobo − nginx ≈ +2: the path stat, and the
+  `ioctl` + `setsockopt` + the probe `poll` against nginx's one
+  `epoll_ctl`. The prediction the whole item rests on, stated so it
+  can be wrong: **the keepalive gap is NOT in the count** — one
+  syscall of ~7.5 at ~3.5% per syscall (ws25: three fewer read as
+  +10.5%) is ~3–4% of a 1.65x gap, and the rest is the cost per call
+  (`poll` over eleven fds against `epoll_wait`; `writev` and `close`
+  are the kernel's and nginx pays them too) and lobo's user space
+  (the runtime's string materialization, ws22's ~5 of 63 µs). The
+  profile leg on the keepalive shape (`profile_shape=keepalive`,
+  dispatched in the same job) is what says which. MEASURED: (below,
+  when the count returns).
+
 ## ws26 — 2026-09-09 — the quiet set (W8 MET on macOS; the load was the whole story)
 
 The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
