@@ -8,9 +8,13 @@
 //! pinned, and an IO leg (connect → send → read → relay under
 //! deadlines, with peer failover) that runs on native + checked, and
 //! is held to the pinned nginx by the two-sided differential.
-//! Direction (ARCHITECTURE.md, locked): serve → proxy → {http, obs};
-//! proxy reads the config model and http's byte predicates, never the
-//! other way. Every rewrite/header/rotation rule below was probed from
+//! Direction (ARCHITECTURE.md, locked): {main, serve} → proxy →
+//! {config, http, resolver}; proxy reads the config model, http's byte
+//! predicates and the resolver's answers, never the other way. ws29
+//! (lobo#4): this line used to name `obs` as a callee and lobo has
+//! never had that arrow — proxy raises no log line of its own, it
+//! answers and its caller logs. ARCHITECTURE.md's re-read against the
+//! tree said so; this header had not been re-read with it. Every rewrite/header/rotation rule below was probed from
 //! the pinned oracle FIRST (the probe matrix is the spec, not the RFC
 //! where they disagree — the differential holds us to nginx); the
 //! deltas from the RFC and from stock nginx are named in the sprint

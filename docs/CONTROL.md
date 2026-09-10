@@ -128,10 +128,11 @@ reload && deploy` never runs on a reload that did not happen.
 
 Why `upgrade` exists before it works: it is the one verb the
 endpoint reaches that no signal does. On unix, UPGRADE's bit is lobo's
-own poll probe (the serve loop self-raises it every pass to bound its
-spawn-free signal wait), so a real outside `SIGUSR2` is
-indistinguishable from the probe and is ignored (the wsm01 residue). On
-windows there is no external RELOAD or UPGRADE at all. Naming the verb
+own probe — through ws28 the poll the serve loop self-raised to bound
+its signal wait, and since ws29 (lobo#8) the single raise that retires
+the parked signal forwarder at shutdown — so a real outside `SIGUSR2`
+is indistinguishable from the probe and is ignored (the wsm01
+residue). On windows there is no external RELOAD or UPGRADE at all. Naming the verb
 here puts the binary swap at this endpoint when it lands, and the
 reply says so instead of answering `unknown verb`.
 

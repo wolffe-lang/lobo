@@ -7,11 +7,11 @@ module (D32); every module's public surface is a checked-in `.wolfi`
 snapshot beside it (the many-hands rule: internals are yours,
 surfaces are contracts; see `tools/lobo-interface` and CLAUDE.md).
 
-This page used to be the ws00 map — six stub territories and an
-"intended call direction once real". It was never re-read after the
-stubs shipped. Everything below is read off the tree at v0.1.0 / ws22:
-the modules are `find src -name '*.lu'`, the arrows are the `use`
-lines, and no arrow here is an intention.
+Everything below is read off the tree, not intended for it: the
+modules are `find src -name '*.lu'`, the arrows are the `use` lines,
+and no arrow here is a plan. Re-read at **ws29** (lobo#4's second
+item, whose first pass wrote this page at ws22 against v0.1.0); the
+sprint that moves a module or an arrow re-reads it again.
 
 ## The modules
 
@@ -34,14 +34,22 @@ imports; `budget` is the thirteenth and is reached through `serve`.
 | `resolver/` | async upstream DNS: a stub client over TCP the one poll loop multiplexes, plus the TTL cache `resolver … valid=` names | ws13 |
 | `budget/` | the proc boundary D68's region cap needs — a budgeted request's regioned work runs inside `spawn proc` here, and the join maps the exit reason for `serve` | ws13 |
 
-`src/main.lu` is not thin and this page should stop saying it is. It is
-the largest single file in the tree (~3,500 lines) because it owns the
-things that cannot live in a module: the ONE spawn-free poll loop that
-multiplexes the http listener, the control channel, the signal queue
-and every open connection; the per-generation drain bookkeeping ws08
-made watchable; the prefork master and its per-worker control endpoints
+`src/main.lu` is not thin. It is the largest single file in the tree
+(~3,700 lines, against `serve/serve.lu`'s ~2,650 and
+`proxy/proxy.lu`'s ~2,000) because it owns the things that cannot
+live in a module: the ONE poll loop that multiplexes the http
+listener, the control channel, the signal forwarder's pipe and every
+open connection; the per-generation drain bookkeeping ws08 made
+watchable; the prefork master and its per-worker control endpoints
 (ws16/ws17, D73 — D7 kept inside every process); and the two-phase
 `/metrics` render. The CLI grammar it dispatches over is `shell/`'s.
+
+D7 in one sentence, as ws29 (lobo#8) left it: the serving loop is
+spawn-free, and the ONE proc beside it is `sig_forwarder`, parked in
+`os_signal_wait` for the process's life so that a signal is
+READINESS on a socket the loop already waits on rather than something
+the loop has to go and ask about. It holds two ints and a socket and
+touches no server state.
 
 ## Who calls whom
 
@@ -93,21 +101,43 @@ do.
 | [LOGGING.md](LOGGING.md) · [log-variables.md](log-variables.md) | `obs` |
 | [metrics.md](metrics.md) | the registry, generated |
 | [directives.md](directives.md) | the config surface, generated |
-| [DRYRUN.md](DRYRUN.md) · [PARITY.md](PARITY.md) · [DIFFERENTIAL.md](DIFFERENTIAL.md) | what lobo promises against nginx |
+| [DRYRUN.md](DRYRUN.md) · [DIFFERENTIAL.md](DIFFERENTIAL.md) | what lobo promises against nginx |
+| [PARITY.md](PARITY.md) · [PROFILE.md](PROFILE.md) | the performance pair: PARITY sets the bar, PROFILE says what stands in the way |
+| [REPLAY.md](REPLAY.md) | a concurrency schedule replayed from an artifact (ws11) |
+| [GETTING-STARTED.md](GETTING-STARTED.md) | the learner path against an unpacked release archive |
+
+Three of those pages are GENERATED and are never hand-edited —
+`directives.md` from `src/config/table.lu` (`tools/lobo-directives`),
+`metrics.md` from `metrics.registry` (`tools/lobo-metricsdoc`), and
+`log-variables.md` from `obs.var_table` (`tools/lobo-logvars`).
 
 ## Test infrastructure (not part of the server)
 
+`tests/` mirrors `src/` — one directory per module (`acme config
+dryrun http metrics obs proxy replay resolver serve shell tls`) — plus
+four that belong to nobody's module:
+
 ```
-tests/rig/           the loopback HTTP client harness, in wolf:
+tests/rig/           the harness, in wolf, all of it loopback:
   httpc/             client module (exchange, exchange_once,
                      split_reply, has_header)
   echosrv/           rig-private one-exchange server (NOT serve/'s
                      territory)
-  *.lu               directive tests + drivers (freeport, diffsend)
+  acmeca/            a test CA the ACME flow issues against
+  dnssrv/            a stub DNS server the resolver resolves against
+  rigback/           a backend the proxy proxies to
+  *.lu               drivers: freeport, diffsend, holdconn, memdrive,
+                     nowms, reloadhold, resolvedrive, …
 tests/differential/  the pinned-nginx differential (docs/DIFFERENTIAL.md)
-tools/               lobo-gauntlet and its steps (sh + jq; the tests
-                     themselves are wolf — .docs/STYLE.md records why)
+tests/config-corpus/ eight real-world nginx.conf fixtures (certbot
+                     vhost, distro default, php-fpm, openresty, …)
+tests/cve-corpus/    the historical-CVE corpus ws02 declared
+tools/               the gauntlet and thirty-odd single-purpose tools
+                     beside it (sh + jq; the tests themselves are wolf)
 ```
 
 Every test is loopback-only, port 0 (or OS-chosen), deadline on every
-read. The gauntlet (`tools/lobo-gauntlet`) is green before any commit.
+read, and writes its scratch under `target/` — the repo root is not a
+scratch directory, and since ws29 (lobo#2) the gauntlet's census step
+fails RED, by name, on a run that leaves a file in the tree.
+The gauntlet (`tools/lobo-gauntlet`) is green before any commit.

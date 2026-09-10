@@ -257,8 +257,9 @@ the console handler is the delivery (`CTRL_C` and `CTRL_CLOSE` are
 `terminate`, lobo's `stop`; `CTRL_BREAK` is `quit`, the graceful
 drain), and `RELOAD` and `UPGRADE` have no windows analog; an
 `os_signal_raise` there is in-process only, so lobo's own probe
-self-raise (the spawn-free poll) works, and nothing outside the
-process can raise `reload`. ws04's control-channel question is
+raise — since ws29 the one that RETIRES the signal forwarder at
+shutdown, and through ws28 the poll that bounded its signal wait —
+works, and nothing outside the process can raise `reload`. ws04's control-channel question is
 therefore answered in one sentence, and this is the sentence lobo
 promises:
 
