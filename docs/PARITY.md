@@ -154,6 +154,41 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws27: the warm kind table ÷ the pin, ONE VM · **VALID** · **NOT MET on both shapes** (close 1.365x, keepalive 1.822x on the fast class)
+
+The ws25 instrument, run 34506393898 (`parity=true ref_tree=9a24fde
+ref_name=pin this_name=warm`, the count leg in the same job), load
+1.95, nginx close **77.2k** — the runner's fastest class (ws24 met it
+once at 75.4k), so the ratios sit where that class puts them and the
+DELTA is the number. `warm` is `e568707` + its interface commit (the
+router remembers a path's regular-file answer for one second; the
+CHANGELOG's ws27 entry), `pin` is `9a24fde` (the v0.2.9 pin, nothing
+else), both at wolf 0.2.9:
+
+| cell | shape | warm req/s | pin req/s | nginx req/s | nginx ÷ warm median [min, max] | nginx ÷ pin | **warm ÷ pin** median [min, max] | warm / pin / nginx cores |
+|---|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 56,369 | 55,357 | 77,200 | **1.365x** [1.346, 1.409] | 1.398x [1.365, 1.449] | **1.021x** [1.011, 1.049] | 2.02 / 2.03 / 1.60 |
+| **N=4 c=32** | keepalive | 129,474 | 125,874 | 233,456 | **1.822x** [1.744, 1.834] | 1.855x [1.820, 1.884] | **1.027x** [0.993, 1.049] | 2.88 / 2.93 / 2.38 |
+| N=1 c=32 | close | 32,789 | 32,601 | 48,325 | 1.481x [1.438, 1.497] | 1.471x [1.468, 1.499] | 1.003x [0.983, 1.027] | 0.99 / 0.99 / 0.99 |
+| N=1 c=32 | keepalive | 46,666 | 46,211 | 87,761 | 1.880x [1.849, 1.934] | 1.899x [1.855, 2.085] | 1.006x [0.979, 1.109] | 1.00 / 1.00 / 1.00 |
+
+One syscall fewer per request (`tools/lobo-syscalls`, same job:
+`statx` 2 → 1, keepalive 6.31 vs nginx 6.13, close 12.41 vs 10.13)
+read as **+2.1% on the close cell and +2.7% on the keepalive cell**
+at N=4, inside the bands predicted before the dispatch (+1.5% [0, 3]
+and +3.5% [1.5, 5.5]); the N=1 cells +0.3% and +0.6% (the keepalive
+one under its +3% [1, 5] band). ws25's ~3.5% per call was three
+calls on the 28k class; one call on the 77k class is ~2–3%. NOT MET
+on both shapes. What the count leaves: 6.31 calls against 6.13 and
+1.82x slower on keepalive — the gap on this cell is not in the
+number of calls (`docs/PROFILE.md`, ws27's addendum: a third of the
+request is the string runtime, the rest the kernel's per-call cost
+and the transmit path nginx pays too). macOS, the same two trees,
+indicative (load 6.18, refused): warm ÷ pin N=18 close 0.993x
+[0.977, 0.998], N=18 keepalive 1.035x [0.965, 1.306], N=1 close
+0.997x, N=1 keepalive 1.025x — the same sign on keepalive, noise on
+close.
+
 ### 2026-09-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws27: the v0.2.9 pin, ONE tree · **VALID** · **NOT MET on both shapes** (close 1.255x, keepalive 1.718x)
 
 The pin moved (wolf 0.2.8 → 0.2.9, lupin 0.1.27 → 0.1.29; nothing on
