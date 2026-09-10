@@ -1,0 +1,144 @@
+#!/bin/sh
+# lobo-strings — THE BYTES LEG (ws28): what one request MATERIALIZES,
+# counted rather than sampled. The native runtime lands every `str`
+# it builds, every list header and every list growth outside a
+# `region` in the process-lifetime ambient arena, which never frees
+# (wolf-lang#191) — so a serving hand's resident-set growth over a
+# drive, divided by the requests the drive completed, IS the bytes the
+# request path materializes per request (the arena's 16-byte rounding
+# included, and the 64 KiB chunk granularity amortized over thousands
+# of requests). It is the same number on every host and every VM
+# class, which is why it is the instrument for the per-row split the
+# CHANGELOG's ws28 table predicts: a req/s delta a shared VM cannot
+# hold still row by row, a byte count it can. NOT a gauntlet step and
+# never a gate.
+#
+#   tools/lobo-strings [requests] [concurrency] [shape]
+#     requests     the drive's length (default 20000)
+#     concurrency  ab's connections (default 8)
+#     shape        keepalive (default) or close
+#
+# ONE process (`worker_processes 1`: the master serves alone —
+# docs/WORKERS.md), the parity file (1 KiB), a warm-up drive first
+# (the tables, the arena's first chunks and the allocator's own
+# structures are not the request's), then RSS read off ps(1) before
+# and after the counted drive. `LOBO_REF=<binary>` (ws25's two-tree
+# idiom) counts a second tree in the same run; nginx (the pinned
+# oracle) is counted last for the contrast — its RSS should not move.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
+
+REQS="${1:-20000}"
+CONC="${2:-8}"
+SHAPE="${3:-keepalive}"
+case "$SHAPE" in
+keepalive) KA="-k" ;;
+close) KA="" ;;
+*) echo "lobo-strings: REFUSED — shape is keepalive or close, not $SHAPE" >&2; exit 1 ;;
+esac
+LOBO="${LOBO_THIS:-$(pwd)/target/lobo-release}"
+NGINX="$(pwd)/tests/differential/bin/nginx"
+[ -x "$LOBO" ] || { echo "lobo-strings: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+[ -x "$NGINX" ] || { echo "lobo-strings: REFUSED — pinned nginx missing at $NGINX (docs/DIFFERENTIAL.md)" >&2; exit 1; }
+command -v ab > /dev/null 2>&1 || { echo "lobo-strings: REFUSED — ab(1) is not on PATH" >&2; exit 1; }
+REF="${LOBO_REF:-}"
+LNAME="${LOBO_NAME:-lobo}"
+RNAME="${LOBO_REF_NAME:-ref}"
+if [ -n "$REF" ]; then
+    [ -x "$REF" ] || { echo "lobo-strings: REFUSED — LOBO_REF=$REF is not an executable" >&2; exit 1; }
+    case "$REF" in /*) ;; *) REF="$(pwd)/$REF" ;; esac
+fi
+scratch="$(pwd)/target/strings-$SHAPE"
+rm -rf "$scratch"
+mkdir -p "$scratch/www" "$scratch/logs"
+awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
+host="$(uname -sm)"
+
+wait_port() { # wait_port <port> — up to ~8s
+    i=0
+    while [ $i -lt 80 ]; do
+        printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
+        "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null | grep -q "200 OK" && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+rss_kb() { # rss_kb <pid> — resident set in KiB, the host's accounting
+    ps -o rss= -p "$1" 2>/dev/null | tr -d ' '
+}
+drive() { # drive <port> <n> <tag> — sets reqs (completed), failed
+    ab -q $KA -n "$2" -c "$CONC" "http://127.0.0.1:$1/index.html" > "$scratch/ab-$3.txt" 2>&1
+    reqs=$(awk '/^Complete requests/ { print $3 }' "$scratch/ab-$3.txt")
+    failed=$(awk '/^Failed requests/ { print $3 }' "$scratch/ab-$3.txt")
+    : "${reqs:=0}" "${failed:=0}"
+}
+
+start_lobo() { # start_lobo <binary> <label> — sets hp, mpid, hand, lconf, lbin
+    lbin=$1
+    hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    lconf="$scratch/$2.conf"
+    printf 'worker_processes 1;\npid %s/%s.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$scratch" "$2" "$cp" "$hp" "$scratch" > "$lconf"
+    "$lbin" serve -p . -c "$lconf" 2>> "$scratch/logs/$2.log" &
+    mpid=$!
+    wait_port "$hp" || { echo "lobo-strings: $2 never served" >&2; kill "$mpid"; return 1; }
+    sleep 0.5
+    hand=$mpid
+}
+stop_lobo() {
+    "$lbin" -s stop -p . -c "$lconf" > /dev/null 2>&1
+    wait "$mpid" 2>/dev/null
+}
+start_nginx() { # sets hp, npid, hand
+    hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    mkdir -p "$scratch/nginx/logs"
+    printf 'daemon off;\nworker_processes 1;\npid nginx.pid;\nerror_log error.log;\nevents {\n}\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$hp" "$scratch" > "$scratch/nginx/nginx.conf"
+    "$NGINX" -p "$scratch/nginx" -c nginx.conf >> "$scratch/logs/nginx.out" 2>&1 &
+    npid=$!
+    wait_port "$hp" || { echo "lobo-strings: nginx never served" >&2; kill "$npid"; return 1; }
+    sleep 0.5
+    hand=$(pgrep -P "$npid" | head -1)
+    [ -n "$hand" ] || hand=$npid
+}
+stop_nginx() {
+    kill -QUIT "$npid" 2>/dev/null
+    wait "$npid" 2>/dev/null
+}
+
+# count <label> — warm-up, then the counted drive; prints one row
+count() {
+    drive "$hp" 2000 "$1-warm"
+    before=$(rss_kb "$hand")
+    drive "$hp" "$REQS" "$1"
+    after=$(rss_kb "$hand")
+    per=$(awk -v a="$before" -v b="$after" -v n="$reqs" 'BEGIN { if (n > 0) printf "%.0f", (b - a) * 1024 / n; else print "?" }')
+    echo "| $1 | $before | $after | $reqs | $failed | **$per** |"
+    rows="$rows
+| $1 | $before | $after | $reqs | $failed | **$per** |"
+}
+
+echo "lobo-strings: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); one process, $SHAPE shape, ab $KA -n $REQS -c $CONC after a 2000-request warm-up; $LNAME = $("$LOBO" -v 2>&1 | head -1)"
+[ -n "$REF" ] && echo "lobo-strings: $RNAME = $("$REF" -v 2>&1 | head -1)"
+echo ""
+echo "| tree | RSS before (KiB) | RSS after (KiB) | requests | failed | bytes per request |"
+echo "|---|---|---|---|---|---|"
+rows=""
+start_lobo "$LOBO" "$LNAME" || exit 1
+count "$LNAME"
+stop_lobo
+if [ -n "$REF" ]; then
+    start_lobo "$REF" "$RNAME" || exit 1
+    count "$RNAME"
+    stop_lobo
+fi
+start_nginx || exit 1
+count nginx
+stop_nginx
+echo ""
+echo "lobo-strings: bytes per request = (RSS after − RSS before) ÷ requests completed; the arena never frees, so this is what the request path materialized (lists included), not what it allocated and released"
