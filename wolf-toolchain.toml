@@ -14,109 +14,109 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang at the **v0.2.8 RELEASE TAG** (5c729e8, "the syscall goes
-# first" — s141 (#257, #254) and s142 (#263 `str.to_int`, #261
-# `fs_fstat`) on the r11 train). ws24 pinned the dev-stamped trunk sha
-# bd7caff first (r11 had not tagged when the sprint reached its pin
-# step; the contract's either/or, the ws18 shape) and RE-PINNED here
-# the same day the tag landed. D57: built AT the tag the driver claims
-# the bare version, no +dev suffix. Build in a scratch worktree at the
-# tag with the release stamp (xtask's own rule: granted only when that
-# exact tag points at HEAD, `build_is_release`):
-#   git worktree add <scratch> v0.2.8
-#   WOLF_RELEASE=v0.2.8 WOLF_COMMIT=5c729e8 \
-#     cargo build --release -p wolf_driver -p wolf_rt
-# and stage target/release/{wolf, libwolf_rt.a} into .wolf-bin/ — the
-# native tier needs the staticlib beside the driver. ci.yml stages
-# exactly this (the tag at HEAD grants the release stamp).
+# wolf-lang at the **v0.2.9 RELEASE TAG** (4c60946, "three things a
+# reader ran into this week" — the r12 train: s143 (#265 the `parse`
+# row, #268 every value renders in a hole, #270 the per-file IR
+# ratchet), s144 (#276 a leading `else`, #273 `closed`/`cancelled`,
+# #274 `pop` answers `none`), s145 (#278 `str + char`, #268 closure
+# `return`)). ws27 pinned it the day after the tag landed, so the
+# ws18/ws24 dev-stamped-trunk shape was not needed. D57: built AT the
+# tag the driver claims the bare version, no +dev suffix. Build in a
+# scratch worktree at the tag with `cargo xtask dist` — the dist
+# build is the stamped one (WOLF_COMMIT from HEAD's short sha,
+# WOLF_RELEASE granted only when the exact tag points at HEAD; a plain
+# `cargo build` prints `+dev.unknown` and lib-toolchain.sh refuses it):
+#   git worktree add <scratch> v0.2.9
+#   (cd <scratch> && cargo xtask dist)
+# and stage target/dist/wolf-0.2.9-<host>/{wolf, libwolf_rt.a} into
+# .wolf-bin/ — the native tier needs the staticlib beside the driver.
+# ci.yml builds the same stamp by hand (WOLF_RELEASE from the tag at
+# HEAD, WOLF_COMMIT the rev below cut to seven).
 #
-# 398e5f5 (v0.2.6) → bd7caff → 5c729e8 is fifty-four commits over four
-# trains. What the bump brings this repo, each classed at the bump and
-# measured after it (the ws24 CHANGELOG entry carries the numbers):
-#   * s141 — **wolf-lang#257 CLOSES** (`[os.net.io]`, the syscall goes
-#     first): every parking net call tries the syscall before it waits
-#     and parks on WouldBlock only, against the budget computed at
-#     entry. The rows are unchanged; the COST moves (ws22's profile:
-#     ~30 of 63 µs per keepalive request was the pre-syscall park).
-#     BEHAVIORAL-COST-ONLY. Measured at ws24: linux N=4 keepalive
-#     3.178x → 1.862x, close 1.981x → 1.300x (VALID sets); macOS N=1
-#     keepalive 46 → 23 µs/request (indicative).
-#   * s141 — **wolf-lang#254 CLOSES** (`[os.net.writev]`,
-#     `[os.net.nodelay]`): `net_writev(fd, List[List[byte]]) -> () !
-#     {closed, io}` and `net_nodelay(fd, bool) -> () ! {io}`, and
-#     **TCP_NODELAY ON by default** on every stream the runtime hands
-#     out. TWO NEW BUILTINS (consumed by ws24: the plaintext small-file
-#     arm gathers head and body; `tcp_nodelay` is served) and ONE
-#     BEHAVIORAL DEFAULT (Nagle off on every accepted stream — the
-#     posture nginx's `tcp_nodelay on` takes; the linux delayed-ACK
-#     stall lobo#3 worked around by copying cannot arise on any write
-#     pattern now).
-#   * s142 — `str.to_int() -> int ! {NotAnInt}` (#263) and
-#     `fs_fstat(fd) -> List[int] ! {not_found, denied, io}` (#261:
-#     kind, size and mtime from ONE metadata read on an open handle —
-#     lobo's own filing from ws23, the answer to the two path stats
-#     `serve_file` still pays; consuming it is the next lane's, not a
-#     pin bump's side effect). TWO NEW BUILTINS, neither called here.
-#   * s140 — `--help`, a man page, completions; the compile-failure
-#     footer names the code reported (#249); a `use std.…` miss with
-#     no std root says so (#251). DIAGNOSTIC-ONLY.
-#   * s139 — spec/07 (sched) admitted to [conf.anchor.ns]; xtask only.
-#   * r10/r11 — v0.2.7 and v0.2.8 themselves, fa01 and the unslop
-#     passes (docs). MECHANICAL: the `.wolfi` toolchain stamp reads the
-#     VERSION — 0.2.6 → 0.2.7+dev.bd7caff → 0.2.8 in every header.
-# bd7caff → 5c729e8 in particular (the re-pin): s142's two builtins,
-# the version sites, CHANGELOG, the interface-pretty snapshot. Source
-# motion in lobo for the re-pin's own sake: ZERO predicted, zero
-# measured (the `.wolfi` stamp only); the numbers between the two pins
-# are in the ledger side by side.
-# Pairing note (F-0064, reported never gated): wolf@v0.2.8 declares
-# lupin **0.1.27** as its pairing and [lupin] below names 0.1.27 —
-# the PAIRING GAP IS ZERO. THE LANE GAP, named: lupin 0.1.27's
-# conformance pin is v0.2.5, so `net_writev`/`net_nodelay`/`to_int`/
-# `fs_fstat` are not on the lupin lane at this trio (the mirrors are
-# wolf-interp#67 and is40's). lupin resolves a builtin at the CALL,
-# not at load (probed at ws24: a program naming `net_writev` on an
-# unreached path runs), so the lupin-lane tests that stage `serve`
-# and never drive its static small-file arm keep their lanes; the
-# corpus at the bump is the measurement (255/255 lane-runs).
-# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, FIFTEENTH
-# measurement — still OPEN (the issue's state read at the bump), so
-# the gauntlet's release step and the release archive's build both
-# keep WOLF_MIDEND=0. See [std]'s note. The shipped binary is the
-# gauntlet's release-tier build, flag for flag.
+# 5c729e8 (v0.2.8) → 4c60946 (v0.2.9) is fifty-one commits over one
+# train. What the bump brings this repo, each classed at the bump and
+# measured after it (the ws27 CHANGELOG entry carries the numbers):
+#   * s143 — `str.to_int()`'s row is spelled **`parse`**, not
+#     `NotAnInt` ([mem.str.parse]): the ONE source-breaking change in
+#     0.2.9, refused by name. ZERO HERE: lobo never calls `to_int`, no
+#     `NotAnInt` arm exists in src/ or tests/, none in the pinned std
+#     tree (grepped at the bump). `{x}` renders every value both
+#     machines can show ([type.interp.*]) and refuses the rest by
+#     name; `channel[T]` in a signature position types as a channel.
+#     ADDITIVE — every hole lobo writes is a primitive or a str.
+#   * s144 — a line whose first token is `else` continues the previous
+#     statement (E0005 retired; `wolf fmt` is unchanged, so canonical
+#     source does not move and lobo has no leading `else`, grepped);
+#     `[conc.chan.close]` spells `closed`/`cancelled` (lobo's `closed`
+#     rows are the net tier's and were lowercase already);
+#     `[mem.list.pop]` says `pop` on an empty list is `none`, never a
+#     fault (lobo's one `pop`, `http.lu`'s segment stack, takes the
+#     row with an `else`). GRAMMAR-WIDENING and SPEC-SAYS-WHAT-THE-
+#     COMPILER-DID; zero source motion.
+#   * s145 — `str + char`, `char + str` and `s += c` are
+#     interpolation-append (the int rows keep E0409); `return` inside
+#     a CLOSURE returns from the closure, typed against its own result
+#     (both lowering tiers already ran it so; sema's NotYet retires).
+#     ZERO HERE: lobo is spawn-free (D7) and has no closure body — its
+#     `else |e| { return … }` blocks are the defaulting operator
+#     ([gram.amb.else]), whose `return` was and is the enclosing
+#     function's — and it appends chars through holes, never `+`.
+#   * runtime motion, all of it: `str.rs` (the char-append path
+#     interpolation already had) and `task/conc_abi.rs` (a proc's int
+#     result rides its exit reason). Neither is on the serving path.
+#     BEHAVIORAL-COST: none predicted.
+#   * r12 — v0.2.9 itself, the CHANGELOG, the README's vendored mark.
+#     MECHANICAL: the `.wolfi` toolchain stamp reads the VERSION —
+#     0.2.8 → 0.2.9 in every header, the export/pkg hashes re-derived.
+# Source motion in lobo for the pin's own sake: the `.wolfi` stamp and
+# the two shell.lu constants; predicted ZERO item lines, and the
+# ws27 entry says what was measured.
+# Pairing note (F-0064, reported never gated): wolf@v0.2.9 declares
+# lupin **0.1.29** as its pairing and [lupin] below names 0.1.29 —
+# THE PAIRING GAP IS ZERO (0.1.30, is42's leading-`else` mirror,
+# exists and is not the pairing). THE LANE GAP, named: 0.1.29's
+# conformance pin is e9a17cb (past v0.2.8 — s141's `net_writev`/
+# `net_nodelay` are in its builtin table now) but it does not name
+# `fs_fstat` (grepped), so the static small-file arm is still native-
+# only; lupin resolves a builtin at the CALL (probed at ws24), no
+# lupin-lane test drives that arm, and the corpus at the bump is the
+# measurement.
+# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, SIXTEENTH
+# measurement — see the ws27 CHANGELOG entry for the state read at the
+# bump; the gauntlet's release step and the release archive's build
+# keep WOLF_MIDEND=0 until the fix enters the [wolf] pin. See [std]'s
+# note. The shipped binary is the gauntlet's release-tier build, flag
+# for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "5c729e8779a83611a66f47a63a5276b158ecdec1"
-version_line = "wolf 0.2.8 (wolfgang, pin 5c729e8)"
+rev = "4c60946081e1d1e65dd4b3d98cd69ac86bdf1d38"
+version_line = "wolf 0.2.9 (wolfgang, pin 4c60946)"
 
 [lupin]
-# lupin at the v0.1.27 RELEASE TAG (4d64d90, the is38 merge; D57: build
+# lupin at the v0.1.29 RELEASE TAG (99feca3, the is41 merge; D57: build
 # the tag, so --version claims the release with no +dev suffix).
-# 0.1.27 is is38 ("the cores in the mirror"): the reference
-# interpreter takes wolf-lang **v0.2.5** (6ade878) as its conformance
-# pin — 982f857/v0.2.4 → 6ade878/v0.2.5, ONE train forward — and
-# mirrors s137's five anchors. Three of the four witnesses flip
-# unsupported → run with stdout byte-identical to the directive
-# (net/reuse_port, net/wait_readiness, os/cpus); the fourth declines
-# BY NAME on both machines. **THE LANE GAP NARROWS, and this sprint
-# does not spend it**: `net_wait`, `net_listen_with` and `os_cpus`
-# now exist on the lupin lane, so lobo tests that declared
-# `lanes: native` for those calls alone COULD widen to lupin; the
-# inherit pair (`os_spawn_with` + `net_adopt_listener`) still cannot.
-# Widening lanes is a measurement per test, not a pin bump's side
-# effect, and ws19's contract is the artifact — routed as residue to
-# the next lobo maintenance sprint (.docs/sprints/deferrals.md). What
-# 0.1.27 could do to this repo is REFUSE a byte-domain or resolve-time
-# slip the native tier let through (it is a tightening, as 0.1.26
-# was); it does not: the corpus is green on every declared lane at
-# this trio, measured at the bump. Its conformance pin (6ade878) is
-# information, not this file's rev.
+# 0.1.29 is is41 ("the mirror spells `parse`"): the reference
+# interpreter's conformance pin is wolf-lang **e9a17cb** — s143's last
+# commit on the r12 train, dev-stamped, because v0.2.9 had not tagged
+# when the mirror landed — 6ade878/v0.2.5 (0.1.27) → 5c729e8/v0.2.8
+# (0.1.28, is40) → e9a17cb, and `to_int`'s row is `parse` there too,
+# so `rows/to_int_parse.lu`, the one witness the two machines parted
+# on at 0.1.28, is byte-identical at this pairing. Pinned because
+# wolf@v0.2.9 declares 0.1.29 (the pairing gap is ZERO — see [wolf]).
+# What 0.1.29 could do to this repo is REFUSE a byte-domain or
+# resolve-time slip the native tier let through (a tightening, as
+# 0.1.26–0.1.28 were); the lupin-lane rows it does not mirror yet
+# (s144's leading `else`, `pop`'s `none`, `closed`; s145's `str +
+# char`) are rulings lobo's source does not exercise (grepped at the
+# bump), so no lane moves. Widening lanes is a measurement per test,
+# not a pin bump's side effect (ws19's contract; the deferral stands).
+# Its conformance pin (e9a17cb) is information, not this file's rev.
 # Bumped together with [wolf] as always. Build AT THE TAG (scratch
 # worktree):
-#   git checkout v0.1.27 && cargo build --release --bin lupin
+#   git checkout v0.1.29 && cargo build --release --bin lupin
 # stage target/release/lupin into .wolf-bin/.
 repo = "wolffe-lang/wolf-interp"
-rev = "4d64d9010f71cb6cb21885a73bb5452ae1849607"
-version_line = "lupin 0.1.27 (wolf-interp, reference interpreter at pin 6ade878)"
+rev = "99feca39336b0d625541368e1ca98c3b4cd60a40"
+version_line = "lupin 0.1.29 (wolf-interp, reference interpreter at pin e9a17cb)"
 
 [std]
 # wolf-std, pinned at TRUNK bd12ef5 (the sc37 docs commit atop the sc37

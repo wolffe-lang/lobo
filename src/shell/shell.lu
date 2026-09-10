@@ -90,12 +90,12 @@ pub fn release_channel() -> str {
 /// The wolf this binary was built with — wolf-toolchain.toml [wolf]'s
 /// version (bare at a release tag; `0.2.5+dev.32f66bf` at a trunk pin).
 pub fn toolchain_version() -> str {
-    "0.2.8"
+    "0.2.9"
 }
 
 /// …and its commit: the short sha `wolf --version` names as `pin`.
 pub fn toolchain_pin() -> str {
-    "5c729e8"
+    "4c60946"
 }
 
 /// The wolf-std tree compiled in — wolf-toolchain.toml [std]'s rev,
