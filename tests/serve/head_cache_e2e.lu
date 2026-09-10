@@ -1,0 +1,197 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! ws28: THE HEAD CACHE, END TO END. Spawn the real lobo and ask for
+//! one file four ways: twice inside a second (the second answer is
+//! the memo — the same head, byte for byte); once after the file is
+//! REWRITTEN to a different size (the memo is keyed on this request's
+//! own fstat, so Content-Length and the ETag move at once — never a
+//! second old); once with the other Connection token (a different
+//! head, the token is part of the key); once a second later (the Date
+//! moves — the memo is keyed on the clock); and once with the
+//! Last-Modified it was told, which is 304. Loopback only, OS-chosen
+//! ports, scratch cleared at START, the master stopped through its
+//! desk and waited for.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Send `reqtext`, read until the peer closes OR the reply carries
+/// `until` (a keep-alive reply never closes), then close. Rows: `io`.
+fn ask(port: int, reqtext: str, until: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+            if !until.is_empty() && buf.contains(until) {
+                reading = false
+            }
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn get(port: int, path: str) -> str ! {io} {
+    ask(port, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", "")
+}
+
+/// The value of header `name` in a reply ("" when absent). Total.
+fn hdr(reply: str, name: str) -> str {
+    let key = "\r\n{name}: "
+    let at = reply.find(key) else -1
+    if at < 0 {
+        return ""
+    }
+    let from = at + key.len
+    let rest = reply[from..reply.len]
+    let end = rest.find("\r\n") else -1
+    if end < 0 {
+        return rest
+    }
+    rest[0..end]
+}
+
+/// The head of a reply: everything through the blank line. Total.
+fn head_of(reply: str) -> str {
+    let at = reply.find("\r\n\r\n") else -1
+    if at < 0 {
+        return reply
+    }
+    reply[0..at + 4]
+}
+
+fn main() -> !int {
+    let d = "ws28_hc_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/a.html", "HEAD-CACHE-A\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  error_log {d}/error.log info;\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // 1. twice inside a second: the same head, byte for byte, and the
+    //    body both times (the memo is the head only)
+    let r1 = get(hp, "/a.html")?
+    assert(r1.starts_with("HTTP/1.1 200 OK"), "a.html serves: {r1}")
+    assert(r1.contains("HEAD-CACHE-A"), "the body: {r1}")
+    assert(hdr(r1, "Content-Length") == "13", "length 13: {r1}")
+    assert(hdr(r1, "Accept-Ranges") == "bytes", "accept-ranges: {r1}")
+    assert(hdr(r1, "Connection") == "close", "close token: {r1}")
+    let r2 = get(hp, "/a.html")?
+    assert(r2.contains("HEAD-CACHE-A"), "the body again: {r2}")
+    if hdr(r1, "Date") == hdr(r2, "Date") {
+        assert(head_of(r1) == head_of(r2), "inside a second the head is the memo:\n{r1}\n--\n{r2}")
+    }
+    let lm1 = hdr(r1, "Last-Modified")
+    let etag1 = hdr(r1, "ETag")
+    assert(!lm1.is_empty() && !etag1.is_empty(), "lm and etag present: {r1}")
+
+    // 2. the file rewritten to another size: this request's own fstat
+    //    keys the memo, so the length and the tag move at once
+    fs_write_text("{d}/w/a.html", "HEAD-CACHE-A-REWRITTEN-LONGER\n")?
+    let r3 = get(hp, "/a.html")?
+    assert(r3.starts_with("HTTP/1.1 200 OK"), "rewritten serves: {r3}")
+    assert(hdr(r3, "Content-Length") == "30", "the new length at once: {r3}")
+    assert(hdr(r3, "ETag") != etag1, "the tag moved with the size: {r3}")
+    assert(r3.contains("REWRITTEN"), "the new body: {r3}")
+
+    // 3. the other Connection token: a different head (the token is
+    //    part of the key), the same file
+    let r4 = ask(hp, "GET /a.html HTTP/1.1\r\nHost: x\r\n\r\n", "REWRITTEN-LONGER\n")?
+    assert(r4.starts_with("HTTP/1.1 200 OK"), "keepalive serves: {r4}")
+    assert(hdr(r4, "Connection") == "keep-alive", "keep-alive token: {r4}")
+    assert(hdr(r4, "Content-Length") == "30", "the length on the keep-alive head: {r4}")
+
+    // 4. a second later: the Date moves (the memo is keyed on the clock)
+    time_sleep_ms(1100)
+    let r5 = get(hp, "/a.html")?
+    assert(r5.starts_with("HTTP/1.1 200 OK"), "later serves: {r5}")
+    assert(hdr(r5, "Date") != hdr(r3, "Date"), "the Date moved:\n{r3}\n--\n{r5}")
+    assert(hdr(r5, "Content-Length") == "30", "the length holds: {r5}")
+
+    // 5. the Last-Modified it was told, back as If-Modified-Since: 304
+    let lm5 = hdr(r5, "Last-Modified")
+    let r6 = ask(
+        hp,
+        "GET /a.html HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: {lm5}\r\nConnection: close\r\n\r\n",
+        "",
+    )?
+    assert(r6.starts_with("HTTP/1.1 304 Not Modified"), "a matching IMS is 304: {r6}")
+    assert(hdr(r6, "Last-Modified") == lm5, "the 304 carries the date: {r6}")
+
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "lobo exited 0 (got {code})")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

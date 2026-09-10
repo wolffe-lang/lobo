@@ -101,12 +101,32 @@ pub fn to_hex(n: int) -> str {
     out
 }
 
-/// Zero-pad a non-negative int to two digits. Total.
+/// Zero-pad a non-negative int to two digits. For 0..99 the answer is
+/// a VIEW into a digit table (ws28: `http_date` called this four
+/// times a request, an interpolation each — the table makes a date
+/// one interpolation); larger values interpolate as before. Total.
 fn pad2(n: int) -> str {
+    if n >= 0 && n < 100 {
+        let table = "00010203040506070809101112131415161718192021222324252627282930313233343536373839404142434445464748495051525354555657585960616263646566676869707172737475767778798081828384858687888990919293949596979899"
+        let at = n * 2
+        return table[at..at + 2]
+    }
     if n < 10 {
         return "0{n}"
     }
     "{n}"
+}
+
+/// True when `s` has no `A`..`Z` byte — an ASCII `lower()` would
+/// answer the receiver's own bytes. Total.
+fn has_no_upper(s: str) -> bool {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b >= 65 && b <= 90 {
+            return false
+        }
+    }
+    true
 }
 
 /// Day-of-week abbreviation, 0=Sun..6=Sat. Total.
@@ -180,7 +200,23 @@ fn extension(path: str) -> str {
     if dot < slash {
         return ""
     }
-    path[dot + 1..path.len].lower()
+    let ext = path[dot + 1..path.len]
+    // ws28: an extension with no uppercase ASCII byte is its own
+    // lowercase when it is ASCII — a view, no materialization; a
+    // non-ASCII or uppercase one takes `lower()` as before
+    if has_no_upper(ext) {
+        var ascii = true
+        for b_raw in ext.bytes() {
+            let b = b_raw as int
+            if b >= 128 {
+                ascii = false
+            }
+        }
+        if ascii {
+            return ext
+        }
+    }
+    ext.lower()
 }
 
 /// The MIME type for `path`'s extension, consulting the config
@@ -540,13 +576,21 @@ fn err_len(code: int, special: bool, token: str) -> int {
     error_body(code, token).len
 }
 
-/// Copy the parsed request's line and headers into the access record
-/// (names arrive lowercased from the parser). Total.
+/// Copy the parsed request's headers into the access record. The
+/// record's request line is the RAW line `serve_request` already set
+/// (`raw_line(head)`), which for a request that PARSED is byte for
+/// byte `"{method} {target} {version}"`: the line is method SP target
+/// SP version by construction (`is_target_bad` refuses SP and every
+/// control inside the target; the version is one of two literals), so
+/// the interpolation the first cut built here was a copy of bytes the
+/// record already held (ws28). The names arrive lowercased from the
+/// parser and are pushed as they are — `obs.access_header` lowers its
+/// name, which lowered every name a second time. Total.
 fn fill_req_acc(mut acc: obs.Access, req: http.Request) {
-    acc.request = "{req.method} {req.target} {req.version}"
     var i: int = 0
     for h in req.hnames {
-        obs.access_header(mut acc, h, req.hvals[i])
+        (mut acc.hnames).push(h)
+        (mut acc.hvals).push(req.hvals[i])
         i = i + 1
     }
 }
@@ -700,6 +744,7 @@ fn serve_file(
     local_port: int,
     mut acc: obs.Access,
     mut chg: Charge,
+    mut ft: FileKinds,
 ) -> bool ! {closed, io} {
     // ws25 (wolf-lang#261 consumed): ONE open, ONE fstat — nginx's
     // shape. The handle is opened FIRST and `fs_fstat` answers kind,
@@ -753,14 +798,15 @@ fn serve_file(
     var secs: int = 0
     let mms = st[2]
     secs = mms / 1000
-    let lm = http_date(secs)
-    let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
-    let mime = mime_for(c, path)
     let conn_hdr = keep_token(keep)
 
-    // conditional GET: a matching If-Modified-Since → 304, no body
+    // conditional GET: a matching If-Modified-Since → 304, no body.
+    // ws28: the Last-Modified string is built only when there is a
+    // header to compare it with (the head below has its own memo)
     let ims = http.header(req, "if-modified-since") else ""
-    if !ims.is_empty() && ims == lm {
+    if !ims.is_empty() && ims == http_date(secs) {
+        let lm = http_date(secs)
+        let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
         fs_close(fd) else |_| {}
         acc.status = 304
         acc.body_bytes = 0
@@ -797,16 +843,31 @@ fn serve_file(
 
     acc.status = 200
     acc.body_bytes = if is_head { 0 } else { size }
-    var head = "HTTP/1.1 200 OK\r\n"
-    head = "{head}{hline("Server", token)}"
-    head = "{head}{hline("Date", now_date())}"
-    head = "{head}{hline("Content-Type", mime)}"
-    head = "{head}{hline("Content-Length", "{size}")}"
-    head = "{head}{hline("Last-Modified", lm)}"
-    head = "{head}{hline("Connection", conn_hdr)}"
-    head = "{head}{hline("ETag", etag)}"
-    head = "{head}{hline("Accept-Ranges", "bytes")}"
-    head = "{head}\r\n"
+    // ws28: the head from the table's memo when this request's stat,
+    // clock and tokens are the ones it was built for; built once and
+    // remembered otherwise. The bytes are the same either way — the
+    // differential holds the wire, tests/serve/head_cache_e2e.lu the
+    // freshness (a rewritten file answers its new length at once, a
+    // new second its new Date).
+    let now_secs = time_unix_ms() / 1000
+    var head = head_warm(ft, path, size, mms, keep, now_secs, token)
+    if head.is_empty() {
+        let lm = http_date(secs)
+        let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
+        let mime = mime_for(c, path)
+        let dnow = date_str(mut ft, now_secs)
+        head = "HTTP/1.1 200 OK\r\n"
+        head = "{head}{hline("Server", token)}"
+        head = "{head}{hline("Date", dnow)}"
+        head = "{head}{hline("Content-Type", mime)}"
+        head = "{head}{hline("Content-Length", "{size}")}"
+        head = "{head}{hline("Last-Modified", lm)}"
+        head = "{head}{hline("Connection", conn_hdr)}"
+        head = "{head}{hline("ETag", etag)}"
+        head = "{head}{hline("Accept-Ranges", "bytes")}"
+        head = "{head}\r\n"
+        head_remember(mut ft, path, size, mms, keep, now_secs, token, head)
+    }
 
     if is_head {
         fs_close(fd) else |_| {}
@@ -1273,19 +1334,124 @@ fn file_kinds_slots() -> int {
 pub struct FileKinds {
     paths: List[str],
     seen: List[int],
+    hpath: List[str],
+    hsize: List[int],
+    hmtime: List[int],
+    hsecs: List[int],
+    hkeep: List[int],
+    htoken: List[str],
+    hhead: List[str],
+    date_secs: int,
+    date_str: str,
 }
 
-/// An empty table: every slot holds no path and the epoch. Total.
+/// An empty table: every slot holds no path and the epoch; the head
+/// cache empty; the date cache unset. Total.
 pub fn file_kinds_new() -> FileKinds {
     var p = List[str]()
     var t = List[int]()
+    var hp = List[str]()
+    var hs = List[int]()
+    var hm = List[int]()
+    var hc = List[int]()
+    var hk = List[int]()
+    var ht = List[str]()
+    var hh = List[str]()
     var i: int = 0
     while i < file_kinds_slots() {
         (mut p).push("")
         (mut t).push(0)
+        (mut hp).push("")
+        (mut hs).push(-1)
+        (mut hm).push(-1)
+        (mut hc).push(-1)
+        (mut hk).push(-1)
+        (mut ht).push("")
+        (mut hh).push("")
         i = i + 1
     }
-    FileKinds { paths: p, seen: t }
+    FileKinds {
+        paths: p,
+        seen: t,
+        hpath: hp,
+        hsize: hs,
+        hmtime: hm,
+        hsecs: hc,
+        hkeep: hk,
+        htoken: ht,
+        hhead: hh,
+        date_secs: -1,
+        date_str: "",
+    }
+}
+
+/// The IMF-fixdate for `secs`, from the table's one-second memo when
+/// the second is the one it holds and built (`http_date`, one
+/// interpolation) otherwise. ws28: every response asked `now_date()`,
+/// a fresh date string per request for a value that changes once a
+/// second. Total.
+pub fn date_str(mut ft: FileKinds, secs: int) -> str {
+    if ft.date_secs == secs {
+        return ft.date_str
+    }
+    let d = http_date(secs)
+    ft.date_secs = secs
+    ft.date_str = d
+    d
+}
+
+/// The response head cached for `path` in its slot, when it was built
+/// for EXACTLY this request's answer — this size and mtime (the
+/// `fs_fstat` the caller just took), this second (the Date), this
+/// Connection token and this Server token — and "" otherwise. A memo
+/// of a pure function of those inputs, never a window: a byte the
+/// client sees is never older than this request's own stat and clock
+/// (ws28; the CHANGELOG entry counts what it removes — the whole head
+/// build, nine chained interpolations and two dates and an ETag per
+/// request). A slot collision is a miss, and a miss builds the head
+/// the way it always was. Total.
+pub fn head_warm(
+    ft: FileKinds,
+    path: str,
+    size: int,
+    mtime_ms: int,
+    keep: bool,
+    secs: int,
+    token: str,
+) -> str {
+    let s = kind_slot(path)
+    let k = if keep { 1 } else { 0 }
+    if ft.hsecs[s] == secs &&
+        ft.hsize[s] == size &&
+        ft.hmtime[s] == mtime_ms &&
+        ft.hkeep[s] == k &&
+        ft.hpath[s] == path &&
+        ft.htoken[s] == token {
+        return ft.hhead[s]
+    }
+    ""
+}
+
+/// Remember `head` as the response head for `path` under the inputs
+/// it was built from (see `head_warm`). Total.
+pub fn head_remember(
+    mut ft: FileKinds,
+    path: str,
+    size: int,
+    mtime_ms: int,
+    keep: bool,
+    secs: int,
+    token: str,
+    head: str,
+) {
+    let s = kind_slot(path)
+    ft.hpath[s] = path
+    ft.hsize[s] = size
+    ft.hmtime[s] = mtime_ms
+    ft.hsecs[s] = secs
+    ft.hkeep[s] = if keep { 1 } else { 0 }
+    ft.htoken[s] = token
+    ft.hhead[s] = head
 }
 
 /// The slot a path hashes to: a byte fold (the multiply-by-31 shape),
@@ -1428,6 +1594,7 @@ fn handle_request(
             local_port,
             mut acc,
             mut chg,
+            mut ft,
         )
     }
 
@@ -1477,6 +1644,7 @@ fn handle_request(
                 local_port,
                 mut acc,
                 mut chg,
+                mut ft,
             )
         }
     }
@@ -2182,8 +2350,22 @@ struct HeadCut {
 }
 
 fn head_cut(buf: str) -> HeadCut {
+    // ws28: an empty buffer holds no head (the loop asks every
+    // connection every pass; a search builds a searcher first), and
+    // a bare LF-LF can only be the marker when it lies BEFORE the
+    // CRLFCRLF — a hit before it lies wholly before it (the byte at
+    // m1 is CR, so no LF-LF straddles it) — so it is searched for
+    // in those bytes alone
+    if buf.is_empty() {
+        return HeadCut { ready: false, marker: -1, mlen: 0 }
+    }
     let m1 = buf.find("\r\n\r\n") else -1
-    let m2 = buf.find("\n\n") else -1
+    var m2: int = -1
+    if m1 >= 0 {
+        m2 = buf[0..m1].find("\n\n") else -1
+    } else {
+        m2 = buf.find("\n\n") else -1
+    }
     if m1 >= 0 && (m2 < 0 || m1 <= m2) {
         return HeadCut { ready: true, marker: m1, mlen: 4 }
     }
@@ -2338,13 +2520,15 @@ pub fn conn_step(
     mut rs: resolver.Resolver,
     mut ft: FileKinds,
 ) -> ConnStep {
-    var cn = conn_mod_plain(conn)
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
         return step_serve(conn, c, opts, limits, local_port, buf, pre, served, mut rs, mut ft)
     }
     if buf.len > limits.max_header_total {
+        // ws28: the conn seam is built in the arms that write through
+        // it (`tls.no_sess()` is six list headers), not on every step
+        var cn = conn_mod_plain(conn)
         send_err(mut cn, 400, true, opts.token)
         var acc4 = obs.access_new()
         acc4.request = raw_line(buf)
@@ -2363,6 +2547,7 @@ pub fn conn_step(
             return step_out(false, false, buf, served, false, obs.access_new())
         },
         utf8 => {
+            var cn = conn_mod_plain(conn)
             send_err(mut cn, 400, false, opts.token)
             var acc5 = obs.access_new()
             acc5.request = raw_line(buf)
@@ -2377,7 +2562,14 @@ pub fn conn_step(
     if piece.is_empty() {
         return step_out(false, true, buf, served, false, obs.access_new())
     }
-    buf = "{buf}{piece}"
+    // ws28: with an empty carry the read IS the buffer — the
+    // interpolation copied every request head twice (into a String,
+    // then into the arena) to append it to nothing
+    if buf.is_empty() {
+        buf = piece
+    } else {
+        buf = "{buf}{piece}"
+    }
     let cut = head_cut(buf)
     if cut.ready {
         return step_serve(conn, c, opts, limits, local_port, buf, cut, served, mut rs, mut ft)

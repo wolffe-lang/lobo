@@ -1,0 +1,23 @@
+//! check: run(exit=0, stdout="epoch=Thu, 01 Jan 1970 00:00:00 GMT\ny2k=Sat, 01 Jan 2000 00:00:00 GMT\nleap=Mon, 29 Feb 2016 23:59:59 GMT\nlate=Wed, 10 Sep 2025 21:05:07 GMT\nhex0=0\nhexff=ff\nhex1024=400\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws28: `http_date` pads through a digit-table VIEW now (`pad2` was
+//! four interpolations per date); the bytes must be the IMF-fixdate
+//! they always were — the epoch, a century boundary, a leap day's last
+//! second, and a recent instant whose fields are all two digits. The
+//! `to_hex` shape the ETag is built from rides along.
+
+use serve
+
+fn main() -> int {
+    print("epoch={serve.http_date(0)}")
+    print("y2k={serve.http_date(946684800)}")
+    print("leap={serve.http_date(1456790399)}")
+    print("late={serve.http_date(1757538307)}")
+    print("hex0={serve.to_hex(0)}")
+    print("hexff={serve.to_hex(255)}")
+    print("hex1024={serve.to_hex(1024)}")
+    0
+}
