@@ -128,7 +128,15 @@ fn pow2ceil_t(n: int) -> int {
 }
 
 fn main() -> !int {
-    let root = "ws13_cap"
+    // ws29 (lobo#2): the scratch lives under `target/`, the one
+    // directory this repo already treats as disposable and gitignores.
+    // It used to be the bare relative path `ws13_cap`, which landed in
+    // whatever the runner's cwd was — the REPO ROOT — and survived
+    // every corpus run as 128 KiB of untracked debris one `git add -A`
+    // from being committed. Removing it at the end was not enough: the
+    // remove is the last statement and every `?` above it leaves early.
+    // The gauntlet's census now fails RED on a leaving like this.
+    let root = "target/ws13_cap"
     fs_remove_dir_all(root) else |_| {}
     fs_create_dir_all(root)?
     fs_write_text("{root}/small.html", "<html>\nhi\n</html>\n")?
@@ -139,7 +147,7 @@ fn main() -> !int {
         i = i + 1
     }
     fs_write_text("{root}/big.bin", big)?
-    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws13_cap; }}\n}}\n"
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root target/ws13_cap; }}\n}}\n"
     let c = config.parse_str(src, "t.conf")
     let pipe = serve.open_self_pipe()?
     let base = live_region_bytes()

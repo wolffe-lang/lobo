@@ -128,7 +128,9 @@ fn run_server(d: str, conf: str, hp: int, ep: str, req: str) -> (str, str) ! {io
 }
 
 fn main() -> !int {
-    let d = "ws13_cap_e2e"
+    // ws29 (lobo#2): under `target/`, not the repo root — the sibling
+    // half of budget_cap.lu's fix; see the note there
+    let d = "target/ws13_cap_e2e"
     fs_remove_dir_all(d) else |_| {}
     fs_create_dir_all("{d}/w")?
     // exactly 18 bytes
