@@ -2032,7 +2032,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     span = 0
                 }
                 a2.req_ms = span
-                (mut pass_accs).push(AccRow { a: copy a2 })
+                // ws28: the pass record is a deep copy of the record
+                // (its two header lists); with no access output
+                // configured nothing renders it, so nothing copies it
+                if !asinks.is_empty() {
+                    (mut pass_accs).push(AccRow { a: copy a2 })
+                }
                 new_start = now
                 // ws10: the budget observability — a refusal is a LOUD
                 // error event (the ws09 seam) and the generation's
