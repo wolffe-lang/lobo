@@ -395,6 +395,90 @@ same on both sides of the bar.
 - nginx was COUNTED and not profiled; its user-space share is ws22's
   macOS reading (~3%), not a linux measurement.
 
+## ws28's addendum — the strings on the serving path, counted, and the head taken out of the request (2026-09-10)
+
+ws27 left the linux keepalive cell with the count settled and a
+third of the request in user space, most of it the runtime
+materializing strings. ws28 counted those strings by source line —
+the CHANGELOG's ws28 entry carries the predicted table, sixteen rows,
+one per operation, with arena allocations, libc calls and bytes
+beside each — and then took out the rows a program can. Two
+instruments, one new:
+
+- **`tools/lobo-strings`** (the BYTES leg): the ambient arena never
+  frees (wolf-lang#191), so a serving hand's RSS growth over a drive
+  ÷ the requests it completed IS what one request materializes and
+  keeps — on either host, on any VM class, a count and not a sample.
+  One process, the parity file, `ab -k -n 20000 -c 8` after a
+  2,000-request warm-up, `LOBO_REF` for a second tree, nginx for the
+  contrast.
+- `tools/lobo-profile … keepalive` on macOS (`sample`, the main
+  thread), read as INCLUSIVE counts per function (every stack line
+  naming the function, summed) rather than the tool's top-of-stack
+  table, so a runtime entry's whole cost — the `String` growth, the
+  arena bump, the frees under it — lands on one row.
+
+### Bytes per request, counted (macOS arm64, the count is host-independent)
+
+| tree | RSS before | RSS after (20,000 requests) | **bytes retained per request** |
+|---|---|---|---|
+| pin (trunk c58b4f1) | 15,680 KiB | 139,488 KiB | **6,339** |
+| ws28 | 7,872 KiB | 56,896 KiB | **2,510** (before the histogram row below; re-read after it in the CHANGELOG) |
+| nginx 1.30.4 | 2,320 KiB | 2,320 KiB | **0** |
+
+The prediction was ~5.3 KB before and ~0.4 KB after. Before: the
+16-byte rounding and the list buffers the table under-counted (a
+`List[str]` header is 48 bytes and its first buffer 128) make up the
+difference. After: the prediction missed by 2 KB, and the miss is
+LISTS, not strings — every string row the table named is gone (the
+profile below says so), and what remains is list headers and
+eight-slot buffers: `tls.no_sess()`'s six (the conn seam the request
+writes through), the parser's four, the access record's two,
+`fs_fstat`'s `List[int]`, the route's three, the loop's per-pass
+lists, the metrics histogram's eleven-element bucket ladder built
+per observation (found by this count, removed in the same sprint),
+and the read's 117-byte arena copy.
+
+### One hand, keepalive, macOS `sample` — before and after (INDICATIVE: load 3.3 before, 5.4 after; proportions, not rates)
+
+Main thread, one hand under four `ab -k -c 8`, an 8 s window at 1 ms:
+6,804 samples at trunk (58,771 req/s under the drive), 6,766 at ws28
+(71,908 req/s under a heavier load — the rate is not the number here,
+the shares are):
+
+| inclusive, main thread | trunk c58b4f1 | ws28 | what it is |
+|---|---|---|---|
+| `open(2)` | 2,245 (33.0%) | 3,140 (46.4%) | the file, APFS — the same per request, a larger share of a shorter one |
+| `writev` | 878 (12.9%) | 1,166 (17.2%) | the response |
+| `recvfrom` | 433 (6.4%) | 587 (8.7%) | the request |
+| `read` (the file) + `fstat` + `close` + `poll` | ~805 (11.8%) | ~1,033 (15.3%) | the file's read and stat, the pass's wait |
+| **in a syscall** | **~4,361 (64.1%)** | **~5,926 (87.6%)** | |
+| **user space** | **~2,443 (35.9%)** | **~840 (12.4%)** | |
+| `__wolf_rt_strbuf_str` | 669 (9.8%) | 45 (0.7%) | interpolation segments (the `String` growing: `reserve` 511, `finish_grow` 482, `realloc` 319 under it) |
+| `__wolf_rt_strbuf_finish` + `_new` + `_i64` | 658 (9.7%) | <5 | the arena copy of every interpolation, the box, the int holes |
+| `__wolf_rt_str_case` (`lower()`) | 116 (1.7%) | 0 | eight per request → none on an ASCII request |
+| `__wolf_rt_str_find` + `StrSearcher::new` | 103 + 64 | 45 + 20 | `head_cut`'s searches, halved |
+| `__wolf_rt_list_new` + `list_push` | 162 + 87 (3.7%) | 92 + 69 (2.4%) | the lists that remain |
+| `ambient_alloc` (inclusive: the mutex) | 252 (3.7%) | 79 (1.2%) | arena bumps |
+| `memmove` + `xzm_free` + `malloc` family, leaves | ~1,100 (16%) | ~170 (2.5%) | the copies and the `String` frees |
+| **the string runtime** (`strbuf_*` + `str_case` + `str_find` + `list_*`) | **~1,795 (26.4%)** | **~251 (3.7%)** | |
+| `serve.hline` / `http_date` / `to_hex` | 375 / 355 / 248 | 0 / 0 / 0 | the head's builders — memoized |
+| `http.parse_request` | 163 | 92 | names interned, tokens folded |
+| `serve.conn_step` less `net_read` | 54 | 7 | the read adopted, the seam lazy |
+| `http.normalize_path` + `percent_decode` | 79 + 41 | 15 + <5 | the views |
+| `http.route` + `join_path` | 32 + 30 | ~10 + 63 | no trace; the fs path's join stays |
+| `serve.is_file_warm` + `head_warm` + `head_cut` | 30 + — + — | 52 + 32 + 25 | the tables and the cut — what the memo costs |
+| `tls.no_sess` | 59 | 42 | once per request now, not twice |
+
+Read: on this host a keepalive request's user space fell from ~36%
+of the thread to ~12%, and the string runtime's share from ~26% to
+under 4%. What is left in user space is the runtime's list headers,
+the read's copy, and lobo's own frames (the parser, the tables, the
+loop — ~4%). The kernel's share is the same work it always was —
+`open`, `writev`, `recvfrom`, the file's read and stat — now most of
+the request. The linux profile and the two-tree parity on ONE VM are
+the CHANGELOG entry's measured section and the PARITY ledger.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
