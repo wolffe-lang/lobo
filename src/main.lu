@@ -31,11 +31,14 @@
 //! is the control channel's, or nothing (the language has no
 //! platform query, so the sentence is documented, not detected).
 //!
-//! Serve stays SPAWN-FREE (D7, ws04's shape): ONE poll loop
+//! The serving LOOP stays spawn-free (D7, ws04's shape): ONE poll loop
 //! multiplexes the http listener, the control channel, the signal
-//! queue, and every open connection, each stepped a slice at a time
-//! under a short deadline (serve.conn_step) so no single connection
-//! blocks the loop. ws16 (D73): with `worker_processes N` (N >= 2)
+//! forwarder's pipe, and every open connection, each stepped a slice
+//! at a time under a short deadline (serve.conn_step) so no single
+//! connection blocks the loop. Since ws29 there is exactly ONE proc
+//! beside it — `sig_forwarder`, parked in `os_signal_wait` for the
+//! process's life, holding two ints and a socket and touching no
+//! server state — which is the whole of D7's amendment. ws16 (D73): with `worker_processes N` (N >= 2)
 //! that loop runs N times over, one os process each — a MASTER
 //! starts the hands through `os_spawn` and supervises them over
 //! per-worker control endpoints (`master_main` below); a hand is
@@ -43,19 +46,25 @@
 //! endpoint, every log line stamped `worker=N`, and a listener it
 //! RETRIES rather than dies for (the measured accept-distribution
 //! posture at this pin — docs/WORKERS.md). D7 is KEPT inside every
-//! process. Signals are polled by SELF-RAISE: a hand raises the
-//! UPGRADE meaning as a probe and waits once — the runtime's queue
-//! is FIFO, so a real pending SIGHUP/TERM/QUIT comes back BEFORE the
-//! probe and the probe bounds the wait (never a park on a signal
-//! that may not come) — on the wait budget's cadence since ws23, not
-//! every pass (a loaded hand's pass is one request; docs/PROFILE.md
-//! measured the per-pass poll at ~10% of a hand at eighteen hands). The clean parked-forwarder
-//! task ([os.signal.wait]'s intended shape) is blocked at this pin by
-//! an upstream release-tier bug — s43's cluster partition follows
-//! CALL edges only, so a task-entry shim can land in a different
-//! object than its spawner's `func.addr` and the LLVM tier refuses
-//! (filed; the corpus-shape witness is tools' probe record). The poll
-//! flips to the forwarder the sprint after the fix enters the pin.
+//! process. Signals arrive by FORWARDER (ws29, lobo#8): one proc parks
+//! in `os_signal_wait` and writes each meaning down a loopback
+//! self-pipe whose read end sits in the loop's own wait set, so a
+//! signal is READINESS like anything else and the loop pays nothing
+//! per pass for the ability to hear one. Through ws28 it was a
+//! SELF-RAISE poll instead — raise the UPGRADE meaning as a probe and
+//! wait once, the runtime queue being FIFO so a real pending
+//! SIGHUP/TERM/QUIT came back before the probe and the probe bounded
+//! the wait — correct, and four syscalls (`kill` + `getpid` +
+//! `rt_sigreturn` + the runtime's self-pipe `write`) every
+//! `sig_poll_ms`: ~0.12 per request at N=4, MEASURED at ws27. That
+//! shape was ws08's only option — [os.signal.wait]'s intended parked
+//! forwarder was refused by the release tier under wolf-lang#136
+//! (s43's cluster partition follows CALL edges only, so a task-entry
+//! shim could land outside its spawner's object) — and this header
+//! promised the flip "the sprint after the fix enters the pin". #136
+//! is closed, the pin is v0.2.9, and this is that sprint. The only
+//! self-raise left in lobo is the ONE that retires the forwarder at
+//! shutdown.
 //! That is what makes the DRAIN WATCHABLE (ws08): a per-generation live
 //! counter in the loop's own bookkeeping lets an operator see an old
 //! generation drain — via `lobo status` and log events — while a new one
@@ -124,7 +133,8 @@ fn read_command(conn: int) -> str {
 // LIVE generation (current + every still-draining old one), each
 // carrying its FROZEN model, its live-connection count, its state, and
 // the accounting a retirement reports. The counter is here, in the
-// poll loop's own bookkeeping — spawn-free, no concurrent tasks (D7 /
+// poll loop's own bookkeeping — the loop is spawn-free and the signal
+// forwarder beside it touches none of this (D7 /
 // ws04). The table is a local List[GenRow]: a List of an IMPORTED
 // struct is refused in the checked tier, but a List of a LOCAL struct
 // is fine, so the row type lives here and shell formats it one field at
@@ -1370,7 +1380,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
 
     // signal reception (wsm01, s114 in the pin): register interest in
     // RELOAD|TERMINATE|QUIT by MEANING, plus the probe bit (UPGRADE —
-    // the self-raise poll below). Where delivery is not wired (s114 is
+    // the forwarder's teardown, below). Where delivery is not wired (s114 is
     // Linux-full; non-Linux follows the task-layer port) the listen
     // answers `io` and the control channel stays the only trigger —
     // the NAMED platform gap, said out loud at startup.
@@ -1379,14 +1389,29 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     os_signal_listen(shell.sig_mask() + sprobe) else |_| {
         sig_on = false
     }
-    // ws23: when the self-raise poll last ran (unix ms). The poll is
-    // a real signal to self plus a wait on the runtime's queue — a
-    // cross-thread handoff — and it ran EVERY pass, which at eighteen
-    // hands on the keepalive shape was ~10% of a hand's time
-    // (docs/PROFILE.md: `os_signal_wait` 7.2% + `signal::raise` 3.0%)
-    // because a loaded hand's passes are one request long. Now it
-    // runs on the wait's own budget instead (`sig_poll_ms`).
-    var sig_polled: int = 0
+    // ws29 (lobo#8): THE FORWARDER, not a poll. A signal has no
+    // readiness handle in the language, so through ws28 this loop
+    // learned about one by SELF-RAISING the probe meaning and waiting
+    // once, every `sig_poll_ms` — four syscalls a probe, ~0.12 per
+    // request at N=4 (ws27's count table). `sig_forwarder` parks in
+    // `os_signal_wait` instead and writes the meaning down a loopback
+    // self-pipe, whose read end joins the wait set below: the loop
+    // asks nothing, pays nothing, and hears a signal at the wait's
+    // return instead of within a poll interval plus a pass. A host
+    // that cannot give us the pipe keeps signal reception OFF and says
+    // so — the control channel is then the only trigger, which is the
+    // same named gap the platform row above describes, never a fake.
+    var sig_r = -1
+    if sig_on {
+        let sp = serve.open_self_pipe() else |_| {
+            sig_on = false
+            (-1, -1)
+        }
+        if sig_on {
+            sig_r = sp.1
+            let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
+        }
+    }
     if sig_on {
         ev_log(
             mut elog,
@@ -1507,6 +1532,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         if have_ctrl {
             (mut wfds).push(cl)
         }
+        // ws29: the forwarder's read end — the readiness handle a
+        // signal did not have until this sprint (lobo#8)
+        if sig_on {
+            (mut wfds).push(sig_r)
+        }
         // ws18: EVERY hand's listeners join the wait set, every pass —
         // FREE-FOR-ALL, which is the posture ws17 measured (17,347
         // req/s) and could not ship. ws17 admitted a listener only
@@ -1532,7 +1562,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             }
             wi = wi + 1
         }
-        let wms = wait_budget(sig_on, parked)
+        let wms = wait_budget(parked)
         var ready = List[int]()
         if wfds.len > 0 {
             ready = net_wait(wfds, wms) else |_| {
@@ -1603,29 +1633,17 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             net_close(cc) else |_| {}
             cc = -1
         }
-        if sig_on && cc < 0 && now - sig_polled >= sig_poll_ms() {
-            // The self-raise poll: enqueue the probe meaning, then
-            // wait ONCE. The runtime queue is FIFO, so a real
-            // pending signal comes back before the probe and the
-            // probe bounds the wait — a spawn-free, non-blocking
-            // signal check (see the header note; flips to the
-            // parked forwarder when the upstream cluster fix
-            // lands). A failed raise skips the wait: without a
-            // probe in the queue the wait could park forever.
-            // ws23: ON A BUDGET, not every pass — `sig_poll_ms` is the
-            // wait's own floor, so an idle hand polls exactly as
-            // often as before and a loaded one stops paying a signal
-            // round-trip per request; an operator's signal is seen
-            // within one budget plus one pass either way.
-            sig_polled = now
-            var m = 0
-            os_signal_raise(sprobe) else |_| {
-                m = -1
-            }
-            if m == 0 {
-                m = os_signal_wait(shell.sig_mask() + sprobe) else |_| { sprobe }
-            }
-            if m > 0 && m != sprobe {
+        if sig_on && cc < 0 && ready_has(ready, sig_r) {
+            // ws29 (lobo#8): a signal ARRIVED — the forwarder wrote
+            // its meaning down the self-pipe and the wait above said
+            // the read end is ready. Nothing was asked and nothing
+            // was raised: this branch costs a `read` on the pass a
+            // signal actually reaches the process, and zero on every
+            // other pass. One line, one meaning; a short read leaves
+            // the rest for the next pass (level-triggered readiness).
+            let line = net_read(sig_r, 32) else |_| { "" }
+            let m = sig_meaning_of(line)
+            if m > 0 {
                 verb = shell.signal_verb(m)
             }
         }
@@ -2170,6 +2188,17 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         }
     }
 
+    // ws29 (lobo#8): retire the forwarder — ONE probe raise, the only
+    // self-raise left in lobo and the last four syscalls this process
+    // spends on signals. The root supervisor would kill it at process
+    // exit anyway ([conc.proc.root], measured); doing it here makes
+    // the teardown ordered rather than incidental, so the forwarder is
+    // gone before the log closes under it.
+    if sig_on {
+        os_signal_raise(sprobe) else |_| {}
+        net_close(sig_r) else |_| {}
+    }
+
     // shutdown: flush-and-close the log outputs FIRST (the ws09
     // flush-on-quit rule: the last request of a quit run is in the
     // log), then close connections, listeners, pid
@@ -2317,39 +2346,90 @@ fn ready_has(ready: List[int], fd: int) -> bool {
     false
 }
 
-/// ws23: how often a serving hand runs the self-raise signal poll, in
-/// milliseconds — `wait_budget`'s signal floor, so an idle hand's
-/// cadence is unchanged and a loaded hand (whose passes are one
-/// request long) polls once per budget instead of once per request.
-/// Signal latency is bounded by this plus one pass, as it was by the
-/// wait budget plus one pass before. Pure and total.
-fn sig_poll_ms() -> int {
-    25
+/// ws29 (lobo#8): THE SIGNAL FORWARDER. One proc, parked in
+/// `os_signal_wait` for the life of the process, that turns a signal
+/// into READINESS on a socket the poll loop already waits on — so the
+/// loop never asks whether a signal arrived and pays nothing per pass
+/// for the ability to notice one.
+///
+/// Until this sprint the loop asked by SELF-RAISE: raise the probe
+/// meaning, then wait once (the runtime queue is FIFO, so a real
+/// pending signal comes back before the probe and the probe bounds the
+/// wait). It was correct and it was not free — `kill` + `getpid` +
+/// `rt_sigreturn` + the runtime's self-pipe `write`, four syscalls
+/// every `sig_poll_ms`, MEASURED at ws27 as ~0.12 syscalls per request
+/// at N=4 (docs/PROFILE.md's count table; lobo#8). The clean shape was
+/// blocked at the ws08 pin by wolf-lang#136 — s43's cluster partition
+/// put a task-entry shim outside its spawner's object and the LLVM
+/// tier refused the address — and the header promised the flip the
+/// sprint after the fix entered the pin. #136 is closed and the pin is
+/// v0.2.9: this is that flip.
+///
+/// One line per meaning goes out the write end; the loop reads it off
+/// the read end in its ordinary readiness pass. The forwarder retires
+/// when it sees the PROBE meaning, which the loop raises exactly once
+/// on its way out — the only self-raise left in lobo, and it is a
+/// teardown, not a poll. A write that fails retires it too (the loop
+/// is gone).
+///
+/// D7 moves with it, and is still one sentence: the serving loop is
+/// spawn-free and this is the ONE proc beside it, which touches no
+/// server state — it holds two ints and a socket.
+fn sig_forwarder(w: int, mask: int, probe: int) -> int {
+    var run = true
+    while run {
+        let m = os_signal_wait(mask + probe) else |_| { probe }
+        if m == probe {
+            run = false
+        } else {
+            net_write(w, "{m}\n") else |_| {
+                run = false
+            }
+        }
+    }
+    0
+}
+
+/// ws29: the meaning on one forwarder line. The wire between
+/// `sig_forwarder` and the loop is its own and is private to this
+/// file: one decimal meaning per line, the same integers
+/// `shell.sig_mask()` names. A line that is not one of them answers 0
+/// and the loop ignores it — a short read across a pass boundary is
+/// the only way that happens, and the rest arrives next pass. Pure
+/// and total.
+fn sig_meaning_of(line: str) -> int {
+    let t = line.trim()
+    if t == "1" {
+        return 1
+    }
+    if t == "2" {
+        return 2
+    }
+    if t == "4" {
+        return 4
+    }
+    0
 }
 
 /// How long this pass's `net_wait` may block, in milliseconds.
 ///
-/// The floor is the SIGNAL POLL's, and it is the honest limit on how
-/// much of #127's win a server that must notice a SIGHUP can take:
-/// signals have no readiness handle in the language — the loop learns
-/// about one by raising a probe and waiting on the runtime's queue
-/// ([os.signal.wait], the self-raise poll in the header) — so while
-/// signal reception is armed the wait cannot outlast the latency an
-/// operator's `kill -HUP` may see. 25 ms is ws16's own number (the
-/// control listener's accept deadline), so signal latency IMPROVES:
-/// ws16 polled once per pass and a pass was three stacked accepts.
-/// With reception unavailable the control channel is the only trigger
-/// and the wait stretches to 250 ms.
+/// ws29: there is no signal floor any more. Through ws28 the floor was
+/// the SELF-RAISE POLL's 25 ms, and the comment here called it "the
+/// honest limit on how much of #127's win a server that must notice a
+/// SIGHUP can take", because signals had no readiness handle in the
+/// language and the loop learned about one by raising a probe and
+/// waiting on the runtime's queue. `sig_forwarder` gives them one: a
+/// signal is now a readable socket in the wait set, so an armed loop
+/// waits the SAME 250 ms an unarmed one does and notices a signal
+/// sooner than it used to — at the wait's return rather than within
+/// `sig_poll_ms` plus a pass.
 ///
 /// `busy` shortens it to 5 ms: a connection parked on a name needs the
 /// resolver ticked, and the resolver's sockets are not in the wait set
 /// (its own 1 ms reads are its clock). Pure and total.
-fn wait_budget(sig_on: bool, busy: bool) -> int {
+fn wait_budget(busy: bool) -> int {
     if busy {
         return 5
-    }
-    if sig_on {
-        return 25
     }
     250
 }
@@ -2865,6 +2945,22 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     os_signal_listen(shell.sig_mask() + sprobe) else |_| {
         sig_on = false
     }
+    // ws29 (lobo#8): the master takes its signals the same way a hand
+    // does — one parked forwarder, its self-pipe in the wait set. The
+    // master polled EVERY pass, so the flip retires a raise-and-wait
+    // round trip per supervision pass here too; the operator's
+    // `kill -HUP` lands on this process and fans out from it.
+    var sig_r = -1
+    if sig_on {
+        let sp = serve.open_self_pipe() else |_| {
+            sig_on = false
+            (-1, -1)
+        }
+        if sig_on {
+            sig_r = sp.1
+            let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
+        }
+    }
     if sig_on {
         ev_log(
             mut elog,
@@ -2929,14 +3025,17 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         var verb = ""
         var cc = -1
         var denied = false
+        var cready = List[int]()
         if have_ctrl {
             // ws17: the master waits on its ONE socket the same way a
             // hand waits on its set ([os.net.wait]); the supervision
             // pass below is this loop's timer work
-            var cready = List[int]()
             var cwf = List[int]()
             (mut cwf).push(cl)
-            cready = net_wait(cwf, wait_budget(sig_on, false)) else |_| {
+            if sig_on {
+                (mut cwf).push(sig_r)
+            }
+            cready = net_wait(cwf, wait_budget(false)) else |_| {
                 List[int]()
             }
             var got_ctrl = ready_has(cready, cl)
@@ -2963,15 +3062,12 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             net_close(cc) else |_| {}
             cc = -1
         }
-        if sig_on && cc < 0 {
-            var m = 0
-            os_signal_raise(sprobe) else |_| {
-                m = -1
-            }
-            if m == 0 {
-                m = os_signal_wait(shell.sig_mask() + sprobe) else |_| { sprobe }
-            }
-            if m > 0 && m != sprobe {
+        if sig_on && cc < 0 && ready_has(cready, sig_r) {
+            // ws29 (lobo#8): the forwarder's line, read only on the
+            // pass a signal actually arrived
+            let line = net_read(sig_r, 32) else |_| { "" }
+            let m = sig_meaning_of(line)
+            if m > 0 {
                 verb = shell.signal_verb(m)
             }
         }
@@ -3137,6 +3233,11 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             let _c = reap_worker(wslot[k], k + 1, "", mut elog)
         }
         k = k + 1
+    }
+    // ws29 (lobo#8): retire the forwarder before the log closes
+    if sig_on {
+        os_signal_raise(sprobe) else |_| {}
+        net_close(sig_r) else |_| {}
     }
     elog = reopen_elog(elog)
     if have_ctrl {

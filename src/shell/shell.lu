@@ -19,9 +19,16 @@
 //! reachable over it, `lobo control <verb>` is its CLI door, and an
 //! optional shared secret read from an operator-owned token file is
 //! its second auth arm beside the loopback bind. docs/CONTROL.md is
-//! the page; wolf has no unix-domain socket at this pin (measured;
-//! wolf-lang#227), which is why the listener is loopback TCP on
-//! every host and why the token arm exists at all.
+//! the page. ws29 (lobo#4): this paragraph was written at ws15, when
+//! wolf had no unix-domain socket on any host and every spelling
+//! answered a bare `io` (wolf-lang#227) — which is why it said the
+//! listener is loopback TCP everywhere. `[os.net.unix]` landed at the
+//! ws17 pin (s136) and there are TWO transports now: `unix:<path>`,
+//! nginx's own spelling and the RECOMMENDED default where the host
+//! has the family, because file permissions are a uid boundary and a
+//! loopback port is not; and loopback TCP, which keeps the token arm
+//! and is the fallback where the family is missing. This module's own
+//! `is_unix_addr`/`unix_path_of` below are that form.
 //!
 //! Design (contract §3 sketch): every trigger — a control command
 //! today, a real signal when #126 lands — flows through the SAME verb
@@ -1100,12 +1107,18 @@ pub fn sig_mask() -> int {
     7
 }
 
-/// The probe meaning (bit 8 — UPGRADE, SIGUSR2 on unix). The serve
-/// loop's spawn-free signal poll self-raises this bit each pass and
-/// waits once: the runtime queue is FIFO, so a real pending operator
-/// signal comes back first and the probe bounds the wait. NAMED
-/// residue: until the binary-swap sprint claims UPGRADE, an outside
-/// SIGUSR2 is indistinguishable from the probe and is ignored. Total.
+/// The probe meaning (bit 8 — UPGRADE, SIGUSR2 on unix). Through ws28
+/// the serve loop self-raised this bit on a cadence and waited once,
+/// the runtime queue being FIFO so a real pending operator signal came
+/// back first and the probe bounded the wait. ws29 (lobo#8) retired
+/// that poll for a parked forwarder, and the bit's remaining job is
+/// its TEARDOWN: the loop raises it exactly once on its way out and
+/// the forwarder, seeing it, retires. NAMED residue, unchanged: until
+/// the binary-swap sprint claims UPGRADE, an outside SIGUSR2 is
+/// indistinguishable from the probe and is ignored — an operator who
+/// sends one now retires a forwarder, and the loop is on its way out
+/// or will simply stop hearing signals; the control channel still
+/// reaches it. Total.
 pub fn sig_probe() -> int {
     8
 }

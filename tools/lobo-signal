@@ -261,8 +261,56 @@ else
     check "the blocks still differ with source normalized ($sdiff lines) — the doors are NOT one dispatch" 1
 fi
 
+# ws29 (lobo#8): THE FORWARDER'S OWN WITNESS. Every check above sends
+# its signal to a server the harness is also TALKING TO — `poll` opens
+# a control connection every 100 ms — so the loop's wait keeps
+# returning for reasons that are not the signal. This one does not: a
+# server with no connection held, no request in flight and nobody
+# polling it sits in the longest wait it has (250 ms since ws29, where
+# through ws28 the SELF-RAISE POLL floored it at 25). A signal reaches
+# such a loop ONLY because `sig_forwarder`'s self-pipe is in the wait
+# set. Drop the pipe from that set and this check is the one that
+# hangs: the untouched idle server would never notice the HUP at all.
+# ONE query, after a fixed interval — no polling, so nothing but the
+# signal can have woken it.
+hp4=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+ctp4=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+conf4="$scratch/idle.conf"
+mkdir -p "$scratch/I1" "$scratch/I2"
+render4() { # render4 <root>
+    printf 'pid %s/idle.pid;
+control 127.0.0.1:%s;
+http {
+  types { text/html html; }
+  server { listen 127.0.0.1:%s; root %s; }
+}
+' \
+        "$scratch" "$ctp4" "$hp4" "$1" > "$conf4"
+}
+render4 "$scratch/I1"
+"$LOBO" serve -p . -c "$conf4" 2> "$scratch/idle.log" &
+pid4=$!
+i=0
+while [ $i -lt 80 ] && ! "$LOBO" status -p . -c "$conf4" 2>/dev/null | grep -q "generation 1: current"; do
+    sleep 0.1
+    i=$((i + 1))
+done
+# nothing touches it from here until the signal
+render4 "$scratch/I2"
+sleep 1
+kill -HUP "$pid4"
+sleep 2
+if "$LOBO" status -p . -c "$conf4" 2>/dev/null | grep -q "generation 2: current"; then
+    check "an IDLE server — nothing held, nothing polling it, the loop in its longest wait — reloaded on a real SIGHUP: the forwarder's self-pipe is in the wait set (ws29, lobo#8)" 0
+else
+    say "idle status: $("$LOBO" status -p . -c "$conf4" 2>/dev/null | tr '\n' ' | ')" >&2
+    check "an idle server did not see a real SIGHUP — the forwarder is not wired into the wait set (ws29, lobo#8)" 1
+fi
+"$LOBO" -s stop -p . -c "$conf4" > /dev/null 2>&1 || kill -TERM "$pid4" 2>/dev/null || true
+wait "$pid4" 2>/dev/null || true
+
 if [ "$red" != 0 ]; then
     echo "lobo-signal: RED — $red of $total checks failed (logs under $scratch/)" >&2
     exit 1
 fi
-echo "lobo-signal: $total/$total checks green (a real SIGHUP drove the observable drain; and a control verb's event block is byte-identical to a signal's but for source=)"
+echo "lobo-signal: $total/$total checks green (a real SIGHUP drove the observable drain; a control verb's event block is byte-identical to a signal's but for source=; and an IDLE loop in its longest wait still heard one — ws29's forwarder)"
