@@ -192,8 +192,96 @@ sets and counts on the CI runner.
   are the kernel's and nginx pays them too) and lobo's user space
   (the runtime's string materialization, ws22's ~5 of 63 µs). The
   profile leg on the keepalive shape (`profile_shape=keepalive`,
-  dispatched in the same job) is what says which. MEASURED: (below,
-  when the count returns).
+  dispatched in the same job) is what says which. MEASURED (run
+  34504504973, the same VM as the pin's set, both shapes at N=4
+  c=32; the first cut of the tool printed a doubled total by counting
+  strace's own `total` row as a syscall — fixed, the per-syscall rows
+  were right): keepalive **lobo 7.41, nginx 6.14, +1.27** — `statx`
+  2.00 vs `fstat` 1.00 (the router's path stat is the +1.00, exactly
+  the prediction), `read` 1.02 vs `pread64` 1.00, `recvfrom`/`openat`/
+  `writev`/`close` 1.00 each on both, `poll` 0.15 vs `epoll_wait` 0.13
+  (the pass's wait serves ~7 requests on both — the loop shape is
+  nginx's), and the small change nginx has none of: the signal
+  self-raise probe (`kill` + `getpid` + `rt_sigreturn` + `write`, 0.03
+  each, 0.12 together — `sig_poll_ms` fires every ~33 requests at this
+  rate), `futex` 0.06 and `brk` 0.04 (the runtime's), the accept side
+  0.03. Close: **lobo 13.36, nginx 10.13, +3.22** — on top of the path
+  stat, `ioctl(FIONBIO)` 1.01 and `setsockopt(TCP_NODELAY)` 1.01 per
+  connection (the runtime's accept posture: std's `accept4` carries
+  only `SOCK_CLOEXEC`, then a separate non-blocking ioctl, then Nagle
+  off on every stream; nginx's `accept4(SOCK_NONBLOCK)` is one call
+  and it sets `TCP_NODELAY` only on a connection that goes keepalive,
+  so on this shape never), `poll` 1.28 (the pass's wait plus the
+  zero-budget probe before every accept after a burst's first, 0.28)
+  against nginx's `epoll_wait` 1.00 + `epoll_ctl` 1.13, and the herd's
+  residue at four hands — `accept4` 1.08 (0.08 lost races answering
+  EAGAIN), whose parks show as the reactor thread's `futex` 0.27,
+  `epoll_ctl` 0.14, `epoll_wait` 0.13 and the eventfd `write`/`read`
+  0.11 each: ~0.1 parks per connection, ~0.9 syscalls (wolf-lang#267,
+  lobo#5: the count at N=4 on linux). The prediction held: the
+  keepalive gap is NOT in the count — 7.41 against 6.14 is 1.21x in
+  calls where the cell reads 1.72x in req/s — and the profile leg
+  says where it is: one hand under `ab -k`, `perf` on the same VM,
+  **kernel 64.2%, lobo-release 22.0%, libc 13.5%** (the close shape at
+  ws25 read 76/14.5/9), `writev`'s transmit path 31% inclusive, and
+  the leaves under lobo's own dso are the runtime's string work —
+  `malloc`/`cfree`/`realloc`/`finish_grow` ~4.5%, `ambient_alloc`
+  1.8%, `__wolf_rt_strbuf_str` 1.4%, `StrSearcher`/`TwoWaySearcher`
+  1.7% (`str.find`), `to_lowercase` 0.5%, and lobo's frames
+  (`serve_request` 0.9%, `serve_main` 0.9%, `parse_request` 0.5%,
+  `conn_step`, `serve_file`, `http_date`, `hline`, `split_lines_strict`
+  ~0.4% each). A third of a keepalive request on linux is user space,
+  and most of that is the runtime materializing strings (wolf-lang#191's
+  seam) — the number the next lane on this cell starts from.
+
+- **The one that needs no new wolf surface, built: the warm kind
+  table.** Of the calls lobo makes that nginx does not, each is named
+  with what removes it: the router's path `statx` (+1.00 per request
+  on both shapes) goes with an `fs_open` that opens `O_NONBLOCK` (the
+  way nginx opens, so a fifo answers instead of parking the hand and
+  the classification moves to the `fstat` the handle already pays) —
+  a wolf surface, FILED; `ioctl(FIONBIO)` (+1.01 per connection) goes
+  with `accept4(SOCK_NONBLOCK)` in the runtime — no lobo surface, a
+  wolf_rt change, FILED; `setsockopt(TCP_NODELAY)` on every accept
+  (+1.01 per close-shape connection) goes with setting it lazily, the
+  way nginx does — a runtime posture (#254's default), FILED with the
+  count; the signal self-raise probe (+0.12) goes with a signal poll
+  that does not park — a wolf surface, FILED; the probe `poll` and the
+  herd's parks (+0.28, +0.9 per close connection) are wolf-lang#267's
+  and stop there. The path stat is the only one lobo can remove
+  alone, and it removes it by REMEMBERING: `serve.FileKinds`, a
+  256-slot direct-mapped table (a byte-fold hash, one compare, never
+  a scan) of the paths the router classified as regular files and
+  when, threaded beside the resolver through `conn_step` → `step_serve`
+  → `serve_request` → `handle_request` (one table per hand; one per
+  connection on the standalone `serve_conn` path), answering
+  `is_file_warm` from memory for ONE SECOND after a stat said yes and
+  from `fs_is_file` otherwise. Only the KIND is remembered — size and
+  mtime stay on `serve_file`'s `fs_fstat` on the handle it opens, so
+  Content-Length, Last-Modified and the ETag are never a second old;
+  negatives are never remembered (a file that appears is seen at once);
+  a collision is a miss and a miss is the stat the router always paid.
+  The exposure, named: a path swapped for a fifo with no writer inside
+  the second parks the hand on the open (the guard's whole reason;
+  nginx has none of it because of `O_NONBLOCK`, which is why the
+  surface is filed); a path swapped for a directory inside the second
+  is 404 from the handle's kind (the swap-under-us arm) instead of the
+  301 the router answers once the window expires; a deleted file is
+  404 from the open either way. Tests: `tests/serve/file_kinds.lu`
+  (the table's contract, both lanes: cold stat, warm after a delete,
+  expired after 1.1 s, a directory and a missing path answer no and
+  are not remembered, a file that appears is seen) and
+  `tests/serve/file_kinds_e2e.lu` (the real server: 200, the swap to
+  a directory inside the window is 404, a deletion is 404, past the
+  window the directory is 301). PREDICTED before the two-tree dispatch
+  (this tree ÷ the pin tree `9a24fde`, one VM, the same toolchain):
+  `statx` 2.00 → 1.00 per request on both shapes, every other count
+  unchanged; N=4 keepalive **+3.5%** [+1.5, +5.5] (one call of 7.41,
+  at ws25's ~3.5% per call on this host), N=4 close **+1.5%** [0,
+  +3] (one of 13.36, and the close shape is accept- and
+  teardown-bound), N=1 keepalive +3% [+1, +5], N=1 close +1.5% [0,
+  +3]; the ratio 1.718x → ~1.66x on the pin set's VM class, NOT MET
+  on both shapes still. MEASURED: (below, when the set returns).
 
 ## ws26 — 2026-09-09 — the quiet set (W8 MET on macOS; the load was the whole story)
 
