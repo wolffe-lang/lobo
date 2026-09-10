@@ -2,10 +2,14 @@
 target/
 *.o
 # Pinned toolchain binaries (wolf, lupin, libwolf_rt.a) — vendored
-# locally per wolf-toolchain.toml's ritual, never committed.
-.wolf-bin/
+# locally per wolf-toolchain.toml's ritual, never committed. NO
+# trailing slash (ws29): a lane's worktree stages these by SYMLINK
+# from the main checkout, and a trailing slash matches a directory
+# only — the symlink showed as untracked in every lane's `git status`
+# and would have tripped the census gate below.
+.wolf-bin
 # The pinned nginx binary the differential harness vendors — built
 # once per docs/DIFFERENTIAL.md (the D33-safe one-time action).
-tests/differential/bin/
+tests/differential/bin
 # Compiler object/interface cache (D7).
 .lu-cache/

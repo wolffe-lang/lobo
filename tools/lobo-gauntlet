@@ -16,9 +16,10 @@
 #                     docs/DIFFERENTIAL.md is part of entering this
 #                     repo — see CLAUDE.md)
 #   …  the witnesses, one tool each (proxy, control, log, …, dist)
-#   Z. census    — (ws25, lobo#1) nothing of this checkout's is still
-#                  running; a leak is red BY NAME before the exit trap
-#                  reaps it
+#   Z. census    — (ws25/ws29, lobo#1 + lobo#2) nothing of this
+#                  checkout's is still RUNNING and nothing of the
+#                  rig's is still IN THE TREE; either leak is red BY
+#                  NAME before the exit trap reaps the processes
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
@@ -205,9 +206,13 @@ if ! tools/lobo-dist; then
     exit 1
 fi
 
-step "census (ws25, lobo#1: nothing of this checkout's is still running — a step that left a process is RED here, by name; the exit trap reaps it after)"
+step "census (ws25/ws29, lobo#1 + lobo#2: nothing of this checkout's is still running AND nothing of the rig's is still in the tree — a step that left a process or a file is RED here, by name; the exit trap reaps the processes after)"
 if ! rig_census "at the gauntlet's end"; then
     echo "lobo-gauntlet: FAILED at census — a step left process(es) behind (lobo#1); see the names above" >&2
+    exit 1
+fi
+if ! rig_census_fs "at the gauntlet's end"; then
+    echo "lobo-gauntlet: FAILED at census — a step left file(s) in the tree (lobo#2); see the names above" >&2
     exit 1
 fi
 echo "nothing left behind"

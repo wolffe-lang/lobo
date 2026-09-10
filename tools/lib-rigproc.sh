@@ -213,6 +213,52 @@ rig_reap_own() { # at EXIT — whatever THIS run started and did not stop
     rig_reap "own, at exit"
 }
 
+# ------------------------------------------------------------------
+# ws29 (lobo#2): THE FILESYSTEM HALF of the same rule. ws18 closed the
+# PROCESS half — a run leaves no helpers behind and finds none — and
+# left this open in the place it is most visible: `tests/serve/
+# budget_cap.lu` wrote its document root as the bare relative path
+# `ws13_cap`, so it landed in whatever the runner's cwd was (the REPO
+# ROOT) and stayed there as 128 KiB of untracked debris after every
+# corpus run, one `git add -A` from being committed. Three lanes
+# stepped around it before it was filed.
+#
+# The scratch moved under `target/` (the fix), and this is the gate
+# that keeps the next one from being written. It is a DIFFERENCE, not
+# an absolute: an author's new, not-yet-added test file is untracked
+# too and redding on it would make a new file impossible to commit
+# under the gauntlet's own before-any-commit rule. So `rig_arm`
+# records the untracked set as the run BEGINS, and the census names
+# what appeared while the run was going — which is exactly and only
+# the rig's own leavings.
+rig_fs_baseline() { # the file this run's snapshot lives in
+    echo "${TMPDIR:-/tmp}/lobo-rigfs.$$"
+}
+
+rig_fs_untracked() { # the untracked paths, one per line ("" outside git)
+    command -v git > /dev/null 2>&1 || return 0
+    git rev-parse --is-inside-work-tree > /dev/null 2>&1 || return 0
+    git status --porcelain --untracked-files=normal 2> /dev/null |
+        sed -n 's/^?? //p' | LC_ALL=C sort
+}
+
+rig_fs_snapshot() { # at ARM — what was already untracked before we ran
+    rig_fs_untracked > "$(rig_fs_baseline)" 2> /dev/null || :
+}
+
+# rig_census_fs <moment> — the ASSERTION: print what this run left in
+# the tree, by name, and fail. It removes nothing; the caller decides.
+rig_census_fs() {
+    _b=$(rig_fs_baseline)
+    [ -f "$_b" ] || return 0
+    _n=$(rig_fs_untracked | LC_ALL=C comm -13 "$_b" - 2> /dev/null)
+    [ -n "$_n" ] || return 0
+    echo "rigproc: $1 — the run LEFT FILES in the tree (lobo#2):" >&2
+    echo "$_n" | sed 's/^/rigproc:   /' >&2
+    echo "rigproc:   a test writes its scratch under target/, and removes it; the repo root is not a scratch directory" >&2
+    return 1
+}
+
 # rig_census <moment> — the ASSERTION (ws25): print whatever of ours
 # is still running, by name, and fail. It kills nothing; the caller
 # decides (a gauntlet's last step reds, then its exit trap reaps).
@@ -230,6 +276,7 @@ rig_census() {
 # that killed the runs lobo#1 was filed about.
 rig_arm() { # rig_arm — reap now, and again on the way out
     rig_reap_stale
+    rig_fs_snapshot
     trap 'rig_reap_own' EXIT
     trap 'rig_reap_own; exit 130' INT
     trap 'rig_reap_own; exit 143' TERM
