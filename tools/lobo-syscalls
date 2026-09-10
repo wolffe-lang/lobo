@@ -1,0 +1,197 @@
+#!/bin/sh
+# lobo-syscalls — THE COUNT LEG (ws27): what one request costs the
+# kernel, on BOTH servers, at the bar's own cell. `strace -c` over the
+# serving processes for a whole drive, the calls column divided by the
+# requests the generators completed, lobo's table beside nginx's and
+# the difference named per syscall — so the sentence "nginx answers a
+# request with fewer syscalls than lobo" has a number in it and each
+# extra call has a name. NOT a gauntlet step and never a gate; a count
+# is a fact about the code, not the box, which is why it is the one
+# linux number a shared VM holds still (ws25: identical counts across
+# runs whose req/s spread 13%).
+#
+#   tools/lobo-syscalls [shape] [N] [seconds] [concurrency]
+#     shape        keepalive (default) or close — the bar's two shapes
+#     N            worker count, both servers (default: this box's cpus
+#                  — the gating cell's)
+#     seconds      ab -t per drive (default 8)
+#     concurrency  TOTAL connections over 4 generators (default 32)
+#
+# The tracer attaches BEFORE the drive starts and detaches AFTER it
+# ends, so every request the generators count was traced and the
+# division is exact; the price is that req/s under ptrace is not a
+# rate (several-fold slower) and is printed only so the table is never
+# read without knowing how it was taken. `tools/lobo-profile` is the
+# SHARE instrument (perf, a window, never traced); this is the COUNT
+# one. Linux only — strace is the counter; macOS's dtruss needs SIP
+# down and the tool SKIPS there by name (a skip is not a number).
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
+
+SHAPE="${1:-keepalive}"
+cores=$( (nproc 2>/dev/null || sysctl -n hw.ncpu) | head -1)
+N="${2:-$cores}"
+SECS="${3:-8}"
+CONC="${4:-32}"
+GENS=4
+PERGEN=$((CONC / GENS))
+case "$SHAPE" in
+keepalive) KA="-k" ;;
+close) KA="" ;;
+*) echo "lobo-syscalls: REFUSED — shape is keepalive or close, not $SHAPE" >&2; exit 1 ;;
+esac
+LOBO="${LOBO_THIS:-$(pwd)/target/lobo-release}"
+NGINX="$(pwd)/tests/differential/bin/nginx"
+[ -x "$LOBO" ] || { echo "lobo-syscalls: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+[ -x "$NGINX" ] || { echo "lobo-syscalls: REFUSED — pinned nginx missing at $NGINX (docs/DIFFERENTIAL.md)" >&2; exit 1; }
+command -v ab > /dev/null 2>&1 || { echo "lobo-syscalls: REFUSED — ab(1) is not on PATH" >&2; exit 1; }
+case "$(uname -s)" in
+Linux) ;;
+*) echo "lobo-syscalls: SKIPPED — strace(1) is linux's; no syscall counts on $(uname -s) (dtruss needs SIP down)"; exit 0 ;;
+esac
+command -v strace > /dev/null 2>&1 || { echo "lobo-syscalls: REFUSED — strace(1) is not on PATH (apt-get install strace)" >&2; exit 1; }
+SUDO=""
+[ "$(id -u)" = 0 ] || SUDO="sudo -n"
+
+scratch="$(pwd)/target/syscalls-$SHAPE"
+rm -rf "$scratch"
+mkdir -p "$scratch/www" "$scratch/logs"
+awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
+
+wait_port() { # wait_port <port> — up to ~8s
+    i=0
+    while [ $i -lt 80 ]; do
+        printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
+        "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null | grep -q "200 OK" && return 0
+        sleep 0.1
+        i=$((i + 1))
+    done
+    return 1
+}
+
+start_lobo() { # sets hp, mpid, lconf, pids (the serving processes)
+    hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    lconf="$scratch/lobo.conf"
+    printf 'worker_processes %s;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$N" "$scratch" "$cp" "$hp" "$scratch" > "$lconf"
+    "$LOBO" serve -p . -c "$lconf" 2>> "$scratch/logs/lobo.log" &
+    mpid=$!
+    wait_port "$hp" || { echo "lobo-syscalls: lobo ($N workers) never served" >&2; kill "$mpid"; return 1; }
+    sleep 1
+    # at `worker_processes 1` the master serves alone (docs/WORKERS.md);
+    # above it the hands do, and the master only supervises
+    if [ "$N" = 1 ]; then
+        pids="$mpid"
+    else
+        pids="$(pgrep -f -- "^$LOBO .*--worker [0-9]* --worker-control" | tr '\n' ' ')"
+    fi
+    [ -n "$pids" ] || pids="$mpid"
+}
+stop_lobo() {
+    "$LOBO" -s stop -p . -c "$lconf" > /dev/null 2>&1
+    wait "$mpid" 2>/dev/null
+}
+start_nginx() { # sets hp, npid, pids (the workers)
+    hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    mkdir -p "$scratch/nginx/logs"
+    printf 'daemon off;\nworker_processes %s;\npid nginx.pid;\nerror_log error.log;\nevents {\n}\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$N" "$hp" "$scratch" > "$scratch/nginx/nginx.conf"
+    "$NGINX" -p "$scratch/nginx" -c nginx.conf >> "$scratch/logs/nginx.out" 2>&1 &
+    npid=$!
+    wait_port "$hp" || { echo "lobo-syscalls: nginx ($N workers) never served" >&2; kill "$npid"; return 1; }
+    sleep 1
+    pids="$(pgrep -P "$npid" | tr '\n' ' ')"
+    [ -n "$pids" ] || pids="$npid"
+}
+stop_nginx() {
+    kill -QUIT "$npid" 2>/dev/null
+    wait "$npid" 2>/dev/null
+}
+
+# trace <label> — attach to $pids, drive $hp for SECS, detach; writes
+# $scratch/<label>.strace and sets reqs (completed, summed), rps
+trace() {
+    pargs=""
+    for p in $pids; do pargs="$pargs -p $p"; done
+    # shellcheck disable=SC2086
+    $SUDO strace -c -f $pargs -o "$scratch/$1.strace" 2> "$scratch/$1.strace.err" &
+    spid=$!
+    sleep 1
+    g=1
+    genpids=""
+    while [ $g -le $GENS ]; do
+        # shellcheck disable=SC2086
+        ab -q $KA -t "$SECS" -n 1000000 -c $PERGEN "http://127.0.0.1:$hp/index.html" > "$scratch/$1-ab-g$g.txt" 2>&1 &
+        genpids="$genpids $!"
+        g=$((g + 1))
+    done
+    wait $genpids
+    $SUDO kill -INT "$spid" 2>/dev/null
+    wait "$spid" 2>/dev/null
+    reqs=$(awk '/^Complete requests/ { s += $3 } END { print s + 0 }' "$scratch"/$1-ab-g*.txt)
+    rps=$(awk '/^Requests per second/ { s += $4 } END { printf "%.0f", s }' "$scratch"/$1-ab-g*.txt)
+    failed=$(awk '/^Failed requests/ { s += $3 } END { print s + 0 }' "$scratch"/$1-ab-g*.txt)
+    if [ ! -s "$scratch/$1.strace" ]; then
+        echo "lobo-syscalls: strace wrote nothing for $1:" >&2
+        cat "$scratch/$1.strace.err" >&2
+        return 1
+    fi
+    [ "$reqs" -gt 0 ] || { echo "lobo-syscalls: the drive completed no requests against $1" >&2; return 1; }
+    echo "lobo-syscalls: $1 — $reqs requests completed under the tracer ($rps req/s traced: not a rate), failed=$failed, pids:$pids"
+}
+
+# per_request <label> <reqs> — "name calls-per-request" lines from a
+# strace -c table (its columns: % time, seconds, usecs/call, calls,
+# [errors,] syscall — the name is the last field, calls the fourth)
+per_request() {
+    awk -v n="$2" '
+        /^[ 0-9.]+[0-9]+ +[a-z_0-9]+$/ && $1 != "total" && $NF != "syscall" {
+            printf "%s %.3f\n", $NF, $4 / n
+        }' "$scratch/$1.strace"
+}
+
+host="$(uname -sm)"
+echo "lobo-syscalls: $(date -u +%Y-%m-%dT%H:%MZ) host $host, $cores cpus, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); shape $SHAPE, N=$N, c=$CONC over $GENS generators (-c $PERGEN each), ab -t $SECS; lobo $("$LOBO" -v 2>&1 | head -1); nginx $("$NGINX" -v 2>&1 | head -1)"
+
+start_lobo || exit 1
+trace lobo || { stop_lobo; exit 1; }
+stop_lobo
+lreqs=$reqs
+start_nginx || exit 1
+trace nginx || { stop_nginx; exit 1; }
+stop_nginx
+nreqs=$reqs
+
+per_request lobo "$lreqs" > "$scratch/lobo.per"
+per_request nginx "$nreqs" > "$scratch/nginx.per"
+
+echo ""
+echo "=== syscalls per request · $SHAPE · N=$N c=$CONC · linux ($host) · lobo beside nginx"
+echo ""
+echo "| syscall | lobo | nginx | lobo − nginx |"
+echo "|---|---|---|---|"
+# the union, lobo's count first, sorted by the difference (what lobo
+# pays that nginx does not, on top), then the totals
+awk '
+    FNR == NR { l[$1] = $2; seen[$1] = 1; next }
+    { g[$1] = $2; seen[$1] = 1 }
+    END {
+        for (s in seen) {
+            a = (s in l) ? l[s] : 0; b = (s in g) ? g[s] : 0
+            printf "%.3f\t%s\t%.3f\t%.3f\n", a - b, s, a, b
+            ta += a; tb += b
+        }
+        printf "%.3f\t%s\t%.3f\t%.3f\n", ta - tb, "**calls per request**", ta, tb
+    }' "$scratch/lobo.per" "$scratch/nginx.per" | sort -t"$(printf '\t')" -k1,1gr -k2,2 |
+    awk -F'\t' '{ d = $1 + 0; sign = (d > 0) ? "+" : ""; printf "| `%s` | %.2f | %.2f | %s%.2f |\n", $2, $3, $4, sign, d }' |
+    sed 's/`\*\*calls per request\*\*`/**calls per request**/'
+echo ""
+echo "=== lobo — strace -c (raw, $lreqs requests)"
+cat "$scratch/lobo.strace"
+echo ""
+echo "=== nginx — strace -c (raw, $nreqs requests)"
+cat "$scratch/nginx.strace"
