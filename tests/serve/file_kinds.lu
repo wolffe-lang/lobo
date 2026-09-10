@@ -1,0 +1,65 @@
+//! check: run(exit=0, stdout="cold=yes\nwarm-after-delete=yes\nexpired=no\ndir=no\nmissing=no\nmissing-stays=no\nback=yes\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws27: the warm kind table. `serve.is_file_warm` answers the router's
+//! "is this a regular file" from memory for one second after a stat
+//! said yes, and from `fs_is_file` otherwise. The observable contract,
+//! pinned here: a cold path is stat'd (a file answers yes); a path
+//! classified inside the window answers yes WITHOUT a stat, so deleting
+//! the file under it does not flip the answer until the window expires
+//! (the exposure the CHANGELOG prices — `serve_file`'s open is what
+//! sees the deletion, and answers 404); a directory and a missing path
+//! answer no and are NOT remembered (a negative is re-asked every time,
+//! so a file that appears is seen at once). fs → native + checked
+//! (lupin has no fs). The scratch dir is cleared at the START.
+
+use serve
+
+fn main() -> !int {
+    let root = "ws27_fk"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all(root)?
+    fs_write_text("{root}/a.html", "<html>a</html>\n")?
+    fs_create_dir_all("{root}/d")?
+    var ft = serve.file_kinds_new()
+
+    // 1. cold: the stat answers
+    let cold = serve.is_file_warm(mut ft, "{root}/a.html")
+    print("cold={yn(cold)}")
+
+    // 2. warm: the table answers, even though the file is gone
+    fs_remove("{root}/a.html")?
+    let warm = serve.is_file_warm(mut ft, "{root}/a.html")
+    print("warm-after-delete={yn(warm)}")
+
+    // 3. expired: past the window the stat is asked again, and says no
+    time_sleep_ms(1100)
+    let expired = serve.is_file_warm(mut ft, "{root}/a.html")
+    print("expired={yn(expired)}")
+
+    // 4. a directory and a missing path are no, and not remembered
+    let dir = serve.is_file_warm(mut ft, "{root}/d")
+    print("dir={yn(dir)}")
+    let missing = serve.is_file_warm(mut ft, "{root}/b.html")
+    print("missing={yn(missing)}")
+    let missing2 = serve.is_file_warm(mut ft, "{root}/b.html")
+    print("missing-stays={yn(missing2)}")
+
+    // 5. a file that appears is seen at once (no negative memory)
+    fs_write_text("{root}/b.html", "<html>b</html>\n")?
+    let back = serve.is_file_warm(mut ft, "{root}/b.html")
+    print("back={yn(back)}")
+
+    fs_remove_dir_all(root) else |_| {}
+    0
+}
+
+fn yn(b: bool) -> str {
+    if b {
+        return "yes"
+    }
+    "no"
+}

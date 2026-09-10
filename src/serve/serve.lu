@@ -1240,6 +1240,93 @@ pub fn admin_err_len(token: str) -> int {
     err_len(503, false, token)
 }
 
+// ------------------------------------------------------------------
+// ws27: the warm kind table — the router's regular-file answer, kept
+// ------------------------------------------------------------------
+
+/// How long the router trusts a path's regular-file classification,
+/// in milliseconds. One second: long enough that a hot path is
+/// classified once per second per hand rather than once per request
+/// (at 60k req/s that is one `stat(2)` in sixty thousand), short
+/// enough that an operator's swap of a file for a fifo, a device or a
+/// directory is seen inside a second — the exposure the guard exists
+/// for, bounded rather than absent (the CHANGELOG's ws27 entry prices
+/// it; nginx bounds its own descriptor cache the same way with
+/// `open_file_cache_valid`, 60 s by default when the cache is on).
+fn file_kinds_valid_ms() -> int {
+    1000
+}
+
+/// Slots in the table: direct-mapped, one compare per lookup, never a
+/// scan (a scan over a full table would cost what the stat it saves
+/// costs). A collision is a miss, and a miss is the stat the router
+/// always paid — never a wrong answer.
+fn file_kinds_slots() -> int {
+    256
+}
+
+/// The table itself: parallel lists indexed by `kind_slot(path)` —
+/// the path a slot remembers and the unix-ms it was classified at.
+/// One per serving loop (main.lu's, beside its resolver), so a hand's
+/// memory is its own; one per keepalive connection on the standalone
+/// `serve_conn` path.
+pub struct FileKinds {
+    paths: List[str],
+    seen: List[int],
+}
+
+/// An empty table: every slot holds no path and the epoch. Total.
+pub fn file_kinds_new() -> FileKinds {
+    var p = List[str]()
+    var t = List[int]()
+    var i: int = 0
+    while i < file_kinds_slots() {
+        (mut p).push("")
+        (mut t).push(0)
+        i = i + 1
+    }
+    FileKinds { paths: p, seen: t }
+}
+
+/// The slot a path hashes to: a byte fold (the multiply-by-31 shape),
+/// bounded so it never overflows `int`. Total.
+fn kind_slot(path: str) -> int {
+    var h: int = 0
+    for b_raw in path.bytes() {
+        let b = b_raw as int
+        h = (h * 31 + b) % 16777216
+    }
+    h % file_kinds_slots()
+}
+
+/// Is `path` a regular file — answered from the table when it
+/// classified this path inside `file_kinds_valid_ms`, from `fs_is_file`
+/// (one `stat(2)` on the path) otherwise, and a positive answer is
+/// remembered. Only the KIND is remembered: size and mtime stay on the
+/// `fs_fstat` `serve_file` takes on the handle it opens, so nothing a
+/// client sees — Content-Length, Last-Modified, the ETag — is ever a
+/// second old; what the window buys is skipping the path walk the
+/// router paid before every open. Why the router stats at all: `fs_open`
+/// on a fifo with no writer parks the hand (nginx opens with
+/// `O_NONBLOCK` for exactly this reason and classifies with `fstat`
+/// after — a wolf `fs_open` mode this repo has filed upstream; with it
+/// the table and the stat both go). ws27 counted the stat at one of
+/// lobo's ~7.5 syscalls per keepalive request on linux, the one call
+/// nginx does not make on that shape (docs/PROFILE.md). Total.
+pub fn is_file_warm(mut ft: FileKinds, path: str) -> bool {
+    let s = kind_slot(path)
+    let now = time_unix_ms()
+    if ft.paths[s] == path && now - ft.seen[s] <= file_kinds_valid_ms() {
+        return true
+    }
+    if fs_is_file(path) {
+        ft.paths[s] = path
+        ft.seen[s] = now
+        return true
+    }
+    false
+}
+
 /// Execute a routing decision against the fs: directory redirect,
 /// index resolution, file serve, or the 403/404 nginx draws. Returns
 /// should_close. Rows: net `io`.
@@ -1254,6 +1341,7 @@ fn handle_request(
     challenge_dir: str,
     mut acc: obs.Access,
     mut chg: Charge,
+    mut ft: FileKinds,
 ) -> bool ! {closed, io} {
     // method: GET and HEAD serve; anything else is 405 (the CVE
     // corpus's POSTs are already rejected at parse when they smuggle)
@@ -1328,7 +1416,7 @@ fn handle_request(
     // answers kind, size and mtime at once, or an fstat on the fd
     // the read opens (wolf-lang#261, filed from ws23 with the
     // number: ~0.5 µs per path stat on this box).
-    if fs_is_file(d.fs_path) {
+    if is_file_warm(mut ft, d.fs_path) {
         return serve_file(
             mut cn,
             c,
@@ -1377,7 +1465,7 @@ fn handle_request(
     }
     for name in idxs {
         let cand = join_fs(d.fs_path, name)
-        if fs_is_file(cand) {
+        if is_file_warm(mut ft, cand) {
             return serve_file(
                 mut cn,
                 c,
@@ -1524,6 +1612,7 @@ pub fn serve_conn_cn(
 ) {
     var carry = ""
     var served: int = 0
+    var ft = file_kinds_new()
     loop {
         // between requests the idle budget is keepalive_timeout; the
         // first read of a request onward uses read_timeout. v0 arms
@@ -1711,6 +1800,7 @@ pub fn serve_conn_cn(
                 opts.challenge_dir,
                 mut acc0,
                 mut chg,
+                mut ft,
             ) else |_| {
                 conn.conn_close(mut cn)
                 return
@@ -1861,6 +1951,7 @@ pub fn serve_request(
     rest0: str,
     served: int,
     mut rs: resolver.Resolver,
+    mut ft: FileKinds,
 ) -> ReqOut {
     var cn = conn_mod_plain(conn)
     var acc = obs.access_new()
@@ -2060,6 +2151,7 @@ pub fn serve_request(
             opts.challenge_dir,
             mut acc,
             mut chg,
+            mut ft,
         ) else |_| {
             raised = true
             true
@@ -2185,11 +2277,12 @@ fn step_serve(
     cut: HeadCut,
     served: int,
     mut rs: resolver.Resolver,
+    mut ft: FileKinds,
 ) -> ConnStep {
     let head = buf[0..cut.marker]
     let rest = buf[cut.marker + cut.mlen..buf.len]
     net_deadline(conn, opts.read_timeout_ms) else |_| {}
-    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served, mut rs)
+    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served, mut rs, mut ft)
     if !ro.resolve.is_empty() {
         // ws13: parked — the WHOLE buffer rides back as the carry
         // (the head is unconsumed as far as the loop is concerned),
@@ -2243,12 +2336,13 @@ pub fn conn_step(
     served: int,
     poll_ms: int,
     mut rs: resolver.Resolver,
+    mut ft: FileKinds,
 ) -> ConnStep {
     var cn = conn_mod_plain(conn)
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, mut rs)
+        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, mut rs, mut ft)
     }
     if buf.len > limits.max_header_total {
         send_err(mut cn, 400, true, opts.token)
@@ -2286,7 +2380,7 @@ pub fn conn_step(
     buf = "{buf}{piece}"
     let cut = head_cut(buf)
     if cut.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, mut rs)
+        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, mut rs, mut ft)
     }
     step_out(true, false, buf, served, false, obs.access_new())
 }

@@ -103,7 +103,8 @@ fn drive(c: config.Conf, req: str, budget: int, pw: int, pr: int) -> serve.ReqOu
     let cut = req.find("\r\n\r\n") else req.len
     let head = req[0..cut]
     var rs = resolver.new()
-    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, mut rs)
+    var ft = serve.file_kinds_new()
+    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, mut rs, mut ft)
     net_close(conn) else |_| {}
     let reply = read_reply(cli)?
     net_close(cli) else |_| {}
