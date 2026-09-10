@@ -175,8 +175,96 @@ the CI runner's.
   unchanged on every row (nothing here touches a syscall; `brk`
   0.04 → ~0). The head bytes on the wire: identical, byte for byte —
   the differential harness is the guard. RSS growth over a 20k-request
-  drive at N=1: ~106 MB → ~8 MB. MEASURED: (below, per host, when
-  the sets return).
+  drive at N=1: ~106 MB → ~8 MB. MEASURED, the count first (host-
+  independent; `tools/lobo-strings`, one process, 20,000 keepalive
+  requests after a 2,000-request warm-up, RSS off `ps`): the pin
+  retains **6,373 bytes per request** on the keepalive shape and
+  12,934 on the close shape (the accept path's per-connection lists
+  on top); ws28 retains **2,315** and **8,779**; nginx 0 on both.
+  Before, the prediction (5.3 KB) under-read the list rows — a
+  `List[str]` header is 48 bytes rounded and its first buffer 128,
+  not the 40 and 0 the table carried — and the arena's 16-byte
+  rounding; after, it missed by 1.9 KB and the miss is LISTS, not
+  strings: every string row named above is gone (the profile says
+  so, below), and the remainder is the runtime's own per-call list
+  headers and eight-slot buffers — `tls.no_sess()`'s six (the seam
+  the response writes through), the parser's four, the record's two,
+  `fs_fstat`'s `List[int]`, the route's three, the loop's per-pass
+  lists (~150 B per request amortized), the read's 117-byte arena
+  copy — plus one the count FOUND: `metrics.hist_observe` built an
+  eleven-element bucket list per observation (2,510 → 2,315 once it
+  read its bounds by index; `tests/metrics/registry_shapes.lu` pins
+  the two ladders equal). The rows that remain are all the runtime's
+  (a wolf program cannot write a list without its header) and #191's
+  (retained for the process's life). MEASURED, the macOS profile
+  (INDICATIVE — load 3.3 before, 5.4 after; `sample`, one hand under
+  `ab -k`, the main thread's INCLUSIVE counts per function): the
+  string runtime — `strbuf_*` + `str_case` + `str_find` + `list_*` —
+  **26.4% → 3.7%** of the thread (1,795 → 251 of ~6,800 samples), user
+  space **36% → 12%**, `strbuf_str` 669 → 45, `strbuf_finish` 413 → 0,
+  `str_case` 116 → 0, `ambient_alloc` 252 → 79, `memmove` 336 → 68,
+  the `String` frees 425 → 55, `hline`/`http_date`/`to_hex` 375/355/
+  248 → 0, `parse_request` 163 → 92, `normalize_path` + `percent_decode`
+  120 → ~15; what the memo costs is `head_warm` 32 + `is_file_warm`
+  52 + `head_cut` 25; the drive under the profile 58,771 → 71,908
+  req/s (a heavier load on the second — the shares are the number,
+  not the rate; `docs/PROFILE.md`, ws28's addendum, has the table).
+  MEASURED, macOS two trees (INDICATIVE — refused on load 5.26 and on
+  the oracle's N=18 keepalive spread; the ledger carries it named
+  so): ws28 ÷ pin **N=1 keepalive 1.280x** [0.918, 1.300] (68,499 vs
+  53,528 — past the top of the +8% [4, 14] band, on the one cell the
+  profile was taken on; the band is this box's P/E-core swing on
+  every N=1 row), N=18 keepalive 1.038x [0.909, 1.054] and N=18 close
+  1.017x [0.973, 1.058] (the predicted shape: the hands are not
+  cpu-bound here, 8.5 cores for 100k req/s), N=1 close 0.956x [0.868,
+  1.096] (noise); fewer cores for the same req/s on every cell (4.54
+  vs 4.69, 8.46 vs 8.56, 0.70 vs 0.78). MEASURED, linux (the
+  result): run 34536710553 (`parity=true ref_tree=c58b4f1`, the
+  profile leg on the keepalive shape and the count leg in the same
+  job), a VALID set, load 1.72, on the runner's SLOWEST class (nginx
+  close 25.2k — the ws27 pin set's class): ws28 ÷ pin **N=4 keepalive
+  1.306x** [1.288, 1.322] (66,790 vs 51,044), **N=4 close 1.081x**
+  [1.074, 1.089] (21,920 vs 20,273), N=1 keepalive **1.551x** [1.534,
+  1.624] (29,307 vs 18,394), N=1 close 1.218x [1.190, 1.256]; the
+  count leg in the same job: keepalive **6.37** against nginx's 6.14
+  and close **12.38** against 10.13 — UNCHANGED (ws27 read 6.31 and
+  12.41; the difference is `poll` 0.17 vs 0.15), `brk` 0.04 → 0.01
+  as predicted (the arena growing at 2.3 KB per request instead of
+  6.4); the profile leg: one hand under `ab -k` at **31,047 req/s
+  against the pin's 18,625** in the perf window, the dso split
+  **kernel 74.4 / lobo 18.2 / libc 6.9** against 64.1 / 22.6 / 13.1,
+  `do_syscall_64` inclusive 68.9% against 55.2%, and the leaves that
+  named the string runtime gone from the top of the table (`malloc`
+  1.87 → under 0.4, `strbuf_str` 1.53 → 0, `to_lowercase` 0.40 → 0,
+  `ambient_alloc` 1.71 → 0.85, `TwoWaySearcher` 1.10 → 0.67, `cfree`/
+  `realloc`/`reserve`/`finish_grow` ~2.7 → under 0.4 together), the
+  memo's own cost in their place (`head_warm` 0.70, `is_file_warm`
+  0.67, `lower_token` 0.40). THE PREDICTION WAS WRONG BY A FACTOR OF
+  TWO TO FOUR ON EVERY CELL, in the direction of the change: +30.6%
+  against +7% [3, 12] on the gating keepalive cell, +55.1% against
+  +8% [4, 14] at N=1, +8.1% and +21.8% against +3% [0, 6] on close.
+  What it priced was the ~13% of a request that ws27's `perf` LEAVES
+  summed under the string runtime's names; what it did not price is
+  what a leaf table cannot show — ~110 arena bumps behind a mutex,
+  ~245 libc calls and 6.4 KB of copies per request, retained forever,
+  paid in cache lines and in the kernel's own fault path (`clear_page_
+  erms`, `do_anonymous_page`, the `brk`) under kernel symbols the
+  leaf count filed as the kernel's. The count that would have priced
+  it right was the BYTES count, which this sprint built after the
+  prediction was written; the next lane starts from it. The bar on
+  this class: nginx ÷ ws28 **close 1.161x** [1.134, 1.168], **keepalive
+  1.286x** [1.281, 1.298] — NOT MET on both shapes, the keepalive cell
+  moved **1.687x → 1.286x** on one VM (the largest single move this
+  ledger has recorded since the gathered write) and the close cell
+  1.247x → 1.161x. W8's linux standing after ws28: NOT MET, close
+  ~1.16x and keepalive ~1.29x on the slow class; macOS: ws26's MET,
+  indicative at ws28. What is left on the keepalive cell, read from
+  the ws28 profile: the kernel's transmit path (`writev` 39.5%
+  inclusive, which nginx pays too), the file's open/stat/read/close,
+  and ~18% lobo-release of which the runtime's remaining lists and
+  `ambient_alloc` are ~2%, the searchers ~1.5%, and lobo's own frames
+  (`serve_main`, `serve_request`, `parse_request`, the two tables)
+  ~5%.
 
 - **Item 2 — the ones lobo can stop paying without a new surface,
   built.** For each row above, does `std.strbuf`, a byte view or a
