@@ -476,8 +476,42 @@ under 4%. What is left in user space is the runtime's list headers,
 the read's copy, and lobo's own frames (the parser, the tables, the
 loop — ~4%). The kernel's share is the same work it always was —
 `open`, `writev`, `recvfrom`, the file's read and stat — now most of
-the request. The linux profile and the two-tree parity on ONE VM are
-the CHANGELOG entry's measured section and the PARITY ledger.
+the request.
+
+### One hand, keepalive, linux `perf` — both trees, one VM (run 34536710553)
+
+The same instrument as ws27's keepalive profile, both trees in one
+job (`ws28` = 8a14d2a, `pin` = c58b4f1, wolf 0.2.9), `perf record -F
+997 -g` on ONE hand under four `ab -k -c 8` for eight seconds, load
+1.3–1.8:
+
+| | pin | ws28 |
+|---|---|---|
+| req/s under the perf drive | 18,625 | **31,047** |
+| kernel / lobo-release / libc (by dso) | 64.1% / 22.6% / 13.1% | **74.4% / 18.2% / 6.9%** |
+| in a syscall, inclusive (`do_syscall_64`) | 55.2% | 68.9% |
+| `writev` inclusive — the transmit path | 32.2% | 39.5% |
+| `malloc` / `cfree` / `realloc` / `reserve` / `finish_grow` (leaves) | 1.87 / 0.75 / 0.69 / 0.63 / 0.58 | all under 0.4% |
+| `wolf_rt::str::ambient_alloc` / `__wolf_rt_strbuf_str` / `strbuf_finish` | 1.71 / 1.53 / 0.48 | 0.85 / — / — |
+| `to_lowercase` | 0.40 | — |
+| `TwoWaySearcher::next` + `StrSearcher::new` (`find`) | 1.10 + 0.79 | 0.67 + 0.77 |
+| `__wolf_rt_list_new` | 0.48 | 0.41 |
+| `do_user_addr_fault` + `clear_page_erms` (the arena's fresh pages) | (ws27: 1.71 + 0.49) | 0.72 + 0.63 |
+| lobo's own leaves: `serve_main` / `serve_request` / `parse_request` / `serve_file` / `split_lines_strict` | 1.14 / 0.65 / 0.70 / 0.53 / 0.49 | 1.05 / 0.97 / 0.89 / 0.54 / 0.55 |
+| the memo's cost: `head_warm` / `is_file_warm` / `lower_token` | — / 0.43 / — | 0.70 / 0.67 / 0.40 |
+| syscalls per request (the count leg, N=4): keepalive / close | 6.31 / 12.41 (ws27) | **6.37 / 12.38** — unchanged; `brk` 0.04 → 0.01 |
+
+Read: with the strings out, a keepalive request on this host is
+three quarters kernel, and the user-space quarter is lobo's own
+frames (~5%), the runtime's list headers and arena bumps (~2%) and
+the searchers (~1.5%). The two-tree parity set in the same job
+(`docs/PARITY.md`) read the delta at +30.6% on the N=4 keepalive
+cell and +55.1% at N=1 — well past the +7% and +8% the CHANGELOG
+entry predicted from ws27's leaf shares, which is the lesson this
+page records: a leaf table sums what a function does in its own
+frame, and the cost of a retained allocation is paid elsewhere (the
+fault path, the cache), under names that read as the kernel's. The
+bytes count (`tools/lobo-strings`) is the number to predict from.
 
 ## What this does NOT say
 
