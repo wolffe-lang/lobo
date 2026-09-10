@@ -78,6 +78,142 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws29 — 2026-09-10 — the probe and the parity lane (the signal poll retired for a parked forwarder; the rig's filesystem half; two stale pages re-read)
+
+Three items, and one of them stops before it starts.
+
+- **Item 1 — lobo#8, the signal self-raise probe: FLIPPED, not
+  retired.** A serving hand raised a signal to ITSELF every 25 ms and
+  waited once, to learn whether an operator had sent one — `kill` +
+  `getpid` + `rt_sigreturn` + the runtime's self-pipe `write`, four
+  syscalls a probe, MEASURED at ws27 as ~0.12 per request at N=4 and
+  re-measured on trunk `9a4a905` at this sprint's open (0.04 keepalive
+  / 0.12 close, CI run 34539376264: the figure moves with the rate
+  because the cost is per unit TIME divided by requests). **Retiring it
+  outright was refused**: the probe is how the loop hears `kill -HUP`
+  at all, and a server that does not answer an operator's signal is
+  not nginx-compatible — the compat contract is sacred. So it flips to
+  the shape `src/main.lu`'s header has promised since ws08.
+  `sig_forwarder` parks ONE proc in `os_signal_wait` for the process's
+  life and writes each meaning down a loopback self-pipe whose READ END
+  joins the loop's ordinary wait set: a signal becomes READINESS, like
+  every other event, and the loop asks nothing and pays nothing per
+  pass. The blocker was wolf-lang#136 (s43's cluster partition follows
+  CALL edges only, so a task-entry shim could land outside its
+  spawner's object and the LLVM tier refused the address); #136 is
+  closed and the pin is v0.2.9, and the flip was PROBED on the release
+  tier before a line of lobo moved — a spawned proc parks with nothing
+  pending, forwards a real meaning, and the process still exits.
+  - **The only self-raise left in lobo is the ONE that retires the
+    forwarder at shutdown.** ([conc.proc.root] kills a parked proc at
+    process exit anyway — measured — but the explicit raise makes the
+    teardown ordered, so the forwarder is gone before the log closes
+    under it.)
+  - **`wait_budget`'s 25 ms signal floor is gone.** That floor was the
+    honest limit on how much of wolf-lang#127's win a server that must
+    notice a SIGHUP could take, and the function's own doc-comment said
+    so. An armed loop now waits the same 250 ms an unarmed one does.
+  - **Signal latency IMPROVES**, from within `sig_poll_ms` plus a pass
+    to the wait's own return.
+  - **D7 moves, and is still one sentence**: the serving LOOP is
+    spawn-free, and `sig_forwarder` is the one proc beside it — two
+    ints and a socket, touching no server state. The header, `docs/
+    ARCHITECTURE.md` and `docs/DRAIN.md` say it that way now.
+  - **The witness.** `tools/lobo-signal` goes 20 → 21 checks. The new
+    one is the forwarder's own: every other check signals a server the
+    harness is also talking to (`poll` opens a control connection every
+    100 ms), so the loop's wait keeps returning for reasons that are
+    not the signal. This one signals a server with nothing held,
+    nothing in flight and nobody polling it — a loop sitting in its
+    longest wait — and asks ONCE, after a fixed interval. Drop the
+    forwarder's pipe from the wait set and it is the check that hangs;
+    that negative control was run, and it does.
+  - The prediction for the count is in `docs/PROFILE.md`'s ws29
+    addendum, written before the run, row by row with its confidence
+    and its named risk (the forwarder is a real parked thread — a
+    per-PROCESS cost a per-request count cannot see).
+
+- **Item 2 — s149's two syscalls: NOT RUN, and why.** The contract
+  makes it conditional on s149's dev sha existing. s148 merged into
+  wolf-lang trunk at 23:02 on the day of this sprint and **s149 has no
+  branch, no PR and no commit**; there is no sha to take. The item
+  stops here, unstarted rather than half-done. `fs_open` with
+  `O_NONBLOCK` in the router (`statx` 2 → 1 per request) and the accept
+  posture (`ioctl` + `setsockopt` per connection) are still the two
+  biggest named rows in the count table, and the next lane with a dev
+  sha takes them the way ws24 took bd7caff.
+
+- **Item 3a — lobo#2, the rig's filesystem half.** `tests/serve/
+  budget_cap.lu` wrote its document root as the bare relative path
+  `ws13_cap`, so 128 KiB of it landed in whatever the runner's cwd was
+  — the REPO ROOT — and survived every corpus run as untracked debris
+  one `git add -A` from being committed. It DID call
+  `fs_remove_dir_all` at the end; that was never enough, because the
+  remove is the last statement and every `?` above it leaves early
+  (reproduced: `tools/lobo-corpus tests/serve/budget_cap.lu` left the
+  directory on a fully green run). The scratch moves under `target/`,
+  the one directory this repo already treats as disposable, in both
+  that file and `budget_cap_e2e.lu`.
+  - **And the gate, so the next one is caught rather than filed.** The
+    gauntlet's census step — ws25's process assertion, lobo#1's — grows
+    its filesystem half: `rig_census_fs` fails RED, by name, on a run
+    that left a file in the tree. It is a DIFFERENCE, not an absolute:
+    an author's new, not-yet-added test file is untracked too, and
+    redding on that would make a new file impossible to commit under
+    the gauntlet's own before-any-commit rule. So `rig_arm` records the
+    untracked set as a run BEGINS and the census names only what
+    appeared while it ran. Self-tested both ways.
+  - `.gitignore` loses two trailing slashes. `.wolf-bin/` and
+    `tests/differential/bin/` matched a directory only, and a lane
+    stages both by SYMLINK from the main checkout — so every lane's
+    worktree showed them as untracked, and they would have tripped the
+    new gate on the first run.
+
+- **Item 3b — lobo#4, the two stale pages: RE-READ, and mostly already
+  fixed.** The re-read found the issue's own two items closed on trunk:
+  `docs/ARCHITECTURE.md` was rewritten against the tree at `c1dad8c`
+  (no `[stub; wsNN]`, no "intended call direction once real", no
+  "honest edition: mostly stubs" survive anywhere), and `docs/
+  DRAIN.md`'s transport paragraph already says "TWO transports since
+  ws17" and carries its own note about superseding the ws15 text. What
+  the re-read DID find is that the stale sentences moved into code
+  headers nobody re-read with the pages:
+  - `src/shell/shell.lu`'s header still said "wolf has no unix-domain
+    socket at this pin (measured; wolf-lang#227), which is why the
+    listener is loopback TCP on every host" — contradicted six hundred
+    lines below by the module's own `is_unix_addr`/`unix_path_of` and
+    by `net_listen_unix` in `main.lu`. `[os.net.unix]` landed at the
+    ws17 pin and `unix:<path>` is the recommended default.
+  - `src/proxy/proxy.lu`'s header claimed the locked direction
+    `serve → proxy → {http, obs}`. lobo has never had the `obs` arrow
+    — proxy raises no log line of its own; it answers and its caller
+    logs. ARCHITECTURE.md's re-read says so and this header had not
+    been re-read with it. It now names the arrows the `use` lines have:
+    `{main, serve} → proxy → {config, http, resolver}`.
+  - ARCHITECTURE.md's own residue, found by re-reading it rather than
+    trusting the last re-read: it was pinned "at v0.1.0 / ws22" six
+    sprints back; `src/main.lu` is ~3,700 lines, not ~3,500; the test
+    section linked a `.docs/STYLE.md` that does not exist in the tree
+    and listed two rig sub-harnesses where there are five, omitting
+    `acmeca/`, `dnssrv/`, `rigback/`, `tests/config-corpus/` and
+    `tests/cve-corpus/`; and `PROFILE.md`, `REPLAY.md` and
+    `GETTING-STARTED.md` were in `docs/` but in no link table. All
+    fixed, and the three GENERATED pages are now labelled with their
+    generators so a reader knows not to hand-edit them.
+
+- **The toolchain, again, and it is a standing hazard.** The main
+  checkout's `.wolf-bin` held lupin **0.1.27** where `wolf-toolchain.
+  toml` pins **0.1.29**, so `lib-toolchain.sh` refused every tool in
+  this lane on identity drift — the same shape ws28 hit with the wolf
+  half. The pair was built as the pin's own notes say (a scratch
+  worktree of wolf-interp at the v0.1.29 tag, `cargo build --release
+  --bin lupin`, giving `lupin 0.1.29 (wolf-interp, reference
+  interpreter at pin e9a17cb)`) and staged into THIS worktree's own
+  `.wolf-bin` beside the 0.2.9 wolf pair, the std tree symlinked from
+  the main checkout (STD-REV `bd12ef5`, the pin's). `tools/lobo-stamp
+  --check` reads `+dev` on the channel, as a lane's build must. A lane
+  that takes the main checkout's staging on trust starts red.
+
 ## ws28 — 2026-09-10 — the string runtime (the strings on the serving path, counted; the ones lobo stops paying)
 
 The bar is `docs/PARITY.md` (ws22, unchanged; the ws23 refusal scope
