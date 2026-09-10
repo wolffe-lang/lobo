@@ -1639,10 +1639,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             // the read end is ready. Nothing was asked and nothing
             // was raised: this branch costs a `read` on the pass a
             // signal actually reaches the process, and zero on every
-            // other pass. One line, one meaning; a short read leaves
-            // the rest for the next pass (level-triggered readiness).
-            let line = net_read(sig_r, 32) else |_| { "" }
-            let m = sig_meaning_of(line)
+            // other pass. ONE BYTE, one meaning: a second signal that
+            // landed in the same gap stays in the socket, and
+            // level-triggered readiness brings the loop back for it.
+            let b = net_read(sig_r, 1) else |_| { "" }
+            let m = sig_meaning_of(b)
             if m > 0 {
                 verb = shell.signal_verb(m)
             }
@@ -2365,12 +2366,18 @@ fn ready_has(ready: List[int], fd: int) -> bool {
 /// sprint after the fix entered the pin. #136 is closed and the pin is
 /// v0.2.9: this is that flip.
 ///
-/// One line per meaning goes out the write end; the loop reads it off
-/// the read end in its ordinary readiness pass. The forwarder retires
-/// when it sees the PROBE meaning, which the loop raises exactly once
-/// on its way out — the only self-raise left in lobo, and it is a
-/// teardown, not a poll. A write that fails retires it too (the loop
-/// is gone).
+/// ONE BYTE per meaning goes out the write end — the meaning's decimal
+/// digit, no separator — and the loop reads exactly one byte per pass
+/// off the read end. One byte and not one line, deliberately: two
+/// operator signals can land between two passes, and readiness is
+/// level-triggered, so leaving the second byte in the socket keeps the
+/// read end ready and the next pass takes it. A line-at-a-time read
+/// would have swallowed both and acted on neither.
+///
+/// The forwarder retires when it sees the PROBE meaning, which the
+/// loop raises exactly once on its way out — the only self-raise left
+/// in lobo, and it is a teardown, not a poll. A write that fails
+/// retires it too (the loop is gone).
 ///
 /// D7 moves with it, and is still one sentence: the serving loop is
 /// spawn-free and this is the ONE proc beside it, which touches no
@@ -2382,7 +2389,7 @@ fn sig_forwarder(w: int, mask: int, probe: int) -> int {
         if m == probe {
             run = false
         } else {
-            net_write(w, "{m}\n") else |_| {
+            net_write(w, "{m}") else |_| {
                 run = false
             }
         }
@@ -2390,22 +2397,20 @@ fn sig_forwarder(w: int, mask: int, probe: int) -> int {
     0
 }
 
-/// ws29: the meaning on one forwarder line. The wire between
+/// ws29: the meaning in one forwarder byte. The wire between
 /// `sig_forwarder` and the loop is its own and is private to this
-/// file: one decimal meaning per line, the same integers
-/// `shell.sig_mask()` names. A line that is not one of them answers 0
-/// and the loop ignores it — a short read across a pass boundary is
-/// the only way that happens, and the rest arrives next pass. Pure
-/// and total.
-fn sig_meaning_of(line: str) -> int {
-    let t = line.trim()
-    if t == "1" {
+/// file: one decimal digit per meaning, the same integers
+/// `shell.sig_mask()` names. Anything else — an empty read, or the
+/// probe's own digit, which the forwarder consumes and never forwards
+/// — answers 0 and the loop ignores it. Pure and total.
+fn sig_meaning_of(b: str) -> int {
+    if b == "1" {
         return 1
     }
-    if t == "2" {
+    if b == "2" {
         return 2
     }
-    if t == "4" {
+    if b == "4" {
         return 4
     }
     0
@@ -3063,10 +3068,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             cc = -1
         }
         if sig_on && cc < 0 && ready_has(cready, sig_r) {
-            // ws29 (lobo#8): the forwarder's line, read only on the
+            // ws29 (lobo#8): the forwarder's byte, read only on the
             // pass a signal actually arrived
-            let line = net_read(sig_r, 32) else |_| { "" }
-            let m = sig_meaning_of(line)
+            let b = net_read(sig_r, 1) else |_| { "" }
+            let m = sig_meaning_of(b)
             if m > 0 {
                 verb = shell.signal_verb(m)
             }
