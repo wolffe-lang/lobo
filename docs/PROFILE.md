@@ -288,6 +288,104 @@ keepalive cell moved most. lobo's user space is under 15% of the
 process here, of which lobo's own code is under 1%: the ws22 reading
 holds on linux.
 
+## ws27's addendum — both servers counted, and the keepalive shape profiled (2026-09-10)
+
+Two instruments this sprint added, both on the CI runner (ubuntu-
+latest, 4 vcpus), one job (run 34504504973), lobo `9a24fde` at wolf
+0.2.9 (pin 4c60946), nginx 1.30.4, the parity file. The first is
+`tools/lobo-syscalls`: `strace -c -f` attached to EVERY serving
+process of one server before an `ab -t 8 -c 32` drive (four
+generators) and detached after it, calls ÷ the requests the
+generators completed, lobo then nginx, `worker_processes 4` both — so
+the number below is exact per request and the same on every VM class
+(ws25: counts held across runs whose req/s spread 13%). The second is
+`tools/lobo-profile` with its new shape argument: `perf record -F 997
+-g` on ONE hand under `ab -k` (the read/serve path alone; every prior
+profile in this file is the close shape).
+
+### The count, N=4 c=32, per request — the two shapes
+
+| syscall | lobo, keepalive | nginx, keepalive | lobo, close | nginx, close | what it is |
+|---|---|---|---|---|---|
+| `recvfrom` | 1.00 | 1.00 | 1.01 | 1.00 | the request; one read answers the whole head on both |
+| `statx` | **2.00** | — | **2.00** | — | lobo: the router's PATH stat (`fs_is_file`, the fifo guard) + `fs_fstat` on the handle |
+| `fstat` | — | **1.00** | — | **1.00** | nginx: on the fd it opened — no path stat, its open is `O_NONBLOCK` |
+| `openat` | 1.00 | 1.00 | 1.00 | 1.00 | the file, both |
+| `read` / `pread64` | 1.02 / — | — / 1.00 | 1.11 / — | — / 1.00 | the body; lobo's extra 0.02 / 0.11 is the reactor's eventfd (below) |
+| `writev` | 1.00 | 1.00 | 1.00 | 1.00 | the response, one gather each |
+| `close` | 1.00 | 1.00 | 2.01 | 2.00 | the file; on close, the socket too |
+| `poll` / `epoll_wait` | 0.15 / — | — / 0.13 | 1.28 / 0.13 | — / 1.00 | the pass's wait: ~7 requests per pass on BOTH on keepalive (the loop shape is nginx's); on close, one per connection plus lobo's zero-budget probe before every accept after a burst's first (0.28); lobo's `epoll_wait` is the reactor thread's |
+| `accept4` | 0.01 | 0.00 | **1.08** | 1.00 | the accept; lobo's 0.08 are lost races answering EAGAIN (#267) |
+| `ioctl` (FIONBIO) | 0.01 | — | **1.01** | — | the runtime's non-blocking posture, a second call after std's `accept4(SOCK_CLOEXEC)` (wolf-lang#290) |
+| `setsockopt` (TCP_NODELAY) | 0.01 | 0.00 | **1.01** | 0.00 | #254's default, at accept; nginx sets it only when a connection goes keepalive (wolf-lang#290) |
+| `epoll_ctl` | — | 0.00 | 0.14 | 1.13 | nginx's per-connection registration; lobo's is the reactor's arm for a park |
+| `futex` | 0.06 | — | 0.27 | — | the reactor handoff (a park) and malloc's arena |
+| `write` + `read` (eventfd) | 0.03 + ~0.02 | — | 0.11 + 0.11 | — | the reactor's wake per park |
+| `kill` + `getpid` + `rt_sigreturn` | 0.03 each | — | 0.04 each | — | the signal self-raise probe, every `sig_poll_ms` (25 ms): ~1 in 33 requests at this rate |
+| `brk` | 0.04 | — | 0.07 | — | the heap growing — the runtime's |
+| **calls per request** | **7.41** | **6.14** | **13.36** | **10.13** | **+1.27 keepalive, +3.22 close** |
+
+Read on the keepalive shape: lobo makes ONE call nginx does not —
+the router's path stat, +1.00 — and a quarter-call of small change
+(the probe 0.12, `futex` 0.06, `brk` 0.04, the accept side 0.03).
+7.41 against 6.14 is 1.21x in calls where the cell reads 1.72x in
+req/s; **the keepalive gap is not in the count.** Read on the close
+shape: the path stat, then the accept posture (`ioctl` + `setsockopt`,
++2.02 per connection against nginx's one `epoll_ctl`), then the
+herd's residue at four hands — 0.08 lost races per connection, each a
+park (~0.9 syscalls across the reactor's rows), a tenth of the
+eighteen-hand macOS herd and still the one cost no lobo-side change
+reaches. Each extra, what removes it and whose it is: the path stat —
+an `fs_open` that carries `O_NONBLOCK` so `fs_fstat` classifies after
+the open (wolf-lang#289; ws27 built the no-surface half, a one-second
+kind table in the router, and its delta is in the parity ledger); the
+`ioctl` — `accept4(SOCK_NONBLOCK)` in `push_stream` (wolf-lang#290);
+the `setsockopt` — `TCP_NODELAY` set lazily, nginx's shape
+(wolf-lang#290); the probe — a signal poll that does not park
+(wolf-lang#126's family, commented there with the count); the probe
+`poll` and the parks — a park-free lost race (wolf-lang#267).
+
+### Where a keepalive request's time goes on linux — one hand, `perf`, 18,133 req/s under the drive
+
+| | keepalive (ws27) | close (ws25, the fstat tree) |
+|---|---|---|
+| kernel / lobo-release / libc (by dso) | **64.2% / 22.0% / 13.5%** | 76.3% / 14.5% / 9.0% |
+| in a syscall, inclusive (`do_syscall_64`) | 55.6% | 66.8% |
+| `writev` inclusive — the transmit path down to the loopback softirq | 31.0% | 24.9% |
+| top leaf: `_raw_spin_unlock_irqrestore` (the softirq handoff) | 9.4% | 9.0% |
+| `malloc` + `cfree` + `realloc` + `finish_grow` + `reserve` (libc and the runtime's Vec growth) | ~4.7% | — |
+| `wolf_rt::str::ambient_alloc` + `__wolf_rt_strbuf_str` | 3.2% | — |
+| `StrSearcher::new` + `TwoWaySearcher::next` (`str.find`) + `to_lowercase` | 2.2% | — |
+| `link_path_walk` + `__d_lookup_rcu` + `inode_permission` (the path stats' walks) | 2.2% | 0.7% (leaf) |
+| `do_user_addr_fault` + `do_anonymous_page` + `clear_page_erms` + `__handle_mm_fault` (fresh pages — the heap growing) | 3.1% | — |
+| lobo's own frames, leaves: `serve_request` 0.94, `serve_main` 0.92, `parse_request` 0.53, `conn_step` 0.50, `serve_file` 0.45, `http_date` 0.43, `split_lines_strict` 0.41, `hline` 0.40 | ~4.6% | 0.7% |
+
+With the accept and the teardown out of the request, a third of a
+keepalive request on this host is user space, and most of that is the
+runtime materializing and searching strings — the allocator (~5%),
+`ambient_alloc`/`strbuf` (3%), `find`/`to_lowercase` (2%), and the
+page faults that a heap growing under those allocations costs (3%;
+the `brk` in the count is the same fact) — with lobo's own frames
+under 5%. The kernel's share is the response's transmit (31%, which
+nginx pays too on this loopback) and the file's open/stat/read/close.
+So the linux keepalive cell, after the count: ~1 call in 7 is the
+router's (built around, filed); ~1/3 of the request is the string
+runtime's (wolf-lang#191's seam, the same reading ws22 took on macOS
+at 5 of 63 µs and a larger share now that the reactor trips are
+gone); and the remainder is the kernel serving a socket, which is the
+same on both sides of the bar.
+
+### What this does NOT say
+
+- The count is the request's; the herd's cost per park is not a
+  count but a wait, and this table only shows its syscalls.
+- `perf` here is one hand at N=1; the N=4 cell's shares were not
+  taken (the count was). The dso split at N=1 keepalive is the
+  per-request reading with no distribution in the way, which is the
+  cell the profile leg was asked for.
+- nginx was COUNTED and not profiled; its user-space share is ws22's
+  macOS reading (~3%), not a linux measurement.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
