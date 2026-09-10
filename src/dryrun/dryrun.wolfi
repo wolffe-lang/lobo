@@ -1,11 +1,11 @@
 module pkg :: dryrun
-  wolfi v0 · toolchain 0.2.8 · edition v1
-  export_hash 61112b5a6eca159148e08ed6180f1cba1e97b53ce0062631fa57b6db1a97cab3
-  pkg_hash    61112b5a6eca159148e08ed6180f1cba1e97b53ce0062631fa57b6db1a97cab3
+  wolfi v0 · toolchain 0.2.9 · edition v1
+  export_hash 448bdc1208331609767faed0ba0dce644f47714c86e76c0e334a80628199a266
+  pkg_hash    448bdc1208331609767faed0ba0dce644f47714c86e76c0e334a80628199a266
   deps:
-    config  fe1a5f8e7a3a66678b13f4c0eae28fe55f3403b9ee4a779b779a710087b0111c
-    http  e87ea50e617d19c43dae3ce6fe36266fec54f74f9c393a61b1f7cc151625ad80
-    proxy  42ee542a973ec86d40f2ab5a327561a9e6550ac295ac40ad9c97749e17216937
+    config  e351111e28af2e16c50db8f239b107dec0932160adb48b69ea9e2637e1db2cf5
+    http  0ced733c46f8aa9e3877cffd21dc506491d76a3cfc7845890e3a2643d694465f
+    proxy  8541e54f7c0c0048f25b4b6b271adbfdffd50a4ec5e693d83dd53703bb0238ab
   items:
     [0] pub chain_notes — fn chain_notes(c: config.Conf, loc: int) -> str · regions (ρ1, -) -> -
     [1] pub decide — fn decide(c: config.Conf, p: self.Probe, plain_addr: str, ssl_addr: str, mut tr: http.RouteTrace) -> self.Verdict · regions (ρ1, ρ2, -, -, ρ3) -> ρ_caller
