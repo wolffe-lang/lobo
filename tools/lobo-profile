@@ -6,10 +6,13 @@
 # six runner VMs spread 1.27x–1.44x on the close cell with no change
 # to lobo). NOT a gauntlet step and never a gate.
 #
-#   tools/lobo-profile [binary] [label] [seconds]
+#   tools/lobo-profile [binary] [label] [seconds] [shape]
 #     binary   the lobo to profile (default target/lobo-release)
 #     label    names the scratch dir and the report (default: lobo)
 #     seconds  the sampling window (default 8)
+#     shape    close (default — ws22's probe) or keepalive (ws27: the
+#              read/serve path alone, `ab -k`, the cell linux is
+#              furthest from)
 #
 # The shape is ws22's probe (docs/PROFILE.md): `worker_processes 1`,
 # the parity file (1 KiB), the close shape under four `ab -c 8`
@@ -41,11 +44,17 @@ BIN="${1:-$(pwd)/target/lobo-release}"
 case "$BIN" in /*) ;; *) BIN="$(pwd)/$BIN" ;; esac
 LABEL="${2:-lobo}"
 SECS="${3:-8}"
+SHAPE="${4:-close}"
+case "$SHAPE" in
+close) KA="" ;;
+keepalive) KA="-k" ;;
+*) echo "lobo-profile: REFUSED — shape is close or keepalive, not $SHAPE" >&2; exit 1 ;;
+esac
 GENS=4
 PERGEN=8
 [ -x "$BIN" ] || { echo "lobo-profile: REFUSED — $BIN is not an executable" >&2; exit 1; }
 command -v ab > /dev/null 2>&1 || { echo "lobo-profile: REFUSED — ab(1) is not on PATH" >&2; exit 1; }
-scratch="$(pwd)/target/profile-$LABEL"
+scratch="$(pwd)/target/profile-$LABEL-$SHAPE"
 rm -rf "$scratch"
 mkdir -p "$scratch/www"
 awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
@@ -87,7 +96,8 @@ drive() { # drive <seconds> <tag> — the close shape, GENS generators; sets rps
     g=1
     genpids=""
     while [ $g -le $GENS ]; do
-        ab -q -t "$1" -n 1000000 -c $PERGEN "http://127.0.0.1:$hp/index.html" > "$scratch/ab-$2-g$g.txt" 2>&1 &
+        # shellcheck disable=SC2086
+        ab -q $KA -t "$1" -n 1000000 -c $PERGEN "http://127.0.0.1:$hp/index.html" > "$scratch/ab-$2-g$g.txt" 2>&1 &
         genpids="$genpids $!"
         g=$((g + 1))
     done
@@ -103,7 +113,7 @@ drive_wait() { # drive_wait <tag> — sets rps (sum) and failed
     done
 }
 
-echo "lobo-profile: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); $LABEL = $("$BIN" -v 2>&1 | head -1); one hand, close shape, $GENS × ab -c $PERGEN, a $SECS s window"
+echo "lobo-profile: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); $LABEL = $("$BIN" -v 2>&1 | head -1); one hand, $SHAPE shape, $GENS × ab $KA -c $PERGEN, a $SECS s window"
 
 case "$(uname -s)" in
 Linux)
