@@ -1,7 +1,7 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.9 · edition v1
-  export_hash d02efed9d825270305e3e3848d5fd1bed1a27762503918b6de040a155b83db6e
-  pkg_hash    d02efed9d825270305e3e3848d5fd1bed1a27762503918b6de040a155b83db6e
+  export_hash c6a929fa306fe2be551181d93b885b2d69283b75812f449409ef224d317484d2
+  pkg_hash    c6a929fa306fe2be551181d93b885b2d69283b75812f449409ef224d317484d2
   deps:
     budget  0ffb86e7c91e58a512f6c2af8d452193a375cdf35beb209b47fccfb93b034e38
     config  e351111e28af2e16c50db8f239b107dec0932160adb48b69ea9e2637e1db2cf5
@@ -17,28 +17,31 @@ module pkg :: serve
     [2] pub admin_kind — fn admin_kind(on: bool, path: str) -> str
     [3] pub carry_has_head — fn carry_has_head(carry: str) -> bool
     [4] pub conn_idle — fn conn_idle(carry: str, served: int) -> self.ConnStep · regions (-, -) -> ρ_caller
-    [5] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int, mut rs: resolver.Resolver) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4) -> ρ_caller
+    [5] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int, mut rs: resolver.Resolver, mut ft: self.FileKinds) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5) -> ρ_caller
     [6] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
     [7] pub error_body — fn error_body(code: int, server: str) -> str
     [8] pub error_response — fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str
-    [9] pub header_too_large_body — fn header_too_large_body(server: str) -> str
-    [10] pub http_date — fn http_date(secs: int) -> str
-    [11] pub ledger_cap — fn ledger_cap(budget: int) -> int
-    [12] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
-    [13] pub listen_addr_plain — fn listen_addr_plain(c: config.Conf) -> str · regions (ρ1) -> -
-    [14] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
-    [15] pub open_self_pipe — fn open_self_pipe() -> (int, int) ! {io} · regions () -> ρ_caller
-    [16] pub raw_line — fn raw_line(head: str) -> str
-    [17] pub resolve_limits — fn resolve_limits(c: config.Conf) -> http.Limits · regions (ρ1) -> ρ_caller
-    [18] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
-    [19] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, mut rs: resolver.Resolver) · regions (ρ1, ρ2, ρ3, ρ4, -, ρ5) -> -
-    [20] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int, mut rs: resolver.Resolver) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4) -> ρ_caller
-    [21] pub status_phrase — fn status_phrase(code: int) -> str
-    [22] pub to_hex — fn to_hex(n: int) -> str
-    [23] pub version — fn version() -> str
-    [24] pub write_admin — fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io}
-    [25] pub write_admin_503 — fn write_admin_503(conn: int, token: str)
-    [26] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
-    [27] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
-    [28] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int }
+    [9] pub file_kinds_new — fn file_kinds_new() -> self.FileKinds · regions () -> ρ_caller
+    [10] pub header_too_large_body — fn header_too_large_body(server: str) -> str
+    [11] pub http_date — fn http_date(secs: int) -> str
+    [12] pub is_file_warm — fn is_file_warm(mut ft: self.FileKinds, path: str) -> bool · regions (ρ1, -) -> -
+    [13] pub ledger_cap — fn ledger_cap(budget: int) -> int
+    [14] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
+    [15] pub listen_addr_plain — fn listen_addr_plain(c: config.Conf) -> str · regions (ρ1) -> -
+    [16] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
+    [17] pub open_self_pipe — fn open_self_pipe() -> (int, int) ! {io} · regions () -> ρ_caller
+    [18] pub raw_line — fn raw_line(head: str) -> str
+    [19] pub resolve_limits — fn resolve_limits(c: config.Conf) -> http.Limits · regions (ρ1) -> ρ_caller
+    [20] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
+    [21] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, mut rs: resolver.Resolver) · regions (ρ1, ρ2, ρ3, ρ4, -, ρ5) -> -
+    [22] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int, mut rs: resolver.Resolver, mut ft: self.FileKinds) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5) -> ρ_caller
+    [23] pub status_phrase — fn status_phrase(code: int) -> str
+    [24] pub to_hex — fn to_hex(n: int) -> str
+    [25] pub version — fn version() -> str
+    [26] pub write_admin — fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io}
+    [27] pub write_admin_503 — fn write_admin_503(conn: int, token: str)
+    [28] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
+    [29] pub FileKinds — struct FileKinds { paths: prelude.List[str], seen: prelude.List[int] }
+    [30] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
+    [31] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int }
 
