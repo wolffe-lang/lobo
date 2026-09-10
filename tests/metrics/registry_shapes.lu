@@ -179,6 +179,23 @@ fn main() -> !int {
     )
     assert(rh.contains("lobo_request_duration_seconds_sum 60.008\n"), "the sum in seconds: {rh}")
     assert(rh.contains("lobo_request_duration_seconds_count 3\n"), "the count: {rh}")
+    // ws28: the observer reads its bounds by index and the renderer
+    // off the list — observing exactly each bound must land in that
+    // bound's bucket, so the two ladders are pinned equal here
+    var hb = metrics.hist_new()
+    for b in bs {
+        metrics.hist_observe(mut hb, b)
+    }
+    let rb = metrics.render_hist("lobo_request_duration_seconds", hb)
+    var k: int = 1
+    for b in bs {
+        let le = metrics.secs3(b)
+        assert(
+            rb.contains("lobo_request_duration_seconds_bucket{{le=\"{le}\"}} {k}\n"),
+            "the bound {b} lands in bucket {k}: {rb}",
+        )
+        k = k + 1
+    }
     // an empty histogram still exposes its whole ladder (a scraper
     // must not have to guess which buckets exist)
     let empty = metrics.render_hist("lobo_upstream_duration_seconds", metrics.hist_new())

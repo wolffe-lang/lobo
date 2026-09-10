@@ -475,11 +475,14 @@ pub fn hist_new() -> Hist {
 /// NEGATIVE observation is a caller bug and traps. Total otherwise.
 pub fn hist_observe(mut h: Hist, ms: int) {
     assert(ms >= 0, "metrics: negative duration observed ({ms}ms)")
-    let bs = buckets_ms()
+    // ws28: the bound of bucket `i` is read by index, not off a list
+    // built per observation — `buckets_ms()` was an eleven-element
+    // list (a header and two buffer growths in the arena, never
+    // freed) on every served request
     var i: int = 0
-    let n = bs.len
+    let n = bucket_count()
     while i < n {
-        if ms <= bs[i] {
+        if ms <= bucket_ms(i) {
             h.counts[i] = h.counts[i] + 1
             h.sum_ms = h.sum_ms + ms
             h.n = h.n + 1
@@ -490,6 +493,48 @@ pub fn hist_observe(mut h: Hist, ms: int) {
     h.counts[n] = h.counts[n] + 1
     h.sum_ms = h.sum_ms + ms
     h.n = h.n + 1
+}
+
+/// How many finite buckets `buckets_ms()` lists. Total.
+fn bucket_count() -> int {
+    11
+}
+
+/// The upper bound of finite bucket `i` — the same values, in the
+/// same order, as `buckets_ms()` (tests/metrics pins the two equal);
+/// allocation-free. Total for 0..bucket_count().
+fn bucket_ms(i: int) -> int {
+    if i == 0 {
+        return 5
+    }
+    if i == 1 {
+        return 10
+    }
+    if i == 2 {
+        return 25
+    }
+    if i == 3 {
+        return 50
+    }
+    if i == 4 {
+        return 100
+    }
+    if i == 5 {
+        return 250
+    }
+    if i == 6 {
+        return 500
+    }
+    if i == 7 {
+        return 1000
+    }
+    if i == 8 {
+        return 2500
+    }
+    if i == 9 {
+        return 5000
+    }
+    10000
 }
 
 /// A whole histogram family: the `# HELP`/`# TYPE` pair, the
