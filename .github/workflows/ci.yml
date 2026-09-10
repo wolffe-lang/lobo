@@ -40,6 +40,14 @@ on:
         description: "ws25 (lobo#6): the profile leg — tools/lobo-profile (perf record + strace -c on one hand under the close shape) on this checkout, and on ref_tree when given; runs after the parity set, or alone"
         type: boolean
         default: false
+      profile_shape:
+        description: "ws27: the shape the profile leg drives — close (ws22's probe, the default) or keepalive"
+        type: string
+        default: "close"
+      syscalls:
+        description: "ws27: the count leg — tools/lobo-syscalls (strace -c over BOTH servers for a whole drive, calls per request side by side) at N=nproc on both shapes; runs after the parity set and the profile leg, or alone"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -185,7 +193,7 @@ jobs:
           openssl version
 
       - name: lobo-gauntlet
-        if: steps.acquire.outputs.toolchain == 'full' && inputs.parity != true && inputs.profile != true
+        if: steps.acquire.outputs.toolchain == 'full' && inputs.parity != true && inputs.profile != true && inputs.syscalls != true
         shell: bash
         working-directory: lobo
         run: tools/lobo-gauntlet
@@ -263,7 +271,25 @@ jobs:
           mkdir -p target
           [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           nproc; uptime
-          tools/lobo-profile target/lobo-release "${{ inputs.this_name }}"
+          tools/lobo-profile target/lobo-release "${{ inputs.this_name }}" 8 "${{ inputs.profile_shape }}"
           if [ -n "${{ inputs.ref_tree }}" ]; then
-            tools/lobo-profile "$GITHUB_WORKSPACE/lobo-ref/target/lobo-release" "${{ inputs.ref_name }}"
+            tools/lobo-profile "$GITHUB_WORKSPACE/lobo-ref/target/lobo-release" "${{ inputs.ref_name }}" 8 "${{ inputs.profile_shape }}"
           fi
+
+      # ws27: the count leg. strace -c over every serving process of
+      # BOTH servers for a whole drive, the calls column divided by the
+      # requests the generators completed — a count is the one linux
+      # number a shared VM holds still, and it is taken at the bar's
+      # own cell (N=nproc, c=32) on both shapes.
+      - name: "lobo-syscalls (ws27 — strace -c over both servers, calls per request, both shapes)"
+        if: steps.acquire.outputs.toolchain == 'full' && inputs.syscalls == true
+        shell: bash
+        working-directory: lobo
+        run: |
+          set -uo pipefail
+          sudo apt-get install -y -qq apache2-utils strace > /dev/null
+          mkdir -p target
+          [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          nproc; uptime
+          tools/lobo-syscalls keepalive
+          tools/lobo-syscalls close
