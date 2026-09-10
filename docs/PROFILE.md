@@ -345,6 +345,15 @@ the `setsockopt` — `TCP_NODELAY` set lazily, nginx's shape
 (wolf-lang#126's family, commented there with the count); the probe
 `poll` and the parks — a park-free lost race (wolf-lang#267).
 
+### The count after the warm kind table (run 34506393898, the same instrument)
+
+`statx` **1.00** on both shapes, every other row unchanged: keepalive
+**6.31** against nginx's 6.13 (+0.18 — the probe 0.12, `futex`,
+`brk`), close **12.41** against 10.13 (+2.28 — the accept posture's
+`ioctl` + `setsockopt`, the herd's parks, the probe `poll`). The
+delta it read in req/s on the same VM is in the parity ledger:
++2.7% keepalive, +2.1% close at N=4.
+
 ### Where a keepalive request's time goes on linux — one hand, `perf`, 18,133 req/s under the drive
 
 | | keepalive (ws27) | close (ws25, the fstat tree) |
