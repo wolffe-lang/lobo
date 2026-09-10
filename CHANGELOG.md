@@ -234,6 +234,14 @@ sets and counts on the CI runner.
   and most of that is the runtime materializing strings (wolf-lang#191's
   seam) — the number the next lane on this cell starts from.
 
+- **The herd (item 3): nothing to build.** wolf-lang#267 gained no
+  surface this wave — a lost race on a shared listener still parks
+  through the reactor, and `net_deadline(fd, 0)` still clears the
+  budget — so it is said and stopped at, as the contract wrote. What
+  this sprint added to it is the linux count at four hands (above:
+  0.08 lost races per close-shape connection, ~0.9 syscalls of parks),
+  posted on #267 and lobo#5 beside ws24's eighteen-hand macOS number.
+
 - **The one that needs no new wolf surface, built: the warm kind
   table.** Of the calls lobo makes that nginx does not, each is named
   with what removes it: the router's path `statx` (+1.00 per request
@@ -281,7 +289,38 @@ sets and counts on the CI runner.
   +3] (one of 13.36, and the close shape is accept- and
   teardown-bound), N=1 keepalive +3% [+1, +5], N=1 close +1.5% [0,
   +3]; the ratio 1.718x → ~1.66x on the pin set's VM class, NOT MET
-  on both shapes still. MEASURED: (below, when the set returns).
+  on both shapes still. MEASURED, macOS first (indicative — load 6.18
+  at the start, refused on load; `LOBO_REF` the pin tree built with
+  the same staged pair, 17:09Z): warm ÷ pin N=18 close **0.993x**
+  [0.977, 0.998], N=18 keepalive **1.035x** [0.965, 1.306], N=1 close
+  0.997x, N=1 keepalive 1.025x — the predicted sign on both keepalive
+  cells (+3.5%, +2.5%) and noise on close, with nginx's own N=18
+  keepalive numbers swinging 1.4x between pairs on this box, so it is
+  a shape and not a number. MEASURED, linux (the result): run 34506393898
+  (`parity=true ref_tree=9a24fde`, plus the count leg), a VALID set,
+  load 1.95, on the runner's FASTEST class (nginx close 77.2k — ws24's
+  75.4k class; the pin's own set that morning sat on the 25k class,
+  so the two are read by ratio only): warm ÷ pin **N=4 close 1.021x**
+  [1.011, 1.049] (56,369 vs 55,357), **N=4 keepalive 1.027x** [0.993,
+  1.049] (129,474 vs 125,874), N=1 close 1.003x [0.983, 1.027], N=1
+  keepalive 1.006x [0.979, 1.109]; the count leg in the same job:
+  `statx` **2.00 → 1.00** per request on both shapes and every other
+  row unchanged — keepalive **6.31** against nginx's 6.13 (+0.18: the
+  probe, `futex`, `brk`), close **12.41** against 10.13 (+2.28: the
+  accept posture and the herd). The two gating deltas landed inside
+  their bands (+2.7% against +3.5% [1.5, 5.5]; +2.1% against +1.5%
+  [0, 3]), the N=1 keepalive cell under its band (+0.6% against +3%
+  [1, 5]) — one path stat is ~2–3% of a keepalive request on this
+  host, a little under ws25's ~3.5% per call (that arithmetic was
+  three calls on a slower class). The bar on this class: nginx ÷ warm
+  close **1.365x** [1.346, 1.409], keepalive **1.822x** [1.744, 1.834]
+  — NOT MET on both shapes, and the count now says why with nothing
+  left in it: lobo is 6.31 calls to nginx's 6.13 on the keepalive
+  shape and 1.82x slower, so the linux keepalive cell is the string
+  runtime's third of the request (the profile above) and the kernel's
+  per-call cost, not the number of calls. W8's linux standing after
+  ws27: NOT MET, close 1.255x–1.365x and keepalive 1.718x–1.822x by
+  VM class; macOS: ws26's MET, indicative at this pin.
 
 ## ws26 — 2026-09-09 — the quiet set (W8 MET on macOS; the load was the whole story)
 
