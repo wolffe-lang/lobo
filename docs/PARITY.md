@@ -154,6 +154,60 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws27: the v0.2.9 pin, ONE tree · **VALID** · **NOT MET on both shapes** (close 1.255x, keepalive 1.718x)
+
+The pin moved (wolf 0.2.8 → 0.2.9, lupin 0.1.27 → 0.1.29; nothing on
+the request path — the ws27 CHANGELOG entry classes the train) and
+the linux standing was re-taken as a single-tree set, run 34504504973
+(`parity=true`, plus the profile and count legs in the same job),
+load 1.99, lobo `9a24fde` (0.1.0+dev at wolf 0.2.9 pin 4c60946),
+nginx 1.30.4, 5 pairs × `ab -t 5`, c=32 over 4 generators. nginx's
+own close rate names the VM class: **25.2k**, the slowest class ws24
+met (its control run read 25.6k; the ws25 rows sat on the 28–29k
+class), so the ratio and not the rate is the number:
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo cores | nginx cores | ab max |
+|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 20,086 | 25,214 | **1.255x** [1.245, 1.262] | 1.96 | 1.57 | 0.71 |
+| **N=4 c=32** | keepalive | 49,711 | 85,423 | **1.718x** [1.704, 1.752] | 2.87 | 2.46 | 0.71 |
+| N=1 c=32 | close | 11,979 | 14,925 | 1.246x [1.229, 1.296] | 1.00 | 0.99 | 0.41 |
+| N=1 c=32 | keepalive | 19,332 | 34,415 | 1.771x [1.658, 1.883] | 1.00 | 1.00 | 0.41 |
+
+PREDICTED before the dispatch (the CHANGELOG entry): close 1.26x
+[1.22, 1.32], keepalive 1.65x [1.58, 1.75] on the 28–29k class;
+measured 1.255x and 1.718x on a slower class, both inside the
+bands, the keepalive cell at the band's top edge — the pin carries
+nothing, and a slower VM widens the keepalive cell (ws24's series
+read 1.78–2.09x on keepalive across classes). The generators sat at
+0.71 cores on the N=4 cells, under the 0.90 ceiling and the highest
+this ledger has recorded on the runner (a slow VM class costs ab
+too). NOT MET on both shapes; W8's linux standing is unchanged by
+the pin. The count leg and the profile leg of the same run are in
+`docs/PROFILE.md` (ws27's addendum).
+
+### 2026-09-10 · macOS arm64 · nomad-1 (18 cpus) · ws27: the v0.2.9 pin · **REFUSED** (load 5.31; indicative, not a result)
+
+The box carried the user's daemons all day (the Photos indexer,
+per the orchestrator) and no window was confirmed, so the pin's
+macOS set is indicative by the rule: lobo `9a24fde` at wolf 0.2.9,
+nginx 1.30.4, 16:50Z, load(1m) 5.31 at the start, 5 pairs × `ab -t
+5`, c=32 over 4 generators, refused by the tool on load only (exit
+3; the oracle held, nothing failed, ab at 0.36 cores):
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo cores | nginx cores |
+|---|---|---|---|---|---|---|
+| N=18 c=32 | close | 20,595 | 21,306 | 1.032x [1.002, 1.091] | 5.52 | 3.79 |
+| N=18 c=32 | keepalive | 106,929 | 118,550 | 1.066x [0.995, 1.169] | 9.77 | 11.53 |
+| N=1 c=32 | close | 32,734 | 33,078 | 0.995x [0.943, 1.125] | 0.77 | 0.59 |
+| N=1 c=32 | keepalive | 55,174 | 87,068 | 1.522x [1.477, 2.970] | 0.96 | 0.97 |
+
+Read for shape only: ws26's VALID standing (close 1.033x, keepalive
+1.072x, N=1 close 0.985x, N=1 keepalive 1.474x) to the hundredth on
+every cell, on a box three times as loaded — the pin moves nothing
+here either. The macOS standing remains ws26's (MET on both shapes);
+a VALID set at 0.2.9 is owed to the ledger by the next lane that
+gets a quiet window.
+
 ### 2026-09-09 · macOS arm64 · nomad-1 (18 cpus) · ws26: THE QUIET SET · **VALID (3 of 4)** · **MET on both shapes** (close 1.033x, keepalive 1.072x)
 
 The set this ledger has owed since ws22. The box went quiet at
