@@ -149,7 +149,7 @@ trace() {
 # [errors,] syscall — the name is the last field, calls the fourth)
 per_request() {
     awk -v n="$2" '
-        /^[ 0-9.]+[0-9]+ +[a-z_0-9]+$/ && $1 != "total" && $NF != "syscall" {
+        /^[ 0-9.]+[0-9]+ +[a-z_0-9]+$/ && $NF != "total" && $NF != "syscall" {
             printf "%s %.3f\n", $NF, $4 / n
         }' "$scratch/$1.strace"
 }
@@ -183,12 +183,15 @@ awk '
         for (s in seen) {
             a = (s in l) ? l[s] : 0; b = (s in g) ? g[s] : 0
             printf "%.3f\t%s\t%.3f\t%.3f\n", a - b, s, a, b
-            ta += a; tb += b
         }
-        printf "%.3f\t%s\t%.3f\t%.3f\n", ta - tb, "**calls per request**", ta, tb
     }' "$scratch/lobo.per" "$scratch/nginx.per" | sort -t"$(printf '\t')" -k1,1gr -k2,2 |
-    awk -F'\t' '{ d = $1 + 0; sign = (d > 0) ? "+" : ""; printf "| `%s` | %.2f | %.2f | %s%.2f |\n", $2, $3, $4, sign, d }' |
-    sed 's/`\*\*calls per request\*\*`/**calls per request**/'
+    awk -F'\t' '$3 + $4 > 0 { d = $1 + 0; sign = (d > 0) ? "+" : ""; printf "| `%s` | %.2f | %.2f | %s%.2f |\n", $2, $3, $4, sign, d }'
+# the totals: the sum of the per-request column (strace's own `total`
+# row ÷ requests, which the loop above excludes — the first cut of this
+# tool counted it as a syscall and printed a doubled total)
+awk '{ s += $2 } END { printf "%.3f\n", s }' "$scratch/lobo.per" > "$scratch/lobo.total"
+awk '{ s += $2 } END { printf "%.3f\n", s }' "$scratch/nginx.per" > "$scratch/nginx.total"
+awk -v a="$(cat "$scratch/lobo.total")" -v b="$(cat "$scratch/nginx.total")" 'BEGIN { d = a - b; sign = (d > 0) ? "+" : ""; printf "| **calls per request** | **%.2f** | **%.2f** | **%s%.2f** |\n", a, b, sign, d }'
 echo ""
 echo "=== lobo — strace -c (raw, $lreqs requests)"
 cat "$scratch/lobo.strace"
