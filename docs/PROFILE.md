@@ -574,10 +574,81 @@ per-request count cannot see it. It would show in RSS, not here. If
 
 ### The measurement
 
-MEASURED-PENDING — the count leg runs on the CI runner (`tools/
-lobo-syscalls` is linux's; strace is the counter, and the tool skips
-by name on macOS). This section is written before the run, as ws27's
-and ws28's were.
+CI run **34540847393** on `ws29@ece69e7`, the same workflow input
+(`syscalls=true`) and the same runner class as the before-run
+(34540847393's box: ubuntu-latest, 4 vcpus, load(1m) 3.00).
+
+**The acceptance criterion is MET.** `kill`, `getpid` and
+`rt_sigreturn` do not appear in either shape's table any more — not
+0.01, not 0.03: the rows are gone, because the calls are. `write`
+leaves the keepalive table too and falls 0.10 → 0.08 on close, which
+is the handler's self-pipe write going and the log's staying.
+
+| row (per request) | keepalive before → after | close before → after | predicted |
+|---|---|---|---|
+| `kill` / `getpid` / `rt_sigreturn` | 0.01 → **0.00** each | 0.03 → **0.00** each | 0.00 — **right** |
+| `write` | 0.01 → **0.00** | 0.10 → **0.08** | 0.00 / ~0.07 — **right** |
+| `poll` | 0.15 → 0.14 | 1.28 → 1.28 | unchanged — right per request, **wrong in the raw**, and in lobo's favour |
+| `futex` | 0.03 → **0.09** | 0.25 → **0.39** | down — **WRONG**, and against lobo |
+| `epoll_wait` | 0.00 → 0.00 | 0.14 → 0.14 | unchanged or down — right |
+| **calls per request** | 6.28 → **6.26** (nginx 6.14 → 6.15, gap +0.13 → **+0.11**) | 12.27 → **12.27** (gap +2.14 → **+2.14**) | 6.22–6.24 / 12.15–12.20 — **WRONG** |
+
+### Why the totals barely moved, and why that is not the whole result
+
+**Read the raw counts, not only the per-request ones.** Everything this
+change touches is work per unit TIME, and the two drives did not serve
+the same number of requests: the after-box was slower for BOTH servers
+(nginx traced at 13,751 → 10,601 req/s keepalive and 7,312 → 5,774 on
+close, a ~23% fall it had nothing to do with). Per-TIME work divided by
+fewer requests reads higher per request. So the per-request totals are
+the wrong instrument for exactly this change, and the raw column over
+the same 8-second drive across the same four hands is the right one:
+
+| raw calls per 8 s drive, 4 hands | keepalive before → after | close before → after |
+|---|---|---|
+| `kill` + `getpid` + `rt_sigreturn` | 4,113 → **0** | 4,053 → **0** |
+| `poll` | 15,241 → **10,727** | 60,975 → **45,768** |
+| `futex` (of which errors) | 3,205 (539) → **6,608 (6,593)** | 11,770 (1,283) → **13,861 (7,712)** |
+| **net** | **−5,224** | **−17,169** |
+
+Three findings, and two of them contradict the prediction:
+
+1. **The probe is gone, exactly as predicted** — 4,113 and 4,053 calls
+   a drive to zero, and one raise per process instead.
+2. **`poll` fell, and by MORE than the probe did.** Predicted
+   unchanged; wrong, and in lobo's favour. This is `wait_budget`'s
+   floor lifting: the loop's wait went 25 ms → 250 ms, so an idle pass
+   trips the reactor a tenth as often. That win was invisible per
+   request and is 4,514 / 15,207 calls a drive.
+3. **`futex` ROSE, and this is the named risk landing** — on `futex`,
+   not on `poll` where the prediction put it. The error count is the
+   tell: 539 → 6,593 on keepalive, 1,283 → 7,712 on close. That is a
+   permanently parked task's blocking compensation ([os.signal.wait]
+   parks a real thread), waking and re-waiting for the life of the
+   process. It is a cost per unit TIME on an otherwise idle thread and
+   it takes back about two thirds of the probe's calls on keepalive
+   and half on close. **Filed upstream as wolf-lang#302** — it is the
+   runtime's, not lobo's: the forwarder allocates nothing, touches no
+   socket and never returns on a drive where no signal is sent, so
+   every one of those calls is the pool's compensation for a thread
+   that is doing nothing. lobo has no cheaper spelling available; the
+   alternatives are the poll this replaced or no signal reception.
+
+The net is still a win — 5,224 and 17,169 fewer calls a drive — and it
+is a smaller win than "the probe is gone" suggests, which is the
+sentence this page exists to make possible. The per-request table says
+6.26 and 12.27 and would let a reader conclude nothing changed; the raw
+column says what changed and in which direction.
+
+**A caveat on ws25's rule.** ws25 established that the COUNT is the one
+linux number a shared VM holds still — identical across runs whose
+req/s spread 13%. That holds here for every per-REQUEST row: `read`,
+`statx`, `openat`, `writev`, `close` and `recvfrom` read 1.00–1.01 in
+both runs, before and after, unmoved. It does NOT hold for the per-TIME
+rows (`poll`, `futex`, `epoll_wait`, and the probe while it existed),
+and this sprint is the first to change one of those. The rule wants the
+amendment: a per-request count is stable for work the request does, and
+is a rate in disguise for work the clock does.
 
 ## What this does NOT say
 

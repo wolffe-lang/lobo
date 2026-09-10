@@ -128,10 +128,44 @@ Three items, and one of them stops before it starts.
     longest wait — and asks ONCE, after a fixed interval. Drop the
     forwarder's pipe from the wait set and it is the check that hangs;
     that negative control was run, and it does.
-  - The prediction for the count is in `docs/PROFILE.md`'s ws29
-    addendum, written before the run, row by row with its confidence
-    and its named risk (the forwarder is a real parked thread — a
-    per-PROCESS cost a per-request count cannot see).
+  - **The count, PREDICTED then MEASURED** (`docs/PROFILE.md`'s ws29
+    addendum carries both tables; CI runs 34539376264 on trunk
+    `9a4a905` and 34540847393 on `ws29@ece69e7`). The acceptance
+    criterion is MET: `kill`, `getpid` and `rt_sigreturn` are gone
+    from both shapes' tables — not 0.01, not 0.03, absent, because
+    the calls are — and `write` falls with them. **The per-request
+    totals barely move** (keepalive 6.28 → 6.26 against nginx's 6.15,
+    the gap +0.13 → +0.11; close 12.27 → 12.27), and the prediction
+    of 6.22–6.24 / 12.15–12.20 was WRONG. Reading the raw column over
+    the same 8-second drive says why, and says two things the
+    prediction got wrong in opposite directions:
+    - the probe is gone — 4,113 and 4,053 calls a drive to zero;
+    - **`poll` fell too, and by more than the probe did** (15,241 →
+      10,727 keepalive, 60,975 → 45,768 close), which is
+      `wait_budget`'s floor lifting 25 ms → 250 ms. Predicted
+      unchanged; wrong, and in lobo's favour;
+    - **`futex` ROSE** (3,205 → 6,608 and 11,770 → 13,861, with the
+      error count going 539 → 6,593), which is the named risk landing
+      on a row the prediction did not put it on. A task parked in
+      `os_signal_wait` for the process's life costs the runtime's
+      blocking compensation ~106 futex/s per process while doing
+      nothing at all. **Filed as wolf-lang#302** — lobo has no cheaper
+      spelling; the alternatives are the poll this replaced or no
+      signal reception.
+    - Net: **−5,224 and −17,169 calls a drive**. A win, and a smaller
+      one than "the probe is gone" suggests.
+  - **ws25's rule wants an amendment, and this entry is where it is
+    written.** ws25 established the COUNT as the one linux number a
+    shared VM holds still (identical across runs whose req/s spread
+    13%). That held here for every per-REQUEST row — `read`, `statx`,
+    `openat`, `writev`, `close`, `recvfrom` all read 1.00–1.01 in both
+    runs, unmoved — and it does NOT hold for the per-TIME rows
+    (`poll`, `futex`, `epoll_wait`, and the probe while it existed).
+    The after-drive was slower for BOTH servers (nginx itself traced
+    23% lower), so per-TIME work divided by fewer requests read higher
+    per request and hid a real win. A per-request count is stable for
+    work the REQUEST does and is a rate in disguise for work the CLOCK
+    does; this is the first sprint to change one of the latter.
 
 - **Item 2 — s149's two syscalls: NOT RUN, and why.** The contract
   makes it conditional on s149's dev sha existing. s148 merged into
