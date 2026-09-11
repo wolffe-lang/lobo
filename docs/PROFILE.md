@@ -1108,6 +1108,257 @@ the fix, which pins the same toolchain and so CAN be built beside it);
 otherwise the profile is the deliverable and the rows are filed where
 they belong.
 
+
+### The measurement — the pin, the census, the IR (the gauntlet twice on macOS arm64, the IR diffed)
+
+Both gauntlets GREEN, exit 0: the fc07cc5 pair on trunk `d792290`
+(12:09–12:13Z) and the release pair on `92c373b` (12:15–12:21Z). The
+75 summary rows of the two logs diffed: **identical** but for pids,
+which hand a held connection landed on, and the stamp strings —
+corpus **272/272** lane-runs (63 lupin), every other row as
+predicted. E1010: **zero** (both tiers build). `.wolfi`: **14
+insertions, 14 deletions, `toolchain 0.2.10 → 0.2.11` and nothing
+else** — #292's content-only rule at its first pin bump, exactly as
+ws30 wrote it. `wolf fmt --check`: zero. #146: an eighteenth ICE
+(`sc_muladd`, `%19 is not dominated by its definition`).
+
+**The IR — wrong by one site, not lobo's.** WIR of `src/main.lu`
+174,425 → 174,426 lines, **9 diff lines**: the two stamp strings, one
+length constant, and `std.str.each_word`'s callback call — `call.ind
+%1(%137)` at fc07cc5, `%138 = load.ptr %1, %3; call.ind %138(%1,
+%137)` at v0.2.11, s150's record-leading shape — the one `fn`-typed
+parameter in the PINNED STD TREE this program links, which nothing in
+lobo calls. Release LLVM IR 349,020 → 349,025 lines, 35 diff lines
+with metadata numbers normalized (the same site and its `!noalias`
+scopes). 1,191 WIR functions / 1,192 LLVM defines at both pins; zero
+motion on the serving path. The prediction's lesson: "no fn values"
+was a sentence about `src/`; the linked std tree carries one.
+
+### The measurement — the count at the release pair (run 34598620069)
+
+| row (per request) | keepalive: ws30 → ws31 (nginx) | close: ws30 → ws31 (nginx) |
+|---|---|---|
+| `statx` / `openat` / `read` / `recvfrom` / `writev` | 1.00 → **1.00** each | 1.00 → **1.00** each (`read` 1.07 → 1.07) |
+| `close` | 1.00 → 1.00 | 2.00 → 2.00 |
+| `accept4` | — | 1.08 → **1.08** (the herd, lobo#5) |
+| `poll` | 0.16 → 0.15 | 1.28 → **1.28** |
+| `futex` | 0.07 → 0.10 | 0.32 → 0.36 |
+| `epoll_wait` / `epoll_ctl` / `write` / `brk` | 0.00 / 0.00 / — / 0.01 | 0.14 / 0.15 / 0.07 / 0.04 — unmoved |
+| `ioctl` / `setsockopt` | absent | absent |
+| **calls per request** | **6.25 → 6.27** (6.14; +0.13) — predicted 6.25 ± 0.02 | **10.16 → 10.20** (10.13; +0.06) — predicted 10.16 ± 0.10 |
+
+**Right on every per-request row, to a hundredth.** The two
+hundredths on keepalive and four on close are the `futex` clock read
+on a SLOWER VM (nginx's traced rate 13,740 → 10,720 keepalive, 7,320
+→ 5,663 close): raw `futex` 7,444 per 8 s keepalive (ws30: 6,976)
+over 75,578 requests (ws30: 96,601) is 0.098 where ws30's was 0.072
+— the per-time drift ws29's amendment names, and nothing else moved.
+The release runtime's serving path is fc07cc5's, as the diff said.
+
+### The measurement — item 3, the idle count (the same run)
+
+`tools/lobo-syscalls idle`: **`futex` 6,269 calls in 8 s over four
+hands, 6,269 errors — 783.6/s, ~196/s per hand**; `poll` 21.3/s; the
+master's probe 16/s each of `accept4`/`recvfrom`/`sendto`/`close` (4
+calls a probe, as ws30 measured after the posture); **870.5 calls/s
+in all** (ws30: 872); nginx **0**. Predicted ~196/s and 6,200–6,300
+calls — right. The runtime did not touch the parked proc between the
+pins (the diff) and the number says the same thing (6,262 → 6,269).
+wolf-lang#302 stands as posted at ws30; nothing to re-post.
+
+### The measurement — the profile by dso, four cells (runs 34598623726 keepalive N=1, 34598625530 close N=1, 34598628016 close N=4, 34598629759 keepalive N=4; `92c373b`, one runner class, 12:25Z)
+
+`perf record -F 997 -g` on ONE serving process for eight seconds
+under four `ab -c 8` generators, loads 2.96–3.32 at the start (the
+toolchain build's tail; a share, not a rate):
+
+| cell | req/s under perf (summed) | kernel / lobo-release / libc / vdso | predicted | in a syscall (incl.) | `writev` incl. | reactor thread |
+|---|---|---|---|---|---|---|
+| keepalive N=1 | 47,043 | **79.7 / 14.3 / 5.7** / 0.4 | 73–76 / 17–19 / 6–8 | 75.2% | 41.3% | none started |
+| keepalive N=4 (one hand of four) | 66,538 | **73.1 / 19.3 / 7.3** / 0.3 | within 2 points of N=1 | 66.9% | 38.3% | 0 samples (comm) |
+| close N=1 | 15,337 | **81.3 / 13.5 / 4.9** / 0.3 | 77–80 / 12–14 / 7–9 | 74.0% | 31.2% | none started |
+| close N=4 (one hand of four) | 21,728 | **77.4 / 15.5 / 6.8** / 0.3 | within 2 points of N=1 | 68.9% | 25.4% | **`wolf-reactor` 1.74%** |
+
+Read: the dso split at one hand is MORE kernel than ws28's 74.4 /
+18.2 / 6.9 (keepalive) — the user-space quarter shrank to a fifth
+(14.3 + 5.7) with ws30's `classify` and a faster VM class (47k under
+perf where ws28 saw 31k), and the shares landed outside the
+prediction's brackets by 3–4 points on each side: the prediction
+carried ws28's user share forward and it had already fallen. Close at
+one hand is four fifths kernel, as ws25 read it. **At four hands the
+user-space share GROWS on both shapes** (+5.1 points keepalive, +3.9
+close), against the prediction of "within 2 points": with eight
+connections per hand instead of thirty-two, a pass finds fewer ready
+connections and the loop's own frames (`serve_main` 1.13 → 1.26,
+`serve_request` 0.65 → 1.03) and a context switch (`finish_task_switch`
+0.50) are paid per fewer requests; the `poll` count per request is
+the same 0.15, so it is the pass's bookkeeping, not a syscall. The
+reactor thread is 1.74% of a close-shape hand's cpu at four hands and
+absent at one — the herd's park mechanics, in the bracket predicted
+(2–4% with the main thread's own `futex`/`epoll_ctl`/eventfd rows);
+the wolf-reactor row confirms the thread starts only when a hand
+loses a race.
+
+**The one-hand strace beside each profile** (a separate drive, the
+hand alone, 8 s): keepalive N=1 `futex` **1,488 in 8 s = 186/s, all
+errors** — wolf-lang#302's clock, read on the profiled hand itself;
+close N=4, worker 1 alone: `accept4` 9,276 with **2,551 EAGAIN**
+against 6,690 connections served — this hand lost 0.38 races per
+connection it won, `futex` 1.38 / `epoll_wait` 0.68 / `epoll_ctl` 0.76
+/ eventfd `write` 0.38 per connection on top, where the four-hand
+average in the count leg is `accept4` 1.08 and `futex` 0.36: the
+herd's losses fall unevenly and a ptraced hand loses more, which is
+why the count leg (all four traced alike) is the number and this
+column is the mechanism.
+
+### The measurement — the profile BY FUNCTION (runs 34599274095 keepalive N=1, 34599275985 close N=1, 34599278195 close N=4, 34599280320 keepalive N=4; `f9f95e7`, the user-space leaves by dso down to 0.1%)
+
+The whole-process leaf table cuts at 0.4% and a request's user-space
+fifth is spread over rows smaller than that, so the tool grew two
+tables per cell — the leaves inside `lobo-release` (lobo's frames AND
+the statically linked runtime) and inside libc, down to 0.1% — and
+the four cells were taken again. Two things first. **The dso split
+is itself a VM-class number**: keepalive N=1 read 79.7 / 14.3 / 5.7 on
+a VM serving 47k req/s under perf (the first set) and **74.9 / 18.5 /
+6.0** on one serving 31k (this set); close N=4 read 77.4 / 15.5 / 6.8
+at 21.7k and **74.0 / 17.2 / 8.2** at 52k. The user-space share is
+larger on the slower VM class on the keepalive shape and on the
+faster one on the close shape, so a share is compared within one run,
+never across two, and each table below names its own req/s. And
+**`--sort tid` is not a perf 6.17 key** — the by-thread report printed
+nothing and said so (fixed to `pid`, the per-thread key; the runs at
+`cf1141f` carry it; the `comm` report of the first set already named
+`wolf-reactor` at 1.74% of the close N=4 hand).
+
+**Keepalive, one hand (31,008 req/s under perf; 74.9 / 18.5 / 6.0):**
+the per-request cell, priced against the parity VM's **34.2 µs of cpu
+a request** (1% ≈ 0.34 µs) and its **5.2 µs gap** to nginx.
+
+| row (leaf, self) | share | whose |
+|---|---|---|
+| `serve_main` (the pass: the wait set rebuilt, the seven per-pass lists, the walk) | **1.29** | lobo |
+| `serve.serve_request` | **1.12** | lobo |
+| `http.parse_request` | 0.84 | lobo |
+| `TwoWaySearcher::next` + `StrSearcher::new` + `__wolf_rt_str_find` — the `find` family under lobo's `find`s | **0.90 + 0.69 + 0.30 = 1.89** | the runtime's shape, lobo's calls |
+| `ambient_alloc` + `list_new` + `list_push` (the arena) | 0.73 + 0.31 + 0.19 = 1.23 | the runtime (#191, #298) |
+| `serve.head_warm` | 0.61 | lobo (the memo's key: a byte fold and six compares) |
+| `http.split_lines_strict` | 0.59 | lobo |
+| `serve.serve_file` / `conn_step` / `step_serve` / `handle_request` | 0.44 / 0.35 / 0.31 / 0.29 | lobo |
+| `http.lower_token` / `contains_fold` / `is_canonical` / `child_arg1` / `match_location` | 0.40 / 0.21 / 0.19 / 0.23 / 0.15 | lobo |
+| **`proxy.first_http` + `proxy.plan` (+ `first_server`, `child_arg1`'s share)** — the route resolving by scanning the config's name table, per request, on a config with no `proxy_pass` | **0.31 + 0.28 ≈ 0.6–1.0** | lobo — a row nobody had named |
+| `note_request` / `metrics.hist_observe` / `fill_req_acc` (the access record, the histogram) | 0.23 / 0.20 / 0.16 | lobo |
+| the runtime's syscall wrappers: `net_writev` 0.31, `writev_ready` 0.16, `read_shim` 0.21, `fs_open` 0.18, `File::open_c` 0.16, `CStr::from_bytes_with_nul` 0.15 (the path copied to a C string per open), `ledger_on_free` 0.16 | 1.33 | the runtime |
+| libc: `open64` 0.46, `writev` 0.43, `__close` 0.30, `statx` 0.28, `recv` 0.26, `read` 0.25, `clock_gettime` 0.26 | 2.24 | both sides pay these |
+| libc: `malloc` 0.26 + `__libc_calloc` 0.21 + `cfree` 0.28 — `calloc` IS `net_read`'s zeroed 4 KiB `Vec` (#298 item 3), the rest the strbuf boxes | 0.75 | the runtime (#298) |
+| the fault path, kernel-named (first set: `do_user_addr_fault` 1.24, `clear_page_erms` 0.74, `do_anonymous_page`, `__handle_mm_fault`) — the pages the retained 2,315 B/request fault in | ~2.5 | the runtime (#191) |
+| `writev` inclusive — the transmit path | 41.3 | both sides; not a gap row |
+
+**The top five, measured and priced** (keepalive, one hand; the
+prediction's table had the loop and the parser at 2–3 and 3–4 and the
+runtime's rows at 4–6 — the order came out the same and the sizes
+close):
+
+| # | row | share | µs of 34.2 | whose | against |
+|---|---|---|---|---|---|
+| 1 | the transmit path (`writev` inclusive) | ~41% | ~14 | the kernel's, both sides | not a gap row |
+| 2 | **lobo's own frames** — the loop and the route (`serve_main`, `serve_request`, `conn_step`, `step_serve`, `handle_request`, `head_warm`, the config scan), the parser (`parse_request`, `split_lines_strict`, `lower_token`, `contains_fold`), the access record and the histogram | **~8.2%** over 0.1% (≈ 9–10 with the tail) | **~2.8–3.3** | **lobo's** | the biggest single function is the pass at 1.3%; no lobo function is over 1.5% by itself |
+| 3 | **the runtime's allocations and the pages they fault in** — `ambient_alloc`/`list_new`/`list_push` 1.23, `malloc`/`calloc`/`cfree` 0.75, the fault path ~2.5 | **~4.5%** | **~1.5** | the runtime's | **#298** items 1–3 (`calloc` is the read's zeroing; the strbuf boxes), **#191** (the retained bytes: 2,315 B a request is 0.57 fresh pages a request, `clear_page_erms`) |
+| 4 | **the `find` family** — a `TwoWaySearcher` built (`StrSearcher::new` 0.69) and run (`next` 0.90) for every `find`, needles of one to four bytes (`\r\n`, `:`, ` `, `/`) | **1.9%** | **~0.65** | the runtime's shape, under lobo's calls | not in #298: filed new — a searcher per call for a short needle where a `memchr`/`memmem` path is an order cheaper |
+| 5 | the runtime's wrappers around the syscalls (`net_writev`, `writev_ready`, `read_shim`, `fs_open`, `open_c`, the `CString` per open, `ledger_on_free`) | 1.3% | ~0.45 | the runtime's | small; the `CString` is a path copy a request |
+| — | **#299** (the head's `bytes()` copy, 241 B + a list) | under 0.1% — no row | <0.03 | the runtime's | the copy is ~20 ns; its list header is inside row 3 |
+| — | **#302** (the parked proc's `futex`) | the hand's strace: **1,529 `futex` in 8 s = 191/s, all errors**; in cpu under 0.1% | <0.02 | the runtime's | a count, not a time; nothing for W8 |
+
+Sum of the gap rows: lobo ~2.8–3.3 µs, the runtime ~2.6 µs (rows 3–5)
+— **~5.5 µs against the measured 5.2 µs gap at one hand**. So on the
+keepalive shape at one hand the gap is user space, split near evenly
+between lobo's own frames and the runtime's, and the runtime's half
+is three rows: the allocations and their pages (#298/#191), the
+searcher-per-`find`, the wrappers.
+
+**Close, one hand (16,118 req/s; 81.3 / 13.1 / 5.4)** — the cell that
+is AT PARITY (0.994x, 65.1 µs both sides): the same rows at smaller
+shares (`serve_main` 1.17, `parse_request` 0.63, `serve_request`
+0.62, `ambient_alloc` 0.58, the `find` family 1.07, `head_warm` 0.40,
+`list_new` 0.31, `net_writev` 0.28; libc `malloc`/`calloc`/`cfree`
+0.85), under a kernel share that is the accept and the teardown. lobo
+spends the same ~6 µs of user space here as on keepalive and nginx
+spends its ~2 µs; the difference sits inside a 65 µs connection whose
+other 59 µs is the kernel's on both sides, and the ratio reads 0.994x.
+
+**Close, four hands, one sampled (52,075 req/s summed; 74.0 / 17.2 /
+8.2)** — the bar's cell, +17.6 µs a connection over nginx where one
+hand is +0.0: `ambient_alloc` **3.41%** (0.58 at one hand; **0.87** in
+the first four-hand set at 21.7k req/s — a row that varies 4x between
+two VMs of the same cell is reported, not filed), `serve_main` 1.12,
+the `find` family 1.73, `head_warm` 0.71, **`__wolf_rt_net_wait` 0.59
++ the `Vec<i64>::from_iter` under `wait_ready` 0.21** (the pass's
+pollfd array and ready list, built per pass — at 1.28 passes a
+connection), `net_accept` 0.41, `split_lines_strict` 0.56,
+`serve_request` 0.47, `list_new` 0.44; libc `__poll` 0.50, `accept4`
+0.47, `malloc`/`realloc`/`cfree`/`calloc` 1.2; the fault path ~3.1
+(`do_user_addr_fault` 1.58); the `wolf-reactor` thread 1.74% (first
+set). The hand's own strace: `accept4` 28,779 with **7,012 EAGAIN**
+against 21,726 connections — 0.32 lost races a connection won on
+worker 1 under ptrace, `futex` 1.02, `epoll_wait` 0.57, `epoll_ctl`
+0.65, `poll` 1.38 a connection. Priced: the herd's cpu on this hand
+(the reactor thread, the losers' `accept4`, the park's `futex`/
+`epoll_ctl`/eventfd, the `poll` probe) is **~3–5% of the hand ≈ 2–4
+µs a connection**, in the bracket predicted (2–4%), and the other
+~13 µs of the 17.6 is not a cpu row of one hand: it is the four hands'
+WALL — every SYN wakes four `net_wait`s, one wins, three paid a pass
+for nothing (`poll` 1.28 a connection is that pass) — and the four
+arenas faulting at once. **lobo#5 stands as written**: the count's
+`accept4` 1.08 / `poll` 1.28 / `futex` 0.36 are the rows, a kernel-
+distributed wake (`EPOLLEXCLUSIVE`, wolf-lang#267) or a park-free
+loser is what would move them, and nothing on lobo's side under a day
+does.
+
+**Keepalive, four hands, one sampled (65,670 req/s summed; 74.6 /
+18.3 / 6.6)** — +11.1 µs a request over nginx where one hand is +5.2:
+the one-hand table again with the loop's rows a little larger
+(`serve_main` 1.54, `ambient_alloc` 1.08, `serve_request` 1.04,
+`parse_request` 0.89, the `find` family 1.3, `head_warm` 0.62,
+`classify` 0.17) and nothing new over 0.1%. The count says the pass
+frequency is nginx's own (`poll` 0.15 a request beside `epoll_wait`
+0.13), the profile says no row grew by more than half a point, and
+the parity table says lobo's cpu a request rose 34 → 39 µs across the
+cells while nginx's fell 29 → 28. **The ~6 µs a request that four
+hands pay and one does not on this shape has no row in a one-hand
+profile**: it is what four hands, four generators and the softirq
+path cost each other on four vcpus, and nginx's four workers do not
+pay it. Named, not explained; a per-cpu or cross-hand instrument
+(`perf` over all four hands with `--sort cpu`, or `perf sched`) is the
+next reading, and it is not this sprint's.
+
+### The row that could be taken, and why it was not
+
+The rule was: a lobo-side row, under a day, then take it and measure
+it. The candidates the table names: **the pass** (`serve_main` 1.3–1.5%,
+the seven per-pass lists rebuilt on every pass — a restructure of the
+connection table the drain and the generations ride on: past a day);
+**the route's config scan** (`proxy.plan` + `first_http` +
+`first_server` + `child_arg1`, ~0.6–1.0%: a per-generation memo of the
+plan keyed on the normalized path, with a reload-invalidation witness
+— a morning to write, but 1% is under the parity instrument's floor
+(ws30's "nothing" change read 1.005x [0.998, 1.006]) and the share
+table is the only thing that would read it, on a two-tree profile);
+**`head_warm`'s key** (0.6%, the same floor). None is both over the
+floor and under a day, so none was taken blind; the config scan is
+filed as lobo's (lobo#14) with the numbers, the `find` family upstream
+(wolf-lang#335), and #298's rows carry the release-pin prices.
+
+### The measurement — by thread (runs 34599620912 keepalive N=1, 34599622683 close N=4; `cf1141f`, `--sort pid`)
+
+| cell | the serving thread | `wolf-reactor` | the signal forwarder's carrier (unnamed) |
+|---|---|---|---|
+| keepalive, one hand (29,079 req/s; 74.9 / 18.5 / 6.3) | **99.99%** | not started | **0.01%** — 1,528 `futex` in the same window's strace |
+| close, four hands, one sampled (22,131 req/s summed; 76.8 / 16.6 / 6.3) | **98.33%** | **1.60%** | 0.06% |
+
+**#302 priced to the hundredth: the parked proc's ~190 `futex`/s is
+0.01% of a serving hand's cpu.** The reactor thread is 1.60% of a
+four-hand close hand (1.74% in the `comm` set) and absent at one
+hand: the herd's park mechanics, and the only thread row W8 has.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
