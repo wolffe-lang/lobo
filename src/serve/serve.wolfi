@@ -1,7 +1,7 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.10 · edition v1
-  export_hash 5317002b138625872b481269c36def93b3406464b0ea0df5b9f1d27dbaac18a1
-  pkg_hash    5317002b138625872b481269c36def93b3406464b0ea0df5b9f1d27dbaac18a1
+  export_hash 9deb396fd831a545116a27e2402aff81d2c2c8aa479768635929383e0ba60cc5
+  pkg_hash    9deb396fd831a545116a27e2402aff81d2c2c8aa479768635929383e0ba60cc5
   deps:
     budget  9299e00a4af3ebec20e314be715603c6490f169af63de01461fb714934914390
     config  2d9082dfc99a4dd3fa5cbdbc5d9ad72a0f4c7d710d5782e16986e2849be0ec53
@@ -16,18 +16,18 @@ module pkg :: serve
     [1] pub admin_err_len — fn admin_err_len(token: str) -> int
     [2] pub admin_kind — fn admin_kind(on: bool, path: str) -> str
     [3] pub carry_has_head — fn carry_has_head(carry: str) -> bool
-    [4] pub conn_idle — fn conn_idle(carry: str, served: int) -> self.ConnStep · regions (-, -) -> ρ_caller
-    [5] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int, mut rs: resolver.Resolver, mut ft: self.FileKinds) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5) -> ρ_caller
-    [6] pub date_str — fn date_str(mut ft: self.FileKinds, secs: int) -> str · regions (ρ1, -) -> -
-    [7] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
-    [8] pub error_body — fn error_body(code: int, server: str) -> str
-    [9] pub error_response — fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str
-    [10] pub file_kinds_new — fn file_kinds_new() -> self.FileKinds · regions () -> ρ_caller
-    [11] pub head_remember — fn head_remember(mut ft: self.FileKinds, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str, head: str) · regions (ρ1, -, -, -, -, -, -, -) -> -
-    [12] pub head_warm — fn head_warm(ft: self.FileKinds, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str) -> str · regions (ρ1, -, -, -, -, -, -) -> -
-    [13] pub header_too_large_body — fn header_too_large_body(server: str) -> str
-    [14] pub http_date — fn http_date(secs: int) -> str
-    [15] pub is_file_warm — fn is_file_warm(mut ft: self.FileKinds, path: str) -> bool · regions (ρ1, -) -> -
+    [4] pub classify — fn classify(path: str) -> self.Classified · regions (-) -> ρ_caller
+    [5] pub conn_idle — fn conn_idle(carry: str, served: int) -> self.ConnStep · regions (-, -) -> ρ_caller
+    [6] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int, mut rs: resolver.Resolver, mut ft: self.FileKinds) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5) -> ρ_caller
+    [7] pub date_str — fn date_str(mut ft: self.FileKinds, secs: int) -> str · regions (ρ1, -) -> -
+    [8] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
+    [9] pub error_body — fn error_body(code: int, server: str) -> str
+    [10] pub error_response — fn error_response(code: int, special_header_body: bool, date: str, token: str) -> str
+    [11] pub file_kinds_new — fn file_kinds_new() -> self.FileKinds · regions () -> ρ_caller
+    [12] pub head_remember — fn head_remember(mut ft: self.FileKinds, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str, head: str) · regions (ρ1, -, -, -, -, -, -, -) -> -
+    [13] pub head_warm — fn head_warm(ft: self.FileKinds, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str) -> str · regions (ρ1, -, -, -, -, -, -) -> -
+    [14] pub header_too_large_body — fn header_too_large_body(server: str) -> str
+    [15] pub http_date — fn http_date(secs: int) -> str
     [16] pub ledger_cap — fn ledger_cap(budget: int) -> int
     [17] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
     [18] pub listen_addr_plain — fn listen_addr_plain(c: config.Conf) -> str · regions (ρ1) -> -
@@ -43,8 +43,9 @@ module pkg :: serve
     [28] pub version — fn version() -> str
     [29] pub write_admin — fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io}
     [30] pub write_admin_503 — fn write_admin_503(conn: int, token: str)
-    [31] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
-    [32] pub FileKinds — struct FileKinds { paths: prelude.List[str], seen: prelude.List[int], hpath: prelude.List[str], hsize: prelude.List[int], hmtime: prelude.List[int], hsecs: prelude.List[int], hkeep: prelude.List[int], htoken: prelude.List[str], hhead: prelude.List[str], date_secs: int, date_str: str }
-    [33] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
-    [34] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int }
+    [31] pub Classified — struct Classified { kind: int, fd: int, size: int, mtime_ms: int }
+    [32] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
+    [33] pub FileKinds — struct FileKinds { hpath: prelude.List[str], hsize: prelude.List[int], hmtime: prelude.List[int], hsecs: prelude.List[int], hkeep: prelude.List[int], htoken: prelude.List[str], hhead: prelude.List[str], date_secs: int, date_str: str }
+    [34] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int }
+    [35] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int }
 
