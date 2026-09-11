@@ -1069,6 +1069,13 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // else the TLS port (set below).
     let addr = serve.listen_addr_plain(c0)
     let want_http = !addr.is_empty()
+    // ws32 (lobo#5): `listen … reuseport` — this process binds its OWN
+    // member of a SO_REUSEPORT group rather than adopting the master's
+    // socket (which the master then does not bind: `master_main`), so
+    // the kernel wakes one hand per connection. `bind_listener` says
+    // how, and `reuse_said` keeps the fallback notice to one line.
+    let reuseport = serve.listen_reuseport(c0)
+    var reuse_said = false
     var have_http = false
     var hl: int = 0
     var hport: int = 0
@@ -1105,9 +1112,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             }
             next_fd = next_fd + 1
         } else {
-            cand = net_listen(addr) else |_| {
-                bound = false
-                0
+            let bl = bind_listener(addr, reuseport)
+            cand = bl.0
+            bound = bl.1
+            if bl.2 && !reuse_said {
+                reuse_said = true
+                eprint(
+                    "lobo: [notice] worker {worker}: reuseport asked for on {addr} but this host refuses SO_REUSEPORT by name ([os.net.listen.opts] unsupported) — bound without it; the hands stand by behind one holder (docs/WORKERS.md)",
+                )
             }
         }
         if bound {
@@ -1185,9 +1197,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             }
             next_fd = next_fd + 1
         } else {
-            tcand = net_listen(tls_addr) else |_| {
-                tbound = false
-                0
+            let tb = bind_listener(tls_addr, reuseport)
+            tcand = tb.0
+            tbound = tb.1
+            if tb.2 && !reuse_said {
+                reuse_said = true
+                eprint(
+                    "lobo: [notice] worker {worker}: reuseport asked for on {tls_addr} but this host refuses SO_REUSEPORT by name ([os.net.listen.opts] unsupported) — bound without it; the hands stand by behind one holder (docs/WORKERS.md)",
+                )
             }
         }
         if tbound {
@@ -1478,11 +1495,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         // died: the port is free within its kernel teardown, and the
         // first hand to retry serves)
         if standby_http && running && !quitting && !adopting {
-            var got = true
-            let cand = net_listen(addr) else |_| {
-                got = false
-                0
-            }
+            let sb = bind_listener(addr, reuseport)
+            let cand = sb.0
+            let got = sb.1
             if got {
                 hl = cand
                 arm_accept(hl)
@@ -1493,11 +1508,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             }
         }
         if standby_tls && running && !quitting && !adopting {
-            var tgot = true
-            let tcand = net_listen(tls_addr) else |_| {
-                tgot = false
-                0
-            }
+            let tsb = bind_listener(tls_addr, reuseport)
+            let tcand = tsb.0
+            let tgot = tsb.1
             if tgot {
                 tls_l = tcand
                 arm_accept(tls_l)
@@ -2232,6 +2245,64 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
 // wait answered and how long the next one may last.
 // ------------------------------------------------------------------
 
+/// ws32 (lobo#5): bind a listener the way the config asked. With
+/// `reuseport` on the `listen` line the socket is a MEMBER of a
+/// `SO_REUSEPORT` group (`net_listen_with`, [os.net.listen.opts],
+/// wolf-lang#234): N hands bind N members and the kernel wakes ONE of
+/// them per connection instead of all N — nginx's own `reuseport`
+/// flag, and the shape lobo#5 measured against the herd (a lost race
+/// parks through the reactor; a member's queue is never raced). What
+/// the kernel does with the group is the host's: linux spreads it by
+/// 4-tuple hash, macOS hands every SYN to the newest bound member
+/// (s137; tests/serve/reuse_port_posture.lu), and the flag is honored
+/// on both exactly as nginx honors it — documented in docs/WORKERS.md,
+/// never detected. A host whose runtime refuses the option BY NAME
+/// (windows: `unsupported` — aliasing it to SO_REUSEADDR would be a
+/// silent hijack, docs/platforms.md) gets the bind WITHOUT it: ws16's
+/// bind-and-stand-by posture, one hand serving and the rest retrying
+/// each pass, and the third answer says so, so the caller can name it
+/// once. Without the flag this is `net_listen`. Answers (fd, bound,
+/// fell_back). Total.
+fn bind_listener(addr: str, reuseport: bool) -> (int, bool, bool) {
+    if reuseport {
+        var refused = false
+        var failed = false
+        let fd = net_listen_with(addr, true, 0) else |e| match e {
+            unsupported => {
+                refused = true
+                0
+            },
+            exists => {
+                failed = true
+                0
+            },
+            denied => {
+                failed = true
+                0
+            },
+            io => {
+                failed = true
+                0
+            },
+        }
+        if !refused {
+            return (fd, !failed, false)
+        }
+        var pfailed = false
+        let plain = net_listen(addr) else |_| {
+            pfailed = true
+            0
+        }
+        return (plain, !pfailed, true)
+    }
+    var nfailed = false
+    let nfd = net_listen(addr) else |_| {
+        nfailed = true
+        0
+    }
+    (nfd, !nfailed, false)
+}
+
 /// Arm the bounded accept every listener in a many-hands lobo needs
 /// (ws17), and say nothing when the host declines — a listener whose
 /// deadline could not be armed still works, it just waits longer on a
@@ -2914,10 +2985,19 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     // its holder is the gap ws16's failover had to cover.
     let maddr = serve.listen_addr_plain(c0)
     let mtls = ssl_listen_addr(c0)
+    // ws32 (lobo#5): `listen … reuseport` is the OTHER shape, taken by
+    // the operator's flag (nginx's grammar, nginx's default: off). The
+    // master then binds NOTHING for the listeners: a group member that
+    // never accepts would swallow its hash share of the connections,
+    // so every member must be a hand's own (`bind_listener`). The
+    // hands are spawned with an empty inherit set and bind for
+    // themselves; a replacement binds a fresh member. Measured against
+    // the inherited socket in docs/PROFILE.md's ws32 addendum.
+    let mreuse = serve.listen_reuseport(c0)
     var lfds = List[int]()
     var mhl: int = -1
     var mtl: int = -1
-    if !maddr.is_empty() {
+    if !maddr.is_empty() && !mreuse {
         mhl = net_listen(maddr) else |_| {
             eprint("lobo: [emerg] bind() to {maddr} failed")
             shell.pid_remove(pidp) else |_| {}
@@ -2925,7 +3005,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         }
         (mut lfds).push(mhl)
     }
-    if !mtls.is_empty() {
+    if !mtls.is_empty() && !mreuse {
         mtl = net_listen(mtls) else |_| {
             eprint("lobo: [emerg] bind() to TLS {mtls} failed")
             shell.pid_remove(pidp) else |_| {}
@@ -2942,10 +3022,15 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     } else {
         "loopback + token"
     }
+    let dist = if mreuse {
+        "reuseport: {lfds.len} listener(s) bound here — each hand binds its own SO_REUSEPORT member and the kernel wakes one hand per connection (docs/WORKERS.md)"
+    } else {
+        "{lfds.len} listener(s) bound here and handed down (os_spawn_with + net_adopt_listener) — every hand accepts on the same socket (docs/WORKERS.md)"
+    }
     ev_log(
         mut elog,
         "notice",
-        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}; accept distribution: {lfds.len} listener(s) bound here and handed down (os_spawn_with + net_adopt_listener) — every hand accepts on the same socket (docs/WORKERS.md)",
+        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}; accept distribution: {dist}",
     )
     let sprobe = shell.sig_probe()
     var sig_on = true

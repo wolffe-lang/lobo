@@ -1,0 +1,331 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! ws32 (lobo#5): `listen ADDR reuseport;` — nginx's own flag, the
+//! kernel-distributed wake. With it a master binds NOTHING for that
+//! listener and every hand binds its OWN `SO_REUSEPORT` member
+//! (`net_listen_with`, [os.net.listen.opts]); the kernel then wakes
+//! ONE hand per SYN instead of all of them (the herd, docs/PROFILE.md
+//! ws32). Against the REAL binary (`target/lobo-debug serve`,
+//! `worker_processes 2`), the master driven as a client:
+//!   1. the posture: `status` shows BOTH hands `serving` and the
+//!      master's log names the shape (`reuseport: … each hand binds
+//!      its own member`), each hand's own stanza says `listening:
+//!      true` — two sockets, not one adopted socket;
+//!   2. a GET is served;
+//!   3. the distribution: a run of connection-per-request GETs, and
+//!      the SUM of the two `accepted=` counters moves by the run —
+//!      every connection reached SOME member. WHICH member is the
+//!      host's policy and is PRINTED, never asserted: linux spreads
+//!      the group by 4-tuple hash, macOS hands every SYN to the newest
+//!      bound member (s137; tests/serve/reuse_port_posture.lu);
+//!   4. a hand told `stop` directly is REPLACED, and the replacement
+//!      SERVES — it binds a fresh member of the group (the shared
+//!      queue's "inherits the same socket" has no analog here, and
+//!      the test says so);
+//!   5. `quit`: every hand drains, the master exits 0, pid file gone.
+//! What lobo does when the runtime answers `unsupported` (windows) is
+//! the fallback named in src/main.lu — bind without the flag and stand
+//! by — and this file's lanes never run there. Loopback only,
+//! OS-chosen ports. Idempotent: the scratch tree is cleared at the
+//! START.
+
+use shell
+
+/// A single HTTP/1.1 GET, Connection: close, returning the whole
+/// reply (head and body). Rows: net `io`.
+fn http_get(port: int, path: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// GET until the body carries `want`, up to ~15 s (ws25's ceilings
+/// for a loaded box). Total.
+fn poll_body(port: int, want: str) -> bool {
+    var i: int = 0
+    while i < 300 {
+        let r = http_get(port, "/index.html") else ""
+        if r.contains(want) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Poll an endpoint until it answers `ping`, up to ~15 s. Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 300 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn write_conf(path: str, hp: int, cp: int, root: str) -> () ! {not_found, denied, io} {
+    let text = "worker_processes 2;\npid ws32_e2e/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  error_log ws32_e2e/error.log notice;\n  server {{ listen 127.0.0.1:{hp} reuseport; root {root}; }}\n}}\n"
+    fs_write_text(path, text)?
+}
+
+/// The master's status stanza (text), or "". Total.
+fn master_status(ep: str) -> str {
+    shell.control_fetch(ep, "status") else |_| { "" }
+}
+
+/// The line for `worker N:` in a master stanza, or "". Total.
+fn worker_row(st: str, n: int) -> str {
+    for line in st.lines() {
+        if line.starts_with("worker {n}: ") {
+            return line
+        }
+    }
+    ""
+}
+
+/// The `key=value` word's value on a row, or "". Total.
+fn row_field(row: str, key: str) -> str {
+    let probe = "{key}="
+    for w in row.words() {
+        if w.starts_with(probe) {
+            return w[probe.len..w.len]
+        }
+    }
+    ""
+}
+
+/// How many of the two hands say `serving`. Total.
+fn serving_count(st: str) -> int {
+    var n: int = 0
+    if worker_row(st, 1).contains(": serving ") {
+        n = n + 1
+    }
+    if worker_row(st, 2).contains(": serving ") {
+        n = n + 1
+    }
+    n
+}
+
+/// Poll the master until BOTH hands serve, up to ~20 s. Total.
+fn wait_posture(ep: str) -> bool {
+    var i: int = 0
+    while i < 400 {
+        if serving_count(master_status(ep)) == 2 {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// A hand's `accepted=` count off the master's row, or -1. Total.
+fn accepted_of(st: str, w: int) -> int {
+    let v = row_field(worker_row(st, w), "accepted")
+    if v.is_empty() {
+        return -1
+    }
+    var n: int = 0
+    for b in v.bytes() {
+        let d = b as int
+        if d < 48 || d > 57 {
+            return -1
+        }
+        n = n * 10 + (d - 48)
+    }
+    n
+}
+
+fn main() -> !int {
+    let scratch = "ws32_e2e"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/A")?
+    fs_write_text("{scratch}/A/index.html", "reuseport-A-body\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let confp = "{scratch}/lobo.conf"
+    write_conf(confp, hp, cp, "ws32_e2e/A")?
+
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn of target/lobo-debug failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| {
+            0
+        }
+        assert(false, "the spawned master never became alive on {ep}")
+    }
+
+    print("step 1: posture — two members, both serving")
+    if !wait_posture(ep) {
+        os_kill(child) else |_| {}
+        assert(false, "the master never reported two serving hands: {master_status(ep)}")
+    }
+    let st1 = master_status(ep)
+    assert(st1.contains("workers: 2\n"), "the master stanza counts its hands: {st1}")
+    let ep1 = row_field(worker_row(st1, 1), "control")
+    let ep2 = row_field(worker_row(st1, 2), "control")
+    assert(
+        ep1.starts_with("127.0.0.1:") && ep2.starts_with("127.0.0.1:"),
+        "each hand has its own endpoint",
+    )
+    let own1 = shell.control_fetch(ep1, "status") else |_| { "" }
+    assert(
+        own1.contains("worker: 1\nlistening: true\n"),
+        "hand 1 listens on its OWN member: {own1}",
+    )
+    let own2 = shell.control_fetch(ep2, "status") else |_| { "" }
+    assert(
+        own2.contains("worker: 2\nlistening: true\n"),
+        "hand 2 listens on its OWN member: {own2}",
+    )
+    // the master's log names the shape: nothing bound here, each hand
+    // its own member (the notice is written before the hands start)
+    let mlog = fs_read_text("{scratch}/error.log") else |_| { "" }
+    assert(
+        mlog.contains("reuseport"),
+        "the master's notice names the accept-distribution posture it took: {mlog}",
+    )
+    assert(
+        mlog.contains("0 listener(s) bound here"),
+        "…and that the master bound nothing for it (a non-accepting member would swallow its hash share): {mlog}",
+    )
+
+    print("step 2: a GET")
+    assert(poll_body(hp, "reuseport-A-body"), "a GET is served (polled)")
+
+    print("step 3: distribution — the sum moves; the split is the host's")
+    let before1 = accepted_of(master_status(ep), 1)
+    let before2 = accepted_of(master_status(ep), 2)
+    assert(before1 >= 0 && before2 >= 0, "both rows carry accepted=: {master_status(ep)}")
+    var g: int = 0
+    while g < 60 {
+        let b = http_get(hp, "/index.html") else |_| {
+            ""
+        }
+        assert(b.contains("reuseport-A-body"), "GET {g} of the distribution run: {b}")
+        g = g + 1
+    }
+    // the counters are read after the master's next supervision pass
+    // folds the hands' stanzas; poll until the sum has caught up
+    var summed = false
+    var sp: int = 0
+    var after1 = 0
+    var after2 = 0
+    while sp < 100 && !summed {
+        let st = master_status(ep)
+        after1 = accepted_of(st, 1)
+        after2 = accepted_of(st, 2)
+        if after1 + after2 >= before1 + before2 + 60 {
+            summed = true
+        } else {
+            time_sleep_ms(50)
+            sp = sp + 1
+        }
+    }
+    assert(
+        summed,
+        "every connection of the run reached SOME member (sum before {before1}+{before2}, after {after1}+{after2})",
+    )
+    // the policy, printed: which member the kernel woke. linux spreads
+    // by hash; macOS hands all to the newest bound member
+    print(
+        "reuseport split over 60 connections: hand 1 +{after1 - before1}, hand 2 +{after2 - before2} (the host's delivery policy — measured, not asserted)",
+    )
+
+    print("step 4: stop hand 1 — the replacement binds a fresh member and serves")
+    let rs = shell.control_send(ep1, "stop") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "stop to hand 1 never answered")
+        ""
+    }
+    assert(rs.contains("shutting down"), "the hand takes the order: {rs}")
+    assert(poll_body(hp, "reuseport-A-body"), "the survivor's member serves on")
+    var replaced = false
+    var i: int = 0
+    while i < 600 && !replaced {
+        let st = master_status(ep)
+        let r = worker_row(st, 1)
+        if r.contains(": serving ") && row_field(r, "restarts") == "1" {
+            replaced = true
+        } else {
+            time_sleep_ms(50)
+            i = i + 1
+        }
+    }
+    assert(
+        replaced,
+        "the master replaced hand 1 and the replacement SERVES on a member it bound itself (restarts=1): {master_status(ep)}",
+    )
+
+    print("step 5: quit")
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "quit never answered")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit reply: {rq}")
+    let code = os_wait(child) else |_| {
+        -1
+    }
+    assert(code == 0, "the master exits 0 after its hands are gone: {code}")
+    time_sleep_ms(100)
+    assert(!fs_exists("{scratch}/lobo.pid"), "pid file removed on quit")
+
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}
