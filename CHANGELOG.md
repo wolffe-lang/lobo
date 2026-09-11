@@ -78,6 +78,54 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws32 — 2026-09-11 — the herd (the two candidates measured alone; `listen … reuseport` taken as nginx's flag; the cross-hand split; #302 idle held)
+
+lobo#5's two candidates, each ALONE against trunk `d3dec23` on one
+VM, predicted first (`docs/PROFILE.md`'s ws32 addendum).
+
+- **(a) a zero accept budget is an unbudgeted park**, not a try-once:
+  v0.2.11's `set_deadline` clears at `ms <= 0` and `try_then_park`
+  parks unbounded. Probe branch `ws32-a` (never merged): the count
+  moved no per-connection row (`accept4` 1.07, `poll` 1.27); at idle
+  ONE hand of four answered the master (three parked mute, `futex`
+  784 → 1,373/s — one ~196/s clock per parked wait, posted on
+  wolf-lang#302); the parity set REFUSED on a keepalive run stalled
+  at 0.446x (a hand parked with its connections); the gauntlet RED at
+  the corpus (`prefork_e2e.lu`, `control_unix_e2e.lu`: a hand's own
+  endpoint mute after one GET). wolf-lang#267's try-once accept is
+  the surface that would make the candidate exist; posted there.
+- **(b) `listen ADDR reuseport;` — nginx's opt-in flag, taken.** Each
+  hand binds its own `SO_REUSEPORT` member (`bind_listener`), the
+  master binds nothing; `unsupported` (windows) falls back to the
+  bind without it and stands by, said once; macOS honored as nginx
+  honors it (the newest member takes all — `docs/WORKERS.md`).
+  Count, close N=4: `accept4` 1.09 → 1.00, `epoll_ctl`/`epoll_wait`/
+  the eventfd pair → 0, `futex` 0.35 → 0.12, `poll` 1.27 → 1.58 (the
+  probe finds an empty own queue), **10.29 → 9.76 vs nginx 10.13**.
+  Parity (VALID): **N=4 close ws32 ÷ trunk 1.044x** [1.028, 1.053],
+  79.6 → 73.3 µs a connection; **nginx ÷ ws32 1.089x MET** beside
+  nginx ÷ trunk 1.138x; keepalive 1.016x. Profile over all four hands:
+  zero EAGAIN, no `wolf-reactor` thread. The default stays nginx's
+  (the inherited socket): the bar's gating row is 1.138x NOT MET, the
+  flagged row 1.089x MET, both in the ledger. Witness
+  `tests/shell/reuseport_e2e.lu`.
+- **Item 2 — the cross-hand split.** `tools/lobo-profile … N all`:
+  perf over every hand, `--sort pid`/`--sort cpu`, and a tracer-free
+  per-hand `/proc` split (cpu, `syscw` as requests, µs a request,
+  voluntary/involuntary switches). Keepalive N=4: the four hands
+  within **1.01x** of each other at 31.6–32.0 µs; **0.35 involuntary
+  switches a request** (close 0.04–0.10); the switch/wake rows ~10
+  points of the union. The ~6 µs is preemption, paid evenly — named,
+  partly priced, not a row lobo owns; the lever is ws31's user-space
+  rows. `--sort cpu` read `-001` until `--sample-cpu` (50bf8ce).
+- **Item 3 — #302 idle at the release pair**: 6,273 `futex` / 8 s,
+  784/s, ~196/s per hand, all errors; nginx 0. Holds.
+- Tools: `LOBO_LISTEN_ARGS` / `LOBO_REF_LISTEN_ARGS` per binary in the
+  parity, count and profile legs; ci inputs `listen_args`,
+  `ref_listen_args`, `profile_hands`.
+- Gates: gauntlet GREEN exit 0 at d3dec23 and 7bd615f (274/274
+  lane-runs; macOS arm64); CI gauntlet green; lobo#5 closed.
+
 ## ws31 — 2026-09-11 — the gap closed (the release pair by digest; the pairing one release each way; the linux profile that names what remains of W8)
 
 Three items; the count settled at ws30, so this sprint's deliverable
