@@ -58,6 +58,11 @@ idle) KA="" ;;
 *) echo "lobo-syscalls: REFUSED — shape is keepalive, close or idle, not $SHAPE" >&2; exit 1 ;;
 esac
 LOBO="${LOBO_THIS:-$(pwd)/target/lobo-release}"
+# ws32 (lobo#5): words appended to lobo's `listen` line (e.g.
+# `reuseport`), so a candidate posture's count can be taken; "" is the
+# bar's own line. nginx's line never carries them: the count is lobo's
+# posture beside nginx's default
+LARGS="${LOBO_LISTEN_ARGS:-}"
 NGINX="$(pwd)/tests/differential/bin/nginx"
 [ -x "$LOBO" ] || { echo "lobo-syscalls: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
 [ -x "$NGINX" ] || { echo "lobo-syscalls: REFUSED — pinned nginx missing at $NGINX (docs/DIFFERENTIAL.md)" >&2; exit 1; }
@@ -90,8 +95,8 @@ start_lobo() { # sets hp, mpid, lconf, pids (the serving processes)
     hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     lconf="$scratch/lobo.conf"
-    printf 'worker_processes %s;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
-        "$N" "$scratch" "$cp" "$hp" "$scratch" > "$lconf"
+    printf 'worker_processes %s;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s%s; root %s/www; }\n}\n' \
+        "$N" "$scratch" "$cp" "$hp" "${LARGS:+ $LARGS}" "$scratch" > "$lconf"
     "$LOBO" serve -p . -c "$lconf" 2>> "$scratch/logs/lobo.log" &
     mpid=$!
     wait_port "$hp" || { echo "lobo-syscalls: lobo ($N workers) never served" >&2; kill "$mpid"; return 1; }
@@ -194,7 +199,7 @@ if [ "$SHAPE" = idle ]; then
 else
     drive="c=$CONC over $GENS generators (-c $PERGEN each), ab -t $SECS"
 fi
-echo "lobo-syscalls: $(date -u +%Y-%m-%dT%H:%MZ) host $host, $cores cpus, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); shape $SHAPE, N=$N, $drive; lobo $("$LOBO" -v 2>&1 | head -1); nginx $("$NGINX" -v 2>&1 | head -1)"
+echo "lobo-syscalls: $(date -u +%Y-%m-%dT%H:%MZ) host $host, $cores cpus, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); shape $SHAPE, N=$N, $drive; lobo $("$LOBO" -v 2>&1 | head -1)${LARGS:+ (listen args: $LARGS)}; nginx $("$NGINX" -v 2>&1 | head -1)"
 
 # table <unit> <total label> — the union of both per-files, lobo's
 # count first, sorted by the difference (what lobo pays that nginx

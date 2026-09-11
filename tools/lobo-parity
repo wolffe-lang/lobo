@@ -46,6 +46,10 @@
 # `ref`), and `LOBO_THIS=<binary>` names this side when it is not
 # this tree's `target/lobo-release` (two OTHER trees measured from
 # here). Single-tree runs print exactly what they printed before.
+# ws32 (lobo#5): `LOBO_LISTEN_ARGS` / `LOBO_REF_LISTEN_ARGS` are words
+# appended to THIS tree's / the ref's `listen` line (e.g. `reuseport`),
+# per binary so a candidate posture can be measured against a ref that
+# does not carry it on ONE VM; the bar's own config is the bare line.
 #
 # The generator is ab(1) — single-threaded, on every macOS and in
 # apache2-utils on linux — and ONE ab is the ceiling on the keepalive
@@ -81,6 +85,8 @@ NGINX="$(pwd)/tests/differential/bin/nginx"
 REF="${LOBO_REF:-}"
 LNAME="${LOBO_NAME:-lobo}"
 RNAME="${LOBO_REF_NAME:-ref}"
+LARGS="${LOBO_LISTEN_ARGS:-}"
+RARGS="${LOBO_REF_LISTEN_ARGS:-}"
 if [ -n "$REF" ]; then
     [ -x "$REF" ] || { echo "lobo-parity: REFUSED — LOBO_REF=$REF is not an executable" >&2; exit 1; }
     case "$REF" in /*) ;; *) REF="$(pwd)/$REF" ;; esac
@@ -196,8 +202,11 @@ start_lobo() { # start_lobo <workers> <binary> <label> — sets hp, mpid, lpids,
     hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     lconf="$scratch/$3-$1.conf"
-    printf 'worker_processes %s;\npid %s/%s-%s.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
-        "$1" "$scratch" "$3" "$1" "$cp" "$hp" "$scratch" > "$lconf"
+    # ws32: the listen line's extra words, per binary (this tree's or
+    # the ref's); "" is the bar's own line
+    if [ "$3" = "$LNAME" ]; then largs="$LARGS"; else largs="$RARGS"; fi
+    printf 'worker_processes %s;\npid %s/%s-%s.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s%s; root %s/www; }\n}\n' \
+        "$1" "$scratch" "$3" "$1" "$cp" "$hp" "${largs:+ $largs}" "$scratch" > "$lconf"
     "$lbin" serve -p . -c "$lconf" 2>> "$scratch/logs/$3-$1.log" &
     mpid=$!
     wait_port "$hp" || { echo "lobo-parity: $3 ($1 workers) never served" >&2; kill "$mpid"; return 1; }
@@ -331,7 +340,7 @@ cell() {
     return 0
 }
 
-echo "lobo-parity: $stamp host $host, $cores cpus, load(1m) $load1; bar N=$N c=$CONC over $GENS generators (-c $PERGEN each); $PAIRS pairs × ab -t $SECS; file $(wc -c < "$scratch/www/index.html") bytes"
+echo "lobo-parity: $stamp host $host, $cores cpus, load(1m) $load1; bar N=$N c=$CONC over $GENS generators (-c $PERGEN each); $PAIRS pairs × ab -t $SECS; file $(wc -c < "$scratch/www/index.html") bytes${LARGS:+; $LNAME listen args: $LARGS}${RARGS:+; $RNAME listen args: $RARGS}"
 [ "$(awk -v l="$load1" -v m="$LOADMAX" 'BEGIN { print (l > m) ? 1 : 0 }')" = 1 ] &&
     refused="$refused
   rig not quiet: load(1m) $load1 before the set (> $LOADMAX)"
