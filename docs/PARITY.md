@@ -154,6 +154,68 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws31: the release pair (wolf v0.2.11, lupin 0.1.33), ONE tree · **VALID** · **NOT MET on both shapes** (close 1.139x, keepalive 1.282x on the slow class); N=1 close **0.994x** — one hand is AT parity
+
+The ws22 instrument, run 34598621850 (`parity=true this_name=ws31`),
+load 1.73 after the settle loop, nginx close **25.6k**, keepalive
+87.8k — the runner's SLOW class (ws28's row was 1.161x / 1.286x on
+this class; ws30's the same two numbers on the fast class). `ws31` is
+`92c373b`: lobo's source at trunk `d792290` (ws30's router) built by
+wolf **0.2.11** (pin c9237c1) from the release archive's toolchain —
+the serving path's runtime is fc07cc5's byte for byte (the ws31
+addendum in `docs/PROFILE.md` reads the diff), so this row is ws30's
+tree on a slow VM, and the number it adds is the one-hand cell. No
+ref tree: a one-VM before/after of a PIN is not something the
+workflow can take (ws30 named it), and the pin-only tree at ws30's
+sha would refuse this job's toolchain. nginx 1.30.4, 5 pairs × `ab -t
+5`, c=32 over 4 generators:
+
+| cell | shape | ws31 req/s | nginx req/s | nginx ÷ ws31 median [min, max] | ws31 / nginx cores | µs cpu per request, ws31 / nginx |
+|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 22,447 | 25,627 | **1.139x** [1.128, 1.153] | 1.77 / 1.57 | 78.9 / 61.3 (**+17.6**) |
+| **N=4 c=32** | keepalive | 67,551 | 87,753 | **1.282x** [1.229, 1.309] | 2.64 / 2.46 | 39.1 / 28.0 (**+11.1**) |
+| N=1 c=32 | close | 15,371 | 15,213 | **0.994x** [0.973, 1.009] | 1.00 / 0.99 | 65.1 / 65.1 (**0.0**) |
+| N=1 c=32 | keepalive | 29,230 | 34,496 | **1.171x** [1.156, 1.221] | 1.00 / 1.00 | 34.2 / 29.0 (**+5.2**) |
+
+PREDICTED (the ws31 addendum, before the pin was staged): the same
+tree's timing as ws30's on whatever class the VM is — keepalive ~1.29x
+(right: 1.282x), close ~1.16x (1.139x, inside the pair spread of a
+class change). The last column is new to the ledger and is the number
+the profile is priced against: cores ÷ req/s, the cpu one request
+costs each server, which the sets before this one carried as two
+columns and never divided.
+
+**Read across the cells, with the profile beside it** (`docs/PROFILE.md`,
+the ws31 addendum): **at ONE hand the close shape is AT PARITY** —
+0.994x, and 65.1 µs of cpu a connection on both servers to the tenth —
+and the keepalive shape is 17% off at **5.2 µs a request, which is
+lobo's user space** (the profile at N=1 keepalive: 14.3% lobo-release
++ 5.7% libc of a 34 µs request ≈ 6.8 µs, against nginx's ~3% user
+space ≈ 0.9 µs). **At FOUR hands both shapes pay what one hand does
+not**: close +17.6 µs a connection where one hand pays +0.0 (lobo's
+per-connection cpu grows 65 → 79 µs across the cells while nginx's
+FALLS 65 → 61 — the herd, lobo#5 / wolf-lang#267: the count's `poll`
+1.28, `accept4` 1.08, `futex` 0.36, the reactor's `epoll_wait` 0.14 /
+`epoll_ctl` 0.15 per connection, and the profiled hand's
+`wolf-reactor` thread at 1.74% of its cpu), keepalive +11.1 µs where
+one hand pays +5.2 (lobo 34 → 39 µs across the cells, nginx 29 → 28;
+the count says the pass frequency is nginx's own — `poll` 0.15 a
+request against `epoll_wait` 0.13 — so what a lobo pass costs at eight
+connections a hand is the row, not how often it runs).
+
+**W8 restated for linux, the count beside the timing, at the release
+pin.** Count: keepalive **6.27 vs 6.14** (+0.13), close **10.20 vs
+10.13** (+0.06) — the runtime's pin bump moved no per-request row.
+Timing: keepalive **1.282x**, close **1.139x** at N=4 — **NOT MET on
+both shapes**; the count does not claim the bar. What remains has a
+cell and a name on each shape: on close, nothing at one hand and the
+herd at four; on keepalive, ~5 µs of user space a request at one hand
+(the runtime's copies and allocations, #298/#299/#191, beside lobo's
+own parser and loop — priced row by row in the profile) and ~6 µs
+more at four that neither the count nor a one-hand profile shows.
+macOS: ws26's MET stands as the last valid macOS set; no macOS set was
+taken this sprint (the box carried two compiler lanes; load 3.1–3.8).
+
 ### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws30: the router at fc07cc5 ÷ the pin-only tree, ONE VM · **VALID** · **NOT MET on both shapes** (close 1.161x, keepalive 1.286x on the fast class)
 
 The ws25 instrument, run 34554232695 (`parity=true ref_tree=08d9362
