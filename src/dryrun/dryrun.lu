@@ -605,24 +605,60 @@ pub fn stat_note(v: Verdict, req_path: str) -> str {
                 cand = "{cand}/"
             }
             cand = "{cand}{name}"
-            if fs_is_file(cand) {
+            let pk = probe(cand)
+            if pk.0 == 0 {
                 return "  stat: directory; index \"{name}\" exists — the live answer serves {cand}"
+            }
+            if pk.0 == 4 {
+                return "  stat: directory; index \"{name}\" exists, NOT readable — the live answer is 403"
             }
         }
         return "  stat: directory; no index file exists — the live answer is 403 (autoindex off)"
     }
-    if fs_is_file(v.fs_path) {
-        // ws25: the size off the handle (`fs_fstat`), as the live path
-        // reads it — one open, one fstat; the path stat is gone
-        let fd = fs_open(v.fs_path) else |_| {
-            return "  stat: file, NOT readable — the live answer is 403"
-        }
-        let st = fs_fstat(fd) else |_| List[int]()
-        let size = if st.len == 3 { st[1] } else { -1 }
-        fs_close(fd) else |_| {}
-        return "  stat: file, {size} bytes, readable"
+    let pk = probe(v.fs_path)
+    if pk.0 == 0 {
+        return "  stat: file, {pk.1} bytes, readable"
+    }
+    if pk.0 == 4 {
+        return "  stat: file, NOT readable — the live answer is 403"
+    }
+    if pk.0 == 2 {
+        return "  stat: not a regular file (a fifo, a device or a socket) — the live answer is 404"
     }
     "  stat: does not exist — the live answer is 404"
+}
+
+/// The live router's classification, mirrored (ws30, wolf-lang#289
+/// consumed): ONE open that cannot park (`fs_open_mode` 5) and ONE
+/// `fs_fstat` on the handle — the path stat is gone from both, so the
+/// prediction and the demonstration keep agreeing call for call.
+/// Answers (kind, size): 0 a regular file, 1 a directory, 2 a fifo, a
+/// device or a socket, 3 not found, 4 not readable, 5 the open's `io`,
+/// 6 an fstat that failed. The handle is closed here. Total.
+fn probe(path: str) -> (int, int) {
+    let fd = fs_open_mode(path, 5) else |e| match e {
+        not_found => {
+            return (3, -1)
+        },
+        denied => {
+            return (4, -1)
+        },
+        exists => {
+            return (5, -1)
+        },
+        invalid => {
+            return (5, -1)
+        },
+        io => {
+            return (5, -1)
+        },
+    }
+    let st = fs_fstat(fd) else |_| List[int]()
+    fs_close(fd) else |_| {}
+    if st.len != 3 {
+        return (6, -1)
+    }
+    (st[0], st[1])
 }
 
 // ------------------------------------------------------------------

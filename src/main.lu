@@ -1462,8 +1462,10 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // ws13: the resolver — the cache and the pending query table the
     // loop ticks once per pass like every other socket it owns
     var rs = resolver.new()
-    // ws27: the warm kind table rides beside the resolver — one per
-    // hand, threaded into every step the same way
+    // ws27/ws28: the per-hand memo table (the head cache and the date
+    // memo; its kind half retired at ws30 with the stat it remembered)
+    // rides beside the resolver — one per hand, threaded into every
+    // step the same way
     var ft = serve.file_kinds_new()
 
     var running = true

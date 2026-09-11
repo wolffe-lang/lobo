@@ -723,8 +723,9 @@ fn send_err(mut cn: conn.Conn, code: int, special: bool, token: str) {
     conn.conn_write(mut cn, resp) else |_| {}
 }
 
-/// Serve one already-resolved file at `path` (known to exist and be a
-/// regular file). Writes a 200 (or 304 on a matching
+/// Serve one already-resolved file at `path`, whose handle `fd`
+/// `classify` opened a moment ago and whose `fs_fstat` said regular,
+/// `size` bytes, modified at `mms`. Writes a 200 (or 304 on a matching
 /// If-Modified-Since), byte-order matching nginx's static handler:
 /// Server, Date, Content-Type, Content-Length, Last-Modified,
 /// Connection, ETag, Accept-Ranges. `is_head` omits the body. Reads
@@ -738,6 +739,9 @@ fn serve_file(
     c: config.Conf,
     req: http.Request,
     path: str,
+    fd: int,
+    size: int,
+    mms: int,
     token: str,
     keep: bool,
     is_head: bool,
@@ -746,57 +750,19 @@ fn serve_file(
     mut chg: Charge,
     mut ft: FileKinds,
 ) -> bool ! {closed, io} {
-    // ws25 (wolf-lang#261 consumed): ONE open, ONE fstat — nginx's
-    // shape. The handle is opened FIRST and `fs_fstat` answers kind,
-    // size and mtime off it in one metadata read, where ws23 left
-    // two path stats (`fs_size`, `fs_modified_ms`) ahead of a read
-    // that opened the file again (and, inside the runtime's
-    // `fs_read_bytes`, fstat'd it a third time for its buffer). The
-    // router's `fs_is_file` stays: it is the guard against a
-    // blocking `open` on a fifo or a device, which no stat AFTER the
-    // open can provide. Every arm below reads through this handle and
+    // ws30 (wolf-lang#289 consumed): the handle arrives OPEN from
+    // `classify` — ONE `fs_open_mode(path, 5)`, the read open that
+    // cannot park, and ONE `fs_fstat` on it, whose kind said regular
+    // and whose size and mtime are `size` and `mms` here. ws25 had
+    // the open and the fstat in this function behind the router's
+    // `fs_is_file`, the PATH stat that guarded a plain `fs_open`
+    // against a fifo; s149's mode 5 is that guard as a flag on the
+    // open itself, so the router opens first and there is nothing
+    // left to guard. Every arm below reads through this handle and
     // closes it on its own way out; the budgeted arms hand the PATH
     // to their proc as before (the proc opens under its own cap) and
     // close it first.
-    let fd = fs_open(path) else |e| match e {
-        not_found => {
-            acc.status = 404
-            acc.body_bytes = err_len(404, false, token)
-            send_err(mut cn, 404, false, token)
-            return true
-        },
-        denied => {
-            acc.status = 403
-            acc.body_bytes = err_len(403, false, token)
-            send_err(mut cn, 403, false, token)
-            return true
-        },
-        io => {
-            acc.status = 500
-            acc.body_bytes = err_len(500, false, token)
-            send_err(mut cn, 500, false, token)
-            return true
-        },
-    }
-    let st = fs_fstat(fd) else |_| {
-        fs_close(fd) else |_| {}
-        acc.status = 500
-        acc.body_bytes = err_len(500, false, token)
-        send_err(mut cn, 500, false, token)
-        return true
-    }
-    if st[0] != 0 {
-        // the router classified a regular file a moment ago; the handle
-        // says otherwise (a swap under us) — the path's answer is 404
-        fs_close(fd) else |_| {}
-        acc.status = 404
-        acc.body_bytes = err_len(404, false, token)
-        send_err(mut cn, 404, false, token)
-        return true
-    }
-    let size = st[1]
     var secs: int = 0
-    let mms = st[2]
     secs = mms / 1000
     let conn_hdr = keep_token(keep)
 
@@ -1302,38 +1268,29 @@ pub fn admin_err_len(token: str) -> int {
 }
 
 // ------------------------------------------------------------------
-// ws27: the warm kind table — the router's regular-file answer, kept
+// the per-hand memo table (ws27's kind table, ws28's head cache and
+// date memo; ws30 retired the kind half with the stat it remembered)
 // ------------------------------------------------------------------
 
-/// How long the router trusts a path's regular-file classification,
-/// in milliseconds. One second: long enough that a hot path is
-/// classified once per second per hand rather than once per request
-/// (at 60k req/s that is one `stat(2)` in sixty thousand), short
-/// enough that an operator's swap of a file for a fifo, a device or a
-/// directory is seen inside a second — the exposure the guard exists
-/// for, bounded rather than absent (the CHANGELOG's ws27 entry prices
-/// it; nginx bounds its own descriptor cache the same way with
-/// `open_file_cache_valid`, 60 s by default when the cache is on).
-fn file_kinds_valid_ms() -> int {
-    1000
-}
-
 /// Slots in the table: direct-mapped, one compare per lookup, never a
-/// scan (a scan over a full table would cost what the stat it saves
-/// costs). A collision is a miss, and a miss is the stat the router
-/// always paid — never a wrong answer.
+/// scan. A collision is a miss, and a miss builds what the memo would
+/// have answered — never a wrong answer.
 fn file_kinds_slots() -> int {
     256
 }
 
-/// The table itself: parallel lists indexed by `kind_slot(path)` —
-/// the path a slot remembers and the unix-ms it was classified at.
-/// One per serving loop (main.lu's, beside its resolver), so a hand's
-/// memory is its own; one per keepalive connection on the standalone
-/// `serve_conn` path.
+/// The table itself: parallel lists indexed by `kind_slot(path)`. ws27
+/// built it to remember the router's regular-file classification for
+/// one second, so a hot path paid its guarding PATH stat once a second
+/// instead of once a request; ws30 (wolf-lang#289 consumed) retired
+/// that half — `classify` opens with the mode that cannot park, so
+/// there is no stat left to remember and no second in which a swap
+/// for a fifo could park a hand. What stays is ws28's: the response
+/// head memoized under exactly the inputs it was built from, and the
+/// Date string for the second it names. One per serving loop
+/// (main.lu's, beside its resolver), so a hand's memory is its own;
+/// one per keepalive connection on the standalone `serve_conn` path.
 pub struct FileKinds {
-    paths: List[str],
-    seen: List[int],
     hpath: List[str],
     hsize: List[int],
     hmtime: List[int],
@@ -1345,11 +1302,8 @@ pub struct FileKinds {
     date_str: str,
 }
 
-/// An empty table: every slot holds no path and the epoch; the head
-/// cache empty; the date cache unset. Total.
+/// An empty table: the head cache empty, the date cache unset. Total.
 pub fn file_kinds_new() -> FileKinds {
-    var p = List[str]()
-    var t = List[int]()
     var hp = List[str]()
     var hs = List[int]()
     var hm = List[int]()
@@ -1359,8 +1313,6 @@ pub fn file_kinds_new() -> FileKinds {
     var hh = List[str]()
     var i: int = 0
     while i < file_kinds_slots() {
-        (mut p).push("")
-        (mut t).push(0)
         (mut hp).push("")
         (mut hs).push(-1)
         (mut hm).push(-1)
@@ -1371,8 +1323,6 @@ pub fn file_kinds_new() -> FileKinds {
         i = i + 1
     }
     FileKinds {
-        paths: p,
-        seen: t,
         hpath: hp,
         hsize: hs,
         hmtime: hm,
@@ -1454,8 +1404,8 @@ pub fn head_remember(
     ft.hhead[s] = head
 }
 
-/// The slot a path hashes to: a byte fold (the multiply-by-31 shape),
-/// bounded so it never overflows `int`. Total.
+/// The slot a path hashes to in the memo table: a byte fold (the
+/// multiply-by-31 shape), bounded so it never overflows `int`. Total.
 fn kind_slot(path: str) -> int {
     var h: int = 0
     for b_raw in path.bytes() {
@@ -1465,32 +1415,71 @@ fn kind_slot(path: str) -> int {
     h % file_kinds_slots()
 }
 
-/// Is `path` a regular file — answered from the table when it
-/// classified this path inside `file_kinds_valid_ms`, from `fs_is_file`
-/// (one `stat(2)` on the path) otherwise, and a positive answer is
-/// remembered. Only the KIND is remembered: size and mtime stay on the
-/// `fs_fstat` `serve_file` takes on the handle it opens, so nothing a
-/// client sees — Content-Length, Last-Modified, the ETag — is ever a
-/// second old; what the window buys is skipping the path walk the
-/// router paid before every open. Why the router stats at all: `fs_open`
-/// on a fifo with no writer parks the hand (nginx opens with
-/// `O_NONBLOCK` for exactly this reason and classifies with `fstat`
-/// after — a wolf `fs_open` mode this repo has filed upstream; with it
-/// the table and the stat both go). ws27 counted the stat at one of
-/// lobo's ~7.5 syscalls per keepalive request on linux, the one call
-/// nginx does not make on that shape (docs/PROFILE.md). Total.
-pub fn is_file_warm(mut ft: FileKinds, path: str) -> bool {
-    let s = kind_slot(path)
-    let now = time_unix_ms()
-    if ft.paths[s] == path && now - ft.seen[s] <= file_kinds_valid_ms() {
-        return true
+/// What the router learned from ONE open and ONE fstat (`classify`).
+/// `kind` 0 is a regular file and `fd` is its OPEN handle — the caller
+/// owns it — with `size` and `mtime_ms` off the same stat; every other
+/// kind arrives with no handle open. Total.
+pub struct Classified {
+    kind: int,
+    fd: int,
+    size: int,
+    mtime_ms: int,
+}
+
+/// A `Classified` that is not a regular file: no handle. Total.
+fn not_a_file(kind: int) -> Classified {
+    Classified { kind: kind, fd: -1, size: 0, mtime_ms: 0 }
+}
+
+/// The router's classification of `path`, s149's shape (wolf-lang#289
+/// consumed, ws30): ONE open that cannot park — `fs_open_mode` 5, a
+/// read open carrying `O_NONBLOCK`, so a fifo with no writer answers a
+/// handle instead of parking the hand — and ONE `fs_fstat` on the
+/// handle, where ws23–ws29 paid a PATH stat (`fs_is_file`) before a
+/// plain `fs_open` to be safe and ws27 hid that stat behind a one-
+/// second table. The stat and the table are both gone: nothing is
+/// remembered, nothing a client sees is a second old, and the
+/// exposure the table bounded to a second is not bounded but absent.
+/// nginx's `ngx_open_file_wrapper` + `fstat` shape, call for call.
+///
+/// `kind` 0: a regular file, the handle OPEN, size and mtime beside
+/// it. Every other kind comes back with the handle closed or never
+/// opened: 1 a directory (linux and macOS open one read-only; the
+/// router's directory arm), 2 a fifo, a device or a socket (refused
+/// — nginx's "is not a regular file"), 3 not found, 4 the open was
+/// denied (nginx's 403), 5 the open's `io` — ENOTDIR through a file,
+/// ELOOP, a name too long: the path stat answered "no" to all of
+/// these and the router drew 404, and it still does (nginx draws 403
+/// for ELOOP and 500 for a true EIO; that delta predates this sprint
+/// and is unchanged by it) — and 6 an fstat that failed on a handle
+/// it just got (the 500 `serve_file` gave it before). Total.
+pub fn classify(path: str) -> Classified {
+    let fd = fs_open_mode(path, 5) else |e| match e {
+        not_found => {
+            return not_a_file(3)
+        },
+        denied => {
+            return not_a_file(4)
+        },
+        exists => {
+            return not_a_file(5)
+        },
+        invalid => {
+            return not_a_file(5)
+        },
+        io => {
+            return not_a_file(5)
+        },
     }
-    if fs_is_file(path) {
-        ft.paths[s] = path
-        ft.seen[s] = now
-        return true
+    let st = fs_fstat(fd) else |_| {
+        fs_close(fd) else |_| {}
+        return not_a_file(6)
     }
-    false
+    if st[0] != 0 {
+        fs_close(fd) else |_| {}
+        return not_a_file(st[0])
+    }
+    Classified { kind: 0, fd: fd, size: st[1], mtime_ms: st[2] }
 }
 
 /// Execute a routing decision against the fs: directory redirect,
@@ -1567,39 +1556,41 @@ fn handle_request(
         return true
     }
 
-    // ws23 (the stats): the REGULAR FILE is asked first, because it is
-    // what nearly every request names and the path stats are where
-    // a file request's syscalls went beyond nginx's (docs/PROFILE.md
-    // counted three; there were four — `fs_is_dir`, `fs_is_file`,
-    // `fs_size`, `fs_modified_ms` — against nginx's one `fstat` on the
-    // fd it opened). Asking `fs_is_dir` first cost every file request
-    // a stat that only a directory request needed; now a file pays
-    // one classification stat, a directory request pays the same two
-    // it did, and what any request OBSERVES is unchanged: the fifo,
-    // device and socket a `fs_is_file` guard exists for still never
-    // reach an `open` that could block. The remaining two — size and
-    // mtime, each its own `stat(2)` — need a runtime call that
-    // answers kind, size and mtime at once, or an fstat on the fd
-    // the read opens (wolf-lang#261, filed from ws23 with the
-    // number: ~0.5 µs per path stat on this box).
-    if is_file_warm(mut ft, d.fs_path) {
-        return serve_file(
-            mut cn,
-            c,
-            req,
-            d.fs_path,
-            token,
-            keep,
-            is_head,
-            local_port,
-            mut acc,
-            mut chg,
-            mut ft,
-        )
-    }
-
+    // ws30 (wolf-lang#289 consumed): the router OPENS first — one
+    // `fs_open_mode(path, 5)`, the read open that cannot park, and one
+    // `fs_fstat` on the handle — and classifies from the kind it got
+    // back: nginx's `ngx_open_file_wrapper` shape. ws23 asked the
+    // regular file first with a PATH stat because a plain `fs_open`
+    // on a fifo parks the hand; ws27 hid that stat behind a one-
+    // second table; s149's mode 5 makes the open itself safe, so the
+    // stat and the table both go, and a regular file — nearly every
+    // request — costs the open and the fstat it was always going to
+    // pay and nothing before them (docs/PROFILE.md's ws30 addendum
+    // counts it). A path with a trailing slash asks its index
+    // candidates directly (nginx's index module opens the candidate,
+    // never the directory) and stats the directory only when no index
+    // served, to tell 403 from 404 — as before.
     if !norm_path.ends_with("/") {
-        if fs_is_dir(d.fs_path) {
+        let cl = classify(d.fs_path)
+        if cl.kind == 0 {
+            return serve_file(
+                mut cn,
+                c,
+                req,
+                d.fs_path,
+                cl.fd,
+                cl.size,
+                cl.mtime_ms,
+                token,
+                keep,
+                is_head,
+                local_port,
+                mut acc,
+                mut chg,
+                mut ft,
+            )
+        }
+        if cl.kind == 1 {
             // 301 to the trailing-slash form (nginx's dir redirect)
             let loc = "http://{hostport(req.host, local_port)}{norm_path}/"
             let body = error_body(301, token)
@@ -1616,6 +1607,21 @@ fn handle_request(
             write_all(mut cn, h)?
             return !keep
         }
+        if cl.kind == 4 {
+            // the open was refused: 403, nginx's answer to EACCES
+            acc.status = 403
+            acc.body_bytes = err_len(403, false, token)
+            send_err(mut cn, 403, false, token)
+            return true
+        }
+        if cl.kind == 6 {
+            acc.status = 500
+            acc.body_bytes = err_len(500, false, token)
+            send_err(mut cn, 500, false, token)
+            return true
+        }
+        // not found; a fifo, a device or a socket (nginx: "is not a
+        // regular file"); a name the open could not walk: 404
         acc.status = 404
         acc.body_bytes = err_len(404, false, token)
         send_err(mut cn, 404, false, token)
@@ -1632,12 +1638,16 @@ fn handle_request(
     }
     for name in idxs {
         let cand = join_fs(d.fs_path, name)
-        if is_file_warm(mut ft, cand) {
+        let cl = classify(cand)
+        if cl.kind == 0 {
             return serve_file(
                 mut cn,
                 c,
                 req,
                 cand,
+                cl.fd,
+                cl.size,
+                cl.mtime_ms,
                 token,
                 keep,
                 is_head,
@@ -1647,6 +1657,21 @@ fn handle_request(
                 mut ft,
             )
         }
+        if cl.kind == 4 {
+            // the candidate is there and its open was refused: 403 —
+            // the answer `serve_file` gave when it opened it before
+            acc.status = 403
+            acc.body_bytes = err_len(403, false, token)
+            send_err(mut cn, 403, false, token)
+            return true
+        }
+        if cl.kind == 6 {
+            acc.status = 500
+            acc.body_bytes = err_len(500, false, token)
+            send_err(mut cn, 500, false, token)
+            return true
+        }
+        // missing, a directory, a fifo: the next candidate
     }
     if fs_is_dir(d.fs_path) {
         // no index, autoindex off → 403 (nginx)

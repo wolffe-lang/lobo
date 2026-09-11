@@ -1,0 +1,80 @@
+//! check: run(exit=0, stdout="file=0 size=15\nfd-reads=yes\ndir=1\nmissing=3\nappeared=0\ngone=3\nfifo=2\nfifo-at-once=yes\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws30 (wolf-lang#289 consumed): the router's classification is ONE
+//! open that cannot park and ONE fstat on the handle — `serve.classify`
+//! — where ws23–ws29 paid a PATH stat before a plain `fs_open` and
+//! ws27 remembered that stat for a second. The observable contract,
+//! pinned here: a regular file answers kind 0 with an OPEN handle the
+//! caller reads through, its size the stat's; a directory 1; a
+//! missing path 3; NOTHING is remembered, so a file that appears is
+//! seen at once and one that goes is gone at once (ws27's test pinned
+//! a one-second memory of a deleted file — that window is what this
+//! sprint retired); and a FIFO with no writer answers kind 2 AT ONCE,
+//! where `fs_open` without the flag parks the caller until a writer
+//! appears — the hang the path stat guarded against, now a row. The
+//! fifo is made by `mkfifo(1)`: the language has no mkfifo (#289 says
+//! so), and every host this repo serves has the tool. fs → native +
+//! checked (lupin has no fs). The scratch dir is under `target/`
+//! (lobo#2) and cleared at the START.
+
+use serve
+
+fn main() -> !int {
+    let root = "target/ws30_classify"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all(root)?
+    fs_write_text("{root}/a.html", "<html>a</html>\n")?
+    fs_create_dir_all("{root}/d")?
+
+    // 1. a regular file: kind 0, an open handle, the stat's size
+    let f = serve.classify("{root}/a.html")
+    print("file={f.kind} size={f.size}")
+    let text = fs_read(f.fd, 64) else |_| ""
+    fs_close(f.fd) else |_| {}
+    print("fd-reads={yn(text == "<html>a</html>\n")}")
+
+    // 2. a directory and a missing path, no handle either way
+    let d = serve.classify("{root}/d")
+    print("dir={d.kind}")
+    let m = serve.classify("{root}/b.html")
+    print("missing={m.kind}")
+
+    // 3. no memory in either direction
+    fs_write_text("{root}/b.html", "<html>b</html>\n")?
+    let ap = serve.classify("{root}/b.html")
+    print("appeared={ap.kind}")
+    fs_close(ap.fd) else |_| {}
+    fs_remove("{root}/b.html")?
+    let g = serve.classify("{root}/b.html")
+    print("gone={g.kind}")
+
+    // 4. the fifo: a handle at once, classified 2, never a park
+    var argv = List[str]()
+    (mut argv).push("mkfifo")
+    (mut argv).push("{root}/hole.html")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn(mkfifo) failed — is mkfifo(1) on PATH?")
+        0
+    }
+    let rc = os_wait(child) else |_| -1
+    assert(rc == 0, "mkfifo exited {rc}")
+    let t0 = time_unix_ms()
+    let h = serve.classify("{root}/hole.html")
+    let took = time_unix_ms() - t0
+    print("fifo={h.kind}")
+    print("fifo-at-once={yn(took < 1000)}")
+
+    fs_remove_dir_all(root) else |_| {}
+    0
+}
+
+fn yn(b: bool) -> str {
+    if b {
+        return "yes"
+    }
+    "no"
+}

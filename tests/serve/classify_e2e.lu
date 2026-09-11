@@ -3,16 +3,18 @@
 //! lanes: native checked
 //! stage-src: shell config obs
 //!
-//! ws27: THE WARM KIND TABLE, END TO END. Spawn the real lobo, serve a
-//! file (200), then swap that path for a DIRECTORY under the server and
-//! ask again inside the one-second window: the router still calls it a
-//! file from memory, `serve_file` opens it, the handle says otherwise,
-//! and the answer is 404 (the "swap under us" arm) — never a hang,
-//! never a stale body. Past the window the router stats again, sees
-//! the directory, and answers nginx's 301 to the slashed path. A path
-//! deleted inside the window is 404 from the open. Loopback only,
-//! OS-chosen ports, scratch cleared at START, the master stopped
-//! through its desk and waited for.
+//! ws30: THE CLASSIFICATION, END TO END — nothing is remembered.
+//! Spawn the real lobo, serve a file (200), then swap that path for a
+//! DIRECTORY under the server and ask again AT ONCE: the router opens
+//! the path (`fs_open_mode` 5), the handle says directory, and the
+//! answer is nginx's 301 to the slashed path — not the 404 ws27's
+//! one-second kind table gave inside its window, and not a wait for
+//! the window to pass. A deleted file is 404 from the open, at once.
+//! The file beside them still serves. (ws27's `file_kinds_e2e.lu`
+//! pinned the window this sprint retired; wolf-lang#289 consumed.)
+//! Loopback only, OS-chosen ports, scratch under `target/` (lobo#2)
+//! and cleared at START, the master stopped through its desk and
+//! waited for.
 
 use shell
 
@@ -74,7 +76,7 @@ fn get(port: int, path: str) -> str ! {io} {
 }
 
 fn main() -> !int {
-    let d = "ws27_fk_e2e"
+    let d = "target/ws30_classify_e2e"
     fs_remove_dir_all(d) else |_| {}
     fs_create_dir_all("{d}/w")?
     fs_write_text("{d}/w/a.html", "FILE-KINDS-A\n")?
@@ -104,36 +106,36 @@ fn main() -> !int {
         assert(false, "the spawned lobo never became alive")
     }
 
-    // 1. the file serves, and its kind is now warm in this hand
+    // 1. the file serves
     let r1 = get(hp, "/a.html")?
     assert(r1.starts_with("HTTP/1.1 200 OK"), "a.html serves: {r1}")
     assert(r1.contains("FILE-KINDS-A"), "the body: {r1}")
     let r1g = get(hp, "/gone.html")?
     assert(r1g.starts_with("HTTP/1.1 200 OK"), "gone.html serves first: {r1g}")
 
-    // 2. the swap, inside the window: the path is a directory now;
-    //    memory says file, the open succeeds, the handle says
-    //    directory → 404, the swap-under-us arm, no hang
+    // 2. the swap, AT ONCE: the path is a directory now; the open
+    //    succeeds, the handle says directory → nginx's 301 to the
+    //    slashed path, with no window to wait out and no hang
     fs_remove("{d}/w/a.html")?
     fs_create_dir_all("{d}/w/a.html")?
     let r2 = get(hp, "/a.html")?
     assert(
-        r2.starts_with("HTTP/1.1 404 Not Found"),
-        "inside the window a swapped path is 404: {r2}",
+        r2.starts_with("HTTP/1.1 301 Moved Permanently"),
+        "a swapped path is a directory at once: {r2}",
     )
 
-    // 3. a deletion inside the window: the open answers not_found → 404
+    // 3. a deletion, at once: the open answers not_found → 404
     fs_remove("{d}/w/gone.html")?
     let r3 = get(hp, "/gone.html")?
     assert(r3.starts_with("HTTP/1.1 404 Not Found"), "a deleted file is 404 from the open: {r3}")
 
-    // 4. past the window the router stats again and sees the directory:
-    //    nginx's 301 to the slashed path
-    time_sleep_ms(1100)
-    let r4 = get(hp, "/a.html")?
+    // 4. the file beside them still serves, from a hand that never
+    //    parked and remembers nothing
+    fs_write_text("{d}/w/b.html", "FILE-KINDS-B\n")?
+    let r4 = get(hp, "/b.html")?
     assert(
-        r4.starts_with("HTTP/1.1 301 Moved Permanently"),
-        "past the window the directory redirects: {r4}",
+        r4.starts_with("HTTP/1.1 200 OK") && r4.contains("FILE-KINDS-B"),
+        "a file that appears is served at once: {r4}",
     )
 
     let rq = shell.control_send(ep, "quit") else |_| {

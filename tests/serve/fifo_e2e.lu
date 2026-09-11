@@ -1,0 +1,150 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! THE FIFO UNDER THE ROOT, END TO END (ws30, wolf-lang#289 consumed):
+//! a real lobo whose document root holds a fifo with no writer is
+//! asked for it, and answers 404 AT ONCE — then serves the file beside
+//! it, because the hand was never parked. Before s149's `fs_open_mode`
+//! 5 the router paid a PATH stat before every open to keep this
+//! request from parking the whole serving hand until some writer
+//! appeared; ws27 hid that stat behind a one-second table (a swap for
+//! a fifo inside the second could still park); now the open itself
+//! cannot park and there is no stat and no window. The fifo is made by
+//! `mkfifo(1)`. The checked lane here is the driver only (the server
+//! is the native debug binary), so it runs. Loopback only, OS-chosen
+//! ports, scratch under `target/` (lobo#2) and cleared at START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// One request with a 3 s deadline: a hand parked on the fifo is an
+/// `io` here, never a hang. Row: io.
+fn ask(port: int, reqtext: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_write(c, reqtext) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+fn main() -> !int {
+    let d = "target/ws30_fifo_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/index.html", "FIFO-E2E-BESIDE\n")?
+    var mk = List[str]()
+    (mut mk).push("mkfifo")
+    (mut mk).push("{d}/w/hole.html")
+    let mkc = os_spawn(mk) else |_| {
+        assert(false, "os_spawn(mkfifo) failed — is mkfifo(1) on PATH?")
+        0
+    }
+    let rc = os_wait(mkc) else |_| -1
+    assert(rc == 0, "mkfifo exited {rc}")
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; index index.html; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+    var argv = List[str]()
+    // ws25 (lobo#1): the ABSOLUTE path, so the rig's reaper can see a
+    // master a failure path leaves behind
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // 1. the fifo: 404, at once (the deadline in `ask` is the clock)
+    let t0 = time_unix_ms()
+    let r1 = ask(hp, "GET /hole.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        shell.control_fetch(ep, "stop") else |_| ""
+        let _ = os_wait(child) else |_| 0
+        assert(
+            false,
+            "the fifo request did not answer within its deadline — the hand parked on the open",
+        )
+        ""
+    }
+    let took = time_unix_ms() - t0
+    assert(r1.starts_with("HTTP/1.1 404 "), "a fifo under the root is 404, got: {r1}")
+    assert(took < 2000, "the 404 took {took} ms — that is a park, not an answer")
+
+    // 2. the hand is still serving: the file beside the fifo
+    let r2 = ask(hp, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        shell.control_fetch(ep, "stop") else |_| ""
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the request after the fifo did not answer")
+        ""
+    }
+    assert(
+        r2.starts_with("HTTP/1.1 200 OK") && r2.contains("FIFO-E2E-BESIDE"),
+        "served beside the fifo: {r2}",
+    )
+
+    shell.control_fetch(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        ""
+    }
+    let _ = os_wait(child) else |_| 0
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
