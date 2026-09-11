@@ -78,6 +78,183 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws30 — 2026-09-11 — the router takes the syscalls (wolf pinned at fc07cc5; one open that cannot park; the count and the parked task's futex measured)
+
+Three items; two runtime syscalls become one router site; every
+number was written down before its run.
+
+- **Item 1 — the pin, and the one site.** `[wolf]` moves 4c60946
+  (v0.2.9) → **fc07cc5**, s149 merged on trunk, dev-stamped `wolf
+  0.2.10+dev.fc07cc5 (wolfgang, pin fc07cc5)` — the ws18/ws24 shape,
+  since v0.2.10 is 62 commits behind it and s149 is the reason. Built
+  with `cargo xtask dist` in a scratch worktree (the archive is named
+  0.2.10; the binary says `+dev.fc07cc5`) and staged into the main
+  checkout's `.wolf-bin`, which every lane's worktree symlinks; the
+  main checkout at trunk therefore refuses its own tools on identity
+  drift until it is re-staged or re-pinned, as ws28/ws29 recorded. The
+  sixty-two commits are classed in `wolf-toolchain.toml`: s149 is the
+  point (#289 `fs_open_mode` 5, a read open carrying `O_NONBLOCK`;
+  #290 `accept4(SOCK_NONBLOCK|SOCK_CLOEXEC)` and `TCP_NODELAY` paid at
+  the write Nagle could hold, not at every accept); s148's #292 makes
+  every `.wolfi` hash re-derive ONCE (the hashes are over the
+  interface now, not the release string — this is the last pin bump
+  that moves them); #293's E0416 (`s[a..b] = …` refused) is zero here,
+  grepped; s146's W0601 (a `!()` tail in a unit context is a warned
+  discard) is measured by the gauntlet, which denies warnings, and it
+  fired nowhere; s147's range arms and #284's two clauses move
+  nothing. The pairing gap is **two releases, named and not closed**:
+  wolf@fc07cc5 declares lupin 0.1.31, `[lupin]` stays at 0.1.29 (this
+  lane's contract pins `[wolf]`; the disk held one toolchain build);
+  neither 0.1.30 nor 0.1.31 names the fs tier, so no lupin lane
+  reaches the code the bump moves. #146 re-probed a SEVENTEENTH time
+  at this pin: `WOLF_MIDEND=1` still ICEs on `sc_muladd`'s dominance
+  (`%19 is not dominated by its definition`); `WOLF_MIDEND=0` stays.
+  - **The site count, read off the tree**: s149's hand-off said one
+    site; it is one serving-path site with two halves and one mirror.
+    `serve.is_file_warm` (`fs_is_file` behind ws27's one-second kind
+    table, the guard) and `serve_file`'s `fs_open` + `fs_fstat` (the
+    open it guarded) become **`serve.classify`**: ONE `fs_open_mode(p,
+    5)` and ONE `fs_fstat` on the handle, the kind decided off what
+    came back — 0 serve through the open handle, 1 the router's
+    directory arm (a 301 without a second stat), 2 a fifo, a device or
+    a socket (refused: nginx's "is not a regular file", 404), `denied`
+    403 (nginx's EACCES answer; a stat-first router said 404 to an
+    unsearchable parent, now it says what nginx says), the open's `io`
+    (ENOTDIR through a file, ELOOP, a name too long) 404 as before.
+    The kind table's kind half is retired with the stat it remembered
+    — there is nothing left to remember and no second in which a swap
+    for a fifo could park a hand; ws28's head cache and date memo stay
+    on the same struct. The mirror is `dryrun.stat_note` (`-t
+    --request`'s prediction), which classifies the same way so the
+    prediction and the demonstration keep agreeing; it is not on the
+    serving path. `budget.lu`'s open (the capped proc's, on a path the
+    router already classified) and `obs.lu`'s log open do not move.
+    **A path with a trailing slash asks its index candidates directly
+    and never opens the directory** — nginx's index module's shape —
+    so `GET /` costs what it did, not an extra open+fstat+close.
+  - **The witnesses.** `tests/serve/classify.lu` (a regular file is
+    kind 0 with an open handle whose read is the file; a directory 1;
+    a missing path 3; a file that appears or goes is seen AT ONCE —
+    ws27's test pinned a one-second memory of a deleted file, and that
+    memory is what this sprint retired; a FIFO made by `mkfifo(1)`
+    answers kind 2 in 0 ms). `tests/serve/fifo_e2e.lu` (a real lobo
+    with a writerless fifo under its root answers `GET /hole.html`
+    **404 at once** and serves the file beside it after: the hand was
+    never parked). `tests/serve/classify_e2e.lu` (ws27's
+    `file_kinds_e2e.lu` rewritten: a swap for a directory is nginx's
+    301 at once, not a 404 inside a window). The negative control was
+    run by hand: `fs_open_mode(fifo, 0)` — the old open — parks until
+    `timeout` kills it (exit 124); mode 5 answers a handle in 0 ms,
+    kind 2.
+  - **The census, predicted then measured.** Predicted: the corpus row
+    moves by one witness, every other row identical. Measured
+    (gauntlet at the pin, macOS arm64, GREEN exit 0): **corpus 270 →
+    272 lane-runs** (the new witness on its two lanes; the two
+    rewrites are one-for-one), differential 3/3, proxy 8/8, control
+    9/9, logdiff 4/4, signal 21/21, prefork 38/38, membudget 17/17,
+    resolver 9/9, replay 2/2, metrics, dryrun, shell, confcheck, tls,
+    acme, dist — identical. Two `.wolfi` motions, each its own
+    `interface(…)` commit: the stamp `0.2.9 → 0.2.10` in every header
+    with every hash re-derived once (#292), emitted from a worktree at
+    the pin commit so the intermediate tree is self-consistent; then
+    `serve` gaining `classify`/`Classified` and losing `is_file_warm`
+    and the two kind lists.
+
+- **Item 2 — the count, PREDICTED against trunk, then measured.**
+  s149's own prediction (keepalive 7.41 → 6.41, close 13.36 → 10.34)
+  was against ws27's PRE-kind-table table; this sprint's prediction
+  (`docs/PROFILE.md`, ws30 addendum, committed before the pin was
+  staged) was against trunk, and said the pin buys the keepalive
+  table NOTHING at two decimals and the close table exactly the
+  accept side: **6.26 → 6.26** and **12.27 → 10.27**. Measured, one
+  instrument, one day, one runner class (CI runs 34553773533 before
+  at wolf 0.2.9, 34554207566 after at fc07cc5):
+  - **keepalive 6.29 → 6.25** against nginx 6.14 → 6.15 (gap +0.15 →
+    **+0.10**) — right: `ioctl` leaves the table (raw 221 → 0),
+    `setsockopt` stays 0.00 (raw 221 → 114 — paid at a stream's SECOND
+    write, so the master's one-write probe connections never pay and
+    only `ab`'s do; the prediction said ~231 and counted every accept),
+    and every per-request row (`statx` 1.00, `openat`, `read`,
+    `recvfrom`, `writev`, `close`) holds to a hundredth.
+  - **close 12.27 → 10.16** against nginx 10.13 (gap +2.13 →
+    **+0.03**; **1.21x → 1.003x in calls**) — right on the mechanism,
+    0.11 better than the figure: `ioctl` 1.00 → gone, `setsockopt`
+    1.00 → gone, the accept side per connection **3.08 → 1.08**
+    (predicted 3.08 → 1.08), `accept4` 1.08 → 1.08 (the herd, lobo#5,
+    untouched), `poll` 1.28 → 1.28 (per connection, and it holds).
+    The 0.11 is three per-time rows reading lower on a faster box
+    (`futex` 0.39 → 0.32, `read`, `close` a hundredth each).
+  - **The per-time drift, named before and measured after.** nginx's
+    traced rate went 8,672 → 13,740 req/s keepalive (+58%) and 5,210
+    → 7,320 close (+40%) between the two boxes. Read raw: keepalive
+    `futex` 6,846 → 6,976 a drive — FLAT under 46% more requests (a
+    clock), `poll` +51% (the pass's wait, scales with requests); close
+    `futex` +32% under +61% more requests (the clock plus the
+    reactor's parks), `poll` +61% (per connection). ws29's amendment
+    read exactly as written: the per-request rows hold, the per-time
+    rows move with the box, and this sprint's change is in neither —
+    it is two per-CONNECTION rows going to zero.
+  - **Every row that moved**: `ioctl`, `setsockopt` (close). **Every
+    row that did not**: the twelve others, both shapes.
+  - **The timing, PREDICTED then measured** (the parity leg, run
+    34554232695, `ref_tree` = the pin-only tree `08d9362`: the same
+    fc07cc5 pin with the OLD router, so the set isolates the router
+    half on one VM — the ref tree must pin the toolchain the job
+    staged, and a one-VM before/after of a PIN is not something the
+    workflow can take; named, not worked around). Predicted on PR #12
+    before the set was read: ws30 ÷ pin-only ~1.00 both shapes,
+    nginx ÷ ws30 keepalive ~1.29x, close ~1.08x. Measured, VALID, the
+    fast class (nginx close 46.4k): **ws30 ÷ pin-only 1.005x close /
+    1.004x keepalive** at N=4 — right, the router half is worth what
+    the count said (nothing; a lookup, not a syscall); **nginx ÷ ws30
+    keepalive 1.286x** — right; **close 1.161x — wrong**: ws28's ledger
+    row was 1.161x on the slow class with the old accept posture,
+    this is 1.161x on the fast class with the new one, and a
+    cross-class comparison cannot separate them. Cores 1.81 / 1.81 /
+    1.62 close, 2.67 / 2.68 / 2.45 keepalive.
+  - **W8 restated for linux, the count beside the timing.** Count:
+    keepalive **6.25 vs 6.15** (1.02x), close **10.16 vs 10.13**
+    (1.003x). Timing: keepalive **1.286x**, close **1.161x** — **NOT
+    MET on both shapes**. The count says the remaining gap is not
+    syscalls on either shape — on close lobo makes nginx's calls to
+    three hundredths and is 16% slower; the timing says the bar is
+    not met; the count does not claim the bar. What is left has a
+    name on each shape: the string runtime and the transmit path on
+    keepalive (ws28), the herd's parks on close (`accept4` 1.08,
+    `poll` 1.28, the reactor's `futex`/`epoll_wait` — a wait behind
+    each fraction of a call; lobo#5, wolf-lang#267). N=1 close 1.065x
+    is inside the bar on the non-gating cell. `docs/PARITY.md`'s
+    ws30 entry carries the table.
+
+- **Item 3 — the parked task's cost, measured on lobo.**
+  `tools/lobo-syscalls` grows an **`idle` shape**: the same serving
+  processes for the same window with no generator, calls ÷ SECONDS —
+  the per-time rows read with the only divisor they have. CI's count
+  leg runs it after both drives. Measured before and after the pin,
+  same day: **`futex` 6,266 → 6,262 calls in 8 s over four hands, every
+  one an error return — ~196/s per hand, and the pin did not move it**
+  (s149 touched `fs.rs` and `net.rs`, nothing in `task/`). Predicted
+  ~100–110/s: **wrong by half** — ws29's ~106 was a subtraction of two
+  drives whose "before" carried the old self-raise probe's own
+  handoffs. Under the keepalive drive the idle clock is ~90% of every
+  `futex` the hands make. nginx's four workers make **zero** syscalls
+  in the same window. Posted on wolf-lang#302 with both raw tables;
+  the runtime lane reads it there. A row the prediction did not know:
+  the master's 200 ms liveness probe costs each idle hand six syscalls
+  a probe before this pin and **four after** (`ioctl` and
+  `setsockopt` were the two) — 16 calls/s per hand for supervision
+  without a channel, lobo's own design (`docs/WORKERS.md`), named
+  because an idle count now exists to show it.
+
+- **Gates.** Local gauntlet at the 0.2.9 pair before Phase A's
+  commits (GREEN, exit 0; a first run was red at tls-interop only
+  because the lane's shell had no `$OPENSSL_BIN` — LibreSSL refused by
+  name, as designed — and was re-run whole); local gauntlet at the
+  fc07cc5 pair before Phase B's (GREEN, exit 0, 272/272); the three
+  witnesses 6/6 lane-runs; `tools/lobo-interface --check` on the final
+  tree; CI gauntlet, the count leg twice and the parity leg on the
+  runner (run ids in the PR).
+
 ## ws29 — 2026-09-10 — the probe and the parity lane (the signal poll retired for a parked forwarder; the rig's filesystem half; two stale pages re-read)
 
 Three items, and one of them stops before it starts.
