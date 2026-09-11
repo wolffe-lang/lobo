@@ -154,6 +154,68 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws30: the router at fc07cc5 ÷ the pin-only tree, ONE VM · **VALID** · **NOT MET on both shapes** (close 1.161x, keepalive 1.286x on the fast class)
+
+The ws25 instrument, run 34554232695 (`parity=true ref_tree=08d9362
+ref_name=pin-only this_name=ws30`), load 1.70, nginx close **46.4k**,
+keepalive 150k — the runner's FAST class. `ws30` is `3c064d2` (the
+ws30 CHANGELOG entry: `serve.classify`, one `fs_open_mode(p, 5)` and
+one `fs_fstat`, the kind table's stat half retired), `pin-only` is
+`08d9362` (the same pin, the OLD router — `is_file_warm` and its
+table), **both at wolf `0.2.10+dev.fc07cc5`**: the ref tree must pin
+the toolchain the job staged, so the accept posture s149 brought is
+in BOTH columns and this set isolates the router half alone. nginx
+1.30.4, 5 pairs × `ab -t 5`, c=32 over 4 generators:
+
+| cell | shape | ws30 req/s | pin-only req/s | nginx req/s | nginx ÷ ws30 median [min, max] | nginx ÷ pin-only | **ws30 ÷ pin-only** median [min, max] | ws30 / pin-only / nginx cores |
+|---|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 39,860 | 39,731 | 46,383 | **1.161x** [1.138, 1.179] | 1.167x [1.145, 1.185] | **1.005x** [0.998, 1.006] | 1.81 / 1.81 / 1.62 |
+| **N=4 c=32** | keepalive | 116,787 | 117,010 | 150,231 | **1.286x** [1.279, 1.291] | 1.292x [1.281, 1.295] | **1.004x** [0.993, 1.005] | 2.67 / 2.68 / 2.45 |
+| N=1 c=32 | close | 28,640 | 28,148 | 30,487 | 1.065x [1.062, 1.082] | 1.084x [1.075, 1.096] | **1.017x** [1.013, 1.018] | 0.99 / 0.99 / 0.99 |
+| N=1 c=32 | keepalive | 50,986 | 50,985 | 63,186 | 1.248x [1.207, 1.273] | 1.248x [1.201, 1.311] | **1.000x** [0.983, 1.049] | 1.00 / 1.00 / 1.00 |
+
+PREDICTED before the set was read (PR #12's comment, 02:28Z, the run
+in flight): ws30 ÷ pin-only **~1.00 on both shapes** [0.98, 1.03];
+nginx ÷ ws30 keepalive **~1.29x** unchanged; nginx ÷ ws30 close
+**~1.08x** [1.05, 1.12], pricing the accept side's two syscalls per
+connection at ws25/ws27's ~2–3.5% each against ws28's 1.161x.
+MEASURED: the router half is **1.005x / 1.004x** at N=4 — right, and
+exactly what the count said it would be (the kind table had already
+taken the path stat's unit; `classify` removes a lookup, not a
+syscall); keepalive **1.286x** — right; close **1.161x — WRONG**, and
+wrong in the direction that matters: the ledger's ws28 row read
+1.161x on the SLOW class with the old accept posture, this row reads
+1.161x on the FAST class with the new one, and nothing in a
+cross-class comparison can tell those apart. What can be said on one
+VM: both trees here carry s149's posture and both sit at 1.16x, so
+whatever the two syscalls were worth in time, the close cell's gap
+after them is **16% with the syscall count at +0.03 per request** —
+the count's whole remaining excess is three hundredths of a call.
+The instrument's limit is named rather than worked around: the ref
+tree must pin the toolchain the job staged, so a one-VM before/after
+of a PIN is not something this workflow can take; a set with the
+0.2.9 tree beside this one would need two staged toolchains in one
+job.
+
+**W8 restated for linux, the count beside the timing.** Count:
+keepalive 6.25 against 6.15 (+0.10, 1.02x), close 10.16 against 10.13
+(+0.03, 1.003x). Timing: keepalive 1.286x, close 1.161x — **NOT MET
+on both shapes**, N=4. The count now says, on both shapes, that the
+remaining gap is NOT syscalls: lobo makes nginx's calls, to a
+hundredth on close, and is 16% slower at 1.81 cores against nginx's
+1.62; on keepalive it is 29% slower at 2.67 cores against 2.45 with
+a tenth of a call more per request. The timing says the bar is not
+met, and the count does not claim it. Where the time is: ws28's
+reading stands for keepalive (the string runtime and the kernel's
+transmit path, `docs/PROFILE.md`), and for close the herd's parks —
+`accept4` still 1.08 per connection, `poll` 1.28, `futex` 0.32,
+`epoll_wait` 0.14 of the reactor thread's — are the rows that have
+no nginx counterpart and a wait behind each (lobo#5, wolf-lang#267),
+which a count shows as a fraction of a call and a profile shows as a
+park. N=1 close reads 1.065x, inside the bar on the non-gating cell.
+macOS: ws26's MET stands as the last valid macOS set; no macOS set
+was taken this sprint (the box carried two compiler lanes).
+
 ### 2026-09-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws28: the head memo and the byte views ÷ the pin, ONE VM · **VALID** · **NOT MET on both shapes** (close 1.161x, keepalive 1.286x on the slow class)
 
 The ws25 instrument, run 34536710553 (`parity=true ref_tree=c58b4f1
