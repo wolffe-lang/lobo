@@ -1639,6 +1639,74 @@ preemption at four that the same rows expose. macOS: ws26's MET stands
 as the last valid macOS set; no macOS set this sprint (load 5.3–5.6,
 two compiler lanes on the box).
 
+## ws33's addendum — lobo#14: the route's per-request config scan, indexed once at load, PREDICTED before either leg (2026-09-11)
+
+### What ws31 priced, and what it is
+
+`serve.handle_request` called `proxy.plan(c, norm)` on EVERY request
+(`serve.lu:1955`, the dry-run mirror at :2304), and `http.route` ran
+`match_location` beside it. Between them a **static** request — a
+config with no `proxy_pass` in it at all — paid these whole-arena
+walks of `c.names`, ws31's self shares on one hand under
+`keepalive 1` (run 34599274095):
+
+| leaf (self) | share of the hand's cpu | what it walked |
+|---|---|---|
+| `proxy.first_http` | 0.31% | every row, for the first `http` block |
+| `proxy.plan` | 0.28% | every row, for `location` blocks under the server |
+| `http.child_arg1` | 0.23% | every row, per `alias`/`root` lookup (three a request) |
+| `proxy.first_server` | 0.15% | every row, for the first `server` under http |
+
+plus `http.match_location`'s own location walk and two `index_list`
+walks, both under ws31's 0.1% print cut. **~0.6–1.0% of a 34.2 µs
+keepalive request**, spent learning that nothing proxies the path.
+
+### The shape taken — an index in the `Conf`, not a per-path memo
+
+The issue proposed a memo keyed `(configuration generation,
+normalized path)`. This lane took the other half of the same idea and
+it is strictly smaller: the config model is **immutable after parse**
+(`config/parse.lu`'s header states it, and a `-s reload` builds a NEW
+`Conf` and swaps), so a table derived at the end of the load and
+carried BY the `Conf` needs no generation key, no invalidation and no
+staleness witness — **it IS the generation**. `build_index` runs once
+per load, O(rows), and adds to `Conf`:
+
+- `ix_http` / `ix_server` — the two first-block rows, now field reads;
+- `loc_row` / `loc_mod` / `loc_prefix` — the `location` blocks under
+  the first server, **in row order**, with the modifier and prefix the
+  matcher reads. Longest-prefix, `=`-exact-wins, `^~`, first-match on
+  a tie: all unchanged, because the candidate list is the same rows in
+  the same order;
+- `kids` / `kid_at` / `kid_n` — every row's DIRECT children in row
+  order, counting-sorted into buckets keyed `parent + 1` (bucket 0 is
+  the top level). `child_row` / `child_arg1` / `index_list` walk a
+  block's own children instead of the arena, and the first match in
+  that window is the first match the arena scan returned.
+
+`proxy` and `http` stopped carrying private copies of the four
+scanners; both now read `config`'s. `config/logconf.lu`'s third copy
+of `first_server` went with them.
+
+**The witness that nothing routes differently** is
+`tests/config/route_index.lu`: it carries the pre-index scanners
+verbatim as `ref_*` and asserts the index agrees with them — on the
+location table (rows, order, modifier, prefix), on `child_row` /
+`child_arg1` over every block × a twelve-name battery plus the top
+level and two out-of-range keys, and on the child buckets
+partitioning the rows — across seven configs (no http; a lexer error;
+four prefix shapes with a nested location; two servers; the three
+proxy inheritance levels; top-level directives; and two generations
+alive at once, each answering under its own table). All three lanes.
+
+### The prediction (written 2026-09-11, before either leg ran)
+
+| leg | predicted |
+|---|---|
+| profile, keepalive N=1, leaves in `lobo-release` over 0.1% | `proxy.first_http`, `proxy.first_server` **gone** (the functions no longer exist); `http.child_arg1` under 0.05%; `proxy.plan` 0.03–0.10% (it still scans the location table — one to four entries); the four rows' **0.6–1.0% sum falls under 0.15%**; no new row over 0.05% (the index build is once a load, off the request path) |
+| parity, N=4 and N=1, both shapes | **NOT VISIBLE.** ~1% of 34.2 µs is ~0.3 µs; ws30's no-op read 1.005x [0.998, 1.006]. Predict **ws33 ÷ trunk 1.00 [0.98, 1.02]** on every cell — indistinguishable from a no-op. Saying so is the finding; the count does not claim the bar |
+| the gauntlet | GREEN — zero behaviour motion, and `route_index.lu` is why |
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
