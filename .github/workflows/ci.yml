@@ -52,6 +52,18 @@ on:
         description: "ws27: the count leg — tools/lobo-syscalls (strace -c over BOTH servers for a whole drive, calls per request side by side) at N=nproc on both shapes; runs after the parity set and the profile leg, or alone"
         type: boolean
         default: false
+      profile_hands:
+        description: "ws32 (lobo#5): the hands the profile leg samples — 1 (worker 1, the default) or all (every hand at once: --sort pid over the four, --sort cpu, and the per-hand /proc split)"
+        type: string
+        default: "1"
+      listen_args:
+        description: "ws32 (lobo#5): words appended to THIS checkout's `listen` line in every leg's config (e.g. reuseport) — a candidate posture measured; empty is the bar's own line"
+        type: string
+        default: ""
+      ref_listen_args:
+        description: "ws32: the same for the ref tree's config (parity and profile legs); empty is the bar's own line"
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -235,6 +247,8 @@ jobs:
           LOBO_REF: ${{ inputs.ref_tree != '' && format('{0}/lobo-ref/target/lobo-release', github.workspace) || '' }}
           LOBO_REF_NAME: ${{ inputs.ref_name }}
           LOBO_NAME: ${{ inputs.this_name }}
+          LOBO_LISTEN_ARGS: ${{ inputs.listen_args }}
+          LOBO_REF_LISTEN_ARGS: ${{ inputs.ref_listen_args }}
         run: |
           set -euo pipefail
           sudo apt-get install -y -qq apache2-utils
@@ -275,9 +289,9 @@ jobs:
           mkdir -p target
           [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           nproc; uptime
-          tools/lobo-profile target/lobo-release "${{ inputs.this_name }}" 8 "${{ inputs.profile_shape }}" "${{ inputs.profile_n }}"
+          LOBO_LISTEN_ARGS="${{ inputs.listen_args }}" tools/lobo-profile target/lobo-release "${{ inputs.this_name }}" 8 "${{ inputs.profile_shape }}" "${{ inputs.profile_n }}" "${{ inputs.profile_hands }}"
           if [ -n "${{ inputs.ref_tree }}" ]; then
-            tools/lobo-profile "$GITHUB_WORKSPACE/lobo-ref/target/lobo-release" "${{ inputs.ref_name }}" 8 "${{ inputs.profile_shape }}" "${{ inputs.profile_n }}"
+            LOBO_LISTEN_ARGS="${{ inputs.ref_listen_args }}" tools/lobo-profile "$GITHUB_WORKSPACE/lobo-ref/target/lobo-release" "${{ inputs.ref_name }}" 8 "${{ inputs.profile_shape }}" "${{ inputs.profile_n }}" "${{ inputs.profile_hands }}"
           fi
 
       # ws27: the count leg. strace -c over every serving process of
@@ -298,6 +312,7 @@ jobs:
           mkdir -p target
           [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           nproc; uptime
+          export LOBO_LISTEN_ARGS="${{ inputs.listen_args }}"
           tools/lobo-syscalls keepalive
           tools/lobo-syscalls close
           tools/lobo-syscalls idle
