@@ -766,6 +766,132 @@ was wrong (the rise under the drive would then be the reactor's, not
 the forwarder's) and #302 needs an amended number; if it reads ~100
 it is the witness the runtime lane asked for.
 
+### The measurement — the count (runs 34553773533 before, 34554207566 after)
+
+Both runs are on branch `ws30`, one instrument, one day, one runner
+class (ubuntu-latest, 4 vcpus): the BEFORE at `daf629b` (trunk
+`d04dd97` plus this sprint's idle shape, wolf 0.2.9), the AFTER at
+`3c064d2` (the pin and the router, wolf `0.2.10+dev.fc07cc5`).
+
+| row (per request) | keepalive: before → after (predicted) | close: before → after (predicted) | verdict |
+|---|---|---|---|
+| `statx` | 1.00 → **1.00** (1.00) | 1.00 → **1.00** (1.00) | **right** — the fstat; the path stat's unit was already gone |
+| `openat` | 1.00 → 1.00 | 1.00 → 1.00 | right |
+| `ioctl` | 0.00 → **gone from the table** (raw 221 → 0) | **1.00 → gone** (raw 34,237 → 0) | **right** — `accept4(SOCK_NONBLOCK)`; the listeners' own FIONBIO is outside the traced window |
+| `setsockopt` | 0.00 → 0.00 (raw 221 → **114**; predicted ~231) | **1.00 → gone** (raw 34,237 → 0) | right per request; **the raw is half the prediction, and the rule says why** (below) |
+| `accept4` | 0.00 → 0.00 | 1.08 → **1.08** (1.08) | right — the herd's lost races, 7.0% → 6.9% of accepts, untouched |
+| `read` / `recvfrom` / `writev` / `close` | 1.00 / 1.00 / 1.00 / 1.00, unmoved | 1.08 → 1.07 / 1.00 / 1.00 / 2.01 → 2.00 | right — per-request rows hold to a hundredth |
+| `poll` | 0.15 → 0.16 | 1.28 → 1.28 | right; on close `poll` is per CONNECTION (the probe before an accept), and it holds |
+| `futex` | 0.10 → 0.07 | 0.39 → 0.32 | per-time, read raw below: the row did not move, the box did |
+| `epoll_wait` / `epoll_ctl` / `write` / `brk` | 0.00 / 0.00 / — / 0.01 | 0.14 / 0.15 / 0.07 / 0.04, unmoved | right |
+| **calls per request** | **6.29 → 6.25** (nginx 6.14 → 6.15; gap +0.15 → **+0.10**) — predicted 6.26 → 6.26 | **12.27 → 10.16** (nginx 10.13 → 10.13; gap +2.13 → **+0.03**, 1.21x → **1.003x** in calls) — predicted 10.27 | keepalive **right** (the pin buys the table nothing at two decimals); close **right on the mechanism, 0.11 better than the figure**, and the 0.11 is drift |
+| accept side per close connection | — | **3.08 → 1.08** (1.08) | **right** — the whole of s149's second syscall |
+
+**Every row that moved**: `ioctl` and `setsockopt` on the close shape
+(each 1.00 → absent), and nothing else at two decimals. **Every row
+that did not**: `statx`, `openat`, `read`, `recvfrom`, `writev`,
+`close`, `accept4`, `poll`, `epoll_wait`, `epoll_ctl`, `write`, `brk`
+— on both shapes. The close-shape total lands at 10.16 against a
+predicted 10.27 because three per-time rows read lower on a faster
+box (`futex` −0.07, `read` −0.01, `close` −0.01), which is the
+prediction's own caveat landing: MEDIUM on any per-request figure of a
+per-time row, by construction.
+
+**The per-time drift, measured.** nginx's traced rate — the gauge,
+since nginx did not change — was **8,672 → 13,740 req/s** on
+keepalive (+58%) and **5,210 → 7,320** on close (+40%) between the two
+boxes; lobo's went 8,271 → 12,074 and 4,257 → 6,844. Read raw over
+the same 8-second drive across the same four hands:
+
+| raw calls per 8 s drive, 4 hands | keepalive before → after | close before → after |
+|---|---|---|
+| requests completed | 66,172 → 96,601 (+46%) | 34,061 → 54,767 (+61%) |
+| `futex` (errors) | 6,846 (6,840) → **6,976 (6,960)** — flat | 13,334 (7,611) → **17,578 (8,227)** (+32%, under +61% more requests) |
+| `poll` | 9,956 → 15,063 (+51%: scales with requests — the pass's wait) | 43,606 → 70,077 (+61%: scales with connections — the probe) |
+| `ioctl` + `setsockopt` | 221 + 221 → **0 + 114** | 34,237 + 34,237 → **0 + 0** |
+| `epoll_wait` (the reactor thread's) | 5 → 14 | 4,781 → 7,515 |
+
+So `futex` on keepalive is a CLOCK: the same ~6,900 calls a drive
+whether the drive served 66k or 97k requests, which is why its
+per-request figure fell 0.10 → 0.07 with nothing changed — the drift
+this addendum named before the run. On close it is a clock plus the
+reactor's parks (which scale with the herd's lost races, +61%), and
+the sum grew slower than the requests did.
+
+**Why keepalive `setsockopt` read 114 and not ~231.** The runtime
+pays `TCP_NODELAY` before the first write that finds bytes of the
+stream still in flight — concretely, before a stream's SECOND write
+(`wolf_rt::net::Nodelay`: `Fresh` → `InFlight` on the first write of
+n > 0 bytes; `arm_nodelay` pays on the next). Of the ~254 connections
+the four hands accepted in the window, ~128 were the master's 200 ms
+liveness probes (`docs/WORKERS.md` §Supervision — a CONNECT the hand
+answers with one `sendto` and closes: one write, never a second, so
+never the option) and ~126 were `ab`'s (32 held open plus one
+reconnect per 1,000 requests, `keepalive_requests`' default). 114 of
+those paid it at their second write; the dozen that did not were the
+connections `-t 8` cut off inside their first. The prediction counted
+every accepted connection; the rule counts the ones that write twice.
+Per request the row is 0.00 either way; the raw column is where the
+rule is legible, and it says the deferral is doing exactly what #290
+described.
+
+### The measurement — item 3, the parked task's `futex`, idle and under the drive
+
+`tools/lobo-syscalls idle`, the same four hands, no generator, 8 s:
+
+| idle, 8 s, 4 hands | before (wolf 0.2.9) | after (fc07cc5) | predicted |
+|---|---|---|---|
+| `futex` calls (errors) | **6,266 (6,266)** | **6,262 (6,262)** | "the same number" — **right** |
+| `futex` / s, per hand | **~196** | **~196** | ~100–110 — **WRONG, low by half** |
+| `poll` / s, all hands | 16 | 23 | ~16 — right before, high after (the loop woke more often: the master's probes, below) |
+| `epoll_wait` | 0 | 0 | ~0 — right |
+| the master's probe on the hand: `accept4` + `recvfrom` + `sendto` + `close` (+ `ioctl` + `setsockopt` before) | 128 each = **24 calls/s per hand** | 128 each = **16 calls/s per hand** | not predicted: a row this addendum did not know was there |
+| **calls / s, all hands** | **897** | **872** | — |
+| nginx, four workers, same window | **0** | **0** | 0 — right |
+
+**The number for wolf-lang#302 is ~196 `futex`/s per hand, all of
+them error returns, and the pin did not move it** (6,266 → 6,262 in
+8 s is the same clock read twice). ws29's ~106 was a subtraction of
+two drives whose "before" column carried the old self-raise probe's
+own handoffs; measured with nothing else on the thread the cost is
+almost twice that, and under the keepalive drive it is ~90% of every
+`futex` the hands make (6,976 a drive against 6,262 idle). Posted on
+#302 the same day with both raw tables. nginx makes NO syscalls at
+idle: four workers in `epoll_wait` with nothing armed.
+
+**The row the prediction did not know: the master's probe.** At idle
+each hand accepts a fresh loopback connection from its master every
+~250 ms (`docs/WORKERS.md`: "a hand is probed at most every 200 ms",
+paced by the loop's own wait) and answers it with one `sendto` and a
+close. Before this pin that was six syscalls on the hand per probe
+(`accept4`, `ioctl`, `setsockopt`, `recvfrom`, `sendto`, `close`);
+now it is four, because the accept posture arrives with the fd and a
+single write pays no option — s149's second syscall, read a second
+way. It is 16 calls/s per hand for supervision without a channel
+(nginx has a socketpair; wolf-lang#235's inherited descriptor is what
+would give lobo one), and it is lobo's design, not a finding against
+the runtime; it is named here because an idle count now exists to
+show it.
+
+### W8 restated, the count beside the timing (parity run 34554232695)
+
+The parity leg on the same day (`docs/PARITY.md`, the ws30 entry):
+nginx ÷ ws30 **close 1.161x**, **keepalive 1.286x** at N=4 (VALID, the
+fast class), and ws30 ÷ the pin-only tree **1.005x / 1.004x** — the
+router half is worth in time exactly what it is worth in calls,
+nothing. Beside the count: close **10.16 vs 10.13**, keepalive **6.25
+vs 6.15**. So the count answers its question — the remaining gap is
+NOT syscalls, on either shape — and the timing answers its: W8 linux
+is **NOT MET on both shapes**. The count does not claim the bar. The
+close cell's 16% at three hundredths of a call excess is the herd's
+parks (the rows with a wait behind them: `accept4` 1.08, `poll` 1.28,
+`futex` 0.32, the reactor's `epoll_wait`) and 0.19 more cores; the
+keepalive cell's 29% is ws28's reading, the string runtime and the
+transmit path. The prediction (PR #12, before the set was read) had
+close at ~1.08x, pricing the accept side's two syscalls at ws25's
+per-call rate against a cross-class ledger row; that comparison
+cannot be made across classes and was wrong to be priced that way.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
