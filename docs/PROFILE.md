@@ -1359,6 +1359,157 @@ filed as lobo's (lobo#14) with the numbers, the `find` family upstream
 four-hand close hand (1.74% in the `comm` set) and absent at one
 hand: the herd's park mechanics, and the only thread row W8 has.
 
+## ws32's addendum — the herd: two candidates, each alone, PREDICTED before either is built (2026-09-11)
+
+lobo#5 at the release pair (ws31): N=1 close is AT parity (0.994x,
+65.1 µs a connection on both servers) and N=4 close is 1.139x with
++17.6 µs a connection, of which one sampled hand's cpu accounts for
+~2–4 µs (the reactor thread 1.6–1.7%, the losers' `accept4`, the
+park's `futex`/`epoll_ctl`/eventfd) and the rest is four hands' wall:
+every SYN wakes four `net_wait`s, one wins, three paid a pass for
+nothing (`poll` 1.28 a connection). ws27 named two candidates and this
+sprint measures each ALONE on the count leg and the parity leg, both
+predicted here first, and takes the one that moves the N=4 close
+number below the parity instrument's floor (~1%: ws30's no-op read
+1.005x [0.998, 1.006]) — or says neither does. The parity leg is the
+ws25 two-tree shape: the candidate ÷ trunk `d3dec23` on ONE VM against
+that VM's own nginx; the count leg is ws27's `strace -c` over all four
+hands. Everything under this heading and above "The measurement" was
+written before a dispatch.
+
+### What the runtime offers, read off v0.2.11's `net.rs` (the candidates as lobo can spell them)
+
+`net.rs` did not move between v0.2.11 and trunk (the one commit past
+the tag is the release commit). Two facts decide what each candidate
+IS:
+
+- **`net_deadline(fd, 0)` CLEARS the budget.** `set_deadline` maps
+  `millis <= 0` to `deadline: None`, and `try_then_park` with `None`
+  is `wait_raw(raw, Read, None)` — an unbounded park. ws27's
+  correction on lobo#5 stands: there is no try-once accept in the
+  runtime (wolf-lang#267 asks for one), so the only "zero accept
+  budget" lobo can write is the ws17 shape — a loser parks in the
+  reactor until the NEXT SYN wakes it, not for 5 ms.
+- **`net_listen_with(addr, reuse_port, backlog)`** sets `SO_REUSEPORT`
+  before the bind. Linux distributes the group by 4-tuple hash; macOS
+  hands every SYN to the newest bound member (s137, and lobo's own
+  `tests/serve/reuse_port_posture.lu`: 0/0/30); windows answers
+  `unsupported` by name (the alias to `SO_REUSEADDR` would be a silent
+  hijack — `docs/platforms.md`). A group member that never accepts
+  swallows its hash share, so in this shape the MASTER must not hold a
+  member: each hand binds its own socket, and the master binds nothing.
+
+### Candidate (a) — `arm_accept` at 0: the unbudgeted accept
+
+The change is one line (`net_deadline(l, 0)` in `arm_accept`), taken
+on a side branch `ws32-a` off this one and never merged. Predicted:
+
+| leg | prediction |
+|---|---|
+| count, close N=4 | **no row moves by design**: `accept4` 1.08 → 1.05–1.10 (the race is the same race; the loser parks longer, then re-races on the next SYN), `futex` 0.36 / `epoll_ctl` 0.15 / `epoll_wait` 0.14 / eventfd `write` 0.07 each within ±0.05, `poll` 1.28 → 1.2–1.3; total 10.20 → 10.1–10.3. Only the park's LENGTH changes, and a count cannot see length |
+| parity, close N=4 | delta ws32-a ÷ trunk **1.00 [0.98, 1.02]** — under the floor |
+| parity, keepalive N=4 | **at risk, and the risk is the ws17 bug**: 32 connections open at the start of a run and none after; a hand that loses a race at setup parks holding its keepalive connections until the next SYN, which may be the run's end. Predicted: delta **0.75–1.00 with a wide spread** (a mute hand in some pairs), or a refused set on failed requests |
+| the gauntlet on ws32-a | **RED at `tools/lobo-prefork` check 1c** ("after 2 s of silence every hand still answers its own control endpoint — a #242 park leaves the losers mute"): the losers are parked in the reactor on the http listener and their control endpoints are not in that park. That check exists because ws18 fixed exactly this |
+
+So (a) is predicted to move nothing on close and to be inadmissible on
+its own witness regardless. It is measured anyway because the contract
+says each alone, and because "a park until the next SYN costs the same
+as a park for 5 ms" is a sentence the count can confirm or deny.
+
+### Candidate (b) — `listen … reuseport`: the kernel-distributed wake
+
+nginx spells this as an opt-in flag on `listen` (off by default; useful
+on linux 3.9+ and DragonFly, honored elsewhere without distributing),
+so lobo mirrors it: `listen ADDR reuseport;` — nginx's own grammar, a
+config that carries. With the flag, at `worker_processes N`:
+
+- the master binds NOTHING for that listener and spawns the hands with
+  an empty inherit set (`os_spawn`, `--inherit 0`);
+- each hand binds its own `net_listen_with(addr, true, 0)`, arms the
+  same 5 ms budget (a member's queue is its own, so the budget is
+  never spent), and serves;
+- **on `unsupported` (windows) a hand falls back to `net_listen(addr)`
+  — ws16's bind-and-stand-by shape: one hand serves, the rest retry
+  each pass and take the port when its holder dies — and says so once,
+  by name, in its log** (the runtime's refusal is a choice, not a gap,
+  and lobo does not re-decide it); on `exists` (a foreign holder
+  without the option) the hand stands by the same way;
+- at `worker_processes 1` the one process binds a one-member group
+  (a socket with a flag; nothing else changes);
+- on macOS the flag is honored as nginx honors it, and the delivery is
+  the newest member's — documented in `docs/WORKERS.md`, not detected:
+  the operator who writes `reuseport` on macOS gets what nginx gives.
+
+The trade the flag makes is nginx's too: a hand that dies takes the
+connections queued on ITS socket with it (a shared queue loses none),
+and a replacement binds a fresh member. The prefork witness's kill-9
+window is therefore "the queue's depth" rather than "a request" in
+this shape — reported, not gated.
+
+Predicted, the candidate ÷ trunk on one VM (the tools grow
+`LOBO_LISTEN_ARGS` / `LOBO_REF_LISTEN_ARGS` so the candidate's config
+carries the flag and the ref's does not; trunk parses the flag and
+ignores it, so one config could serve both — the knob is per binary to
+keep the two trees' configs honest):
+
+| leg | prediction |
+|---|---|
+| count, close N=4 | **`accept4` 1.08 → 1.00** (no lost races: one wake, one queue, one hand), **`epoll_ctl` 0.15 → 0.00, `epoll_wait` 0.14 → 0.00, eventfd `write` 0.07 → 0.00** (no hand ever parks, so the `wolf-reactor` thread never starts), `futex` 0.36 → ~0.10 (#302's clock alone, read through the rate), `poll` 1.28 → 1.00–1.15 (a SYN wakes one hand once; the probe after a burst's first accept persists); **total 10.20 → 9.5–9.7 against nginx's 10.13 — under nginx's count on close for the first time** |
+| count, keepalive N=4 | unchanged, 6.27 ± 0.05: accepts happen at the start only |
+| parity, close N=4 | lobo's cpu a connection 78.9 → **66–72 µs**; delta ws32 ÷ trunk **1.05–1.12x** req/s; nginx ÷ ws32 1.139x → **1.02–1.08x** — above the floor, and the number the sprint takes if it reads so |
+| parity, keepalive N=4 | delta **0.95–1.01**: the hash spreads 32 connections unevenly over four members (a shared queue balances by whoever is free), and the busiest hand bounds the run |
+| parity, N=1 both shapes | 1.00 ± 0.01 — a one-member group |
+| the by-thread profile, close N=4 | `wolf-reactor` **absent** (1.60–1.74% at trunk); the serving thread 99.9% |
+
+If close N=4 reads under 1.02x delta the prediction is wrong and the
+herd's cost was not the wasted passes; if keepalive N=4 reads under
+0.95x the flag costs more on the read/serve path than it buys on the
+accept path and the posture stays opt-in with that number beside it.
+
+### Item 2 — the ~6 µs a request that four hands pay and one does not: the cross-hand instrument, predicted
+
+ws31's one-hand profile at keepalive N=4 found no row over half a point
+larger than at N=1, and named the gap "what four hands, four generators
+and the softirq path cost each other on four vcpus". `tools/lobo-profile`
+grows a sixth argument, `hands` (`1`, the default — worker 1 sampled as
+at ws31 — or `all`): with `all`, `perf record -p` takes every hand at
+once and the report adds `--sort pid` over the four (each hand's threads
+side by side), `--sort cpu` (which vcpus the four hands ran on), and the
+same dso/leaf tables over the union; and, from `/proc` with no tracer
+at all, a per-hand table for the window — cpu seconds (utime+stime),
+write syscalls (`syscw`, one `writev` a request on this shape: the
+request count per hand without ptrace), **µs cpu a request per hand**,
+and voluntary / involuntary context switches per request. Predicted:
+
+- the four hands' cpu a request are **within ±10% of each other** —
+  the ~6 µs is paid by every hand, not by an unlucky one (imbalance
+  would show as one hand at 30+ µs beside three at 34 — the shape the
+  hash can produce in candidate (b), not the shared queue);
+- involuntary switches a request **> 0.2 at four hands** where one hand
+  on a quiet vcpu reads ~0: four hands and four generators on four
+  vcpus preempt each other mid-request, and the scheduler's rows
+  (`finish_task_switch`, `__schedule`, `switch_mm_irqs_off`) plus the
+  softirq path (`__do_softirq`, `net_rx_action` charged to whichever
+  hand's context the loopback delivery lands in) sum to **~8–12% of the
+  union** where the one-hand cell reads ~3%;
+- `--sort cpu` shows every hand on every vcpu (no affinity; migrations
+  are the `switch_mm` row).
+
+If that reads so, the row has a name — preemption and migration on a
+fully subscribed VM, paid per request because a lobo pass at eight
+connections a hand is a shorter run between switches than nginx's —
+and it is priced, not fixed, this sprint. If the split is uneven, the
+row is the shared queue's imbalance and candidate (b)'s keepalive
+number is the fix's own measurement.
+
+### Item 3 — wolf-lang#302 at the release pair, one leg
+
+The runtime did not touch the parked proc between fc07cc5 and v0.2.11
+(ws31 read the diff); this sprint re-measures the idle count once on
+the new pair from THIS branch and predicts **6,200–6,300 `futex` in
+8 s over four hands, ~196/s per hand, every one an error return; nginx
+0** — ws31 read 6,269. It holds or the reading of the diff was wrong.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
