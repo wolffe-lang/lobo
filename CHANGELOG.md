@@ -78,6 +78,62 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws33 — 2026-09-11 — the route (the per-request config scan indexed once at load; B1 ruled; B3 measured as a no-op at this pin)
+
+- **lobo#14 — the route stopped re-reading the configuration.**
+  `serve.handle_request` ran `proxy.plan(c, norm)` on every request and
+  `http.route`'s `match_location` beside it, so a STATIC request walked
+  the whole `c.names` arena four ways to learn that nothing proxies it
+  (ws31 priced the printed rows at 0.6–1.0% of a 34.2 µs keepalive
+  request). The fix is a **table built once at load and carried by the
+  `Conf`**, not the per-path memo the issue proposed: the model is
+  immutable after parse and a reload builds a NEW `Conf`, so the index
+  needs no generation key, no invalidation and no staleness witness —
+  it IS the generation. `build_index` adds `ix_http`/`ix_server`, the
+  first server's `location` blocks in ROW order
+  (`loc_row`/`loc_mod`/`loc_prefix`) and every row's direct children
+  counting-sorted into buckets (`kids`/`kid_at`/`kid_n`). `proxy`,
+  `http` and `config/logconf` dropped their private copies of the four
+  scanners.
+  **Measured, two trees on one VM** (profile run 34631696981, parity
+  34631705651): `proxy.first_http` 0.26%, `http.child_arg1` 0.23%,
+  `http.first_server` 0.14% and `http.index_list` 0.13% are **gone**;
+  what stands where they stood is `config.child_row` 0.18% and
+  `proxy.plan` 0.13% — **0.76% → 0.31% of the hand's cpu**, 0.45 points
+  recovered (PREDICTED "under 0.15%": right on shape, optimistic on
+  size; `docs/PROFILE.md` names the two residues and the follow-ups
+  they want). No syscall row moved, on either tree. **The parity leg
+  says the change is NOT VISIBLE — ws33 ÷ trunk 0.990x / 0.990x /
+  0.992x / 0.983x on the four cells, every median inside the predicted
+  [0.98, 1.02] and every bracket at 1.00 — which is what it predicted
+  and what it was run to establish: the profile can see this change and
+  the bar cannot. The count does not claim the bar.**
+  **Nothing routes differently, and the test is the proof**:
+  `tests/config/route_index.lu` carries the pre-index scanners verbatim
+  as `ref_*` and holds the index against them — the location table
+  (rows, order, modifier, prefix), `child_row`/`child_arg1` over every
+  block × a twelve-name battery plus the top level and out-of-range
+  keys, and the buckets partitioning the rows — across seven configs,
+  including two generations alive at once each answering under its own
+  table. All three lanes.
+- **B1 — the parity bar's configuration: ruled (2026-09-11).** The bar
+  stays at the DEFAULT on both sides and the `reuseport`-flagged number
+  is reported beside it on the same VM, labelled as flagged: a flag must
+  not be able to hide a regression on the default path. `tools/lobo-parity`
+  is unchanged; `docs/PARITY.md` records the ruling where the bar is
+  defined, and the gating row on every shape is the default's.
+- **B3 — the `wolf fmt` pass: 0 files, measured.** lobo's `[wolf]` pin
+  is 0.2.11 (`c9237c1`, 04:57) and wolf-lang#303's chain fix is
+  `0c47664` (09:15), four hours later, so the pinned formatter still
+  lays a chain per arm. `wolf fmt --check src tests` exits 0 over all
+  148 `.lu`, and #303's own witness reproduces at the pin. The three
+  mixed-shape chains waiting for the pass (all in `src/main.lu`) and
+  the pass itself are **lobo#16**, owed by whichever lane next moves the
+  pin past `0c47664`.
+- Gates: gauntlet GREEN exit 0 at `b6f29f2` (277/277 lane-runs, the
+  three new ones this lane's) on macOS arm64 and on the ubuntu runner
+  (run 34631690844).
+
 ## ws32 — 2026-09-11 — the herd (the two candidates measured alone; `listen … reuseport` taken as nginx's flag; the cross-hand split; #302 idle held)
 
 lobo#5's two candidates, each ALONE against trunk `d3dec23` on one
