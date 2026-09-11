@@ -44,6 +44,10 @@ on:
         description: "ws27: the shape the profile leg drives — close (ws22's probe, the default) or keepalive"
         type: string
         default: "close"
+      profile_n:
+        description: "ws31: worker_processes for the profile leg — 1 (the per-request cell, the default) or nproc (the bar's cell: four hands, ONE hand sampled, the herd in the picture)"
+        type: string
+        default: "1"
       syscalls:
         description: "ws27: the count leg — tools/lobo-syscalls (strace -c over BOTH servers for a whole drive, calls per request side by side) at N=nproc on both shapes; runs after the parity set and the profile leg, or alone"
         type: boolean
@@ -252,7 +256,7 @@ jobs:
       # linux-tools; the azure kernel's package is in the archive
       # under its exact release, and when it is not the tool SKIPS by
       # name (a skip is not a number). strace is the syscall counter.
-      - name: "lobo-profile (ws25 — perf record + strace -c on one hand, close shape)"
+      - name: "lobo-profile (ws25 — perf record + strace -c on one hand; ws27 both shapes; ws31 at N hands)"
         if: steps.acquire.outputs.toolchain == 'full' && inputs.profile == true
         shell: bash
         working-directory: lobo
@@ -271,9 +275,9 @@ jobs:
           mkdir -p target
           [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           nproc; uptime
-          tools/lobo-profile target/lobo-release "${{ inputs.this_name }}" 8 "${{ inputs.profile_shape }}"
+          tools/lobo-profile target/lobo-release "${{ inputs.this_name }}" 8 "${{ inputs.profile_shape }}" "${{ inputs.profile_n }}"
           if [ -n "${{ inputs.ref_tree }}" ]; then
-            tools/lobo-profile "$GITHUB_WORKSPACE/lobo-ref/target/lobo-release" "${{ inputs.ref_name }}" 8 "${{ inputs.profile_shape }}"
+            tools/lobo-profile "$GITHUB_WORKSPACE/lobo-ref/target/lobo-release" "${{ inputs.ref_name }}" 8 "${{ inputs.profile_shape }}" "${{ inputs.profile_n }}"
           fi
 
       # ws27: the count leg. strace -c over every serving process of
