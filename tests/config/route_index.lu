@@ -1,0 +1,225 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! lobo#14 — the route index, held against the whole-arena scans it
+//! replaces. Every reader here (`ref_*`) is the code the router ran
+//! BEFORE this change, verbatim; every assertion is the index
+//! agreeing with it on a battery of configs. That is the whole
+//! claim: the table is built once at load and the FIRST-MATCH
+//! semantics are the same ones, so nothing routes differently.
+//! The model is immutable after parse and a reload builds a NEW
+//! Conf, so the index cannot go stale — the `two_gens` case is that
+//! property made a witness: two generations alive at once, each
+//! answering under its OWN table.
+
+use config
+
+/// The pre-index `first_http`: the first `http` block row, or -1.
+fn ref_first_http(c: config.Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "http" && c.kinds[i] == "b" {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The pre-index `first_server`: the first `server` block under http.
+fn ref_first_server(c: config.Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "server" && c.kinds[i] == "b" && c.ctx[i] == "http" {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The pre-index `child_row`: first `name` row whose parent is `blk`.
+fn ref_child_row(c: config.Conf, blk: int, name: str) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == name && c.parent[i] == blk && c.args_n[i] >= 1 {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The pre-index location walk: every `location` block under `srv`,
+/// in row order.
+fn ref_locs(c: config.Conf, srv: int) -> List[int] {
+    var out = List[int]()
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "location" && c.kinds[i] == "b" && c.parent[i] == srv {
+            (mut out).push(i)
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// The (modifier, prefix) a `location` row carries, the pre-index way.
+fn ref_key(c: config.Conf, i: int) -> (str, str) {
+    let at = c.args_at[i]
+    let nn = c.args_n[i]
+    if nn == 1 {
+        return ("", c.argp[at])
+    }
+    if nn >= 2 {
+        return (c.argp[at], c.argp[at + 1])
+    }
+    ("", "")
+}
+
+fn names_battery() -> str {
+    "location root index alias proxy_pass proxy_read_timeout proxy_connect_timeout listen server http worker_processes nosuch"
+}
+
+/// Hold one parsed config's whole index against the scans.
+fn hold(c: config.Conf, tag: str) {
+    let total = c.names.len
+
+    assert(config.first_http(c) == ref_first_http(c), "{tag}: first_http")
+    assert(config.first_server(c) == ref_first_server(c), "{tag}: first_server")
+
+    // the location table: the same rows, in the same order, with the
+    // same modifier and prefix
+    let srv = ref_first_server(c)
+    let want = ref_locs(c, srv)
+    assert(config.loc_count(c) == want.len, "{tag}: loc_count")
+    var i: int = 0
+    while i < want.len {
+        assert(c.loc_row[i] == want[i], "{tag}: loc_row {i}")
+        let k = ref_key(c, want[i])
+        assert(c.loc_mod[i] == k.0, "{tag}: loc_mod {i}")
+        assert(c.loc_prefix[i] == k.1, "{tag}: loc_prefix {i}")
+        i = i + 1
+    }
+    // a location under a SECOND server, or nested under a location,
+    // is not this server's candidate — the scan never saw it either
+    var seen: int = 0
+    var r: int = 0
+    while r < total {
+        if c.names[r] == "location" && c.kinds[r] == "b" {
+            seen = seen + 1
+        }
+        r = r + 1
+    }
+    assert(seen >= want.len, "{tag}: the table is a subset of the location rows")
+
+    // child_row / child_arg1 over every block and every name, plus
+    // the top level (-1) and two out-of-range keys
+    for nm in names_battery().words() {
+        var blk: int = -2
+        while blk < total + 1 {
+            let got = config.child_row(c, blk, nm)
+            var ref_r = -1
+            if blk >= -1 && blk < total {
+                ref_r = ref_child_row(c, blk, nm)
+            }
+            assert(got == ref_r, "{tag}: child_row {nm} under {blk}")
+            let gv = config.child_arg1(c, blk, nm) else ""
+            var rv = ""
+            if ref_r >= 0 {
+                rv = c.argp[c.args_at[ref_r]]
+            }
+            assert(gv == rv, "{tag}: child_arg1 {nm} under {blk}")
+            blk = blk + 1
+        }
+    }
+
+    // the child buckets partition the rows: every row is exactly one
+    // parent's child, and each bucket is in ascending row order
+    var tally: int = 0
+    var b: int = -1
+    while b < total {
+        let at = config.kid_first(c, b)
+        let n = config.kid_count(c, b)
+        tally = tally + n
+        var j: int = 0
+        var prev: int = -1
+        while j < n {
+            let row = c.kids[at + j]
+            assert(c.parent[row] == b, "{tag}: bucket {b} holds row {row}")
+            assert(row > prev, "{tag}: bucket {b} ascends")
+            prev = row
+            j = j + 1
+        }
+        b = b + 1
+    }
+    assert(tally == total, "{tag}: every row bucketed once")
+    assert(config.kid_count(c, total + 7) == 0, "{tag}: out-of-range bucket empty")
+    assert(config.kid_first(c, total + 7) == 0, "{tag}: out-of-range window empty")
+}
+
+fn main() -> int {
+    // 1. no http block at all
+    hold(config.parse_str("events {{}}\n", "a.conf"), "no-http")
+
+    // 2. a lexer error: the index is still total on a half-model
+    hold(config.parse_str("http {{ server {{ listen \"8080;\n", "b.conf"), "lex-err")
+
+    // 3. the shapes the matcher cares about: plain prefixes of two
+    //    lengths, `=` exact, `^~`, and a nested location
+    let src3 = "http {{\n  server {{\n    root /var/www;\n    index index.html a.html;\n    location /a/ {{ root /one; }}\n    location /a/long/ {{ root /two; location /a/long/deep/ {{ root /three; }} }}\n    location = /health {{ root /h; }}\n    location ^~ /img/ {{ alias /data/img/; }}\n  }}\n}}\n"
+    let c3 = config.parse_str(src3, "c.conf")
+    hold(c3, "shapes")
+    assert(config.loc_count(c3) == 4, "shapes: four candidates, the nested one is not one")
+
+    // 4. two servers: only the FIRST server's locations are candidates
+    let src4 = "http {{\n  server {{ listen 8080; location /one/ {{ root /1; }} }}\n  server {{ listen 8081; location /two/ {{ root /2; }} }}\n}}\n"
+    let c4 = config.parse_str(src4, "d.conf")
+    hold(c4, "two-servers")
+    assert(config.loc_count(c4) == 1, "two-servers: one candidate")
+    assert(c4.loc_prefix[0] == "/one/", "two-servers: the first server's")
+
+    // 5. a proxy config with the three inheritance levels
+    let src5 = "http {{\n  proxy_read_timeout 10s;\n  server {{\n    listen 8080;\n    proxy_connect_timeout 2s;\n    location /api/ {{ proxy_pass http://127.0.0.1:9001; proxy_read_timeout 30s; }}\n    location / {{ root /var/www; }}\n  }}\n}}\n"
+    let c5 = config.parse_str(src5, "e.conf")
+    hold(c5, "proxy")
+
+    // 6. top-level directives live in the -1 bucket
+    let c6 = config.
+        parse_str("worker_processes 4;\nhttp {{ server {{ listen 8080; }} }}\n", "f.conf")
+    hold(c6, "top-level")
+    assert(
+        (config.child_arg1(c6, -1, "worker_processes") else "") == "4",
+        "top-level: the -1 bucket reads",
+    )
+
+    // 7. two generations alive at once, each under its OWN table —
+    //    the reload witness: a new Conf carries a new index, and the
+    //    old one keeps answering as it did
+    let gen1 = config.
+        parse_str(
+        "http {{ server {{ listen 8080; location /api/ {{ proxy_pass http://127.0.0.1:9001; }} }} }}\n",
+        "g1.conf",
+    )
+    let gen2 = config.
+        parse_str(
+        "http {{ server {{ listen 8080; location /api/ {{ proxy_pass http://127.0.0.1:9002; }} location /new/ {{ root /n; }} }} }}\n",
+        "g2.conf",
+    )
+    hold(gen1, "gen1")
+    hold(gen2, "gen2")
+    assert(config.loc_count(gen1) == 1, "gen1: one location")
+    assert(config.loc_count(gen2) == 2, "gen2: two locations")
+    let p1 = config.child_arg1(gen1, gen1.loc_row[0], "proxy_pass") else ""
+    let p2 = config.child_arg1(gen2, gen2.loc_row[0], "proxy_pass") else ""
+    assert(p1 == "http://127.0.0.1:9001", "gen1: its own proxy_pass")
+    assert(p2 == "http://127.0.0.1:9002", "gen2: the reloaded proxy_pass")
+
+    0
+}

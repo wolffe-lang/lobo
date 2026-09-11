@@ -37,6 +37,16 @@
 /// faithful -T. `delta_at`/`delta_note` list named_error directives
 /// met (the class-C named deltas). `err` is "" on success, else the
 /// oracle-shaped message with its file and line.
+/// The tail is the ROUTE INDEX (lobo#14), derived once by
+/// `build_index` at the end of every load and never mutated after:
+/// `ix_http`/`ix_server` are the two first-block rows the router used
+/// to re-scan the whole arena for; `loc_row`/`loc_mod`/`loc_prefix`
+/// are the `location` blocks under `ix_server` IN ROW ORDER (the
+/// matcher's first-match order, unchanged); `kids`/`kid_at`/`kid_n`
+/// are every row's DIRECT children in row order, bucketed by
+/// `parent + 1` so bucket 0 is the top level. The model is immutable
+/// after parse and a reload builds a NEW Conf, so the index needs no
+/// generation key and can never go stale: it IS the generation.
 pub struct Conf {
     names: List[str],
     kinds: List[str],
@@ -54,6 +64,14 @@ pub struct Conf {
     err: str,
     err_file: str,
     err_line: int,
+    ix_http: int,
+    ix_server: int,
+    loc_row: List[int],
+    loc_mod: List[str],
+    loc_prefix: List[str],
+    kids: List[int],
+    kid_at: List[int],
+    kid_n: List[int],
 }
 
 /// Include-walk state: resolution mode and the open-file chain the
@@ -83,6 +101,14 @@ fn empty_conf() -> Conf {
         err: "",
         err_file: "",
         err_line: 0,
+        ix_http: -1,
+        ix_server: -1,
+        loc_row: List[int](),
+        loc_mod: List[str](),
+        loc_prefix: List[str](),
+        kids: List[int](),
+        kid_at: List[int](),
+        kid_n: List[int](),
     }
 }
 
@@ -557,6 +583,162 @@ fn glob_at(p: List[byte], n: List[byte], pi0: int, ni0: int) -> bool {
     ni == n.len
 }
 
+/// Derive the route index (lobo#14). ONE pass for the two first-block
+/// rows, a counting pass and a fill pass for the direct-children
+/// buckets, one walk of the first server's children for the location
+/// table. O(rows), run once per load — off the request path, where it
+/// replaces four whole-arena scans a request. Total.
+fn build_index(mut c: Conf) {
+    let total = c.names.len
+
+    // the first `http` block and the first `server` block under http
+    // — the two scans `proxy.plan` opened every request with
+    var i: int = 0
+    while i < total {
+        if c.kinds[i] == "b" {
+            if c.ix_http < 0 && c.names[i] == "http" {
+                c.ix_http = i
+            } else if c.ix_server < 0 && c.names[i] == "server" && c.ctx[i] == "http" {
+                c.ix_server = i
+            }
+        }
+        i = i + 1
+    }
+
+    // direct children, bucketed by `parent + 1` (bucket 0 = the top
+    // level). Counting sort over row order, so a bucket lists its
+    // children in ROW order — the same first match a whole-arena scan
+    // for `parent[i] == blk` returned.
+    var b: int = 0
+    while b <= total {
+        (mut c.kid_at).push(0)
+        (mut c.kid_n).push(0)
+        b = b + 1
+    }
+    i = 0
+    while i < total {
+        let p = c.parent[i] + 1
+        c.kid_n[p] = c.kid_n[p] + 1
+        i = i + 1
+    }
+    var acc: int = 0
+    b = 0
+    while b <= total {
+        c.kid_at[b] = acc
+        acc = acc + c.kid_n[b]
+        c.kid_n[b] = 0
+        b = b + 1
+    }
+    var k: int = 0
+    while k < total {
+        (mut c.kids).push(0)
+        k = k + 1
+    }
+    i = 0
+    while i < total {
+        let p = c.parent[i] + 1
+        let base = copy c.kid_at[p]
+        let off = copy c.kid_n[p]
+        c.kids[base + off] = i
+        c.kid_n[p] = off + 1
+        i = i + 1
+    }
+
+    // the location table under the first server: row, modifier,
+    // prefix — everything the longest-prefix/`=`-exact matcher reads
+    if c.ix_server >= 0 {
+        let sb = c.ix_server + 1
+        let at = copy c.kid_at[sb]
+        let n = copy c.kid_n[sb]
+        var j: int = 0
+        while j < n {
+            let r = copy c.kids[at + j]
+            if c.names[r] == "location" && c.kinds[r] == "b" {
+                let aat = c.args_at[r]
+                let nn = c.args_n[r]
+                var modi = ""
+                var prefix = ""
+                if nn == 1 {
+                    prefix = c.argp[aat]
+                } else if nn >= 2 {
+                    modi = c.argp[aat]
+                    prefix = c.argp[aat + 1]
+                }
+                (mut c.loc_row).push(r)
+                (mut c.loc_mod).push(modi)
+                (mut c.loc_prefix).push(prefix)
+            }
+            j = j + 1
+        }
+    }
+}
+
+/// The index of the first `http` block, or -1. An index read. Total.
+pub fn first_http(c: Conf) -> int {
+    c.ix_http
+}
+
+/// The index of the first `server` block under http, or -1. v0 serves
+/// the first server (host matching is a later sprint). An index read.
+/// Total.
+pub fn first_server(c: Conf) -> int {
+    c.ix_server
+}
+
+/// The number of `location` blocks under the first server. Total.
+pub fn loc_count(c: Conf) -> int {
+    c.loc_row.len
+}
+
+/// The start of block `blk`'s direct-children window in `kids`
+/// (`blk` -1 is the top level); 0 when `blk` is out of range, which
+/// pairs with a `kid_count` of 0. Total.
+pub fn kid_first(c: Conf, blk: int) -> int {
+    let bucket = blk + 1
+    if bucket < 0 || bucket >= c.kid_at.len {
+        return 0
+    }
+    c.kid_at[bucket]
+}
+
+/// The number of direct children block `blk` has (`blk` -1 is the top
+/// level), 0 when out of range. Total.
+pub fn kid_count(c: Conf, blk: int) -> int {
+    let bucket = blk + 1
+    if bucket < 0 || bucket >= c.kid_n.len {
+        return 0
+    }
+    c.kid_n[bucket]
+}
+
+/// The row index of the first `name` directive DIRECTLY under block
+/// `blk` carrying at least one argument, or -1. `blk` -1 is the top
+/// level. Reads the child index — the same first match the whole-arena
+/// scan returned, over the block's own children only. Total.
+pub fn child_row(c: Conf, blk: int, name: str) -> int {
+    let at = kid_first(c, blk)
+    let n = kid_count(c, blk)
+    var j: int = 0
+    while j < n {
+        let r = c.kids[at + j]
+        if c.names[r] == name && c.args_n[r] >= 1 {
+            return r
+        }
+        j = j + 1
+    }
+    -1
+}
+
+/// The first single-argument value of directive `name` directly under
+/// block `blk`, or the `none` row. Total over the model.
+pub fn child_arg1(c: Conf, blk: int, name: str) -> str ! {none} {
+    let r = child_row(c, blk, name)
+    if r < 0 {
+        return none
+    }
+    c.argp[c.args_at[r]]
+}
+
 /// Parse a single source text, pure — includes are recorded as
 /// directives but never followed (the three-lane unit surface; the
 /// fs-facing `load` is the two-lane integration surface).
@@ -566,9 +748,11 @@ pub fn parse_str(src: str, file: str) -> Conf {
     let t = lex(src)
     if !t.err.is_empty() {
         set_err(mut c, t.err, file, t.err_line)
+        build_index(mut c)
         return c
     }
     walk(mut c, mut w, t, src, file, "", -1, "main", 0, false)
+    build_index(mut c)
     c
 }
 
@@ -586,5 +770,6 @@ pub fn load(prefix: str, conf_rel: str) -> Conf {
     let cprefix = if cut < 0 { "." } else { conf[0..cut] }
     var w = Walker { resolve: true, conf_prefix: cprefix, open_chain: "", tbl: table() }
     parse_file(mut c, mut w, conf, "", -1, "main")
+    build_index(mut c)
     c
 }

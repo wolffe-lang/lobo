@@ -232,19 +232,6 @@ pub fn fmt_vars(f: str) -> str {
 // access_log resolution — the effective output set
 // ------------------------------------------------------------------
 
-/// The row index of the first `server` block, or -1. Total.
-fn first_server(c: Conf) -> int {
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == "server" && c.kinds[i] == "b" && c.ctx[i] == "http" {
-            return i
-        }
-        i = i + 1
-    }
-    -1
-}
-
 /// The effective access_log rows (v0 resolution: the first server
 /// block's rows when it has any, else the http-level rows), as a
 /// List of row indices. `access_log off` rows are INCLUDED (an off
