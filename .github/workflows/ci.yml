@@ -280,8 +280,11 @@ jobs:
       # BOTH servers for a whole drive, the calls column divided by the
       # requests the generators completed — a count is the one linux
       # number a shared VM holds still, and it is taken at the bar's
-      # own cell (N=nproc, c=32) on both shapes.
-      - name: "lobo-syscalls (ws27 — strace -c over both servers, calls per request, both shapes)"
+      # own cell (N=nproc, c=32) on both shapes. ws30 adds the IDLE
+      # shape: the same processes, no drive, calls per SECOND — the
+      # per-time rows (wolf-lang#302's futex) read with the clock as
+      # the divisor, which is the only divisor they have.
+      - name: "lobo-syscalls (ws27 — strace -c over both servers, calls per request, both shapes; ws30 — and per second at idle)"
         if: steps.acquire.outputs.toolchain == 'full' && inputs.syscalls == true
         shell: bash
         working-directory: lobo
@@ -293,3 +296,4 @@ jobs:
           nproc; uptime
           tools/lobo-syscalls keepalive
           tools/lobo-syscalls close
+          tools/lobo-syscalls idle
