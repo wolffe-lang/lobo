@@ -1140,18 +1140,11 @@ fn location_key(c: config.Conf, i: int) -> (str, str) {
 }
 
 /// The first N-argument value of directive `name` whose parent block
-/// is `blk` (or, when `blk` is -1, whose context is `ctx_want` at the
-/// top server/http level). Returns the value or the `none` row.
+/// is `blk` (`blk` -1 is the top level). Returns the value or the
+/// `none` row. lobo#14: the config's load-time child index, not a
+/// whole-arena scan — the same first match.
 fn child_arg1(c: config.Conf, blk: int, name: str) -> str ! {none} {
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == name && c.parent[i] == blk && c.args_n[i] >= 1 {
-            return c.argp[c.args_at[i]]
-        }
-        i = i + 1
-    }
-    none
+    config.child_arg1(c, blk, name)
 }
 
 /// Collect the `index` file list for block `blk` (its own `index`
@@ -1159,10 +1152,12 @@ fn child_arg1(c: config.Conf, blk: int, name: str) -> str ! {none} {
 /// server-level list or the built-in "index.html").
 fn index_list(c: config.Conf, blk: int) -> List[str] {
     var out = List[str]()
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == "index" && c.parent[i] == blk {
+    let at0 = config.kid_first(c, blk)
+    let kn = config.kid_count(c, blk)
+    var k: int = 0
+    while k < kn {
+        let i = c.kids[at0 + k]
+        if c.names[i] == "index" {
             let at = c.args_at[i]
             let nn = c.args_n[i]
             var j: int = 0
@@ -1171,7 +1166,7 @@ fn index_list(c: config.Conf, blk: int) -> List[str] {
                 j = j + 1
             }
         }
-        i = i + 1
+        k = k + 1
     }
     out
 }
@@ -1181,15 +1176,7 @@ fn index_list(c: config.Conf, blk: int) -> List[str] {
 /// by `server_name`/Host is a later sprint's matching (the table row
 /// says host matching lands ws02 as parse; routing by it is ws03+).
 fn first_server(c: config.Conf) -> int {
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == "server" && c.kinds[i] == "b" && c.ctx[i] == "http" {
-            return i
-        }
-        i = i + 1
-    }
-    -1
+    config.first_server(c)
 }
 
 /// The route trace (ws07): every candidate the matcher CONSIDERED,
@@ -1308,26 +1295,25 @@ fn match_location(c: config.Conf, path: str) -> LocMatch {
     var best_len: int = -1
     var best_prefix = ""
     var i: int = 0
-    let total = c.names.len
+    // lobo#14: the load-time location table — the same rows in the
+    // same ROW order, so precedence is untouched
+    let total = config.loc_count(c)
     while i < total {
-        if c.names[i] == "location" && c.kinds[i] == "b" && c.parent[i] == m.srv {
-            let key = location_key(c, i)
-            let modi = key.0
-            let prefix = key.1
-            if modi == "=" {
-                if path == prefix {
-                    m.exact_hit = i
+        let modi = c.loc_mod[i]
+        let prefix = c.loc_prefix[i]
+        if modi == "=" {
+            if path == prefix {
+                m.exact_hit = c.loc_row[i]
+                best_prefix = prefix
+            }
+        } else if modi == "" || modi == "^~" {
+            // plain prefix match (regex modifiers are parse-only
+            // at ws02 — they never win a route here)
+            if path.starts_with(prefix) {
+                if prefix.len > best_len {
+                    best_len = prefix.len
+                    m.best = c.loc_row[i]
                     best_prefix = prefix
-                }
-            } else if modi == "" || modi == "^~" {
-                // plain prefix match (regex modifiers are parse-only
-                // at ws02 — they never win a route here)
-                if path.starts_with(prefix) {
-                    if prefix.len > best_len {
-                        best_len = prefix.len
-                        m.best = i
-                        best_prefix = prefix
-                    }
                 }
             }
         }
