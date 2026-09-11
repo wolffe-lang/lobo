@@ -711,72 +711,18 @@ pub struct Plan {
     resolver_timeout_ms: int,
 }
 
-/// The index of the first `http` block, or -1. Total.
-fn first_http(c: config.Conf) -> int {
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == "http" && c.kinds[i] == "b" {
-            return i
-        }
-        i = i + 1
-    }
-    -1
-}
-
-/// The index of the first `server` block under http, or -1. v0 serves
-/// the first server (host matching is a later sprint). Total.
-fn first_server(c: config.Conf) -> int {
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == "server" && c.kinds[i] == "b" && c.ctx[i] == "http" {
-            return i
-        }
-        i = i + 1
-    }
-    -1
-}
-
-/// The (modifier, prefix) of a `location` block from its args. Total.
-fn location_key(c: config.Conf, i: int) -> (str, str) {
-    let at = c.args_at[i]
-    let nn = c.args_n[i]
-    if nn == 1 {
-        return ("", c.argp[at])
-    }
-    if nn >= 2 {
-        return (c.argp[at], c.argp[at + 1])
-    }
-    ("", "")
-}
-
-/// The first single-arg value of directive `name` whose parent is
-/// block `blk`, or the `none` row. Total over the model.
-fn child_arg1(c: config.Conf, blk: int, name: str) -> str ! {none} {
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == name && c.parent[i] == blk && c.args_n[i] >= 1 {
-            return c.argp[c.args_at[i]]
-        }
-        i = i + 1
-    }
-    none
-}
-
 /// A timeout directive value in ms, taken from the innermost level
 /// (loc, else srv, else http) that sets it, else `deflt`. Total.
 fn timeout_ms(c: config.Conf, loc: int, srv: int, http_blk: int, name: str, deflt: int) -> int {
-    let l = child_arg1(c, loc, name) else ""
+    let l = config.child_arg1(c, loc, name) else ""
     if !l.is_empty() {
         return parse_time_ms(l)
     }
-    let s = child_arg1(c, srv, name) else ""
+    let s = config.child_arg1(c, srv, name) else ""
     if !s.is_empty() {
         return parse_time_ms(s)
     }
-    let h = child_arg1(c, http_blk, name) else ""
+    let h = config.child_arg1(c, http_blk, name) else ""
     if !h.is_empty() {
         return parse_time_ms(h)
     }
@@ -792,7 +738,7 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         is_proxy: false,
         loc: -1,
         srv: -1,
-        http_blk: first_http(c),
+        http_blk: config.first_http(c),
         matched: "",
         pt: PassTarget {
             scheme: "http",
@@ -810,36 +756,36 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         resolver_valid_ms: 0,
         resolver_timeout_ms: 30000,
     }
-    let srv = first_server(c)
+    let srv = config.first_server(c)
     if srv < 0 {
         return pl
     }
     pl.srv = srv
 
+    // lobo#14: the candidates are the load-time location table — the
+    // same rows, in the same ROW order, so first-match/longest-prefix/
+    // `=`-exact reads exactly as the whole-arena walk did.
     var best: int = -1
     var best_len: int = -1
     var best_prefix = ""
     var exact_hit: int = -1
     var exact_prefix = ""
     var i: int = 0
-    let total = c.names.len
+    let total = config.loc_count(c)
     while i < total {
-        if c.names[i] == "location" && c.kinds[i] == "b" && c.parent[i] == srv {
-            let key = location_key(c, i)
-            let modi = key.0
-            let prefix = key.1
-            if modi == "=" {
-                if path == prefix {
-                    exact_hit = i
-                    exact_prefix = prefix
-                }
-            } else if modi == "" || modi == "^~" {
-                if path.starts_with(prefix) {
-                    if prefix.len > best_len {
-                        best_len = prefix.len
-                        best = i
-                        best_prefix = prefix
-                    }
+        let modi = c.loc_mod[i]
+        let prefix = c.loc_prefix[i]
+        if modi == "=" {
+            if path == prefix {
+                exact_hit = c.loc_row[i]
+                exact_prefix = prefix
+            }
+        } else if modi == "" || modi == "^~" {
+            if path.starts_with(prefix) {
+                if prefix.len > best_len {
+                    best_len = prefix.len
+                    best = c.loc_row[i]
+                    best_prefix = prefix
                 }
             }
         }
@@ -861,7 +807,7 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     pl.loc = loc
     pl.matched = matched
 
-    let pp = child_arg1(c, loc, "proxy_pass") else ""
+    let pp = config.child_arg1(c, loc, "proxy_pass") else ""
     if pp.is_empty() {
         return pl
     }
@@ -874,7 +820,7 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     // ws13: the resolver in effect at the proxy_pass row (nearest
     // enclosing block that holds one), its `valid=` override and the
     // innermost `resolver_timeout`
-    let prow = child_row(c, loc, "proxy_pass")
+    let prow = config.child_row(c, loc, "proxy_pass")
     if prow >= 0 {
         let rr = config.resolver_row_for(c, prow)
         if rr >= 0 {
@@ -884,20 +830,6 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         pl.resolver_timeout_ms = config.resolver_timeout_for(c, prow)
     }
     pl
-}
-
-/// The row index of the first `name` directive directly under block
-/// `blk`, or -1. Total.
-fn child_row(c: config.Conf, blk: int, name: str) -> int {
-    var i: int = 0
-    let total = c.names.len
-    while i < total {
-        if c.names[i] == name && c.parent[i] == blk && c.args_n[i] >= 1 {
-            return i
-        }
-        i = i + 1
-    }
-    -1
 }
 
 // ------------------------------------------------------------------
@@ -1010,15 +942,15 @@ fn expand_peer(mut rs: resolver.Resolver, host: str, addr: str, timeout_ms: int,
 /// srv, else http) that sets it, else "" (the timeout_ms shape,
 /// without the time parse). Total.
 fn str_setting(c: config.Conf, loc: int, srv: int, http_blk: int, name: str) -> str {
-    let l = child_arg1(c, loc, name) else ""
+    let l = config.child_arg1(c, loc, name) else ""
     if !l.is_empty() {
         return l
     }
-    let s = child_arg1(c, srv, name) else ""
+    let s = config.child_arg1(c, srv, name) else ""
     if !s.is_empty() {
         return s
     }
-    child_arg1(c, http_blk, name) else ""
+    config.child_arg1(c, http_blk, name) else ""
 }
 
 // ------------------------------------------------------------------
