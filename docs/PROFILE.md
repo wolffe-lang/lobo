@@ -892,6 +892,222 @@ close at ~1.08x, pricing the accept side's two syscalls at ws25's
 per-call rate against a cross-class ledger row; that comparison
 cannot be made across classes and was wrong to be priced that way.
 
+
+## ws31's addendum — the gap closed: the release pair, PREDICTED before the pin is staged, then the profile that names what remains (2026-09-11)
+
+wolf **v0.2.11** tagged at `c9237c1` (r16; release run 34596068449)
+and lupin **0.1.33** tagged at `18de030` (is45) the same morning. This
+sprint pins both — the release archives themselves, by digest, never a
+build on this box — re-reads the count at the release pair, and then
+does what ws30 left as the next question: with the count within 0.03
+calls of nginx on close and 0.10 on keepalive, and the timing at
+1.161x / 1.286x, **profile the request on linux and name, by row, what
+the remaining time is** — the runtime's (#298's copies, #299's head
+list, #302's parked proc) or lobo's own. Everything under this heading
+and above "The measurement" was written BEFORE `.wolf-bin` held the
+release pair.
+
+### The pairing shape, stated honestly
+
+At the tags the pairing is **one release each way, not closed**:
+`wolf 0.2.11` declares `lupin 0.1.32` (pin `e0ce018`, s147's fold,
+twenty-two commits inside v0.2.10 — the release was cut before 0.1.33
+tagged), and `lupin 0.1.33` declares pin `662b14c`, **the v0.2.10
+tag** (s149–s155 are past it). ws30's gap was two releases at a dev
+sha (`[wolf]` fc07cc5 declaring 0.1.31 with 0.1.29 staged); this is
+each side one release behind the other's tag. What CAN be measured
+here is narrower than "closed": whether anything in lobo's corpus
+diverges between the two machines at these tags — the 63 files that
+declare a lupin lane, run by the gauntlet against their own headers on
+both tiers. Predicted: **zero divergence** — none of the clauses on
+either side of the gap (s150's fn values and channel payloads, s151's
+`then`, s152's `Map`, s153's built-`str` site, s155's operator
+dispatch on the wolf side; is45's E0409/E0416/E0206/#84/#89 on the
+lupin side) is spelled anywhere in `src/` or `tests/` (grepped at the
+bump: no `: fn(` type, no `Map`, no `trait`/`impl`, no bare `if …
+then`, no `str` slice assignment, no generic `fn x[`), so the lobo
+corpus cannot reach the code either machine moved. That is a sentence
+about lobo's corpus, not about the pairing.
+
+### What the pin carries that lobo could feel — the census, predicted
+
+The runtime's delta `fc07cc5..v0.2.11` in `crates/wolf_rt/src/` is
+five files: `lib.rs` (+3: `pub mod map`), `map.rs` (new, s152),
+`list.rs` (+23: `alloc_in` made `pub(crate)` for the closure seam and
+`list_from_bytes` for `pairs()` — nothing lobo's lists call),
+`native.rs` (+18: `__wolf_rt_closure_alloc`, s150) and
+`task/chan.rs` (+151: payload boxes). **Nothing in `fs.rs`, `net.rs`,
+`str.rs`, `signal.rs`, `reactor.rs` or `poll.rs`** — the serving path
+runs the same runtime code it ran at fc07cc5, and so does the parked
+signal proc (item 3 below).
+
+| what the bump brings | class | predicted effect on lobo |
+|---|---|---|
+| s150 — every fn value is a pointer to a callable record; channel payloads beyond a word cross in boxes | LOWERING (fn values), RUNTIME (chan) | **zero**: lobo has no fn-typed value anywhere (grepped: no `: fn(`, `= fn(`, `-> fn(`), no channel (ws30 grepped; still none). The `else \|e\|` handlers are row handlers, not closures, and the baseline WIR carries **zero** `closure` constructs. The WIR and the release-tier LLVM IR of `src/main.lu` are predicted **byte-identical modulo any stamp line** — 174,425 WIR lines / 1,191 fns and 349,020 LLVM lines / 1,192 defines at fc07cc5, measured below at the release |
+| s151 — the one-line `if` with a contextual `then`; `[gram.fmt.if]` never converts | GRAMMAR-WIDENING | **zero**: no bare `if` in the tree; `then` appears in strings only. wolf-lang's own s151 entry measured `wolf fmt --check` over lobo `d792290` (this tree) with the new binary: zero motion. The gauntlet's fmt step is the measurement |
+| s152 — `Map[K, V]` typed, `m[k]` is `V ! {none}`, `op=` E0417, a struct key E0418 | TYPING (new), RUNTIME (five seams, `RT_SYMBOLS` 138 → 143) | **zero**: lobo's kind table, head memo and connection table are parallel `List`s (ws27/ws28); there is no `Map` in `src/` or `tests/` |
+| s153 — `[mem.region.escape]`: a `str` built by `+`, `+=` or a holed interpolation is an allocation site in the region of the building expression; leaving it is **E1010** | TIGHTENING — the one rule that could red the build | **zero, predicted by reading every region block.** lobo has four: `serve.serve_file`'s `region resp {…}` (the plaintext small arm) and `region chunkr {…}` (the stream), `budget.body_small`'s `region resp(cap:) {…}` and `body_stream`'s `region chunkr(cap:) {…}`. Each builds a `List[byte]` (the body, the chunk, `head.bytes()`, the gather's `parts`) and nothing else; every `str` they touch (`head`, `path`) is built OUTSIDE and lent in; each block's tail is a scalar on purpose (`wcode = wcode`, ws10) and the only values crossing out are `int`s. No `+`, no `+=`, no interpolation stands inside any of the four, so there is no built-`str` site to escape. The checked budget (`[exec.checked.budget]`) is the checked tier's: the corpus's checked lanes run short programs and none is predicted to exhaust bytes |
+| s155 — operators dispatch through traits on a type parameter or a user type; `trait Num = …` | TYPING | **zero**: lobo defines no trait and no impl; every operator in the tree is on two primitives, which stay builtin |
+| #282 — `wolf --version \| head -1` exits 0 | DRIVER | MECHANICAL; `lib-toolchain.sh` already reads the first line through `head -1` |
+| r16 — the version sites, the pairing at 0.1.32 | MECHANICAL | the `.wolfi` toolchain stamp `0.2.10 → 0.2.11` in every header |
+
+**The census, predicted**: the gauntlet's counts at trunk `d792290`
+(the before-run of this sprint's own gauntlet, at the fc07cc5 pair)
+are the baseline, and **every row is predicted identical at the
+release pair** — corpus **272 lane-runs** (63 lupin-lane files
+among them), differential 3/3, proxy 8/8, control 9/9, logdiff 4/4,
+signal (macOS: the named skip), prefork 38/38, membudget 17/17,
+resolver 9/9, replay 2/2, metrics, dryrun, shell, confcheck, tls,
+acme, dist. Source motion for the pin's own sake: `wolf-toolchain.toml`
+and the two `shell.lu` constants (`toolchain_version` "0.2.11",
+`toolchain_pin` "c9237c1"). **The `.wolfi` motion is the first test of
+s148's content-only rule (#292) at a pin bump**: ws30 re-derived every
+hash once and recorded "the next pin moves only the header stamp";
+predicted here as **fourteen files, one line each** — `toolchain
+0.2.10 · edition v1` → `0.2.11` — and **every `export_hash`, `pkg_hash`
+and dep hash unchanged**, ZERO item motion. `[lupin]` 0.1.29 → 0.1.33
+(is42–is45): the mirrors it takes (a leading `else`, the range arm,
+`then`, E0409 on either side of a row compare, E0416 on a `str` slice
+assignment, one `T` per call, a keyword in type position E0206) are
+all tightenings lobo's source does not spell (grepped at the bump), so
+the **63 lupin-lane files are predicted to move by zero**.
+
+### The count at the release pair, predicted
+
+The serving path's runtime is fc07cc5's byte for byte (the delta above
+touches no file it calls), so the count is ws30's, read again on
+another VM of the same class: **keepalive 6.25 ± 0.02 against nginx
+6.15**, every per-request row (`statx` 1.00, `openat` 1.00, `read`
+1.00, `recvfrom` 1.00, `writev` 1.00, `close` 1.00) held to a
+hundredth, `poll` and `futex` moving only with the box's rate; **close
+10.16 ± 0.10 against 10.13**, `accept4` 1.08 (the herd, lobo#5,
+untouched), `poll` 1.28 per connection, no `ioctl`, no `setsockopt`.
+Any per-request row that moves by more than a hundredth is a finding
+against this prediction and a filing.
+
+### Item 3, said rather than re-measured
+
+wolf-lang#302's parked proc: the runtime between fc07cc5 and v0.2.11
+touched `task/chan.rs` alone under `task/` and nothing under
+`signal.rs`, `reactor.rs` or `poll.rs` — the compensation clock that
+costs an idle hand ~196 `futex`/s is the same code. The count leg's
+idle shape runs regardless (it is one line of the CI step) and is
+predicted to read **~196/s per hand, every one an error return**
+(6,200–6,300 calls per 8 s over four hands), nginx 0, the master's
+probe 4 calls a probe. If it reads otherwise the prediction is wrong
+and the runtime changed something this reading of the diff missed.
+
+### Item 2 — the profile, PREDICTED: what remains of W8 on linux, by row
+
+The instrument is ws25/ws28's, `tools/lobo-profile` (`perf record -F
+997 -g` on ONE serving process for eight seconds under four `ab -c 8`
+generators, then `strace -c` on a separate drive), on the CI runner,
+this sprint on BOTH shapes — and, new, at **N=4 as well as N=1**: the
+tool gains a fifth argument (the worker count) and a by-thread report
+(`--sort comm`), because the close cell's gap lives at four hands
+(N=1 close is 1.065x, inside the bar; N=4 is 1.161x) and a profile at
+one hand cannot see it. `perf` samples CPU, not wall: a parked hand
+takes no samples, so what a park costs in cpu shows (its syscalls, the
+switch), and what it costs in latency shows only in the parity table's
+req/s.
+
+**The arithmetic the pricing is read against** (ws30's parity run
+34554232695, the fast class, cores ÷ req/s):
+
+| cell | lobo µs cpu / request | nginx µs cpu / request | gap | timing |
+|---|---|---|---|---|
+| N=1 keepalive | 19.6 (1.00 core, 50,986 req/s) | 15.8 | **3.8 µs** | 1.248x |
+| N=4 keepalive | 22.9 (2.67 / 116,787) | 16.3 | **6.6 µs** | 1.286x |
+| N=1 close | 34.6 (0.99 / 28,640) | 32.5 | **2.1 µs** | 1.065x |
+| N=4 close | 45.4 (1.81 / 39,860) | 34.9 | **10.5 µs** | 1.161x |
+
+So the keepalive gap is ~4 µs of cpu a request at one hand and ~7 at
+four; the close gap is ~2 µs at one hand and ~10 at four. A profile
+row is priced as its share of lobo's per-request cpu on that cell.
+
+**Predicted, keepalive, one hand** (ws28's linux table at 0.2.9 is
+the base: 74.4 / 18.2 / 6.9 kernel / lobo+runtime / libc; the runtime
+is statically linked, so `lobo-release` the dso is lobo's frames AND
+`wolf_rt`'s):
+
+| | predicted |
+|---|---|
+| kernel / lobo-release / libc | **73–76% / 17–19% / 6–8%** — nothing on the path changed since ws28 but ws29's park (a thread that takes ~no samples) and ws30's `classify` (a lookup fewer, a stat the same) |
+| in a syscall, inclusive | 66–70% |
+| `writev` inclusive (the transmit path down to the loopback softirq) | 38–42% — **not a gap row**: nginx pays the same path for the same bytes |
+| `recvfrom` + the file's `openat`/`fstat`/`read`/`close` | 18–22% — not gap rows either (nginx without `open_file_cache` opens per request too) |
+| **the runtime's allocations and their faults** — `ambient_alloc`, `__wolf_rt_list_new`/`list_push`, `do_user_addr_fault` + `clear_page_erms` + `__handle_mm_fault` (the 2,315 retained bytes a request, #191/#298) | **2.5–3.5%**, ~0.5–0.7 µs — **the runtime's** (#298 items 1–3 and #191) |
+| **libc copies** — `memset` (`net_read`'s 4 KiB zeroing, #298 item 3), `memcpy`/`memmove` (the read's arena copy; `head.bytes()`'s 241 B, #299) | **2–3%**, ~0.4–0.6 µs — **the runtime's** (#298, #299) |
+| **the parser and its searchers** — `parse_request`, `split_lines_strict`, `TwoWaySearcher::next` + `StrSearcher::new` under lobo's `find`s, `lower_token` | **3–4%**, ~0.6–0.8 µs — **lobo's own** (the searchers are the runtime's `str.find`, but lobo chooses the calls) |
+| **the loop and the route** — `serve_main`, `conn_step`, `serve_request`, `handle_request`, `head_warm`, `classify`, `normalize_path`, `join_path` | **3.5–4.5%**, ~0.7–0.9 µs — **lobo's own** |
+| #302's parked proc — `futex` wakes on the forwarder's thread | **under 0.2%**: ~196 wakes/s at a few µs each against ~50k req/s is ~0.006 calls and ~0.02 µs a request; visible in the by-thread report as a thread with a handful of samples, invisible in the leaf table |
+
+Read together: of the ~4 µs a keepalive request costs more than
+nginx's at one hand, the runtime's rows above are predicted at
+**~1.0–1.3 µs** (#298/#299 — the copies and the retained bytes) and
+lobo's own frames at **~1.3–1.7 µs**, with the remainder inside kernel
+rows that read the same by name on both sides but cost lobo more
+(the fault path under the arena's growth, `poll` at 0.16 a request
+where nginx's `epoll_wait` is 1.00 — lobo makes FEWER wait calls and
+each returns more). #302 is not a keepalive row at all.
+
+**Predicted, close, one hand** (ws25's fstat-tree table is the base:
+76.3 / 14.5 / 9.0; since then the accept posture took two syscalls per
+connection and the gather/read arms are the same):
+
+| | predicted |
+|---|---|
+| kernel / lobo-release / libc | **77–80% / 12–14% / 7–9%** |
+| `writev` inclusive / `close(2)` inclusive (the FIN, `__fput`) / `accept4` inclusive | 22–26% / 15–18% / 6–9% — the close SHAPE's own cost; nginx pays all three |
+| the runtime's allocations + faults (8,779 retained bytes a connection, ws28: the conn seam's six lists, the accept record, the parser's four) | **3–4%** — the runtime's (#298/#191), larger than on keepalive because a connection retains ~2 fresh pages |
+| lobo's own frames (the loop, `arm_accept`, the connection table's push/remove, the route) | **3–4%** — lobo's own |
+| the parser + searchers | 2–3% — lobo's own |
+| libc copies | 1.5–2.5% — the runtime's |
+
+**Predicted, close, FOUR hands, one hand sampled** — the cell the bar
+gates: the same rows plus the herd's cpu — `accept4` returning
+EAGAIN (0.08 a connection), the `poll` probe before every accept after
+a burst's first (1.28 a connection, lobo's own design), the park's
+mechanics on a lost race (`epoll_ctl`, the eventfd `write`/`read`,
+`futex`, ~0.9 syscalls and two context switches per lost race — the
+`wolf-reactor` thread's rows in the by-thread report) — predicted
+**2–4% of the hand's cpu together**, i.e. ~1–2 µs of the 10.5 µs
+N=4 gap. The remaining ~8 µs is predicted NOT to be a cpu row of one
+hand at all but the herd's WALL — four hands waking on one listener
+for every SYN (`net_wait` returns on all four; one wins), which
+`perf` on cpu cannot price and the count shows as `poll` 1.28 — plus
+whatever the fault path costs when four arenas grow at once. If the
+N=4 one-hand table reads within 2 points of the N=1 table by dso, the
+herd is wall and lobo#5 stands as written; if `lobo-release` or the
+scheduler's rows (`schedule`, `__switch_to`, `try_to_wake_up`) grow
+by more, the park's cpu is larger than lobo#5 priced it.
+
+**Predicted, keepalive, four hands, one hand sampled**: within 2
+points of the one-hand table by dso — this shape has no listener
+race; the extra ~3 µs a request at N=4 over N=1 is predicted to be
+the four generators and four hands sharing four vcpus with nginx's
+own cell having the same shape, not a row.
+
+**The top five, predicted, and whose they are** (keepalive, the cell
+furthest from the bar; shares of one hand's cpu, priced in µs of a
+~20 µs request):
+
+| # | row | predicted share | µs | whose | what it would take |
+|---|---|---|---|---|---|
+| 1 | the transmit path (`writev` inclusive) | ~40% | ~8 | the kernel's, both sides | nothing — not a gap row |
+| 2 | the loop + the route (`serve_main` … `classify`) | ~4% | ~0.8 | **lobo's** | a lobo-side row only if one function inside it is over ~1% by itself and under a day |
+| 3 | the parser + the searchers | ~3.5% | ~0.7 | **lobo's** (ws28's views already took the copies out; what is left is the walk) | the same rule |
+| 4 | the runtime's allocations + the fault path | ~3% | ~0.6 | **the runtime's** — #298 items 1–3, #191 | `net_read` into the arena / no zeroing (#298 item 3), the list headers (#191) |
+| 5 | libc `memset`/`memcpy` | ~2.5% | ~0.5 | **the runtime's** — #298 item 3, #299 | `net_writev` taking a `str` part (#299), the un-zeroed read (#298) |
+| — | #302 | <0.2% | <0.05 | the runtime's | nothing for W8 on this shape; the idle count is its witness |
+
+If the measurement puts a lobo-own function over ~1% of the request
+by itself and the fix is a morning, this sprint takes it and measures
+it (a two-tree parity set on one VM, `ref_tree` = this branch before
+the fix, which pins the same toolchain and so CAN be built beside it);
+otherwise the profile is the deliverable and the rows are filed where
+they belong.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
