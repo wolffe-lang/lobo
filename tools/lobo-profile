@@ -25,6 +25,22 @@
 #              as the wait itself; the by-thread report below is where
 #              the reactor thread's and the signal forwarder's share
 #              read.
+#     hands    ws32 (lobo#5, item 2): `1` (the default — worker 1 is
+#              the process sampled, as above) or `all` — EVERY hand at
+#              once (`perf record -p` over the N pids), so a cost that
+#              four hands pay each other and one hand's profile cannot
+#              show (ws31's ~6 µs a request at four hands) has a row:
+#              the report adds `--sort pid` over all the hands' threads
+#              and `--sort cpu` (which vcpus the hands ran on). On
+#              linux, whatever `hands` says, the tool ends with THE
+#              SPLIT: a separate drive with no tracer at all, and per
+#              sampled hand, off /proc — cpu seconds (utime+stime),
+#              write syscalls (`syscw`: one `writev` a request on both
+#              shapes at this pin, so a request count per hand without
+#              ptrace), µs of cpu a request, and voluntary /
+#              involuntary context switches a request.
+#   `LOBO_LISTEN_ARGS` (ws32): words appended to the `listen` line
+#   (e.g. `reuseport`) — a candidate posture profiled; "" is the bar's.
 #
 # The shape is ws22's probe (docs/PROFILE.md): `worker_processes 1`,
 # the parity file (1 KiB), the close shape under four `ab -c 8`
@@ -66,11 +82,18 @@ N="${5:-1}"
 case "$N" in
 ''|*[!0-9]*|0) echo "lobo-profile: REFUSED — N is a worker count, not $N" >&2; exit 1 ;;
 esac
+HANDS="${6:-1}"
+case "$HANDS" in
+1|all) ;;
+*) echo "lobo-profile: REFUSED — hands is 1 or all, not $HANDS" >&2; exit 1 ;;
+esac
+[ "$N" = 1 ] && HANDS=1
+LARGS="${LOBO_LISTEN_ARGS:-}"
 GENS=4
 PERGEN=8
 [ -x "$BIN" ] || { echo "lobo-profile: REFUSED — $BIN is not an executable" >&2; exit 1; }
 command -v ab > /dev/null 2>&1 || { echo "lobo-profile: REFUSED — ab(1) is not on PATH" >&2; exit 1; }
-scratch="$(pwd)/target/profile-$LABEL-$SHAPE-n$N"
+scratch="$(pwd)/target/profile-$LABEL-$SHAPE-n$N-h$HANDS"
 rm -rf "$scratch"
 mkdir -p "$scratch/www"
 awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
@@ -93,8 +116,8 @@ start() { # start — one master, N hands; sets hp, mpid, hand, lconf
     hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     lconf="$scratch/lobo.conf"
-    printf 'worker_processes %s;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
-        "$N" "$scratch" "$cp" "$hp" "$scratch" > "$lconf"
+    printf 'worker_processes %s;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s%s; root %s/www; }\n}\n' \
+        "$N" "$scratch" "$cp" "$hp" "${LARGS:+ $LARGS}" "$scratch" > "$lconf"
     "$BIN" serve -p . -c "$lconf" 2>> "$scratch/lobo.log" &
     mpid=$!
     wait_port "$hp" || { echo "lobo-profile: $LABEL never served" >&2; kill "$mpid"; return 1; }
@@ -103,12 +126,22 @@ start() { # start — one master, N hands; sets hp, mpid, hand, lconf
     # (docs/WORKERS.md), so the hand is the master itself; at N > 1
     # (ws31) the hands are the master's children, `--worker k`, and
     # worker 1 is the one sampled — it is spawned after the listener
-    # answers, so it is waited for by name
+    # answers, so it is waited for by name. ws32: with hands=all the
+    # sampled set is every hand, waited for until all N are up; `hand`
+    # is then the comma list perf and strace take, `hands` the space
+    # list the /proc split walks
     hand=""
+    hands=""
     i=0
     while [ $i -lt 50 ]; do
-        hand=$(pgrep -f -- "^$BIN .*--worker 1 --worker-control" | head -1)
-        [ -n "$hand" ] && break
+        if [ "$HANDS" = all ]; then
+            hands=$(pgrep -f -- "^$BIN .*--worker [0-9]* --worker-control" | sort -n | tr '\n' ' ')
+            # shellcheck disable=SC2086
+            [ "$(echo $hands | wc -w)" -ge "$N" ] && { hand=$(echo $hands | tr ' ' ','); break; }
+        else
+            hand=$(pgrep -f -- "^$BIN .*--worker 1 --worker-control" | head -1)
+            [ -n "$hand" ] && { hands="$hand"; break; }
+        fi
         [ "$N" = 1 ] && break
         sleep 0.1
         i=$((i + 1))
@@ -116,12 +149,46 @@ start() { # start — one master, N hands; sets hp, mpid, hand, lconf
     if [ -z "$hand" ]; then
         if [ "$N" = 1 ]; then
             hand=$mpid
+            hands=$mpid
         else
-            echo "lobo-profile: $LABEL at N=$N never spawned worker 1" >&2
+            echo "lobo-profile: $LABEL at N=$N never spawned its hands ($HANDS wanted; up: $hands)" >&2
             kill "$mpid"
             return 1
         fi
     fi
+}
+# ws32: THE SPLIT, off /proc with no tracer. snap <tag> writes one
+# line per sampled hand: pid utime+stime(ticks) syscw voluntary
+# involuntary; split <before> <after> <requests> prints the table
+snap() {
+    : > "$scratch/$1.snap"
+    for p in $hands; do
+        t=$($SUDO cat "/proc/$p/stat" 2>/dev/null | awk '{ sub(/.*\) /, ""); print $12 + $13 }')
+        w=$($SUDO awk '/^syscw:/ { print $2 }' "/proc/$p/io" 2>/dev/null)
+        v=$($SUDO awk '/^voluntary_ctxt_switches:/ { print $2 }' "/proc/$p/status" 2>/dev/null)
+        nv=$($SUDO awk '/^nonvoluntary_ctxt_switches:/ { print $2 }' "/proc/$p/status" 2>/dev/null)
+        echo "$p ${t:-0} ${w:-0} ${v:-0} ${nv:-0}" >> "$scratch/$1.snap"
+    done
+}
+split() {
+    tck=$(getconf CLK_TCK 2>/dev/null || echo 100)
+    echo ""
+    echo "=== $LABEL — the split: per hand, off /proc, a drive with NO tracer ($3 requests completed over the whole drive; syscw = write syscalls in the window ≈ requests the hand answered)"
+    echo "| hand (pid) | cpu s | syscw | µs cpu / syscw | vol. switches / syscw | invol. switches / syscw |"
+    echo "|---|---|---|---|---|---|"
+    awk -v tck="$tck" '
+        FNR == NR { t0[$1] = $2; w0[$1] = $3; v0[$1] = $4; n0[$1] = $5; next }
+        {
+            cpu = ($2 - t0[$1]) / tck; w = $3 - w0[$1]; v = $4 - v0[$1]; n = $5 - n0[$1]
+            us = (w > 0) ? cpu * 1e6 / w : 0; vr = (w > 0) ? v / w : 0; nr = (w > 0) ? n / w : 0
+            printf "| %s | %.2f | %d | %.1f | %.3f | %.3f |\n", $1, cpu, w, us, vr, nr
+            tc += cpu; tw += w; tv += v; tn += n
+            if (w > 0) { if (mn == "" || us < mn) mn = us; if (us > mx) mx = us }
+        }
+        END {
+            if (tw > 0) printf "| **all sampled** | **%.2f** | **%d** | **%.1f** | **%.3f** | **%.3f** |\n", tc, tw, tc * 1e6 / tw, tv / tw, tn / tw
+            if (NR > 1 && mn != "" && mn > 0) printf "the hands spread %.2fx (max ÷ min of µs cpu a syscw)\n", mx / mn
+        }' "$scratch/$1.snap" "$scratch/$2.snap"
 }
 stop() {
     "$BIN" -s stop -p . -c "$lconf" > /dev/null 2>&1
@@ -148,7 +215,7 @@ drive_wait() { # drive_wait <tag> — sets rps (sum) and failed
     done
 }
 
-echo "lobo-profile: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); $LABEL = $("$BIN" -v 2>&1 | head -1); worker_processes $N, one hand sampled, $SHAPE shape, $GENS × ab $KA -c $PERGEN, a $SECS s window"
+echo "lobo-profile: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); $LABEL = $("$BIN" -v 2>&1 | head -1)${LARGS:+ (listen args: $LARGS)}; worker_processes $N, $([ "$HANDS" = all ] && echo "ALL $N hands" || echo "one hand") sampled, $SHAPE shape, $GENS × ab $KA -c $PERGEN, a $SECS s window"
 
 case "$(uname -s)" in
 Linux)
@@ -164,7 +231,7 @@ Linux)
     }
     drive_wait perf
     stop
-    echo "lobo-profile: $LABEL perf window: $rps req/s summed over the drive, failed=$failed, hand pid $hand"
+    echo "lobo-profile: $LABEL perf window: $rps req/s summed over the drive, failed=$failed, hand pid(s) $hand"
     if [ -s "$scratch/perf.data" ]; then
         # the report reads as the user that recorded (root through
         # sudo): perf refuses a data file another user owns, and the
@@ -198,9 +265,27 @@ Linux)
         # for a cost that is a clock, not a request. `pid` (perf's per-THREAD key, tid:comm), not `comm`:
         # an unnamed thread shares the process's comm and would fold
         # into the serving thread's row
-        report "perf report, by thread (pid = the thread, with its comm) — the hand's threads" 8 --no-children --sort pid
+        report "perf report, by thread (pid = the thread, with its comm) — the sampled hands' threads" $((4 * N + 4)) --no-children --sort pid
+        if [ "$HANDS" = all ]; then
+            # ws32: which vcpu each sample landed on — the four hands
+            # over the four vcpus, and whether they stayed put
+            report "perf report, by cpu (the vcpus the hands ran on)" 8 --no-children --sort cpu
+        fi
         report "perf report, inclusive (children), --sort sym, over 3%" 40 --children --sort sym --percent-limit 3
     fi
+    # ws32: THE SPLIT — a third drive, no perf, no strace: the hands'
+    # own /proc counters over the window, per hand
+    start || exit 1
+    drive $((SECS + 5)) split
+    sleep 2
+    snap before
+    sleep "$SECS"
+    snap after
+    drive_wait split
+    stop
+    echo ""
+    echo "lobo-profile: $LABEL split window: $rps req/s summed over the drive, failed=$failed, hand pid(s) $hand (no tracer)"
+    split before after "$(awk '/^Complete requests/ { s += $3 } END { print s }' "$scratch"/ab-split-g*.txt)"
     # the syscall COUNTS, on a separate drive: ptrace slows the hand
     # several-fold and the shares above must not carry that
     if command -v strace > /dev/null 2>&1; then
