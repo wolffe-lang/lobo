@@ -143,7 +143,7 @@ pub fn table() -> Table {
         1,
         -1,
         "implemented",
-        "bind address/port; `ssl` flag serves TLS (ws05). Delta, named: ONE plain + ONE ssl listener bind at this pin — additional listen directives parse but do not bind",
+        "bind address/port; `ssl` flag serves TLS (ws05); `reuseport` flag (ws32, lobo#5) is nginx's: each hand binds its own SO_REUSEPORT member and the master binds nothing, so the kernel wakes one hand per connection — off by default as in nginx; linux distributes by hash, macOS delivers to the newest member, a host that refuses the option by name binds without it and stands by (docs/WORKERS.md). Delta, named: ONE plain + ONE ssl listener bind at this pin — additional listen directives parse but do not bind",
     )
     row(mut t, "server_name", "server", "", 1, -1, "planned(ws02)", "host matching")
     row(

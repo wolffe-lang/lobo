@@ -16,7 +16,7 @@ Status counts: **46 implemented** / **49 planned** / **13 named_error** (108 row
 | `upstream` | http | exact(1) + block | implemented | upstream pool block; proxying lands ws03 |
 | `map` | http | exact(2) + block | implemented | map block; body rows are data entries, evaluation lands ws03 |
 | `types` | http server location | exact(0) + block | implemented | MIME map block; body rows are data entries (type ext...), at_least(1) |
-| `listen` | server | at_least(1) | implemented | bind address/port; `ssl` flag serves TLS (ws05). Delta, named: ONE plain + ONE ssl listener bind at this pin — additional listen directives parse but do not bind |
+| `listen` | server | at_least(1) | implemented | bind address/port; `ssl` flag serves TLS (ws05); `reuseport` flag (ws32, lobo#5) is nginx's: each hand binds its own SO_REUSEPORT member and the master binds nothing, so the kernel wakes one hand per connection — off by default as in nginx; linux distributes by hash, macOS delivers to the newest member, a host that refuses the option by name binds without it and stands by (docs/WORKERS.md). Delta, named: ONE plain + ONE ssl listener bind at this pin — additional listen directives parse but do not bind |
 | `server_name` | server | at_least(1) | planned(ws02) | host matching |
 | `root` | http server location if | exact(1) | implemented | document root (URI appended); location-then-server resolution (ws02) |
 | `alias` | location | exact(1) | implemented | path replacement for the matched location part — see LOBO-L003 (ws02) |
