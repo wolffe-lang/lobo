@@ -150,7 +150,11 @@ none), so the kill-9 window in this shape is the queue's depth, not a
 request. `tests/shell/reuseport_e2e.lu` is the witness: two hands,
 two members, every connection of a run reaches SOME member (the split
 is printed, never asserted — it is the host's), a stopped hand is
-replaced by one that binds for itself.
+replaced by one that binds for itself. Measured on the CI runner
+(ws32, one VM, the flagged tree ÷ the inherited socket): N=4 close
+**1.044x** the req/s, `accept4` 1.09 → 1.00, the reactor's rows to
+zero, 10.29 → 9.76 syscalls a connection; keepalive 1.016x; the
+parity ledger carries both numbers.
 
 `os_spawn_with` + `net_adopt_listener` (`[os.proc.inherit]`,
 wolf-lang#235) is the shape lobo ships: ONE socket, N processes
