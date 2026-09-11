@@ -14,82 +14,93 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang at the **v0.2.9 RELEASE TAG** (4c60946, "three things a
-# reader ran into this week" — the r12 train: s143 (#265 the `parse`
-# row, #268 every value renders in a hole, #270 the per-file IR
-# ratchet), s144 (#276 a leading `else`, #273 `closed`/`cancelled`,
-# #274 `pop` answers `none`), s145 (#278 `str + char`, #268 closure
-# `return`)). ws27 pinned it the day after the tag landed, so the
-# ws18/ws24 dev-stamped-trunk shape was not needed. D57: built AT the
-# tag the driver claims the bare version, no +dev suffix. Build in a
-# scratch worktree at the tag with `cargo xtask dist` — the dist
-# build is the stamped one (WOLF_COMMIT from HEAD's short sha,
-# WOLF_RELEASE granted only when the exact tag points at HEAD; a plain
-# `cargo build` prints `+dev.unknown` and lib-toolchain.sh refuses it):
-#   git worktree add <scratch> v0.2.9
+# wolf-lang at TRUNK **fc07cc5** (s149 merged: "bench: fold the two
+# s149 witnesses into the IR-volume record"), dev-stamped
+# `0.2.10+dev.fc07cc5` — v0.2.10 is tagged 62 commits behind it and
+# s149 is the reason for this pin (ws30), so the ws18/ws24 dev-
+# stamped-trunk shape is taken again; the next release tag re-pins the
+# way ws25 re-pinned bd7caff → v0.2.8. D57: built off the tag the
+# driver claims `+dev.<short sha>`. Build in a scratch worktree at the
+# sha with `cargo xtask dist` — the dist build is the stamped one
+# (WOLF_COMMIT from HEAD's short sha; WOLF_RELEASE is NOT granted, no
+# tag points here; a plain `cargo build` prints `+dev.unknown` and
+# lib-toolchain.sh refuses it):
+#   git worktree add <scratch> fc07cc5
 #   (cd <scratch> && cargo xtask dist)
-# and stage target/dist/wolf-0.2.9-<host>/{wolf, libwolf_rt.a} into
-# .wolf-bin/ — the native tier needs the staticlib beside the driver.
-# ci.yml builds the same stamp by hand (WOLF_RELEASE from the tag at
-# HEAD, WOLF_COMMIT the rev below cut to seven).
+# and stage target/dist/wolf-0.2.10-<host>/{wolf, libwolf_rt.a} into
+# .wolf-bin/ — the archive is NAMED 0.2.10 (xtask names the dist by
+# the cargo version), the binary inside says `+dev.fc07cc5`. ci.yml
+# builds the same stamp by hand (WOLF_COMMIT the rev below cut to
+# seven; no WOLF_RELEASE, since no tag points at the rev).
 #
-# 5c729e8 (v0.2.8) → 4c60946 (v0.2.9) is fifty-one commits over one
-# train. What the bump brings this repo, each classed at the bump and
-# measured after it (the ws27 CHANGELOG entry carries the numbers):
-#   * s143 — `str.to_int()`'s row is spelled **`parse`**, not
-#     `NotAnInt` ([mem.str.parse]): the ONE source-breaking change in
-#     0.2.9, refused by name. ZERO HERE: lobo never calls `to_int`, no
-#     `NotAnInt` arm exists in src/ or tests/, none in the pinned std
-#     tree (grepped at the bump). `{x}` renders every value both
-#     machines can show ([type.interp.*]) and refuses the rest by
-#     name; `channel[T]` in a signature position types as a channel.
-#     ADDITIVE — every hole lobo writes is a primitive or a str.
-#   * s144 — a line whose first token is `else` continues the previous
-#     statement (E0005 retired; `wolf fmt` is unchanged, so canonical
-#     source does not move and lobo has no leading `else`, grepped);
-#     `[conc.chan.close]` spells `closed`/`cancelled` (lobo's `closed`
-#     rows are the net tier's and were lowercase already);
-#     `[mem.list.pop]` says `pop` on an empty list is `none`, never a
-#     fault (lobo's one `pop`, `http.lu`'s segment stack, takes the
-#     row with an `else`). GRAMMAR-WIDENING and SPEC-SAYS-WHAT-THE-
-#     COMPILER-DID; zero source motion.
-#   * s145 — `str + char`, `char + str` and `s += c` are
-#     interpolation-append (the int rows keep E0409); `return` inside
-#     a CLOSURE returns from the closure, typed against its own result
-#     (both lowering tiers already ran it so; sema's NotYet retires).
-#     ZERO HERE: lobo is spawn-free (D7) and has no closure body — its
-#     `else |e| { return … }` blocks are the defaulting operator
-#     ([gram.amb.else]), whose `return` was and is the enclosing
-#     function's — and it appends chars through holes, never `+`.
-#   * runtime motion, all of it: `str.rs` (the char-append path
-#     interpolation already had) and `task/conc_abi.rs` (a proc's int
-#     result rides its exit reason). Neither is on the serving path.
-#     BEHAVIORAL-COST: none predicted.
-#   * r12 — v0.2.9 itself, the CHANGELOG, the README's vendored mark.
-#     MECHANICAL: the `.wolfi` toolchain stamp reads the VERSION —
-#     0.2.8 → 0.2.9 in every header, the export/pkg hashes re-derived.
+# 4c60946 (v0.2.9) → fc07cc5 is sixty-two commits: the r13/r14/r15
+# train (v0.2.10), s146–s149, #281, #292, #301, #304. What the bump
+# brings this repo, each classed at the bump and measured after it
+# (the ws30 CHANGELOG entry carries the numbers):
+#   * s149 — **THE REASON.** `[os.fs.open]` mode **5**: a read open
+#     carrying `O_NONBLOCK`, so a fifo or device answers a handle at
+#     once and `fs_fstat` classifies it `kind` 2 (wolf-lang#289); and
+#     the accept posture, `accept4(SOCK_NONBLOCK|SOCK_CLOEXEC)` where
+#     linux has it with `TCP_NODELAY` paid at the first write Nagle
+#     could hold back, not at every accept (wolf-lang#290). SOURCE
+#     MOTION, predicted ONE router site: `serve.classify` replaces
+#     `is_file_warm`'s path stat + `serve_file`'s open with one open
+#     and one fstat, and ws27's kind table loses its kind half; the
+#     dry-run's `stat_note` mirrors it. BEHAVIORAL-COST, predicted in
+#     docs/PROFILE.md's ws30 addendum BEFORE the pin was staged: close
+#     shape −2.00 syscalls per connection (`ioctl` + `setsockopt`),
+#     keepalive 0.00 (the kind table had already taken the stat's
+#     unit at ws27); what the keepalive shape gains is the window —
+#     no second in which a swap for a fifo can park a hand. On macOS
+#     the accept side goes 4 → 3 (no `accept4`; the `setsockopt`
+#     leaves), per #290's own measurement.
+#   * s148 — #292: the `.wolfi` export/pkg hashes are over the
+#     INTERFACE now, not the release string. MECHANICAL, and the last
+#     time a toolchain bump moves every hash: this re-record moves
+#     them once under the content-only rule, and the next pin moves
+#     only the header stamp. #293: `s[a..b] = …` is E0416 (a str is
+#     immutable; a slice is not a place). REFUSED-BY-NAME class, ZERO
+#     HERE: no slice or index assignment on a str anywhere in src/ or
+#     tests/ (grepped at the bump). #284: `[type.fn.ret]` and
+#     `[type.row.operand]` say what both machines already did; no
+#     behaviour moves.
+#   * s147 — range arms in `match` (`[gram.pat.range]`). GRAMMAR-
+#     WIDENING; lobo's matches are literals and tags; zero motion.
+#   * s146 — `[type.unit.context]`/`[type.unit.discard]`: a `!()` tail
+#     in a unit context is a DISCARD, warned W0601, never a mismatch;
+#     `chan.send` is typed with its row. ZERO HERE on the channel half
+#     (lobo has no channel — grepped); the W0601 half is MEASURED by
+#     the gauntlet, which denies warnings on every lane: the corpus at
+#     the bump is the number.
+#   * #301 — the stamp's commit is seven characters by decision; this
+#     file's `pin fc07cc5` was already that shape. MECHANICAL.
+#   * r14/r15 — v0.2.10, the CHANGELOG, the pairing taking lupin
+#     0.1.30 then 0.1.31 (#304 — the control ritual finds its blind
+#     spot). MECHANICAL here: the `.wolfi` toolchain stamp reads the
+#     VERSION, not the dev suffix — 0.2.9 → 0.2.10 in every header.
 # Source motion in lobo for the pin's own sake: the `.wolfi` stamp and
-# the two shell.lu constants; predicted ZERO item lines, and the
-# ws27 entry says what was measured.
-# Pairing note (F-0064, reported never gated): wolf@v0.2.9 declares
-# lupin **0.1.29** as its pairing and [lupin] below names 0.1.29 —
-# THE PAIRING GAP IS ZERO (0.1.30, is42's leading-`else` mirror,
-# exists and is not the pairing). THE LANE GAP, named: 0.1.29's
-# conformance pin is e9a17cb (past v0.2.8 — s141's `net_writev`/
-# `net_nodelay` are in its builtin table now) but it does not name
-# `fs_fstat` (grepped), so the static small-file arm is still native-
-# only; lupin resolves a builtin at the CALL (probed at ws24), no
-# lupin-lane test drives that arm, and the corpus at the bump is the
-# measurement.
-# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, SIXTEENTH
-# measurement — see the ws27 CHANGELOG entry for the state read at the
+# the two shell.lu constants; the router site is the bump's point, not
+# its tax.
+# Pairing note (F-0064, reported never gated): wolf@fc07cc5 declares
+# lupin **0.1.31** as its pairing and [lupin] below names **0.1.29** —
+# THE PAIRING GAP IS TWO RELEASES, NAMED AND NOT CLOSED HERE, by this
+# lane's contract (the [wolf] pin alone) and by the disk the box had
+# for one toolchain build. 0.1.30 is is42's leading-`else` mirror and
+# 0.1.31 is is44's (#304); neither names `fs_open_mode` 5 or `fs_fstat`
+# — 0.1.31 declines the whole fs tier by name (wolf-lang#289's closing
+# note; wolf-interp#86) — so the static-file arm is native-only at
+# either, exactly as at 0.1.29, and no lupin lane in this corpus
+# reaches the code the bump moves. The next lupin bump takes both
+# with the control ritual (#281) and closes the gap.
+# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, SEVENTEENTH
+# measurement — see the ws30 CHANGELOG entry for the state read at the
 # bump; the gauntlet's release step and the release archive's build
 # keep WOLF_MIDEND=0 until the fix enters the [wolf] pin. See [std]'s
 # note. The shipped binary is the gauntlet's release-tier build, flag
 # for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "4c60946081e1d1e65dd4b3d98cd69ac86bdf1d38"
-version_line = "wolf 0.2.9 (wolfgang, pin 4c60946)"
+rev = "fc07cc529990085f908611d224c4d1bf2baa93a5"
+version_line = "wolf 0.2.10+dev.fc07cc5 (wolfgang, pin fc07cc5)"
 
 [lupin]
 # lupin at the v0.1.29 RELEASE TAG (99feca3, the is41 merge; D57: build
