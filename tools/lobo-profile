@@ -13,6 +13,18 @@
 #     shape    close (default — ws22's probe) or keepalive (ws27: the
 #              read/serve path alone, `ab -k`, the cell linux is
 #              furthest from)
+#     N        worker_processes (default 1 — ws22's probe: the master
+#              serves alone and is the process sampled). ws31: at N > 1
+#              a real master with N hands serves the bar's own cell
+#              (N = nproc on the runner) and ONE hand — worker 1 — is
+#              the process sampled, so the herd (lobo#5: four hands
+#              waking on one listener, the losers' parks) is in the
+#              picture the way the parity table sees it. `perf` samples
+#              CPU, not wall: a parked hand takes no samples, so a park
+#              shows as its mechanics (the syscalls, the switch), never
+#              as the wait itself; the by-thread report below is where
+#              the reactor thread's and the signal forwarder's share
+#              read.
 #
 # The shape is ws22's probe (docs/PROFILE.md): `worker_processes 1`,
 # the parity file (1 KiB), the close shape under four `ab -c 8`
@@ -50,11 +62,15 @@ close) KA="" ;;
 keepalive) KA="-k" ;;
 *) echo "lobo-profile: REFUSED — shape is close or keepalive, not $SHAPE" >&2; exit 1 ;;
 esac
+N="${5:-1}"
+case "$N" in
+''|*[!0-9]*|0) echo "lobo-profile: REFUSED — N is a worker count, not $N" >&2; exit 1 ;;
+esac
 GENS=4
 PERGEN=8
 [ -x "$BIN" ] || { echo "lobo-profile: REFUSED — $BIN is not an executable" >&2; exit 1; }
 command -v ab > /dev/null 2>&1 || { echo "lobo-profile: REFUSED — ab(1) is not on PATH" >&2; exit 1; }
-scratch="$(pwd)/target/profile-$LABEL-$SHAPE"
+scratch="$(pwd)/target/profile-$LABEL-$SHAPE-n$N"
 rm -rf "$scratch"
 mkdir -p "$scratch/www"
 awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
@@ -73,20 +89,39 @@ wait_port() {
     return 1
 }
 
-start() { # start — one master, one hand; sets hp, mpid, hand, lconf
+start() { # start — one master, N hands; sets hp, mpid, hand, lconf
     hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     cp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     lconf="$scratch/lobo.conf"
-    printf 'worker_processes 1;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
-        "$scratch" "$cp" "$hp" "$scratch" > "$lconf"
+    printf 'worker_processes %s;\npid %s/lobo.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+        "$N" "$scratch" "$cp" "$hp" "$scratch" > "$lconf"
     "$BIN" serve -p . -c "$lconf" 2>> "$scratch/lobo.log" &
     mpid=$!
     wait_port "$hp" || { echo "lobo-profile: $LABEL never served" >&2; kill "$mpid"; return 1; }
     sleep 1
     # at `worker_processes 1` lobo is ONE process — the master serves
-    # (docs/WORKERS.md), so the hand is the master itself
-    hand=$(pgrep -f -- "^$BIN .*--worker 1 --worker-control" | head -1)
-    [ -n "$hand" ] || hand=$mpid
+    # (docs/WORKERS.md), so the hand is the master itself; at N > 1
+    # (ws31) the hands are the master's children, `--worker k`, and
+    # worker 1 is the one sampled — it is spawned after the listener
+    # answers, so it is waited for by name
+    hand=""
+    i=0
+    while [ $i -lt 50 ]; do
+        hand=$(pgrep -f -- "^$BIN .*--worker 1 --worker-control" | head -1)
+        [ -n "$hand" ] && break
+        [ "$N" = 1 ] && break
+        sleep 0.1
+        i=$((i + 1))
+    done
+    if [ -z "$hand" ]; then
+        if [ "$N" = 1 ]; then
+            hand=$mpid
+        else
+            echo "lobo-profile: $LABEL at N=$N never spawned worker 1" >&2
+            kill "$mpid"
+            return 1
+        fi
+    fi
 }
 stop() {
     "$BIN" -s stop -p . -c "$lconf" > /dev/null 2>&1
@@ -113,7 +148,7 @@ drive_wait() { # drive_wait <tag> — sets rps (sum) and failed
     done
 }
 
-echo "lobo-profile: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); $LABEL = $("$BIN" -v 2>&1 | head -1); one hand, $SHAPE shape, $GENS × ab $KA -c $PERGEN, a $SECS s window"
+echo "lobo-profile: $(date -u +%Y-%m-%dT%H:%MZ) host $host, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); $LABEL = $("$BIN" -v 2>&1 | head -1); worker_processes $N, one hand sampled, $SHAPE shape, $GENS × ab $KA -c $PERGEN, a $SECS s window"
 
 case "$(uname -s)" in
 Linux)
@@ -145,6 +180,12 @@ Linux)
         }
         report "perf report, leaves (self), --sort sym, over 0.4%" 45 --no-children --sort sym --percent-limit 0.4
         report "perf report, by dso (kernel / runtime+lobo / libc)" 12 --no-children --sort dso
+        # ws31: by thread — the serving thread against the runtime's
+        # own (`wolf-reactor`, the parked signal forwarder's carrier):
+        # what a park and a parked proc cost in CPU lands on THEIR
+        # rows, and a thread with a handful of samples is the number
+        # for a cost that is a clock, not a request
+        report "perf report, by thread (comm) — the hand's threads" 8 --no-children --sort comm
         report "perf report, inclusive (children), --sort sym, over 3%" 40 --children --sort sym --percent-limit 3
     fi
     # the syscall COUNTS, on a separate drive: ptrace slows the hand
