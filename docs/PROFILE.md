@@ -650,6 +650,122 @@ and this sprint is the first to change one of those. The rule wants the
 amendment: a per-request count is stable for work the request does, and
 is a rate in disguise for work the clock does.
 
+## ws30's addendum — the router takes the syscalls: the pin at fc07cc5, PREDICTED before the build (2026-09-11)
+
+s149 landed on wolf-lang trunk as `fc07cc5` (wolf-lang#289 and #290
+closed) with the two runtime changes ws27's count named as the two
+biggest rows lobo could not reach from its own side: `fs_open_mode(p,
+5)` — a read open carrying `O_NONBLOCK`, so a fifo answers a handle
+instead of parking the hand and the router no longer needs a PATH stat
+to be safe — and the accept posture, `accept4(SOCK_NONBLOCK|
+SOCK_CLOEXEC)` where linux has it plus `TCP_NODELAY` paid at the first
+write Nagle could hold back rather than at every accept. This sprint
+pins it (a `+dev` stamp: `wolf 0.2.10+dev.fc07cc5 (wolfgang, pin
+fc07cc5)`), moves the one router site, and measures. Everything below
+this heading and above "The measurement" was written BEFORE the pin
+was staged into `.wolf-bin`.
+
+### The site count, read off the tree
+
+s149's hand-off says "one site". Read against `src/`, it is one
+serving-path site with two halves and one mirror:
+
+- `serve.is_file_warm` (`fs_is_file` behind the ws27 one-second kind
+  table) — the router's guard, called from `handle_request` for the
+  direct path and again for each index candidate;
+- `serve.serve_file`'s `fs_open(path)` + `fs_fstat(fd)` — the open the
+  guard was protecting.
+
+The two become ONE open: `fs_open_mode(path, 5)` first, `fs_fstat` on
+the handle classifies (`kind` 0 serve, 1 a directory — the router's
+directory arm, 2 refuse: close it and answer what a not-a-file answers
+today). The kind table's kind half goes with the stat (its head cache
+and date memo — ws28's — stay; they are per-request memos of pure
+functions, not a window). The mirror is `dryrun.stat_note`
+(`-t --request`'s "what would this config do"), which classifies the
+same way and moves the same way so the prediction and the live
+answer keep agreeing; it is not on the serving path and has no row
+in the count. `budget.lu`'s `fs_open` (the capped proc's own open of
+a path the router already classified) and `obs.lu`'s log open (mode
+2) are not classification sites and do not move.
+
+### The census, predicted
+
+The gauntlet's suite counts at trunk `d04dd97` are the baseline (the
+before-run of this sprint's own gauntlet prints them). Predicted to
+move: the **corpus row, +1** — `tests/serve/file_kinds.lu` is
+rewritten in place to pin the open-first classification (a regular
+file, a directory, a missing path, the swap under a handle), and one
+new witness drives a real lobo at a **fifo under the root** and asks
+for it: the answer is 404 at once, where a `fs_open` without the flag
+parks the hand until a writer appears — the hang the guard existed
+for, now a test instead of a stat. Every other row identical:
+differential, proxy, control, logdiff, signal (21), membudget,
+resolver, prefork, replay, metrics, tls, acme, shell, confcheck,
+dryrun. Two `.wolfi` motions, each its own `interface(…)` commit: the
+toolchain stamp `0.2.9 → 0.2.10` in every header (MECHANICAL — the
+stamp reads the version, not the dev suffix, as the ws24 and ws27
+pins recorded), and `serve.wolfi` losing `is_file_warm` and the two
+kind lists on `FileKinds` (a surface change).
+
+### The count, predicted row by row — against TRUNK, not against ws27
+
+s149 predicted **keepalive 7.41 → 6.41** and **close 13.36 → 10.34**
+on this issue's table. Those are ws27's PRE-kind-table numbers. ws27's
+warm kind table already collected the `statx` unit on both shapes
+(6.31 / 12.41, run 34506393898), and ws28/ws29 took the rest of the
+small change (6.26 / 12.27, run 34540847393 on `ws29@ece69e7`, which
+is trunk `d04dd97` for every per-request row). So the prediction here
+is against trunk, and it says something s149's could not: **the pin
+buys the keepalive table nothing at two decimals, and buys the close
+table exactly the accept side.**
+
+| row (per request) | keepalive: trunk → predicted | close: trunk → predicted | why, and confidence |
+|---|---|---|---|
+| `statx` | 1.00 → **1.00** | 1.00 → **1.00** | this is `fs_fstat` on the handle. The path stat was already down to one per second per hand per path (ws27's table; ~0.0004 per request at this rate, invisible at two decimals). What the pin removes is the WINDOW — a second in which a swap for a fifo could park a hand — not a row. HIGH |
+| `openat` | 1.00 → 1.00 | 1.00 → 1.00 | the flag rides the open that was already made. HIGH |
+| `ioctl` (FIONBIO) | 0.00 → 0.00 (raw 231 → ~8: the listeners' own, once per hand) | **1.00 → 0.00** | `accept4(SOCK_NONBLOCK)`: the posture arrives with the fd. HIGH |
+| `setsockopt` (TCP_NODELAY) | 0.00 → 0.00 (raw ~231 → ~231: paid at each keepalive connection's SECOND write, the first that finds bytes in flight — once per connection, as before, just later) | **1.00 → 0.00** | one gather then a close pays nothing; nginx pays nothing on this shape either. HIGH |
+| `accept4` | 0.00 → 0.00 | 1.08 → 1.08 | the 0.08 are the herd's lost races (lobo#5, wolf-lang#267); the pin does not touch the race. HIGH per request; its raw count moves with the rate |
+| `read`, `recvfrom`, `writev`, `close` | 1.00 / 1.00 / 1.00 / 1.00 | 1.08 / 1.00 / 1.00 / 2.01 | untouched; the 0.08 of `read` on close is the reactor's eventfd, a park's row. HIGH |
+| `poll`, `futex`, `epoll_wait`, `epoll_ctl`, `write`, `brk` | 0.14 / 0.09 / 0.00 / 0.00 / 0.00 / 0.01 | 1.28 / 0.39 / 0.14 / 0.15 / 0.08 / 0.04 | the PER-TIME rows. The pin touches none of their mechanisms (the runtime's delta `4c60946..fc07cc5` is `fs.rs` and `net.rs`, nothing in `task/`), so they are predicted UNCHANGED as rates and are read raw over the 8 s drive, per ws29's amendment; their per-request figures will move with the box's rate and that motion is drift, not the pin. MEDIUM on any per-request figure, by construction |
+| **calls per request** | **6.26 → 6.26** (nginx 6.15; gap **+0.11 → +0.11**, 1.02x) | **12.27 → 10.27** (nginx 10.13; gap **+2.14 → +0.14**, 1.21x → **1.01x** in calls) | the whole of the pin's per-request effect is −2.00 on the close shape and 0.00 on keepalive. HIGH |
+| accept side per close-shape connection (`accept4` + `ioctl` + `setsockopt`) | — | **3.08 → 1.08** | s149 said 3.10 → 1.08 off ws27's 1.08 + 1.01 + 1.01. HIGH |
+
+Restated against s149's own numbers: 10.34 was 13.36 − 1.00 (the
+path stat) − 1.01 − 1.01; from trunk the path stat's unit is already
+gone and the probe's 0.12 went at ws29, so 12.27 − 2.00 = 10.27. The
+two predictions agree on what the pin removes; they start from
+different tables.
+
+**The per-time drift, named before it is measured.** The two boxes
+will not run at the same rate under `ptrace`; the gauge is nginx's
+own traced rate on each (10,601 req/s keepalive / 5,774 close on the
+ws29 box), since nginx did not change. Every per-request row of
+lobo's that is a rate in disguise moves by that ratio and no more; a
+row that moves by more than the drift is the pin's or a finding.
+
+### Item 3 predicted: the parked task's `futex`, at idle and under the drive
+
+wolf-lang#302's number was DERIVED at ws29 from two drives — (6,608 −
+3,205) ÷ 8 s ÷ 4 hands ≈ 106 futex/s per hand — which is a difference
+of two rates in disguise. This sprint measures it directly with
+`tools/lobo-syscalls idle` (new: the same processes, the same window,
+no generator, calls ÷ SECONDS) and re-reads the drives' raw column.
+Predicted:
+
+| | lobo, per hand | nginx, per worker | why |
+|---|---|---|---|
+| `futex` / s at idle | **~100–110**, nearly all of them errors (the ETIMEDOUT shape of a timed wait that re-arms) | 0 | the forwarder's compensation is a clock, not a request: at idle it is the WHOLE of lobo's futex; under the drive the reactor's park handoffs add to it |
+| `poll` / s at idle | **~4** | 0 | `wait_budget` is 250 ms with nothing armed (ws29 lifted the 25 ms floor) |
+| `epoll_wait` / s at idle | ~0–4 | ~0 (its timer wheel) | the reactor thread has nothing to wait for |
+| before → after the pin | **the same number** | — | the runtime between the pins changed `fs.rs` and `net.rs` only; #302 is still open and nothing addressed it, so the idle rate holds and the drives' raw `futex` moves only with the drift |
+
+If idle `futex` reads far below ~100/s per hand, ws29's derivation
+was wrong (the rise under the drive would then be the reactor's, not
+the forwarder's) and #302 needs an amended number; if it reads ~100
+it is the witness the runtime lane asked for.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
