@@ -154,6 +154,56 @@ above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws32: `listen … reuseport` ÷ trunk, TWO TREES ON ONE VM · **VALID** · at lobo's default **NOT MET on both shapes** (close 1.138x, keepalive 1.269x, the slow class); with the flag **close 1.089x MET**, keepalive 1.257x NOT MET
+
+The ws25 two-tree instrument, run 34603185051 (`parity=true
+ref_tree=d3dec23 listen_args=reuseport this_name=ws32 ref_name=trunk`),
+load 1.73 after the settle loop, nginx close **25.4k**, keepalive
+86.1k — the SLOW class (ws31's row was on it too). `ws32` is `7bd615f`
+with `listen 127.0.0.1:PORT reuseport;` in ITS config only
+(`LOBO_LISTEN_ARGS`, 1c24a39): each hand binds its own `SO_REUSEPORT`
+member and the master binds nothing. `trunk` is `d3dec23` — ws31's
+tree, the inherited socket — built beside it with the same toolchain
+and measured on the bare line, lobo's default. nginx 1.30.4 on ITS
+default (no `reuseport`), 5 pairs × `ab -t 5`, c=32 over 4 generators,
+the two lobos alternating pair by pair:
+
+| cell | shape | ws32 req/s | trunk req/s | nginx req/s | nginx ÷ ws32 median [min, max] | nginx ÷ trunk | **ws32 ÷ trunk** median [min, max] | µs cpu a request, ws32 / trunk / nginx |
+|---|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 23,314 | 22,368 | 25,423 | **1.089x** [1.085, 1.111] | **1.138x** [1.131, 1.160] | **1.044x** [1.028, 1.053] | **73.3 / 79.6 / 62.1** |
+| **N=4 c=32** | keepalive | 68,576 | 67,912 | 86,098 | **1.257x** [1.236, 1.275] | **1.269x** [1.256, 1.277] | 1.016x [0.992, 1.018] | 38.8 / 38.7 / 28.7 |
+| N=1 c=32 | close | 15,567 | 15,362 | 15,228 | 0.978x [0.969, 0.993] | 0.991x [0.973, 0.994] | 1.013x [0.999, 1.016] | 64.2 / 65.1 / 65.0 |
+| N=1 c=32 | keepalive | 30,307 | 29,386 | 35,401 | 1.185x [1.127, 1.250] | 1.173x [1.154, 1.223] | 0.974x [0.941, 1.050] | 33.0 / 34.0 / 28.2 |
+
+PREDICTED (the ws32 addendum, before the dispatch): the flag's delta
+on N=4 close 1.05–1.12x with 66–72 µs a connection (measured 1.044x
+and 73.3 — the shape right, the size at the bracket's low edge; the
+count says why: the probe `poll` grew 1.27 → 1.58 while `accept4`,
+`epoll_ctl`, `epoll_wait` and the eventfd pair went to their floors,
+10.29 → 9.76 calls a connection against nginx's 10.13); keepalive N=4
+0.95–1.01 (measured 1.016x — no hash-imbalance cost); N=1 1.00 ± 0.01
+(1.013x / 0.974x, the N=1 keepalive cell swinging as it always has).
+
+**Read: the bar has TWO numbers on the close cell now, and which one
+gates is a question about lobo's default, not about the measurement.**
+The bar's own config is lobo's default, and lobo's default is nginx's
+— the inherited socket, off-by-default `reuseport` — so the gating row
+is **1.138x NOT MET**; the flag the operator writes reads **1.089x MET**
+against nginx's default on the same VM, which is the first MET on a
+linux N=4 cell in this ledger. A set with nginx's own `reuseport`
+beside lobo's (the like-for-like) was not taken. The keepalive cell
+moved by nothing on either tree (1.269x / 1.257x): the ~6 µs a request
+four hands pay over one is not the accept path — `docs/PROFILE.md`'s
+ws32 addendum reads it off all four hands at once as preemption, 0.35
+involuntary switches a request, paid evenly.
+
+**The other candidate's set is named here and not entered**: run
+34603232342, `ws32-a` (a zero accept budget, which the runtime reads
+as no budget) ÷ trunk, **REFUSED** on one keepalive run that stalled
+at 0.446x with a generator that never finished — a hand parked with
+its connections until a SYN that never came. Not a result; the
+refusal is the ws17 bug reproduced, and it is the measurement.
+
 ### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws31: the release pair (wolf v0.2.11, lupin 0.1.33), ONE tree · **VALID** · **NOT MET on both shapes** (close 1.139x, keepalive 1.282x on the slow class); N=1 close **0.994x** — one hand is AT parity
 
 The ws22 instrument, run 34598621850 (`parity=true this_name=ws31`),
