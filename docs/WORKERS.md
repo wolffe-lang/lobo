@@ -119,10 +119,38 @@ the file RUNS on the CI runner and asserts the same guarantee, but
 what it prints there is not visible: the corpus runner does not echo
 a test's stdout, only its verdict, so linux's delivery policy in this
 page is upstream's own measurement (`[os.net.listen.opts]`: a 4-tuple
-hash, every hand accepts), not lobo's. lobo does not take
-this shape. On macOS it would be ws16's posture with a different
+hash, every hand accepts), not lobo's. lobo does not take this shape
+BY DEFAULT. On macOS it would be ws16's posture with a different
 cause; on linux it would work, and a server that picks its
 architecture per host is a server with two architectures.
+
+**ws32 (lobo#5): the shape is the operator's to ask for, in nginx's
+own words — `listen ADDR reuseport;`** (nginx's flag, nginx's default:
+off). With it the master binds NOTHING for that listener (a group
+member that never accepts would swallow its hash share of the
+connections) and spawns the hands with an empty inherit set; every
+hand binds its OWN member with `net_listen_with(addr, true, 0)`
+(`bind_listener` in `src/main.lu`), arms the same 5 ms accept budget
+(never spent: a member's queue is never raced) and serves; a
+replacement hand binds a fresh member. The kernel then wakes ONE hand
+per connection instead of all N, which is the herd's whole cost
+(`docs/PROFILE.md`, the ws32 addendum: the candidate measured alone
+against the inherited socket on one VM). What the flag buys per host
+is what it buys nginx: linux distributes by 4-tuple hash; macOS hands
+every SYN to the newest bound member (so N hands are one server and
+N-1 idle members, exactly as this page measured — the flag is honored
+there as nginx honors it, documented, never detected); a host whose
+runtime refuses the option BY NAME (windows, `[os.net.listen.opts]`
+`unsupported` — `docs/platforms.md` says why the alias to
+`SO_REUSEADDR` is refused) gets the bind WITHOUT it, one notice per
+hand, and the hands fall to ws16's bind-and-stand-by posture behind
+one holder. The trade is nginx's too: a hand that dies takes the
+connections queued on its own member with it (the shared queue loses
+none), so the kill-9 window in this shape is the queue's depth, not a
+request. `tests/shell/reuseport_e2e.lu` is the witness: two hands,
+two members, every connection of a run reaches SOME member (the split
+is printed, never asserted — it is the host's), a stopped hand is
+replaced by one that binds for itself.
 
 `os_spawn_with` + `net_adopt_listener` (`[os.proc.inherit]`,
 wolf-lang#235) is the shape lobo ships: ONE socket, N processes
@@ -552,8 +580,11 @@ instead of on the round.
   `auto`'s 0 sentinel (the RESOLVER left this surface at ws17; it is
   `os_cpus()` in main's `serve` arm now, and the count is the
   runner's, so what is asserted is a relation, never a value).
+- `tests/shell/reuseport_e2e.lu` (ws32), `listen … reuseport` end to
+  end: two hands on two members, the sum of the accepts moves by the
+  run, a stopped hand's replacement binds its own member.
 - `tests/serve/reuse_port_posture.lu`, why lobo does not take
-  `reuse_port`, measured on the host that runs the file: a live
+  `reuse_port` by default, measured on the host that runs the file: a live
   three-member group, thirty dials, and which member the kernel woke
   printed as the finding. Asserts only what `[os.net.listen.opts]`
   promises everywhere (the group binds; every dial is accepted by
