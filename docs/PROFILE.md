@@ -1707,6 +1707,94 @@ alive at once, each answering under its own table). All three lanes.
 | parity, N=4 and N=1, both shapes | **NOT VISIBLE.** ~1% of 34.2 µs is ~0.3 µs; ws30's no-op read 1.005x [0.998, 1.006]. Predict **ws33 ÷ trunk 1.00 [0.98, 1.02]** on every cell — indistinguishable from a no-op. Saying so is the finding; the count does not claim the bar |
 | the gauntlet | GREEN — zero behaviour motion, and `route_index.lu` is why |
 
+### The measurement — the profile leg, two trees on ONE VM (run 34631696981, keepalive N=1, one hand, `profile_shape=keepalive profile_n=1 ref_tree=8fa95fd`)
+
+`ws33` = `b6f29f2`, `trunk` = `8fa95fd`, built beside it with the same
+staged toolchain, profiled back to back on the same runner: ws33
+36,591 req/s under perf (load 2.70), trunk 35,889 (load 1.96), 4 ×
+`ab -k -c 8` over an 8 s window, no failed request. Leaves in
+`lobo-release` over 0.1%, **within this one run**:
+
+| row | trunk | ws33 | predicted |
+|---|---|---|---|
+| `proxy.first_http` | **0.26%** | **gone** (the function no longer exists) | gone |
+| `http.child_arg1` | **0.23%** | **gone** (under the 0.1% cut) | < 0.05% |
+| `http.first_server` | **0.14%** | **gone** | gone |
+| `http.index_list` | **0.13%** | **gone** (under the cut) | (implied) |
+| `proxy.plan` | under the 0.1% cut | **0.13%** | 0.03–0.10% |
+| `config.child_row` | — | **0.18%** | "no new row over 0.05%" |
+| **the route's named rows, summed** | **0.76%** | **0.31%** | **under 0.15%** |
+| by dso: `lobo-release` | 14.90% | **14.69%** | — |
+| by dso: kernel / libc | 79.34 / 5.40 | 79.40 / 5.36 | — |
+
+**Right on the shape, optimistic on the size.** All four whole-arena
+scanners are gone as functions — that half was exact. What was
+predicted at "under 0.15%" measured **0.31%**, so the change recovered
+**0.45 points of the hand's cpu** out of the 0.6–1.0% ws31 priced,
+about three fifths of it, not the four fifths predicted. The residue
+has two named parts and neither is a scan any more:
+
+- `config.child_row` 0.18% — still called FIVE times a static request
+  (`http.decide` asks for `alias`, then `root` at the location and at
+  the server; `proxy.plan` asks for `proxy_pass`; and `index_list`
+  walks two buckets). Each call is now a bucket walk of two or three
+  children instead of the whole arena, but it is still five calls with
+  their own string compares. The next lever here is not a faster
+  lookup, it is asking fewer times — the static decision could read
+  one resolved row per location, built at load like the rest.
+- `proxy.plan` 0.13% — the location table it walks is EMPTY on this
+  config, so what is left is the `Plan` struct literal it builds per
+  request (twelve fields, a nested `PassTarget`) BEFORE it learns
+  there is nothing to proxy. Hoisting the early return above the
+  literal is the obvious follow-up and was not taken here.
+
+The dso column moved 14.90 → 14.69, a fifth of a point, which is less
+than the named rows moved: run-to-run noise inside an 8 s window is
+larger than the effect (`TwoWaySearcher` alone reads 0.74% on trunk
+and 1.25% on ws33 in these same two windows). The per-function rows
+are the reading; the dso total is not.
+
+**The count: nothing moved, as predicted.** `strace -c` on the hand,
+per request, ws33 vs trunk: `writev` 1.000 / 1.000, `openat` 1.000 /
+1.000, `recvfrom` 1.000 / 1.000, `read` 1.000 / 1.000, `statx` 1.000 /
+1.000, `close` 1.001 / 1.000, `poll` 0.033 / 0.031, `futex` 0.068 /
+0.068. A pure user-space change has no syscall to show, and it shows
+none.
+
+### The measurement — the parity leg (run 34631705651, VALID)
+
+**NOT VISIBLE, exactly as predicted.** ws33 ÷ trunk **0.990x**
+[0.988, 1.001] on N=4 close, **0.990x** [0.976, 1.013] on N=4
+keepalive, **0.992x** [0.980, 0.992] and **0.983x** [0.955, 1.081] on
+the N=1 cells — every median inside the predicted [0.98, 1.02], every
+bracket containing or abutting 1.00, and every median just BELOW one,
+which is the opposite sign to the 0.45 points the profile measured.
+0.45% of a hand's cpu is ~0.15 µs of a 34 µs request; ws30's no-op
+read 1.005x [0.998, 1.006] and this instrument cannot do better.
+The set is on the FAST class (nginx close 53.0k, keepalive 168.8k, load
+1.81), so its nginx ÷ lobo ratios (1.197x / 1.263x) are not comparable
+with ws31's or ws32's slow-class rows; `docs/PARITY.md` carries the
+whole table. **The count does not claim the bar, and neither does this
+row: the profile can see this change and the bar cannot, and that is
+the answer the leg was run to get.**
+
+### W8 restated at ws33 (linux x86-64, the CI runner, wolf v0.2.11)
+
+The bar's own numbers did not move this sprint and this lane did not
+touch them; B1's ruling (`docs/PARITY.md`, "The bar's configuration")
+settles which row gates — the DEFAULT on both sides, with the flagged
+number reported beside it:
+
+| cell | at lobo's default (ws32's slow-class VM) | with `listen … reuseport` (ws32) |
+|---|---|---|
+| N=4 close | **1.138x** — NOT MET | **1.089x — MET**, reported beside it |
+| N=4 keepalive | **1.269x** — NOT MET | 1.257x — NOT MET |
+
+What remains on the keepalive shape after this lane: ~5 µs of user
+space a request at one hand (ws31's rows, #298/#299/#191/#335), ~6 µs
+of preemption at four (ws32's split), and of lobo#14's own ~0.3 µs
+this lane took ~0.2 — the two residues named above are the rest.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
