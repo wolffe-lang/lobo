@@ -2655,6 +2655,33 @@ pub fn listen_addr_plain(c: config.Conf) -> str {
     ""
 }
 
+/// ws32 (lobo#5): does any `listen` directive carry nginx's
+/// `reuseport` flag? One answer for the whole config: the flag is a
+/// posture of the process GROUP (the master binds nothing and each
+/// hand binds its own `SO_REUSEPORT` member — `bind_listener` in
+/// src/main.lu), not of one socket, and lobo binds ONE plain + ONE ssl
+/// listener at this pin (the table's named delta), so a flag on either
+/// line is the flag. Total.
+pub fn listen_reuseport(c: config.Conf) -> bool {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "listen" && c.args_n[i] >= 1 {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 1
+            while j < nn {
+                if c.argp[at + j] == "reuseport" {
+                    return true
+                }
+                j = j + 1
+            }
+        }
+        i = i + 1
+    }
+    false
+}
+
 /// The bind address from the config model's first `listen` directive
 /// (a bare port becomes a loopback bind — this server is loopback-only
 /// in every test, forever). Falls back to 127.0.0.1:8080. Total.
