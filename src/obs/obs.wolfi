@@ -1,7 +1,7 @@
 module pkg :: obs
-  wolfi v0 · toolchain 0.2.9 · edition v1
-  export_hash 68d149dc8b51054e5d06d01d2bad77049a28b3ac5a7ecab76b36fd7b65185a4a
-  pkg_hash    68d149dc8b51054e5d06d01d2bad77049a28b3ac5a7ecab76b36fd7b65185a4a
+  wolfi v0 · toolchain 0.2.10 · edition v1
+  export_hash c978bb5286100f8729ffcee6bee9f27526125205ed6bc308aae12b991eb22e32
+  pkg_hash    c978bb5286100f8729ffcee6bee9f27526125205ed6bc308aae12b991eb22e32
   deps: (none)
   items:
     [0] pub access_header — fn access_header(mut a: self.Access, name: str, value: str) · regions (ρ1, -, -) -> -

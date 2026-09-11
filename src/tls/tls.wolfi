@@ -1,13 +1,13 @@
 module pkg :: tls
-  wolfi v0 · toolchain 0.2.9 · edition v1
-  export_hash 3371a9e3e3fb018019ccdb67ab3580ba4df77c4fc15d2e15f81367be5c352226
-  pkg_hash    3371a9e3e3fb018019ccdb67ab3580ba4df77c4fc15d2e15f81367be5c352226
+  wolfi v0 · toolchain 0.2.10 · edition v1
+  export_hash f2fb6d355389a56f1d7f864697aa93726081f938bd67020205d676ea64871ecf
+  pkg_hash    f2fb6d355389a56f1d7f864697aa93726081f938bd67020205d676ea64871ecf
   deps:
-    config  e351111e28af2e16c50db8f239b107dec0932160adb48b69ea9e2637e1db2cf5
-    std.x.crypto.curve25519  e2bf934a405f57ec54f18e9640ba16561a5963d0b8925c9c042a0868dff299d6
-    std.x.tls.cert  387975e6af5290c12d8c06dce8c67f62f321a5bd730136f3aa1d31eddaa386fd
-    std.x.tls.handshake  caa392ab2a248d6486c34d624bac7ec4c4b3398d40db71f2239b7c002fae9191
-    std.x.tls.record  486ea2083a39449511fdaaa8f40da2e437edd89efa2fb87e3c8314d0765f6825
+    config  2d9082dfc99a4dd3fa5cbdbc5d9ad72a0f4c7d710d5782e16986e2849be0ec53
+    std.x.crypto.curve25519  ad4d209666678283c13835ca645a325b6cf065108eb6d553801931b914710d27
+    std.x.tls.cert  daea0d9c5e79a960033f0d461b469eb865d2b365caf0743e508562de83b0301e
+    std.x.tls.handshake  8c458f3f306bf7d277071fa2d007ed88a39a3f29367619def3c109c4780e3ed0
+    std.x.tls.record  1a000ac6507412be69377baca849e126d84650495e4bf00f0748a383f336d2ba
   items:
     [0] pub accept — fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> self.Sess ! {io, refused, timeout} · regions (-, ρ1, -) -> ρ_caller
     [1] pub alert_name — fn alert_name(code: int) -> str
