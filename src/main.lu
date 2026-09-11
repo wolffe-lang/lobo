@@ -2333,7 +2333,13 @@ fn bind_listener(addr: str, reuseport: bool) -> (int, bool, bool) {
 /// is the cost of every contended pass. The deadline is armed ONCE, at
 /// acquisition — the socket keeps it.
 fn arm_accept(l: int) {
-    net_deadline(l, 5) else |_| {}
+    // ws32 PROBE (lobo#5 candidate a), never merged: a ZERO budget —
+    // which the runtime reads as NO budget (`set_deadline`: ms <= 0
+    // clears it), so a lost race parks in the reactor until the next
+    // SYN. Measured on the count and parity legs against trunk;
+    // docs/PROFILE.md's ws32 addendum predicts no row moves and the
+    // prefork witness's quiet-server check goes red (mute losers).
+    net_deadline(l, 0) else |_| {}
 }
 
 /// Bind a control endpoint, TCP or unix, by the shape of its address
