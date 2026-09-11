@@ -226,7 +226,7 @@ Linux)
     start || exit 1
     drive $((SECS + 5)) perf
     sleep 2
-    $SUDO perf record -q -F 997 -g -p "$hand" -o "$scratch/perf.data" -- sleep "$SECS" 2> "$scratch/perf.err" || {
+    $SUDO perf record -q -F 997 -g --sample-cpu -p "$hand" -o "$scratch/perf.data" -- sleep "$SECS" 2> "$scratch/perf.err" || {
         echo "lobo-profile: perf record failed:" >&2; cat "$scratch/perf.err" >&2
     }
     drive_wait perf
@@ -268,7 +268,10 @@ Linux)
         report "perf report, by thread (pid = the thread, with its comm) — the sampled hands' threads" $((4 * N + 4)) --no-children --sort pid
         if [ "$HANDS" = all ]; then
             # ws32: which vcpu each sample landed on — the four hands
-            # over the four vcpus, and whether they stayed put
+            # over the four vcpus, and whether they stayed put. The
+            # record carries the cpu only with --sample-cpu (a -p
+            # record does not by default: the first three runs printed
+            # one row, `-001`, and said nothing)
             report "perf report, by cpu (the vcpus the hands ran on)" 8 --no-children --sort cpu
         fi
         report "perf report, inclusive (children), --sort sym, over 3%" 40 --children --sort sym --percent-limit 3
