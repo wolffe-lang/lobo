@@ -195,10 +195,10 @@ Linux)
         # own (`wolf-reactor`, the parked signal forwarder's carrier):
         # what a park and a parked proc cost in CPU lands on THEIR
         # rows, and a thread with a handful of samples is the number
-        # for a cost that is a clock, not a request. `tid`, not `comm`:
+        # for a cost that is a clock, not a request. `pid` (perf's per-THREAD key, tid:comm), not `comm`:
         # an unnamed thread shares the process's comm and would fold
         # into the serving thread's row
-        report "perf report, by thread (tid) — the hand's threads" 8 --no-children --sort tid
+        report "perf report, by thread (pid = the thread, with its comm) — the hand's threads" 8 --no-children --sort pid
         report "perf report, inclusive (children), --sort sym, over 3%" 40 --children --sort sym --percent-limit 3
     fi
     # the syscall COUNTS, on a separate drive: ptrace slows the hand
