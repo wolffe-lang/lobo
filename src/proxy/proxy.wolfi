@@ -1,10 +1,10 @@
 module pkg :: proxy
   wolfi v0 · toolchain 0.2.11 · edition v1
-  export_hash d2247d28d2be9a8ad0ef7fdbd9d0313084937c7aef8d8884be32e11a5b68b6bd
-  pkg_hash    d2247d28d2be9a8ad0ef7fdbd9d0313084937c7aef8d8884be32e11a5b68b6bd
+  export_hash afad3fd7c33c91fbe5ce902c118cfc7bdf8fa610cdcab9a0042b5efc9bab0d45
+  pkg_hash    afad3fd7c33c91fbe5ce902c118cfc7bdf8fa610cdcab9a0042b5efc9bab0d45
   deps:
-    config  2d9082dfc99a4dd3fa5cbdbc5d9ad72a0f4c7d710d5782e16986e2849be0ec53
-    http  edd94f599f5f91370f6902bc43975ec5c436c5f8e8c636ac31056b01a7adeb6d
+    config  a166b26acb6cf67ec86f30b21fcc0726661d53f5928c54b4fa2ed065a7dc500f
+    http  c8f7d6fed0d5bfbdbea55aa77396a6af4f946bcb0414e49e6130041d50319ea9
     resolver  f529fb7456b2b0154944edba97cca1c42121514b47a38dc5bf9b6ddc89132caa
     std.net  d207555eae40c1304ad899c4a6a12fe7020a7b5c4af3c0816c5f737fcaed55ac
     std.x.tls.cert  daea0d9c5e79a960033f0d461b469eb865d2b365caf0743e508562de83b0301e
