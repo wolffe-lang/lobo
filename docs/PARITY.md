@@ -149,10 +149,65 @@ Ten percent is one noise floor above the oracle's own run-to-run
 spread; nearer than that this method cannot see. Any gating cell
 above 1.10 is not met. "Met on macOS" is a sentence about macOS.
 
+### The bar's configuration — the default on both sides (ruled 2026-09-11)
+
+ws32 shipped `listen ADDR reuseport;`, nginx's opt-in flag, and asked
+whether the bar should then carry it on BOTH sides so the comparison
+is nginx's own flag against lobo's. **The maintainer's ruling (B1,
+2026-09-11): it should not.** `tools/lobo-parity` builds both configs
+at each server's DEFAULT — for lobo the inherited socket, for nginx
+`reuseport` off — and the flagged number is reported BESIDE the
+default one, on the same VM, labelled as flagged. A flag must not be
+able to hide a regression on the default path, which is the path
+every operator who writes nothing gets. So the gating row on any
+shape is always the default's; a `listen_args` set is an extra column
+in the closeout and in the entry below it, never the row that gates.
+
 ## Ledger
 
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
+
+### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws33: the route index ÷ trunk, TWO TREES ON ONE VM · **VALID** · **NOT MET on both shapes** (close 1.197x, keepalive 1.263x — the FAST class); **the change is NOT VISIBLE: ws33 ÷ trunk 0.983–0.992x on all four cells**
+
+The ws25 two-tree instrument, run 34631705651 (`parity=true
+ref_tree=8fa95fd this_name=ws33 ref_name=trunk`), load 1.81 after the
+settle loop, nginx close **53.0k**, keepalive **168.8k** — the FAST
+class, roughly double the VM ws31/ws32 drew, so these ratios are not
+comparable to theirs; the comparison this set is FOR is the third
+ratio column, where both lobos are the same binary but for the route.
+`ws33` is `b6f29f2` (the route index), `trunk` is `8fa95fd`, built
+beside it with the same toolchain; both on lobo's default `listen`
+line, nginx on its default — the bar's configuration under B1's
+ruling above. 5 pairs × `ab -t 5`, c=32 over 4 generators, the two
+lobos alternating pair by pair, no failed request in thirty runs:
+
+| cell | shape | ws33 req/s | trunk req/s | nginx req/s | nginx ÷ ws33 median [min, max] | nginx ÷ trunk | **ws33 ÷ trunk** median [min, max] | cores ws33 / trunk / nginx |
+|---|---|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 44,226 | 44,411 | 52,958 | **1.197x** [1.189, 1.201] | 1.187x [1.176, 1.198] | **0.990x** [0.988, 1.001] | 1.79 / 1.78 / 1.56 |
+| **N=4 c=32** | keepalive | 133,412 | 134,926 | 168,777 | **1.263x** [1.262, 1.280] | 1.251x [1.244, 1.297] | **0.990x** [0.976, 1.013] | 2.59 / 2.61 / 2.39 |
+| N=1 c=32 | close | 32,919 | 33,320 | 37,868 | 1.146x [1.136, 1.164] | 1.134x [1.127, 1.143] | **0.992x** [0.980, 0.992] | 0.99 / 0.99 / 0.99 |
+| N=1 c=32 | keepalive | 57,671 | 56,026 | 70,823 | 1.237x [1.194, 1.361] | 1.265x [1.173, 1.337] | **0.983x** [0.955, 1.081] | 1.00 / 1.00 / 1.00 |
+
+PREDICTED (`docs/PROFILE.md`'s ws33 addendum, written before the
+dispatch): **NOT VISIBLE** — ws33 ÷ trunk 1.00 [0.98, 1.02] on every
+cell, because ~1% of a request is under this instrument's floor
+(ws30's no-op read 1.005x [0.998, 1.006]). **Measured: 0.990 / 0.990 /
+0.992 / 0.983**, every median inside the predicted band, every
+bracket containing or abutting 1.00 — and the medians sit just BELOW
+one, the opposite sign to a saving the profile leg measured at 0.45
+points of the hand's cpu. That is what under-the-floor looks like,
+and it is the finding: **the profile can see this change and the bar
+cannot.** The count leg has nothing to read either — the change adds
+and removes no syscall, and the profile leg's `strace -c` on one hand
+confirms it (per request, both trees: `writev`/`openat`/`recvfrom`/
+`read`/`statx` 1.000, `close` 1.001 vs 1.000, `poll` 0.033 vs 0.031,
+`futex` 0.068 vs 0.068).
+
+**The bar's own row is unchanged by this lane** and stays where ws32
+left it: on lobo's default, NOT MET on both shapes; with
+`listen … reuseport`, close MET at 1.089x on ws32's VM. Under B1's
+ruling the default is the row that gates.
 
 ### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws32: `listen … reuseport` ÷ trunk, TWO TREES ON ONE VM · **VALID** · at lobo's default **NOT MET on both shapes** (close 1.138x, keepalive 1.269x, the slow class); with the flag **close 1.089x MET**, keepalive 1.257x NOT MET
 
