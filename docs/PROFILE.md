@@ -1510,6 +1510,135 @@ the new pair from THIS branch and predicts **6,200–6,300 `futex` in
 8 s over four hands, ~196/s per hand, every one an error return; nginx
 0** — ws31 read 6,269. It holds or the reading of the diff was wrong.
 
+### The measurement — candidate (a), the unbudgeted accept (runs 34603229602 count, 34603232342 parity; `ws32-a` @ f4c9c30, never merged)
+
+| leg | predicted | measured |
+|---|---|---|
+| count, close N=4 | no row moves; `accept4` 1.05–1.10, `poll` 1.2–1.3, `futex` ±0.05 | **`accept4` 1.07** (trunk 1.09), **`poll` 1.27** (1.27), **`futex` 0.32** (0.35), `epoll_wait` 0.07 (0.17), `epoll_ctl` 0.14 (0.18); the eventfd `write`/`read` gone (a loser that never times out never needs the wake) — total 9.93 vs trunk's 10.29 on the same day. **Right: no per-connection row moved**; only the park's LENGTH changed |
+| count, IDLE | (not predicted) | **the master's probes answered by ONE hand of four** — `accept4`/`recvfrom`/`sendto`/`close` 4.00/s where four hands answer 16.00/s — and **`futex` 1,373/s** against 784: three hands parked mute in the reactor, each costing its own ~196/s compensation clock (wolf-lang#302, the per-park reading) |
+| parity, close N=4 | delta 1.00 [0.98, 1.02] | **1.020x [0.988, 1.029]** — under the floor, as predicted |
+| parity, keepalive N=4 | at risk: 0.75–1.00 with a wide spread, or a refused set | **SET REFUSED** (exit 3): pair 4's keepalive run stalled at **0.446x** of trunk with a generator that never finished (`failed=?` — ab reported no rate), the median 0.972x [0.446, 0.988]. A hand lost a race at setup, parked holding its eight keepalive connections, and no SYN came for the rest of the run |
+| the gauntlet on ws32-a | RED at `lobo-prefork` check 1c | **RED, exit 1, one step earlier**: the corpus — `prefork_e2e.lu` native hung to the 181 s ceiling, checked trapped at :254 (hand 1's own control endpoint answers nothing after one GET); `control_unix_e2e.lu` the same at :191; both left three processes behind (lobo#1's census named them). The prefork tool never ran |
+
+So (a) is what ws27's correction said it was: an unbudgeted park, the
+ws17 shape, inadmissible on lobo's own witnesses on both hosts and
+worth nothing on the close count. The candidate the issue meant — a
+loser that answers WITHOUT parking — needs wolf-lang#267's try-once
+accept, and this measurement is posted there.
+
+### The measurement — candidate (b), `listen … reuseport` (runs 34603182793 count, 34603185051 parity, 34603192228 profile; trunk posture beside it in 34603180650 and 34603189535)
+
+| leg | predicted | measured |
+|---|---|---|
+| count, close N=4 | `accept4` → 1.00; `epoll_ctl`/`epoll_wait`/eventfd → 0; `futex` → ~0.10; `poll` 1.00–1.15; total 9.5–9.7 | **`accept4` 1.09 → 1.00; `epoll_ctl` 0.18 → 0.00; `epoll_wait` 0.17 → 0.00; eventfd `write` 0.09 → 0 and `read` 1.09 → 1.00; `futex` 0.35 → 0.12; `poll` 1.27 → 1.58**; **total 10.29 → 9.76 against nginx's 10.13** — under nginx's count on close for the first time. Every row as predicted but the probe `poll`, which GREW: a hand's own queue holds one connection per wake, so the zero-deadline probe after a burst's first accept now finds nothing on nearly every burst (0.28 → ~0.58 a connection) |
+| count, keepalive N=4 | unchanged, 6.27 ± 0.05 | **6.25** (the same day's trunk 6.23) |
+| parity, close N=4 | delta 1.05–1.12x; cpu 66–72 µs; nginx ÷ ws32 1.02–1.08x | **delta ws32 ÷ trunk 1.044x [1.028, 1.053]** req/s — above the floor; cpu a connection **79.6 → 73.3 µs** (nginx 62.1); **nginx ÷ ws32 1.089x [1.085, 1.111] — MET** beside nginx ÷ trunk 1.138x [1.131, 1.160] on the same VM. The shape right, the size at the low edge of the bracket: the probe `poll` that grew is the third of a syscall a connection the flag leaves behind |
+| parity, keepalive N=4 | 0.95–1.01 (a hash imbalance over 32 connections) | **1.016x [0.992, 1.018]** — no imbalance cost visible; cpu a request 38.7 → 38.8 µs |
+| parity, N=1 | 1.00 ± 0.01 | close **1.013x** [0.999, 1.016]; keepalive 0.974x [0.941, 1.050] — the one-member group is a socket with a flag, and the N=1 cell swings as it always has |
+| by thread, close N=4, ALL hands | `wolf-reactor` absent | **absent on every hand** (the four 0.09–0.10% rows are the signal forwarders' carriers); at the trunk posture the same instrument shows **four `wolf-reactor` threads at 0.24–0.37% of the union each** (≈1.0–1.5% of a hand) |
+| the hand's strace, close N=4, ALL hands | — | **zero EAGAIN in 53,567 `accept4`** (= 53,567 `recvfrom`), no `epoll_*` rows, `poll` 1.53 a connection; the trunk posture: **2,953 EAGAIN in 43,824 `accept4`** over all four hands = **0.07 lost races a connection** — the count's 1.07–1.09, and the number ws31's one-traced-hand (0.32) could not read |
+
+The set is VALID (load 1.73, the slow class: nginx close 25.4k,
+keepalive 86.1k; ab at 0.72 cores; no failed request in thirty runs).
+`docs/PARITY.md`'s ledger carries the row.
+
+**Taken, as nginx's opt-in.** The flag moved the N=4 close number by
+4.4% on one VM, above the instrument's floor, with the mechanism
+confirmed on three instruments (the count, the by-thread profile, the
+all-hands strace) and no cost on the read/serve path. It ships as
+`listen ADDR reuseport;` — nginx's grammar, nginx's default (off) —
+with `docs/WORKERS.md` saying what it buys per host and what it trades
+(a dead hand's own queue). lobo's DEFAULT stays the inherited socket,
+which is nginx's default too and the shape that distributes on both
+serving hosts; so **the bar's own row stays 1.138x NOT MET at the
+default and reads 1.089x MET with the flag**, and both numbers are
+in the ledger. A set with nginx's OWN `reuseport` beside lobo's is the
+like-for-like not taken this sprint.
+
+### The measurement — item 2, the cross-hand split (runs 34603187438 keepalive N=4 ALL hands; 34603189535 close N=4 ALL hands; 34603192228 close N=4 ALL hands with the flag)
+
+`tools/lobo-profile … 4 all` took every hand at once, and the split
+drive (no perf, no strace, the hands' own `/proc` counters over an 8 s
+window) read:
+
+| cell (req/s in the split window) | µs cpu a `syscw` per hand | spread | voluntary switches a request | **involuntary** switches a request |
+|---|---|---|---|---|
+| keepalive N=4, trunk posture (80,663) | **31.7 / 31.6 / 32.0 / 31.9** | **1.01x** | 0.024 | **0.346** |
+| close N=4, trunk posture (22,656) | 70.5 / 70.5 / 70.7 / 70.7 | 1.00x | 0.282 (the park) | 0.097 |
+| close N=4, `reuseport` (33,836) | 49.6 / 49.7 / 49.6 / 49.5 | 1.00x | 0.275 (the pass) | 0.041 |
+
+and the union's leaves at keepalive N=4 (76,760 req/s under perf;
+75.7 / 17.3 / 6.6 by dso): **`_raw_spin_unlock_irqrestore` 7.21%**,
+`do_syscall_64` 4.34, **`finish_task_switch` 2.80**, `x64_sys_call`
+2.66, `do_user_addr_fault` 1.73, `serve_main` 1.47, `srso_alias_safe_ret`
+1.38, the `find` family 1.82, `ambient_alloc` 1.09 — against the close
+cells' `_raw_spin_unlock_irqrestore` 4.05 / 3.94 and `finish_task_switch`
+under 0.54 / 1.77.
+
+Predicted: even within ±10% (**right: 1.01x**); involuntary switches
+over 0.2 a request (**right: 0.35** — a hand is preempted every three
+requests, where the close shape reads 0.04–0.10); the scheduler's and
+softirq's rows at 8–12% of the union (**the switch and wake rows read
+~10 points** — `finish_task_switch` 2.8 + `_raw_spin_unlock_irqrestore`
+7.2, the wake path's unlock — with the syscall entry/exit another 7;
+no `net_rx_action`/`__do_softirq` row over 0.4%, so the loopback
+delivery is not charged to the hands' contexts as guessed); every
+hand on every vcpu (**not read**: `--sort cpu` printed one row, `-001`
+— a `-p` record carries no cpu field without `--sample-cpu`, fixed at
+50bf8ce and re-run once, below).
+
+**The re-run (run 34618903224, keepalive N=4 ALL hands, 61,310 req/s
+under perf; a slower VM):** `--sort cpu` reads **`002` 28.8% / `003`
+25.1% / `000` 24.1% / `001` 22.1%** — every hand on every vcpu, no
+affinity, the four within a third of each other; the split again
+**39.2 / 39.0 / 39.4 / 39.2 µs a request, spread 1.01x, involuntary
+switches 0.374 a request** (0.345–0.402 per hand) — the same shape
+on a second VM, and the 39 µs is the parity table's own N=4 keepalive
+number (ws31: 39.1) read off `/proc` per hand.
+
+**So the ~6 µs has a name and a shape, and not yet a row lobo owns.**
+It is paid EVENLY by every hand (not one unlucky hand, not the shared
+queue's imbalance); it is preemption — 0.35 involuntary context
+switches a request on a VM where four hands and four generators share
+four vcpus, ~10 points of the union in the switch and wake rows, the
+rest the cold cache each switch leaves; and nginx's four workers do not
+pay it (28 µs at N=4, 29 at N=1) because a worker's run between waits
+is ~1 µs of user space where a hand's is ~7 (ws31's row 2–5: lobo's
+frames, the runtime's allocations and pages, the searcher-per-`find`,
+the wrappers). The exposure to preemption is the length of the run;
+the lever is the same user-space rows ws31 priced, and nothing new is
+filed for it. Named and partly priced (0.35 switches × ~2–3 µs direct
+≈ 1 µs; the cache's share is the remainder), attributed to the
+scheduler, not to a row: the next reading is the same split against
+a lobo whose request is shorter.
+
+### The measurement — item 3, wolf-lang#302 at the release pair, one leg (run 34603180650, the idle shape)
+
+**`futex` 6,273 in 8 s over four hands, 784.1/s, ~196/s per hand,
+every one an error return; nginx 0** — predicted 6,200–6,300 (ws31
+read 6,269). Holds. And the probe leg gave the issue a second number
+the same day: with three hands parked in an unbudgeted accept the same
+instrument read **1,373/s** — (1,373 − 784) ÷ 3 = **196/s per parked
+wait** — so the compensation clock is armed once per blocked wait,
+not once per process; posted on #302.
+
+### W8 restated at ws32 (linux x86-64, the CI runner, wolf v0.2.11)
+
+| cell | at lobo's default (nginx ÷ trunk, this VM) | with `listen … reuseport` (nginx ÷ ws32) | the count |
+|---|---|---|---|
+| N=4 close | **1.138x** — NOT MET (79.6 µs vs 62.1) | **1.089x — MET** (73.3 µs) | 10.29 → **9.76** vs 10.13 |
+| N=4 keepalive | **1.269x** — NOT MET (38.7 vs 28.7) | 1.257x — NOT MET (38.8) | 6.23 vs 6.13 |
+| N=1 close | 0.991x — AT parity (65.1 vs 65.0) | 0.978x (64.2) | — |
+| N=1 keepalive | 1.173x (34.0 vs 28.2) | 1.185x (33.0) | — |
+
+The count does not claim the bar; the timing does. What remains: on
+close at the default, the shared queue's lost races (wolf-lang#267);
+on keepalive, ~5 µs of user space a request at one hand (ws31's rows,
+#298/#299/#191/#335 and lobo's own frames, lobo#14) and ~6 µs of
+preemption at four that the same rows expose. macOS: ws26's MET stands
+as the last valid macOS set; no macOS set this sprint (load 5.3–5.6,
+two compiler lanes on the box).
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
