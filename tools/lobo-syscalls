@@ -12,6 +12,8 @@
 #
 #   tools/lobo-syscalls [shape] [N] [seconds] [concurrency]
 #     shape        keepalive (default) or close — the bar's two shapes
+#                  — or idle (ws30): NO drive, calls per SECOND over
+#                  the same serving processes for the same window
 #     N            worker count, both servers (default: this box's cpus
 #                  — the gating cell's)
 #     seconds      ab -t per drive (default 8)
@@ -25,6 +27,17 @@
 # SHARE instrument (perf, a window, never traced); this is the COUNT
 # one. Linux only — strace is the counter; macOS's dtruss needs SIP
 # down and the tool SKIPS there by name (a skip is not a number).
+#
+# THE IDLE SHAPE (ws30, wolf-lang#302). ws29's amendment to the
+# stability rule: a per-request count is stable for work the REQUEST
+# does and is a rate in disguise for work the CLOCK does — `poll`,
+# `futex`, `epoll_wait`, a parked task's compensation. Dividing those
+# by requests reads them through the box's rate. `idle` traces the
+# same processes for the same window with no generator at all and
+# divides by SECONDS, so a per-time row is read as what it is: calls
+# per second, over N processes, on a server doing nothing. nginx is
+# traced the same way beside it, because "doing nothing" has a number
+# there too.
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
@@ -41,7 +54,8 @@ PERGEN=$((CONC / GENS))
 case "$SHAPE" in
 keepalive) KA="-k" ;;
 close) KA="" ;;
-*) echo "lobo-syscalls: REFUSED — shape is keepalive or close, not $SHAPE" >&2; exit 1 ;;
+idle) KA="" ;;
+*) echo "lobo-syscalls: REFUSED — shape is keepalive, close or idle, not $SHAPE" >&2; exit 1 ;;
 esac
 LOBO="${LOBO_THIS:-$(pwd)/target/lobo-release}"
 NGINX="$(pwd)/tests/differential/bin/nginx"
@@ -144,6 +158,26 @@ trace() {
     echo "lobo-syscalls: $1 — $reqs requests completed under the tracer ($rps req/s traced: not a rate), failed=$failed, pids:$pids"
 }
 
+# idle_trace <label> — attach to $pids, drive NOTHING for SECS, detach;
+# writes $scratch/<label>.strace. An empty table is a number here (a
+# server that made no calls in the window), not a failure.
+idle_trace() {
+    pargs=""
+    for p in $pids; do pargs="$pargs -p $p"; done
+    # shellcheck disable=SC2086
+    $SUDO strace -c -f $pargs -o "$scratch/$1.strace" 2> "$scratch/$1.strace.err" &
+    spid=$!
+    sleep "$SECS"
+    $SUDO kill -INT "$spid" 2>/dev/null
+    wait "$spid" 2>/dev/null
+    if [ ! -f "$scratch/$1.strace" ]; then
+        echo "lobo-syscalls: strace wrote nothing for $1:" >&2
+        cat "$scratch/$1.strace.err" >&2
+        return 1
+    fi
+    echo "lobo-syscalls: $1 — idle $SECS s under the tracer (no generator), pids:$pids"
+}
+
 # per_request <label> <reqs> — "name calls-per-request" lines from a
 # strace -c table (its columns: % time, seconds, usecs/call, calls,
 # [errors,] syscall — the name is the last field, calls the fourth)
@@ -155,7 +189,59 @@ per_request() {
 }
 
 host="$(uname -sm)"
-echo "lobo-syscalls: $(date -u +%Y-%m-%dT%H:%MZ) host $host, $cores cpus, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); shape $SHAPE, N=$N, c=$CONC over $GENS generators (-c $PERGEN each), ab -t $SECS; lobo $("$LOBO" -v 2>&1 | head -1); nginx $("$NGINX" -v 2>&1 | head -1)"
+if [ "$SHAPE" = idle ]; then
+    drive="no drive, $SECS s"
+else
+    drive="c=$CONC over $GENS generators (-c $PERGEN each), ab -t $SECS"
+fi
+echo "lobo-syscalls: $(date -u +%Y-%m-%dT%H:%MZ) host $host, $cores cpus, load(1m) $(uptime | awk -F'load average[s]*: ' '{ print $2 }' | tr -d ',' | awk '{ print $1 }'); shape $SHAPE, N=$N, $drive; lobo $("$LOBO" -v 2>&1 | head -1); nginx $("$NGINX" -v 2>&1 | head -1)"
+
+# table <unit> <total label> — the union of both per-files, lobo's
+# count first, sorted by the difference (what lobo pays that nginx
+# does not, on top), then the totals: the sum of the per-unit column
+# (strace's own `total` row ÷ n, which per_request excludes — the
+# first cut of this tool counted it as a syscall and printed a
+# doubled total)
+table() {
+    echo ""
+    echo "| syscall | lobo | nginx | lobo − nginx |"
+    echo "|---|---|---|---|"
+    awk '
+        FNR == NR { l[$1] = $2; seen[$1] = 1; next }
+        { g[$1] = $2; seen[$1] = 1 }
+        END {
+            for (s in seen) {
+                a = (s in l) ? l[s] : 0; b = (s in g) ? g[s] : 0
+                printf "%.3f\t%s\t%.3f\t%.3f\n", a - b, s, a, b
+            }
+        }' "$scratch/lobo.per" "$scratch/nginx.per" | sort -t"$(printf '\t')" -k1,1gr -k2,2 |
+        awk -F'\t' '$3 + $4 > 0 { d = $1 + 0; sign = (d > 0) ? "+" : ""; printf "| `%s` | %.2f | %.2f | %s%.2f |\n", $2, $3, $4, sign, d }'
+    awk '{ s += $2 } END { printf "%.3f\n", s }' "$scratch/lobo.per" > "$scratch/lobo.total"
+    awk '{ s += $2 } END { printf "%.3f\n", s }' "$scratch/nginx.per" > "$scratch/nginx.total"
+    awk -v a="$(cat "$scratch/lobo.total")" -v b="$(cat "$scratch/nginx.total")" -v t="$1" 'BEGIN { d = a - b; sign = (d > 0) ? "+" : ""; printf "| **%s** | **%.2f** | **%.2f** | **%s%.2f** |\n", t, a, b, sign, d }'
+}
+
+if [ "$SHAPE" = idle ]; then
+    start_lobo || exit 1
+    idle_trace lobo || { stop_lobo; exit 1; }
+    stop_lobo
+    start_nginx || exit 1
+    idle_trace nginx || { stop_nginx; exit 1; }
+    stop_nginx
+    # calls ÷ SECONDS: the same arithmetic with the clock as the divisor
+    per_request lobo "$SECS" > "$scratch/lobo.per"
+    per_request nginx "$SECS" > "$scratch/nginx.per"
+    echo ""
+    echo "=== syscalls per SECOND at idle · N=$N serving processes, no drive, $SECS s · linux ($host) · lobo beside nginx (÷ N for one process)"
+    table "calls per second"
+    echo ""
+    echo "=== lobo — strace -c (raw, $SECS s idle)"
+    cat "$scratch/lobo.strace"
+    echo ""
+    echo "=== nginx — strace -c (raw, $SECS s idle)"
+    cat "$scratch/nginx.strace"
+    exit 0
+fi
 
 start_lobo || exit 1
 trace lobo || { stop_lobo; exit 1; }
@@ -171,27 +257,7 @@ per_request nginx "$nreqs" > "$scratch/nginx.per"
 
 echo ""
 echo "=== syscalls per request · $SHAPE · N=$N c=$CONC · linux ($host) · lobo beside nginx"
-echo ""
-echo "| syscall | lobo | nginx | lobo − nginx |"
-echo "|---|---|---|---|"
-# the union, lobo's count first, sorted by the difference (what lobo
-# pays that nginx does not, on top), then the totals
-awk '
-    FNR == NR { l[$1] = $2; seen[$1] = 1; next }
-    { g[$1] = $2; seen[$1] = 1 }
-    END {
-        for (s in seen) {
-            a = (s in l) ? l[s] : 0; b = (s in g) ? g[s] : 0
-            printf "%.3f\t%s\t%.3f\t%.3f\n", a - b, s, a, b
-        }
-    }' "$scratch/lobo.per" "$scratch/nginx.per" | sort -t"$(printf '\t')" -k1,1gr -k2,2 |
-    awk -F'\t' '$3 + $4 > 0 { d = $1 + 0; sign = (d > 0) ? "+" : ""; printf "| `%s` | %.2f | %.2f | %s%.2f |\n", $2, $3, $4, sign, d }'
-# the totals: the sum of the per-request column (strace's own `total`
-# row ÷ requests, which the loop above excludes — the first cut of this
-# tool counted it as a syscall and printed a doubled total)
-awk '{ s += $2 } END { printf "%.3f\n", s }' "$scratch/lobo.per" > "$scratch/lobo.total"
-awk '{ s += $2 } END { printf "%.3f\n", s }' "$scratch/nginx.per" > "$scratch/nginx.total"
-awk -v a="$(cat "$scratch/lobo.total")" -v b="$(cat "$scratch/nginx.total")" 'BEGIN { d = a - b; sign = (d > 0) ? "+" : ""; printf "| **calls per request** | **%.2f** | **%.2f** | **%s%.2f** |\n", a, b, sign, d }'
+table "calls per request"
 echo ""
 echo "=== lobo — strace -c (raw, $lreqs requests)"
 cat "$scratch/lobo.strace"
