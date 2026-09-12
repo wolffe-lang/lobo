@@ -729,16 +729,15 @@ fn timeout_ms(c: config.Conf, loc: int, srv: int, http_blk: int, name: str, defl
     deflt
 }
 
-/// Resolve the proxy plan for a decoded, normalized request `path`.
-/// PURE. Finds the best-matching location (longest plain prefix, `=`
-/// exact wins), checks it for a `proxy_pass`; absent → `is_proxy`
-/// false (static). Present → parses the target and the leg deadlines.
-pub fn plan(c: config.Conf, path: str) -> Plan {
-    var pl = Plan {
+/// The "not a proxy" answer: the one every static request gets. Its
+/// fields past `is_proxy` are never read — `serve` and `dryrun` ask
+/// `is_proxy` and pass the plan on only when it is true. Total.
+fn not_proxy(http_blk: int) -> Plan {
+    Plan {
         is_proxy: false,
         loc: -1,
         srv: -1,
-        http_blk: config.first_http(c),
+        http_blk: http_blk,
         matched: "",
         pt: PassTarget {
             scheme: "http",
@@ -756,6 +755,22 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         resolver_valid_ms: 0,
         resolver_timeout_ms: 30000,
     }
+}
+
+/// Resolve the proxy plan for a decoded, normalized request `path`.
+/// PURE. Finds the best-matching location (longest plain prefix, `=`
+/// exact wins), checks it for a `proxy_pass`; absent → `is_proxy`
+/// false (static). Present → parses the target and the leg deadlines.
+/// Total.
+pub fn plan(c: config.Conf, path: str) -> Plan {
+    // lobo#18: a config with no `proxy_pass` anywhere cannot proxy
+    // any path, and that is a load-time fact. Answer it before
+    // reaching for the first server or walking the location table —
+    // on a static hand this is the whole of `plan`.
+    if !config.any_pass(c) {
+        return not_proxy(config.first_http(c))
+    }
+    var pl = not_proxy(config.first_http(c))
     let srv = config.first_server(c)
     if srv < 0 {
         return pl
@@ -770,6 +785,8 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     var best_prefix = ""
     var exact_hit: int = -1
     var exact_prefix = ""
+    var exact_tbl: int = -1
+    var best_tbl: int = -1
     var i: int = 0
     let total = config.loc_count(c)
     while i < total {
@@ -778,6 +795,7 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         if modi == "=" {
             if path == prefix {
                 exact_hit = c.loc_row[i]
+                exact_tbl = i
                 exact_prefix = prefix
             }
         } else if modi == "" || modi == "^~" {
@@ -785,6 +803,7 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
                 if prefix.len > best_len {
                     best_len = prefix.len
                     best = c.loc_row[i]
+                    best_tbl = i
                     best_prefix = prefix
                 }
             }
@@ -793,12 +812,15 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     }
 
     var loc: int = -1
+    var tbl: int = -1
     var matched = ""
     if exact_hit >= 0 {
         loc = exact_hit
+        tbl = exact_tbl
         matched = exact_prefix
     } else if best >= 0 {
         loc = best
+        tbl = best_tbl
         matched = best_prefix
     }
     if loc < 0 {
@@ -807,7 +829,8 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     pl.loc = loc
     pl.matched = matched
 
-    let pp = config.child_arg1(c, loc, "proxy_pass") else ""
+    // lobo#18: the resolved route row, not a sixth `child_row` walk
+    let pp = config.route_pass(c, tbl)
     if pp.is_empty() {
         return pl
     }
