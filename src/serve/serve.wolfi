@@ -1,15 +1,15 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.12 · edition v1
-  export_hash ef0bedd76e93561220d5d98f873cadaad408a978c03f2a57e96683764418e0df
-  pkg_hash    ef0bedd76e93561220d5d98f873cadaad408a978c03f2a57e96683764418e0df
+  export_hash 4c173ee8c9ac7f612e7056e876bfbb1948a477ce5ee3c1807427d32e2b4d4c67
+  pkg_hash    4c173ee8c9ac7f612e7056e876bfbb1948a477ce5ee3c1807427d32e2b4d4c67
   deps:
     budget  9299e00a4af3ebec20e314be715603c6490f169af63de01461fb714934914390
-    config  c3398f24c5e0d926eeea31050d7deee36a118bb9d796839dea82edaffada154d
-    conn  246728b1e5b9f58a3474f95fe978ca02f24d1989e83fecc4472d0d2b79afd5d7
-    http  28a651623864613e10a6cc268f0669d85be79049e56c87eeda1879ad238e7e2f
+    config  aeaff0ba273b2ed89aba97bde7dc9fc6c1df2f383086613738a6c50deacd0c50
+    conn  4c2092f7b7ae9ec528e652a909f767f3a4db4c3332bd9495e32e6fa0b6dae7ad
+    http  cd06581fba495e98e8930c6fdf354843dd6757b7c02ff4da408577ac6b16845b
     metrics  ba75b3743f76d035354c66ad9c0024b5da658383233e56e8a421b9044ae4dfe8
     obs  c978bb5286100f8729ffcee6bee9f27526125205ed6bc308aae12b991eb22e32
-    proxy  2040a08b0a05617046e15d5b407935cf03c21f6a6800f354d450f84f7d7d62df
+    proxy  10bc7016abb59daddb356945b0202b84957ab3ee563072ab37ee62b710d7b8f5
     resolver  f529fb7456b2b0154944edba97cca1c42121514b47a38dc5bf9b6ddc89132caa
   items:
     [0] pub accept_loop — fn accept_loop(c: config.Conf, addr: str, opts: self.ServerOpts, limits: http.Limits) -> () ! {io} · regions (ρ1, -, ρ2, ρ3) -> -
