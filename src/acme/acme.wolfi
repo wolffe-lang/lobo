@@ -1,5 +1,5 @@
 module pkg :: acme
-  wolfi v0 · toolchain 0.2.11 · edition v1
+  wolfi v0 · toolchain 0.2.12 · edition v1
   export_hash 40e81eb23bb08cf1ccfb290dd573b09690f4c0fc4115a22fed66a8a728baf953
   pkg_hash    40e81eb23bb08cf1ccfb290dd573b09690f4c0fc4115a22fed66a8a728baf953
   deps:

@@ -1,5 +1,5 @@
 module pkg :: conn
-  wolfi v0 · toolchain 0.2.11 · edition v1
+  wolfi v0 · toolchain 0.2.12 · edition v1
   export_hash 55fd3a00523026ad863598c45959b6de9e1be4a5cb37ed692bcf00b5cccd61cb
   pkg_hash    55fd3a00523026ad863598c45959b6de9e1be4a5cb37ed692bcf00b5cccd61cb
   deps:
