@@ -161,8 +161,7 @@ fn main() -> !int {
     print("intact={intact}")
 
     let lim_default = serve.resolve_limits(c)
-    let c_off = config.
-        parse_str(
+    let c_off = config.parse_str(
         "http {{\n  tcp_nodelay off;\n  server {{ root ws24_writev/www; }}\n}}\n",
         "t.conf",
     )

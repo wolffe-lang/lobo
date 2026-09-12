@@ -171,8 +171,7 @@ fn main() -> int {
     let nb = acme.to_unix(2026, 1, 1, 0, 0, 0)
     let na = nb + 7776000
     let leaf_seed = acme.keygen()
-    let leaf_der = acme.
-        cert_mint(
+    let leaf_der = acme.cert_mint(
         ca_seed,
         "Test CA",
         acme.pub_of(leaf_seed),
@@ -184,7 +183,10 @@ fn main() -> int {
     )
     let mstore = "target/acme-mint-store"
     fs_remove_dir_all(mstore) else |_| {}
-    acme.store_write("{mstore}/mint.test/fullchain.pem", acme.pem_wrap("CERTIFICATE", leaf_der)) else |_| {
+    acme.store_write(
+        "{mstore}/mint.test/fullchain.pem",
+        acme.pem_wrap("CERTIFICATE", leaf_der),
+    ) else |_| {
         assert(false, "could not stage the minted leaf")
     }
     let mexp = acme.cert_expiry(mstore, "mint.test")

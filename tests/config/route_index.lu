@@ -191,8 +191,10 @@ fn main() -> int {
     hold(c5, "proxy")
 
     // 6. top-level directives live in the -1 bucket
-    let c6 = config.
-        parse_str("worker_processes 4;\nhttp {{ server {{ listen 8080; }} }}\n", "f.conf")
+    let c6 = config.parse_str(
+        "worker_processes 4;\nhttp {{ server {{ listen 8080; }} }}\n",
+        "f.conf",
+    )
     hold(c6, "top-level")
     assert(
         (config.child_arg1(c6, -1, "worker_processes") else "") == "4",
@@ -202,13 +204,11 @@ fn main() -> int {
     // 7. two generations alive at once, each under its OWN table —
     //    the reload witness: a new Conf carries a new index, and the
     //    old one keeps answering as it did
-    let gen1 = config.
-        parse_str(
+    let gen1 = config.parse_str(
         "http {{ server {{ listen 8080; location /api/ {{ proxy_pass http://127.0.0.1:9001; }} }} }}\n",
         "g1.conf",
     )
-    let gen2 = config.
-        parse_str(
+    let gen2 = config.parse_str(
         "http {{ server {{ listen 8080; location /api/ {{ proxy_pass http://127.0.0.1:9002; }} location /new/ {{ root /n; }} }} }}\n",
         "g2.conf",
     )

@@ -183,8 +183,7 @@ fn tls_txn(hostport: str, req: str, ca_root: str) -> str ! {io} {
     // 5s ceiling sat inside the knife-edge margin. Still bounded: a
     // wedged CA is a named failure, never a hung serve loop.
     net_deadline(fd, 15000) else |_| {}
-    let pend = tlsc.
-        begin(
+    let pend = tlsc.begin(
         take net.Socket { fd: fd },
         host,
         anchors,
@@ -634,7 +633,9 @@ fn post(mut fl: Flow, url: str, payload: str) -> Resp ! {io} {
         if r.retry_after > 0 {
             fl.retry_after_s = r.retry_after
         }
-        if r.status == 400 && r.body.contains("urn:ietf:params:acme:error:badNonce") && attempt == 0 {
+        if r.status == 400 &&
+            r.body.contains("urn:ietf:params:acme:error:badNonce") &&
+            attempt == 0 {
             attempt = 1
             continue
         }

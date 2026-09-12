@@ -617,7 +617,13 @@ fn note_served(mut ct: Counters, a: obs.Access, admitted: int) {
 /// scrape is an ordinary request: it appears in these counters and in
 /// the access log on its NEXT scrape, one behind, which is the correct
 /// and only honest ordering for a counter that includes itself.
-fn render_metrics(ct: Counters, gens: List[GenRow], shutdown_ms: int, events: int, worker: int) -> str {
+fn render_metrics(
+    ct: Counters,
+    gens: List[GenRow],
+    shutdown_ms: int,
+    events: int,
+    worker: int,
+) -> str {
     let now = time_unix_ms()
     var out = metrics.header("lobo_build_info")
     out = "{out}{metrics.sample1("lobo_build_info", "version", shell.version_token(), 1)}"
@@ -760,8 +766,7 @@ fn status_stanza(
         // of the generations (additive on schema 1); the single
         // process's is unchanged
         var s = if worker > 0 {
-            shell.
-                status_json_open_worker(
+            shell.status_json_open_worker(
                 cur,
                 quitting,
                 events,
@@ -777,8 +782,7 @@ fn status_stanza(
         for g in gens {
             let sep = if first { "" } else { "," }
             first = false
-            let obj = shell.
-                status_json_obj(
+            let obj = shell.status_json_obj(
                 g.gen,
                 g.state,
                 g.live,
@@ -956,7 +960,9 @@ fn ev_log(mut el: ELog, level: str, rawbody: str) {
     eprint("lobo: [{level}] {body}")
     if el.have && obs.level_passes(level, el.level) {
         let ms = time_unix_ms()
-        let line = if el.json { obs.render_error_jsonl(level, body, ms) } else {
+        let line = if el.json {
+            obs.render_error_jsonl(level, body, ms)
+        } else {
             obs.render_error(level, body, ms)
         }
         obs.sink_emit(mut el.s, line)
@@ -984,7 +990,9 @@ fn pump_sinks(rows: List[SinkRow], accs: List[AccRow], optin: str, mut el: ELog)
         if accs.len > 0 {
             let f = obs.compile(r.fmttext)
             for ar in accs {
-                let line = if r.json { obs.render_access_jsonl(ar.a, optin.words()) } else {
+                let line = if r.json {
+                    obs.render_access_jsonl(ar.a, optin.words())
+                } else {
                     obs.render_access(f, ar.a, r.esc)
                 }
                 obs.sink_emit(mut sk, line)
@@ -1360,8 +1368,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         }
     }
     let auto_primary = config.auto_primary(c0)
-    var flow = acme.
-        flow_new(
+    var flow = acme.flow_new(
         config.auto_store(c0, prefix),
         config.auto_names(c0),
         config.auto_contact(c0),
@@ -1374,7 +1381,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // which may carry :0) so a client — the ACME challenge dial-back
     // included — can find the http listener. The TLS notice already
     // prints its bound port.
-    let where = if have_http { "127.0.0.1:{hport} (port {hport})" } else if standby_http {
+    let where = if have_http {
+        "127.0.0.1:{hport} (port {hport})"
+    } else if standby_http {
         "STANDBY for {addr} (held by another worker — retrying each pass; wolf-lang#234/#235, docs/WORKERS.md)"
     } else {
         "(no plaintext listener)"
@@ -1382,7 +1391,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // ws17: what actually authorizes this endpoint. A unix socket is a
     // uid boundary by its directory's permissions; a loopback port is
     // not one at all, and the notice has always said which.
-    let ctrl_auth = if !have_ctrl { "off" } else if shell.is_unix_addr(ctrl_ep) {
+    let ctrl_auth = if !have_ctrl {
+        "off"
+    } else if shell.is_unix_addr(ctrl_ep) {
         if ctok.is_empty() { "socket permissions" } else { "socket permissions + token" }
     } else if ctok.is_empty() {
         "loopback only"
@@ -1959,8 +1970,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             // privilege.
             let must_step = !waiting.is_empty() || serve.carry_has_head(car)
             let st = if must_step || ready_has(ready, fd) {
-                serve.
-                    conn_step(
+                serve.conn_step(
                     fd,
                     cconf,
                     opts,
@@ -1987,8 +1997,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             if !st.resolve.is_empty() {
                 new_wait = st.resolve
                 new_idle = now
-                resolver.
-                    start(
+                resolver.start(
                     mut rs,
                     st.resolve,
                     st.resolve_addr,
@@ -2084,8 +2093,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     ev_event(
                         mut elog,
                         "error",
-                        shell.
-                            ev_budget_exceeded_cap(
+                        shell.ev_budget_exceeded_cap(
                             cg,
                             st.bud_site,
                             st.bud_limit,
@@ -2103,8 +2111,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     ev_event(
                         mut elog,
                         "error",
-                        shell.
-                            ev_budget_exceeded(
+                        shell.ev_budget_exceeded(
                             cg,
                             "admin",
                             lim_for(gens, cg).memory_budget,
@@ -2129,7 +2136,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             }
             if !close_it && shutdown_ms > 0 {
                 let gi = index_of(gens, cg)
-                if gi >= 0 && gens[gi].state == "draining" && now - gens[gi].since_ms >= shutdown_ms {
+                if gi >= 0 &&
+                    gens[gi].state == "draining" &&
+                    now - gens[gi].since_ms >= shutdown_ms {
                     close_it = true
                     aborted_flag = true
                 }
@@ -2709,7 +2718,11 @@ fn spawn_worker(
     var h: int = -1
     if handed > 0 {
         var ok = true
-        let hh = os_spawn_with(exe, shell.worker_args(prefix, conf, i, ep, handed), lfds) else |e| match e {
+        let hh = os_spawn_with(
+            exe,
+            shell.worker_args(prefix, conf, i, ep, handed),
+            lfds,
+        ) else |e| match e {
             unsupported => {
                 ok = false
                 ev_log(
@@ -2812,7 +2825,9 @@ fn fan_out(verb: str, wctl: List[str], ctok: str) -> int {
         let r = shell.control_send(ep, line) else |_| {
             continue
         }
-        if r == "unauthorized" || r.starts_with("reload rejected") || r.starts_with("unknown verb") {
+        if r == "unauthorized" ||
+            r.starts_with("reload rejected") ||
+            r.starts_with("unknown verb") {
             continue
         }
         ok = ok + 1
@@ -3015,7 +3030,9 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     }
 
     var elog = build_elog(c0, prefix, 0, 0)
-    let ctrl_auth = if !have_ctrl { "off" } else if shell.is_unix_addr(ctrl_ep) {
+    let ctrl_auth = if !have_ctrl {
+        "off"
+    } else if shell.is_unix_addr(ctrl_ep) {
         if ctok.is_empty() { "socket permissions" } else { "socket permissions + token" }
     } else if ctok.is_empty() {
         "loopback only"

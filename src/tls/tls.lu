@@ -828,8 +828,10 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     handshake.transcript_add(mut tr, cmsg)
     let th_cert = handshake.transcript_hash(tr)
 
-    let cv_content = handshake.
-        certificate_verify_content("TLS 1.3, server CertificateVerify", th_cert)
+    let cv_content = handshake.certificate_verify_content(
+        "TLS 1.3, server CertificateVerify",
+        th_cert,
+    )
     let sig = curve25519.sign(seedk, cv_content)
     let cv = handshake.certificate_verify(2055, sig)
     handshake.transcript_add(mut tr, cv)

@@ -94,8 +94,9 @@ fn main() -> int {
     assert(kn.alg == "", "a non-SEQUENCE answers empty")
 
     // the PEM label probe
-    let lbl = config.
-        pem_first_label("-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n")
+    let lbl = config.pem_first_label(
+        "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----\n",
+    )
     assert(lbl == "RSA PRIVATE KEY", "label extracted: {lbl}")
     assert(config.pem_first_label("no pem here") == "", "no block answers empty")
 

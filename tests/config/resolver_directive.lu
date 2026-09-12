@@ -58,8 +58,7 @@ fn main() -> !int {
         ),
         "bad timeout",
     )
-    let ok7 = config.
-        parse_str(
+    let ok7 = config.parse_str(
         "http {{ resolver 10.0.0.53 valid=10s ipv4=on ipv6=on; resolver_timeout 500ms; }}",
         "o7.conf",
     )
@@ -123,8 +122,10 @@ fn main() -> !int {
     )
     assert(config.resolver_valid_ms(c, rp) == 30000, "valid=30s")
     assert(config.resolver_timeout_for(c, peer) == 5000, "http's timeout")
-    let none = config.
-        parse_str("http {{ server {{ location / {{ proxy_pass http://x.test/; }} }} }}", "n.conf")
+    let none = config.parse_str(
+        "http {{ server {{ location / {{ proxy_pass http://x.test/; }} }} }}",
+        "n.conf",
+    )
     var px: int = -1
     var k: int = 0
     while k < none.names.len {
@@ -159,8 +160,7 @@ fn main() -> !int {
         ),
         "L013 names the delta: {l_full}",
     )
-    let lit = config.
-        parse_str(
+    let lit = config.parse_str(
         "http {{ server {{ location / {{ proxy_pass http://10.0.0.5/; }} }} upstream u {{ server 10.0.0.6:80; }} }}",
         "l.conf",
     )
@@ -168,8 +168,7 @@ fn main() -> !int {
         !has(config.lint(lit), "LOBO-L012") && !has(config.lint(lit), "LOBO-L013"),
         "literals lint nothing",
     )
-    let peer_only = config.
-        parse_str(
+    let peer_only = config.parse_str(
         "http {{ upstream u {{ server app.internal:80; }} server {{ location / {{ proxy_pass http://u; }} }} }}",
         "p.conf",
     )

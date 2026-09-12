@@ -240,7 +240,13 @@ fn peers_text(pool: proxy.UpPool) -> str {
 /// computes them (main wires serve.listen_addr_plain) so this module
 /// never grows an io-adjacent scan of its own. Fills `tr` with the
 /// why-it-lost trace. PURE.
-pub fn decide(c: config.Conf, p: Probe, plain_addr: str, ssl_addr: str, mut tr: http.RouteTrace) -> Verdict {
+pub fn decide(
+    c: config.Conf,
+    p: Probe,
+    plain_addr: str,
+    ssl_addr: str,
+    mut tr: http.RouteTrace,
+) -> Verdict {
     var v = empty_verdict()
     // listener first: a request whose scheme has no listener never
     // reaches parse on the live server (the connection is refused)

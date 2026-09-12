@@ -14,8 +14,7 @@
 use config
 
 fn main() -> int {
-    let c = config.
-        parse_str(
+    let c = config.parse_str(
         "worker_priority 0;\nevents {{\n}}\nhttp {{\n    server {{\n        listen 8080;\n        location \"/a b\" {{\n            root \"/srv/w w\";\n        }}\n    }}\n}}\n",
         "t.conf",
     )

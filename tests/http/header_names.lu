@@ -59,18 +59,27 @@ fn main() -> int {
         return 1
     }
     print("conn_upper={ka(rc.keepalive)}")
-    let rk = http.parse_request("GET / HTTP/1.0\r\nHost: x\r\nConnection: Keep-Alive", lim) else |_| {
+    let rk = http.parse_request(
+        "GET / HTTP/1.0\r\nHost: x\r\nConnection: Keep-Alive",
+        lim,
+    ) else |_| {
         print("conn10 parse failed")
         return 1
     }
     print("conn_mixed_10={ka(rk.keepalive)}")
     // the non-ASCII fallback: Unicode lowercasing, as before
-    let rkv = http.parse_request("GET / HTTP/1.0\r\nHost: x\r\nConnection: Keep-Alive", lim) else |_| {
+    let rkv = http.parse_request(
+        "GET / HTTP/1.0\r\nHost: x\r\nConnection: Keep-Alive",
+        lim,
+    ) else |_| {
         print("kelvin parse failed")
         return 1
     }
     print("conn_kelvin_10={ka(rkv.keepalive)}")
-    let rt = http.parse_request("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: CHUNKED", lim) else |_| {
+    let rt = http.parse_request(
+        "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: CHUNKED",
+        lim,
+    ) else |_| {
         print("te parse failed")
         return 1
     }

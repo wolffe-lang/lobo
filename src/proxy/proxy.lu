@@ -921,9 +921,13 @@ pub fn resolve_need(c: config.Conf, path: str, rs: resolver.Resolver, now: int) 
 /// fresh (the blocking driver's path; the loop parks before it gets
 /// here). A held failure expands to NOTHING (the peer is skipped, or
 /// the request 502s when it was the only one). Total.
-fn expand_peer(mut rs: resolver.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int) -> List[
-    str,
-] {
+fn expand_peer(
+    mut rs: resolver.Resolver,
+    host: str,
+    addr: str,
+    timeout_ms: int,
+    valid_ms: int,
+) -> List[str] {
     var out = List[str]()
     if resolver.is_ip_literal(host) || addr.is_empty() {
         (mut out).push(host)
@@ -1435,8 +1439,7 @@ fn attempt_tls(
         net_close(up) else |_| {}
         return 502
     }
-    let pend = tlsc.
-        begin(
+    let pend = tlsc.begin(
         take net.Socket { fd: up },
         sni_host,
         anchors,
@@ -1912,7 +1915,9 @@ pub fn run(
         let phost = hosts[idx]
         let pport = ports[idx]
         let upreq = build_upstream(c, req, pl, phost, pport, remote_addr, body)
-        acc.addr = if acc.addr.is_empty() { "{phost}:{pport}" } else {
+        acc.addr = if acc.addr.is_empty() {
+            "{phost}:{pport}"
+        } else {
             "{acc.addr}, {phost}:{pport}"
         }
         let t0 = time_unix_ms()

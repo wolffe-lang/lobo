@@ -1771,7 +1771,13 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
 /// absolute Location of a directory redirect, matching nginx).
 /// Total: every error path resolves to a written response and/or a
 /// close; the socket is always closed before return.
-pub fn serve_conn(conn: int, c: config.Conf, opts: ServerOpts, limits: http.Limits, local_port: int) {
+pub fn serve_conn(
+    conn: int,
+    c: config.Conf,
+    opts: ServerOpts,
+    limits: http.Limits,
+    local_port: int,
+) {
     var cn = conn_mod_plain(conn)
     // ws13: the blocking driver owns a resolver of its own — a name
     // it meets resolves INLINE (bounded by resolver_timeout) because
@@ -1963,8 +1969,7 @@ pub fn serve_conn_cn(
                 return
             }
             var pacc0 = proxy.run_acc()
-            should_close = proxy.
-                run(
+            should_close = proxy.run(
                 conn.fd(cn),
                 c,
                 req,
@@ -2305,8 +2310,7 @@ pub fn serve_request(
     if pplan.is_proxy {
         var pacc = proxy.run_acc()
         var raised = false
-        should_close = proxy.
-            run(
+        should_close = proxy.run(
             conn,
             c,
             req,
@@ -2429,7 +2433,14 @@ pub struct ConnStep {
 /// A ConnStep with NO served request (idle poll, peer close, a
 /// pre-parse 400): zero budget fields; `logged` says whether `acc`
 /// carries a record. Total.
-fn step_out(active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access) -> ConnStep {
+fn step_out(
+    active: bool,
+    close: bool,
+    carry: str,
+    served: int,
+    logged: bool,
+    acc: obs.Access,
+) -> ConnStep {
     ConnStep {
         active: active,
         close: close,

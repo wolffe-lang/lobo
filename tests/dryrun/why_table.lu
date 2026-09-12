@@ -17,7 +17,8 @@ use dryrun
 fn main() -> int {
     // the teaching lines, pinned verbatim
     assert(
-        dryrun.why_prose("exact-match") == "exact match — `location =` beats every prefix and regex",
+        dryrun.why_prose("exact-match") ==
+            "exact match — `location =` beats every prefix and regex",
         "exact-match prose",
     )
     assert(

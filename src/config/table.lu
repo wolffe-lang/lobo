@@ -41,7 +41,16 @@ pub struct Table {
     specs: List[Spec],
 }
 
-fn row(mut t: Table, name: str, contexts: str, opens: str, lo: int, hi: int, status: str, note: str) {
+fn row(
+    mut t: Table,
+    name: str,
+    contexts: str,
+    opens: str,
+    lo: int,
+    hi: int,
+    status: str,
+    note: str,
+) {
     (mut t.specs).push(Spec {
         name: name,
         contexts: contexts,

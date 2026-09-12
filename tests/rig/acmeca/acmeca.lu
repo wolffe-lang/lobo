@@ -385,8 +385,7 @@ fn main() -> !int {
     let ca_seed = acme.keygen()
     let ca_pub = acme.pub_of(ca_seed)
     let now_s = time_unix_ms() / 1000
-    let ca_cert = acme.
-        cert_mint(
+    let ca_cert = acme.cert_mint(
         ca_seed,
         "Lobo Test CA",
         ca_pub,
@@ -405,8 +404,7 @@ fn main() -> !int {
     var sc = config.ssl_none()
     if tls_mode {
         let tls_seed = acme.keygen()
-        let tls_leaf = acme.
-            cert_mint(
+        let tls_leaf = acme.cert_mint(
             ca_seed,
             "Lobo Test CA",
             acme.pub_of(tls_seed),
@@ -583,8 +581,7 @@ fn main() -> !int {
             if names.is_empty() {
                 names = order_names
             }
-            issued_der = acme.
-                cert_mint(
+            issued_der = acme.cert_mint(
                 ca_seed,
                 "Lobo Test CA",
                 leaf_pub,

@@ -71,8 +71,7 @@ fn main() -> !int {
     assert(
         check_of(
             "  log_format j escape=json \"$request\";\n  access_log a.log j buffer=16k flush=5s;",
-        ).
-            is_empty(),
+        ).is_empty(),
         "buffered json format is clean",
     )
     assert(
@@ -94,16 +93,14 @@ fn main() -> !int {
     assert(config.access_out_path(c2, 0) == "h1.log", "first path")
     assert(config.access_out_esc(c2, 0) == "default", "combined default esc")
     assert(config.access_out_fmt(c2, 0) == obs.combined(), "combined default text")
-    let c3 = config.
-        parse_str(
+    let c3 = config.parse_str(
         "http {{\n  access_log h.log;\n  server {{ listen 8080; access_log s.log format=json; }}\n}}\n",
         "t.conf",
     )
     assert(config.access_out_count(c3) == 1, "server level replaces http level")
     assert(config.access_out_path(c3, 0) == "s.log", "the server row")
     assert(config.access_out_json(c3, 0), "the native door detected")
-    let c4 = config.
-        parse_str(
+    let c4 = config.parse_str(
         "http {{\n  access_log h.log;\n  server {{ listen 8080; access_log off; }}\n}}\n",
         "t.conf",
     )

@@ -85,8 +85,19 @@ fn main() -> !int {
     let date = "Thu, 01 Jan 2026 00:00:00 GMT"
     var pacc = proxy.run_acc()
     var rs = resolver.new()
-    let closed = proxy.
-        run(cli, c, req, "", pl, "127.0.0.1", "lobo/0.1.0", date, false, mut rs, mut pacc) else |_| {
+    let closed = proxy.run(
+        cli,
+        c,
+        req,
+        "",
+        pl,
+        "127.0.0.1",
+        "lobo/0.1.0",
+        date,
+        false,
+        mut rs,
+        mut pacc,
+    ) else |_| {
         assert(false, "client-facing write must not raise here")
         return 1
     }
@@ -110,8 +121,19 @@ fn main() -> !int {
     let cli2 = net_connect("127.0.0.1:{cl2port}")?
     let rd2 = net_accept(cl2)?
     var pacc2 = proxy.run_acc()
-    let closed2 = proxy.
-        run(cli2, c2, req, "", pl2, "127.0.0.1", "lobo/0.1.0", date, false, mut rs, mut pacc2) else |_| {
+    let closed2 = proxy.run(
+        cli2,
+        c2,
+        req,
+        "",
+        pl2,
+        "127.0.0.1",
+        "lobo/0.1.0",
+        date,
+        false,
+        mut rs,
+        mut pacc2,
+    ) else |_| {
         assert(false, "client-facing write must not raise here")
         return 1
     }

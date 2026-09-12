@@ -60,8 +60,7 @@ fn main() -> int {
     assert(config.ok(c1), "p71 conf-prefix resolution: {config.render_conf(c1)}")
     let r1 = config.render_conf(c1)
     assert(
-        r1.
-            contains(
+        r1.contains(
             "d|main|worker_priority 0|{root}/conf/sub/inner.conf:1|via {root}/conf/nginx.conf:1",
         ),
         "p71 chain provenance: got\n{r1}",
@@ -89,8 +88,7 @@ fn main() -> int {
     let c4 = config.load(root, "conf/missing.conf")
     let r4 = config.render_conf(c4)
     assert(
-        r4.
-            contains(
+        r4.contains(
             "err|{root}/conf/missing.conf:1|open() \"{root}/conf/gone.conf\" failed (2: No such file or directory)",
         ),
         "p32 missing include: got\n{r4}",
@@ -110,8 +108,7 @@ fn main() -> int {
     let c6 = config.load(root, "conf/a.conf")
     let r6 = config.render_conf(c6)
     assert(
-        r6.
-            contains(
+        r6.contains(
             "include cycle: \"{root}/conf/a.conf\" is already being loaded (chain: {root}/conf/a.conf:1 > {root}/conf/b.conf:1)",
         ),
         "p37 mutual cycle chain: got\n{r6}",
@@ -143,8 +140,7 @@ fn main() -> int {
     let c8 = config.load(root, "conf/hop0.conf")
     let r8 = config.render_conf(c8)
     assert(
-        r8.
-            contains(
+        r8.contains(
             "d|main|worker_priority 3|{root}/conf/hop2.conf:1|via {root}/conf/hop0.conf:1 > {root}/conf/hop1.conf:1",
         ),
         "two-hop chain: got\n{r8}",

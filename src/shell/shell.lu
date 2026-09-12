@@ -1521,9 +1521,14 @@ pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int)
 /// shape `os_spawn` takes, which is the FALLBACK path (a host that
 /// answers `unsupported` to a non-empty inherit set, and the
 /// zero-listener case). Pure and total.
-pub fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str, inherit: int) -> List[
-    str,
-] {
+pub fn worker_argv(
+    exe: str,
+    prefix: str,
+    conf: str,
+    worker: int,
+    ctrl: str,
+    inherit: int,
+) -> List[str] {
     var a = List[str]()
     (mut a).push(exe)
     for w in worker_args(prefix, conf, worker, ctrl, inherit) {
@@ -1621,7 +1626,13 @@ pub fn status_worker_json(
 /// fills with `status_worker_json` objects and closes with
 /// `status_json_close`. Additive on schema 1 (nothing renamed or
 /// moved). Total.
-pub fn status_json_master_open(current: int, quitting: bool, events: int, live_bytes: int, n: int) -> str {
+pub fn status_json_master_open(
+    current: int,
+    quitting: bool,
+    events: int,
+    live_bytes: int,
+    n: int,
+) -> str {
     "{{\"schema\":{status_schema()},\"current\":{current},\"quitting\":{bool_word(quitting)},\"events\":{events},\"live_region_bytes\":{live_bytes},\"workers_configured\":{n},\"generations\":[],\"workers\":["
 }
 

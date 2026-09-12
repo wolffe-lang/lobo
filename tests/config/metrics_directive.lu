@@ -34,14 +34,12 @@ fn main() -> !int {
     assert(config.metrics_on(conf_of("  metrics on;")), "http-level on -> on")
 
     // ---- resolution: the first server's own row beats the http row
-    let cs = config.
-        parse_str(
+    let cs = config.parse_str(
         "http {{\n  metrics off;\n  server {{ listen 8080; metrics on; }}\n}}\n",
         "t.conf",
     )
     assert(config.metrics_on(cs), "the server's own row wins over http's (D29)")
-    let cs2 = config.
-        parse_str(
+    let cs2 = config.parse_str(
         "http {{\n  metrics on;\n  server {{ listen 8080; metrics off; }}\n}}\n",
         "t.conf",
     )
@@ -53,8 +51,7 @@ fn main() -> !int {
     assert(config.metrics_check(conf_of("  metrics off;")).is_empty(), "off is clean")
     let bad = config.metrics_check(conf_of("  metrics yes;"))
     assert(
-        bad.
-            starts_with(
+        bad.starts_with(
             "invalid value \"yes\" in \"metrics\" directive, it must be \"on\" or \"off\"",
         ),
         "the flag diagnostic keeps nginx's own wording: {bad}",
@@ -62,8 +59,7 @@ fn main() -> !int {
     assert(bad.contains("t.conf:"), "and names the span: {bad}")
     // a bad value ANYWHERE is a config error, not only at the
     // effective level — the oracle's rule
-    let deep = config.
-        parse_str(
+    let deep = config.parse_str(
         "http {{\n  server {{ listen 8080; metrics on; }}\n  server {{ listen 8081; metrics maybe; }}\n}}\n",
         "t.conf",
     )
@@ -90,18 +86,24 @@ fn main() -> !int {
     assert(!has_code(config.lint(conf_of("")), "LOBO-L010"), "no directive, no finding")
 
     // ---- LOBO-L011: the endpoint on a routable listen
-    let pub_c = config.
-        parse_str("http {{\n  server {{ listen 0.0.0.0:80; metrics on; }}\n}}\n", "t.conf")
+    let pub_c = config.parse_str(
+        "http {{\n  server {{ listen 0.0.0.0:80; metrics on; }}\n}}\n",
+        "t.conf",
+    )
     let f_pub = config.lint(pub_c)
     assert(has_code(f_pub, "LOBO-L011"), "a wildcard bind with the endpoint on is warned: {f_pub}")
-    let loop_c = config.
-        parse_str("http {{\n  server {{ listen 127.0.0.1:9113; metrics on; }}\n}}\n", "t.conf")
+    let loop_c = config.parse_str(
+        "http {{\n  server {{ listen 127.0.0.1:9113; metrics on; }}\n}}\n",
+        "t.conf",
+    )
     assert(
         !has_code(config.lint(loop_c), "LOBO-L011"),
         "a loopback bind is the recommended posture and says nothing",
     )
-    let off_c = config.
-        parse_str("http {{\n  server {{ listen 0.0.0.0:80; metrics off; }}\n}}\n", "t.conf")
+    let off_c = config.parse_str(
+        "http {{\n  server {{ listen 0.0.0.0:80; metrics off; }}\n}}\n",
+        "t.conf",
+    )
     assert(
         !has_code(config.lint(off_c), "LOBO-L011"),
         "an OFF endpoint publishes nothing, wherever it is bound",

@@ -46,7 +46,8 @@ fn main() -> !int {
     // a hand's endpoint under a unix master is a SIBLING of it, so it
     // inherits the operator's directory and is a uid boundary too
     assert(
-        shell.unix_worker_addr("unix:/run/lobo/control.sock", 2) == "unix:/run/lobo/control.sock.w2",
+        shell.unix_worker_addr("unix:/run/lobo/control.sock", 2) ==
+            "unix:/run/lobo/control.sock.w2",
         "hand 2's endpoint sits beside the master's: {shell.unix_worker_addr("unix:/run/lobo/control.sock", 2)}",
     )
     assert(
@@ -54,8 +55,10 @@ fn main() -> !int {
         "a TCP master has no unix sibling to give (its hands get loopback ports)",
     )
     // the token arm rides the unix form too — a host may want both
-    let uxt = config.
-        parse_str("control unix:/run/lobo/c.sock token secrets/ctl;\nhttp {{ }}\n", "x")
+    let uxt = config.parse_str(
+        "control unix:/run/lobo/c.sock token secrets/ctl;\nhttp {{ }}\n",
+        "x",
+    )
     assert(shell.control_addr(uxt) == "unix:/run/lobo/c.sock", "the unix address with a token arm")
     assert(
         shell.control_token_path(uxt, "/p") == "/p/secrets/ctl",

@@ -79,8 +79,7 @@ fn main() -> int {
     assert(nf.err.contains("no such file"), "missing file named: {nf.err}")
 
     // 7. protocol honesty: 1.2+1.3 warns and passes, 1.2-only errors
-    let both = config.
-        ssl_resolve(
+    let both = config.ssl_resolve(
         conf_of(
             srv_block(
                 "        ssl_certificate {fx}/fullchain.pem;\n        ssl_certificate_key {fx}/leaf.key;\n        ssl_protocols TLSv1.2 TLSv1.3;\n",
@@ -90,8 +89,7 @@ fn main() -> int {
     )
     assert(config.ssl_ok(both), "1.2+1.3 passes: {both.err}")
     assert(both.warns.contains("TLSv1.2"), "the 1.2 delta is warned: {both.warns}")
-    let only12 = config.
-        ssl_resolve(
+    let only12 = config.ssl_resolve(
         conf_of(
             srv_block(
                 "        ssl_certificate {fx}/fullchain.pem;\n        ssl_certificate_key {fx}/leaf.key;\n        ssl_protocols TLSv1.2;\n",

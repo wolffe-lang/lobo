@@ -29,13 +29,11 @@ fn join(xs: List[str]) -> str {
 
 fn main() -> int {
     // A listens :8080 and :8443; B listens :8080 and :9000.
-    let a = config.
-        parse_str(
+    let a = config.parse_str(
         "http {{\n  server {{ listen 8080; }}\n  server {{ listen 8443; }}\n}}\n",
         "a.conf",
     )
-    let b = config.
-        parse_str(
+    let b = config.parse_str(
         "http {{\n  server {{ listen 8080; }}\n  server {{ listen 9000; }}\n}}\n",
         "b.conf",
     )

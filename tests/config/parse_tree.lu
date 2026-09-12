@@ -51,8 +51,7 @@ fn main() -> int {
         "events {{\n}}\nhttp {{\n    server {{\n        listen 8080;\n        location /a/ {{\n            location /a/b/ {{\n                root html;\n            }}\n        }}\n    }}\n}}\n",
     )
     assert(
-        nest.
-            contains(
+        nest.contains(
             "b|server|location /a/|t.conf:6\nb|location|location /a/b/|t.conf:7\nd|location|root html|t.conf:8",
         ),
         "p52 nested location: got\n{nest}",
@@ -84,8 +83,7 @@ fn main() -> int {
     assert(lua.contains("b|location|content_by_lua_block|t.conf:7"), "lua row recorded: got\n{lua}")
     assert(lua.contains("d|location|root html|t.conf:10"), "parse continues past skip")
     assert(lua.contains("delta|content_by_lua_block|OpenResty Lua"), "delta named")
-    let c = config.
-        parse_str(
+    let c = config.parse_str(
         "events {{\n}}\nhttp {{\n    server {{\n        listen 8080;\n        location / {{\n            content_by_lua_block {{\n                ngx.say(\"}}\")\n            }}\n        }}\n    }}\n}}\n",
         "t.conf",
     )
