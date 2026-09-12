@@ -78,6 +78,89 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws34 — 2026-09-12 — the residue (the pin at v0.2.12 with the pass B3 owed; the route below the profile's resolution; one fix measured and reverted)
+
+- **lobo#16 — the pin moved, and the formatter pass finally ran.**
+  `[wolf]` c9237c1 (v0.2.11) → **a7f517e (v0.2.12)**, staged from the
+  release archive by digest (`sha256 6be493a9…`), whole archive pair,
+  no source build; v0.2.13 was not tagged when this lane ran.
+  **FOUR formatter commits ride the span, not the one lobo#16 named** —
+  #303 (`0c47664`), #314 (`491b65f`), #339 (`e47567b`), #340
+  (`5a27527`). lobo#16 expected #339 at a later pin ("a second pass,
+  not this one"); its fix is inside this tag, so the second pass IS
+  this pass, and **#339, not #303, is what moved the tree**.
+  **Measured with the RELEASE binary: 30 of 149 `.lu` re-lay**
+  (PREDICTED 28). Exactly one file, `src/main.lu`, carries #303's
+  mixed-shape chains — the three at 1377/1385/3018 lobo#16 tabulated;
+  the other 29 are #339's, almost all the orphaned receiver-dot line
+  rejoining its call. #314 and #340 move nothing here. Zero behaviour:
+  the gauntlet is green on both sides and every `.wolfi` hash is
+  unchanged across the re-lay.
+  **The prediction was wrong by two, and the error was upstream's.**
+  v0.2.12's release notes record "lobo `1148318` 28 files" — this
+  repo's exact trunk sha, measured off a branch build. wolf-std logged
+  the identical +2 in the same span (F-0124: 33 predicted, 35
+  measured, twice). Filed as **wolf-lang#363**; the note's *effect*
+  claims reproduce exactly here (string-free over-width code lines
+  **8 → 0**), so only the file count is wrong. The rule for the next
+  bumper: a re-lay count is only as good as the binary it was taken
+  with.
+  **What else the new binary changes here: nothing, measured.**
+  #329's W0318 and #326's W0601 are new warnings and this corpus
+  denies warnings on every declared lane — 300+ lane-runs green,
+  neither fires. All 14 `.wolfi` moved by exactly one line (the
+  stamp) with **every export_hash and pkg_hash byte-identical** across
+  both the bump and the 30-file re-lay — the first test of #292's
+  content-only rule over a layout change, and it holds. #146 is
+  **still open** at v0.2.12 (nineteenth measurement): a release build
+  without `WOLF_MIDEND=0` still ICEs on `sc_muladd`. s158's list
+  literals and s157's papercuts are 0.2.13's, not in this tag.
+
+- **lobo#18 — half the route's residue taken, half measured and given
+  back.** ws33 left 0.31% of a keepalive hand in two rows, neither a
+  scan. `build_index` now resolves **one route row per location** —
+  the effective `alias`/`root`/`index`/`proxy_pass`, under the same
+  innermost-wins rule the per-request readers applied — plus a
+  trailing row for "no location matched", which is the server's own
+  answer because `match_location` reports the server as the location
+  then. `http.decide` reads three fields where it made five bucket
+  walks; `proxy.plan` reads one instead of a sixth.
+  **Measured, two trees on one VM** (profile run 34676662943,
+  keepalive N=1): `config.child_row` **0.14% → gone** (under the 0.1%
+  cut), the predicted direction. `proxy.plan` **was already under the
+  cut on the base tree** — the row ws33 sized at 0.13% at the 0.2.11
+  pin does not read 0.13% at 0.2.12 — and the early-return hoist left
+  it at **0.11%**, no better. **The hoist did not pay and was reverted
+  (`93babac`)**: `plan` returns `Plan` by value, so every path builds
+  the twelve-field literal anyway, and a 0.13% row does not earn a
+  public `any_pass`, a `Conf` field and a branch. lobo#18's second
+  half is reported NOT TAKEN, by measurement.
+  **The route is now below this profile's resolution, and that is the
+  close of the arc.** `wolf_rt::str::str_find` — which neither tree
+  changed — reads 0.89% on base and 0.61% on ws34 in these same two
+  windows, so run-to-run noise is ~0.3 points, larger than either
+  residue row. No precise delta is claimed and the 0.31% → N
+  arithmetic ws33's table invited is explicitly not done. A further
+  lever needs a sharper instrument before it can be priced at all.
+  `tests/config/route_row.lu` holds every resolved row against the
+  five calls it replaces — each `ref_*` reader is the pre-change code
+  verbatim — over eight config shapes including the parity bar's own,
+  two live generations and the out-of-range reads; three lanes green.
+
+- **The W8 bar was not re-argued and not re-run** (ws34 item 3). It
+  stays at defaults (B1). Nothing here moves a W8 number: both rows
+  sit far under the parity instrument's floor, as lobo#14's did.
+
+- **The profile rig cannot span a pin bump** — filed as **lobo#20**.
+  ws25's ref-tree leg symlinks ONE `.wolf-bin` into a ref worktree
+  whose own `wolf-toolchain.toml` then refuses on identity drift, so
+  `ref_tree=1148318` died at "build the ref tree" (run 34676503607).
+  The baseline used instead is this branch's own pre-item-2 commit
+  `5163f11`, already past the bump — which isolates the source change
+  exactly but says nothing about what the compiler bump did to the
+  hand. A pin-bump lane is precisely the one that most wants that
+  comparison, and it is the one that cannot have it.
+
 ## ws33 — 2026-09-11 — the route (the per-request config scan indexed once at load; B1 ruled; B3 measured as a no-op at this pin)
 
 - **lobo#14 — the route stopped re-reading the configuration.**
