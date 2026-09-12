@@ -78,7 +78,6 @@ pub struct Conf {
     rr_index: List[str],
     rr_index_at: List[int],
     rr_index_n: List[int],
-    any_pass: bool,
 }
 
 /// Include-walk state: resolution mode and the open-file chain the
@@ -122,7 +121,6 @@ fn empty_conf() -> Conf {
         rr_index: List[str](),
         rr_index_at: List[int](),
         rr_index_n: List[int](),
-        any_pass: false,
     }
 }
 
@@ -778,9 +776,6 @@ fn build_index(mut c: Conf) {
         (mut c.rr_alias).push(al)
         (mut c.rr_root).push(rt)
         (mut c.rr_pass).push(pp)
-        if !pp.is_empty() {
-            c.any_pass = true
-        }
         t = t + 1
     }
 }
@@ -834,13 +829,6 @@ pub fn route_index(c: Conf, t: int) -> List[str] {
         j = j + 1
     }
     out
-}
-
-/// Whether ANY location in this config carries a `proxy_pass`. When
-/// it does not, no request can ever proxy and `proxy.plan` answers
-/// without matching (lobo#18). Total.
-pub fn any_pass(c: Conf) -> bool {
-    c.any_pass
 }
 
 /// The index of the first `http` block, or -1. An index read. Total.

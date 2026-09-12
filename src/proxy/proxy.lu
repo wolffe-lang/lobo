@@ -729,15 +729,17 @@ fn timeout_ms(c: config.Conf, loc: int, srv: int, http_blk: int, name: str, defl
     deflt
 }
 
-/// The "not a proxy" answer: the one every static request gets. Its
-/// fields past `is_proxy` are never read — `serve` and `dryrun` ask
-/// `is_proxy` and pass the plan on only when it is true. Total.
-fn not_proxy(http_blk: int) -> Plan {
-    Plan {
+/// Resolve the proxy plan for a decoded, normalized request `path`.
+/// PURE. Finds the best-matching location (longest plain prefix, `=`
+/// exact wins), checks it for a `proxy_pass`; absent → `is_proxy`
+/// false (static). Present → parses the target and the leg deadlines.
+/// Total.
+pub fn plan(c: config.Conf, path: str) -> Plan {
+    var pl = Plan {
         is_proxy: false,
         loc: -1,
         srv: -1,
-        http_blk: http_blk,
+        http_blk: config.first_http(c),
         matched: "",
         pt: PassTarget {
             scheme: "http",
@@ -755,22 +757,6 @@ fn not_proxy(http_blk: int) -> Plan {
         resolver_valid_ms: 0,
         resolver_timeout_ms: 30000,
     }
-}
-
-/// Resolve the proxy plan for a decoded, normalized request `path`.
-/// PURE. Finds the best-matching location (longest plain prefix, `=`
-/// exact wins), checks it for a `proxy_pass`; absent → `is_proxy`
-/// false (static). Present → parses the target and the leg deadlines.
-/// Total.
-pub fn plan(c: config.Conf, path: str) -> Plan {
-    // lobo#18: a config with no `proxy_pass` anywhere cannot proxy
-    // any path, and that is a load-time fact. Answer it before
-    // reaching for the first server or walking the location table —
-    // on a static hand this is the whole of `plan`.
-    if !config.any_pass(c) {
-        return not_proxy(config.first_http(c))
-    }
-    var pl = not_proxy(config.first_http(c))
     let srv = config.first_server(c)
     if srv < 0 {
         return pl

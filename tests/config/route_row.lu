@@ -120,17 +120,6 @@ fn hold(c: config.Conf, tag: str) {
     assert(config.route_root(c, nloc + 7) == "", "{tag}: root past the table")
     assert(config.route_pass(c, -1) == "", "{tag}: pass below the table")
     assert(config.route_index(c, nloc + 7).is_empty(), "{tag}: index past the table")
-
-    // `any_pass` is the disjunction of the rows, and nothing else
-    var seen = false
-    var q: int = 0
-    while q <= nloc {
-        if !config.route_pass(c, q).is_empty() {
-            seen = true
-        }
-        q = q + 1
-    }
-    assert(config.any_pass(c) == seen, "{tag}: any_pass is the rows' disjunction")
 }
 
 fn main() -> int {
@@ -144,7 +133,6 @@ fn main() -> int {
     hold(bar, "bar")
     assert(config.loc_count(bar) == 0, "bar: no location")
     assert(config.route_root(bar, 0) == "/srv/w", "bar: the server row carries the root")
-    assert(!config.any_pass(bar), "bar: no proxy_pass anywhere")
 
     // 2. root at the server, inherited by a location that sets none
     let inherit = config.parse_str(
@@ -177,14 +165,13 @@ fn main() -> int {
     let iy = config.route_index(idx, 1)
     assert(iy.len == 3 && iy[0] == "a.html" && iy[2] == "c.html", "index: /y/ inherits all three")
 
-    // 5. proxy_pass at one location only — `any_pass` is true, and
-    //    the static location's row is still empty
+    // 5. proxy_pass at one location only — the static location's
+    //    row is still empty
     let mixed = config.parse_str(
         "http {{ server {{ listen 80; root /s; location /api/ {{ proxy_pass http://127.0.0.1:9001; }} location /s/ {{ }} }} }}\n",
         "mixed.conf",
     )
     hold(mixed, "mixed")
-    assert(config.any_pass(mixed), "mixed: a proxy_pass exists")
     assert(config.route_pass(mixed, 0) == "http://127.0.0.1:9001", "mixed: /api/ passes")
     assert(config.route_pass(mixed, 1) == "", "mixed: /s/ does not")
 
@@ -216,7 +203,6 @@ fn main() -> int {
     let empty = config.parse_str("", "empty.conf")
     assert(config.route_count(empty) == 1, "empty: just the trailing row")
     assert(config.route_root(empty, 0) == "", "empty: no root")
-    assert(!config.any_pass(empty), "empty: nothing passes")
 
     0
 }
