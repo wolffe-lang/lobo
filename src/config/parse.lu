@@ -72,6 +72,13 @@ pub struct Conf {
     kids: List[int],
     kid_at: List[int],
     kid_n: List[int],
+    rr_alias: List[str],
+    rr_root: List[str],
+    rr_pass: List[str],
+    rr_index: List[str],
+    rr_index_at: List[int],
+    rr_index_n: List[int],
+    any_pass: bool,
 }
 
 /// Include-walk state: resolution mode and the open-file chain the
@@ -109,6 +116,13 @@ fn empty_conf() -> Conf {
         kids: List[int](),
         kid_at: List[int](),
         kid_n: List[int](),
+        rr_alias: List[str](),
+        rr_root: List[str](),
+        rr_pass: List[str](),
+        rr_index: List[str](),
+        rr_index_at: List[int](),
+        rr_index_n: List[int](),
+        any_pass: false,
     }
 }
 
@@ -583,6 +597,54 @@ fn glob_at(p: List[byte], n: List[byte], pi0: int, ni0: int) -> bool {
     ni == n.len
 }
 
+/// The first single-argument value of `name` directly under block
+/// `blk` at LOAD time, or "". The same first match `child_arg1`
+/// returns on the request path — lobo#18 resolves it here instead.
+fn kid_arg1_at(c: Conf, blk: int, name: str) -> str {
+    let bucket = blk + 1
+    if bucket < 0 || bucket >= c.kid_at.len {
+        return ""
+    }
+    let at = copy c.kid_at[bucket]
+    let n = copy c.kid_n[bucket]
+    var j: int = 0
+    while j < n {
+        let r = copy c.kids[at + j]
+        if c.names[r] == name && c.args_n[r] >= 1 {
+            return c.argp[c.args_at[r]]
+        }
+        j = j + 1
+    }
+    ""
+}
+
+/// Every `index` argument directly under block `blk`, in row order,
+/// at LOAD time — the same list `http.index_list` built per request.
+fn kid_index_at(c: Conf, blk: int) -> List[str] {
+    var out = List[str]()
+    let bucket = blk + 1
+    if bucket < 0 || bucket >= c.kid_at.len {
+        return out
+    }
+    let at = copy c.kid_at[bucket]
+    let n = copy c.kid_n[bucket]
+    var j: int = 0
+    while j < n {
+        let r = copy c.kids[at + j]
+        if c.names[r] == "index" {
+            let aat = c.args_at[r]
+            let nn = c.args_n[r]
+            var q: int = 0
+            while q < nn {
+                (mut out).push(c.argp[aat + q])
+                q = q + 1
+            }
+        }
+        j = j + 1
+    }
+    out
+}
+
 /// Derive the route index (lobo#14). ONE pass for the two first-block
 /// rows, a counting pass and a fill pass for the direct-children
 /// buckets, one walk of the first server's children for the location
@@ -671,6 +733,114 @@ fn build_index(mut c: Conf) {
             j = j + 1
         }
     }
+
+    // lobo#18: the RESOLVED route row. `http.decide` asked `child_row`
+    // five times a static request — `alias` and `root` at the
+    // location, `root` again at the server, and the index list at
+    // both — for answers that cannot change after load, and
+    // `proxy.plan` asked a sixth time for `proxy_pass`. Resolve them
+    // once here, applying the SAME innermost-wins rule the per-request
+    // readers applied, in the same order.
+    //
+    // One row per location, plus a trailing row for "no location
+    // matched": `match_location` reports the SERVER as the location
+    // then, so that row is the server's own answer. `alias` is the
+    // location's only — a server-level `alias` never applied.
+    let srv = c.ix_server
+    let nloc = c.loc_row.len
+    var t: int = 0
+    while t <= nloc {
+        let blk = if t < nloc { copy c.loc_row[t] } else { srv }
+        var al = ""
+        if t < nloc {
+            al = kid_arg1_at(c, blk, "alias")
+        }
+        var rt = kid_arg1_at(c, blk, "root")
+        if rt.is_empty() && blk != srv {
+            rt = kid_arg1_at(c, srv, "root")
+        }
+        var pp = ""
+        if t < nloc {
+            pp = kid_arg1_at(c, blk, "proxy_pass")
+        }
+        var idx = kid_index_at(c, blk)
+        if idx.is_empty() && blk != srv {
+            idx = kid_index_at(c, srv)
+        }
+        let iat = c.rr_index.len
+        var q: int = 0
+        while q < idx.len {
+            (mut c.rr_index).push(copy idx[q])
+            q = q + 1
+        }
+        (mut c.rr_index_at).push(iat)
+        (mut c.rr_index_n).push(idx.len)
+        (mut c.rr_alias).push(al)
+        (mut c.rr_root).push(rt)
+        (mut c.rr_pass).push(pp)
+        if !pp.is_empty() {
+            c.any_pass = true
+        }
+        t = t + 1
+    }
+}
+
+/// The number of resolved route rows: one per location plus the
+/// trailing "no location matched" row. Total.
+pub fn route_count(c: Conf) -> int {
+    c.rr_alias.len
+}
+
+/// The `alias` in effect for resolved route row `t`, or "". Total.
+pub fn route_alias(c: Conf, t: int) -> str {
+    if t < 0 || t >= c.rr_alias.len {
+        return ""
+    }
+    c.rr_alias[t]
+}
+
+/// The `root` in effect for resolved route row `t` — the location's,
+/// else the server's — or "". Total.
+pub fn route_root(c: Conf, t: int) -> str {
+    if t < 0 || t >= c.rr_root.len {
+        return ""
+    }
+    c.rr_root[t]
+}
+
+/// The `proxy_pass` at resolved route row `t`, or "". The trailing
+/// row is never a proxy: `proxy.plan` asks only at a matched
+/// location. Total.
+pub fn route_pass(c: Conf, t: int) -> str {
+    if t < 0 || t >= c.rr_pass.len {
+        return ""
+    }
+    c.rr_pass[t]
+}
+
+/// The index list in effect for resolved route row `t` — the
+/// location's, else the server's. A fresh list, as the per-request
+/// reader returned. Total.
+pub fn route_index(c: Conf, t: int) -> List[str] {
+    var out = List[str]()
+    if t < 0 || t >= c.rr_index_at.len {
+        return out
+    }
+    let at = copy c.rr_index_at[t]
+    let n = copy c.rr_index_n[t]
+    var j: int = 0
+    while j < n {
+        (mut out).push(c.rr_index[at + j])
+        j = j + 1
+    }
+    out
+}
+
+/// Whether ANY location in this config carries a `proxy_pass`. When
+/// it does not, no request can ever proxy and `proxy.plan` answers
+/// without matching (lobo#18). Total.
+pub fn any_pass(c: Conf) -> bool {
+    c.any_pass
 }
 
 /// The index of the first `http` block, or -1. An index read. Total.

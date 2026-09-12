@@ -1,0 +1,222 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! lobo#18 — the RESOLVED route row, held against the five
+//! `child_row` calls it replaces. `http.decide` asked for `alias`,
+//! then `root` at the location and again at the server, then the
+//! index list at both; `proxy.plan` asked a sixth time for
+//! `proxy_pass`. Every reader here (`ref_*`) is that per-request
+//! code verbatim, and every assertion is the load-time row agreeing
+//! with it — over locations, over the server fallback, and over the
+//! trailing "no location matched" row, which is the server's own
+//! answer because `match_location` reports the server as the
+//! location then.
+//!
+//! The claim is the same one lobo#14 made for the index: the answer
+//! is resolved once at load under the SAME innermost-wins rule, so
+//! nothing routes differently.
+
+use config
+
+/// `decide`'s alias read, verbatim: the location's own `alias`. A
+/// server-level `alias` never applied, so the trailing row has none.
+fn ref_alias(c: config.Conf, blk: int, is_loc: bool) -> str {
+    if !is_loc {
+        return ""
+    }
+    config.child_arg1(c, blk, "alias") else ""
+}
+
+/// `decide`'s root read, verbatim: this block's, else the server's.
+fn ref_root(c: config.Conf, blk: int, srv: int) -> str {
+    var root = config.child_arg1(c, blk, "root") else ""
+    if root.is_empty() && blk != srv {
+        root = config.child_arg1(c, srv, "root") else ""
+    }
+    root
+}
+
+/// `plan`'s proxy_pass read, verbatim: the matched location's own.
+fn ref_pass(c: config.Conf, blk: int, is_loc: bool) -> str {
+    if !is_loc {
+        return ""
+    }
+    config.child_arg1(c, blk, "proxy_pass") else ""
+}
+
+/// `http.index_list`, verbatim — every `index` argument directly
+/// under `blk`, in row order.
+fn ref_index_at(c: config.Conf, blk: int) -> List[str] {
+    var out = List[str]()
+    let at0 = config.kid_first(c, blk)
+    let kn = config.kid_count(c, blk)
+    var k: int = 0
+    while k < kn {
+        let i = c.kids[at0 + k]
+        if c.names[i] == "index" {
+            let at = c.args_at[i]
+            let nn = c.args_n[i]
+            var j: int = 0
+            while j < nn {
+                (mut out).push(c.argp[at + j])
+                j = j + 1
+            }
+        }
+        k = k + 1
+    }
+    out
+}
+
+/// `decide`'s index read, verbatim: the block's list, else the
+/// server's.
+fn ref_index(c: config.Conf, blk: int, srv: int) -> List[str] {
+    var idx = ref_index_at(c, blk)
+    if idx.is_empty() && blk != srv {
+        idx = ref_index_at(c, srv)
+    }
+    idx
+}
+
+fn same_list(a: List[str], b: List[str]) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    var i: int = 0
+    while i < a.len {
+        if a[i] != b[i] {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+/// Hold every resolved row of `c` against the readers it replaced.
+fn hold(c: config.Conf, tag: str) {
+    let srv = config.first_server(c)
+    let nloc = config.loc_count(c)
+
+    // one row per location, plus the trailing server row
+    assert(config.route_count(c) == nloc + 1, "{tag}: a row per location plus the server row")
+
+    var t: int = 0
+    while t <= nloc {
+        let is_loc = t < nloc
+        let blk = if is_loc { c.loc_row[t] } else { srv }
+        assert(config.route_alias(c, t) == ref_alias(c, blk, is_loc), "{tag}: row {t} alias")
+        assert(config.route_root(c, t) == ref_root(c, blk, srv), "{tag}: row {t} root")
+        assert(config.route_pass(c, t) == ref_pass(c, blk, is_loc), "{tag}: row {t} proxy_pass")
+        assert(
+            same_list(config.route_index(c, t), ref_index(c, blk, srv)),
+            "{tag}: row {t} index list",
+        )
+        t = t + 1
+    }
+
+    // out of range reads are total, never a trap
+    assert(config.route_alias(c, -1) == "", "{tag}: alias below the table")
+    assert(config.route_root(c, nloc + 7) == "", "{tag}: root past the table")
+    assert(config.route_pass(c, -1) == "", "{tag}: pass below the table")
+    assert(config.route_index(c, nloc + 7).is_empty(), "{tag}: index past the table")
+
+    // `any_pass` is the disjunction of the rows, and nothing else
+    var seen = false
+    var q: int = 0
+    while q <= nloc {
+        if !config.route_pass(c, q).is_empty() {
+            seen = true
+        }
+        q = q + 1
+    }
+    assert(config.any_pass(c) == seen, "{tag}: any_pass is the rows' disjunction")
+}
+
+fn main() -> int {
+    // 1. the parity bar's own config: a server with a root and NO
+    //    location at all. The trailing row answers, and nothing here
+    //    can ever proxy.
+    let bar = config.parse_str(
+        "http {{ types {{ }} server {{ listen 8080; root /srv/w; }} }}\n",
+        "bar.conf",
+    )
+    hold(bar, "bar")
+    assert(config.loc_count(bar) == 0, "bar: no location")
+    assert(config.route_root(bar, 0) == "/srv/w", "bar: the server row carries the root")
+    assert(!config.any_pass(bar), "bar: no proxy_pass anywhere")
+
+    // 2. root at the server, inherited by a location that sets none
+    let inherit = config.parse_str(
+        "http {{ server {{ listen 80; root /srv/top; location /a/ {{ }} location /b/ {{ root /srv/b; }} }} }}\n",
+        "inherit.conf",
+    )
+    hold(inherit, "inherit")
+    assert(config.route_root(inherit, 0) == "/srv/top", "inherit: /a/ takes the server root")
+    assert(config.route_root(inherit, 1) == "/srv/b", "inherit: /b/ keeps its own")
+
+    // 3. alias wins over root at the same location, and never
+    //    inherits from the server
+    let al = config.parse_str(
+        "http {{ server {{ listen 80; root /srv/top; location /img/ {{ alias /var/img/; }} }} }}\n",
+        "alias.conf",
+    )
+    hold(al, "alias")
+    assert(config.route_alias(al, 0) == "/var/img/", "alias: the location's own")
+    assert(config.route_alias(al, 1) == "", "alias: the server row has none")
+
+    // 4. the index list: the location's, else the server's, in row
+    //    order across several `index` directives
+    let idx = config.parse_str(
+        "http {{ server {{ listen 80; index a.html b.html; index c.html; location /x/ {{ index x.html; }} location /y/ {{ }} }} }}\n",
+        "index.conf",
+    )
+    hold(idx, "index")
+    let ix = config.route_index(idx, 0)
+    assert(ix.len == 1 && ix[0] == "x.html", "index: /x/ its own")
+    let iy = config.route_index(idx, 1)
+    assert(iy.len == 3 && iy[0] == "a.html" && iy[2] == "c.html", "index: /y/ inherits all three")
+
+    // 5. proxy_pass at one location only — `any_pass` is true, and
+    //    the static location's row is still empty
+    let mixed = config.parse_str(
+        "http {{ server {{ listen 80; root /s; location /api/ {{ proxy_pass http://127.0.0.1:9001; }} location /s/ {{ }} }} }}\n",
+        "mixed.conf",
+    )
+    hold(mixed, "mixed")
+    assert(config.any_pass(mixed), "mixed: a proxy_pass exists")
+    assert(config.route_pass(mixed, 0) == "http://127.0.0.1:9001", "mixed: /api/ passes")
+    assert(config.route_pass(mixed, 1) == "", "mixed: /s/ does not")
+
+    // 6. `=` exact and `^~` locations resolve like any other row
+    let mods = config.parse_str(
+        "http {{ server {{ listen 80; root /s; location = /exact {{ root /e; }} location ^~ /pre/ {{ root /p; }} }} }}\n",
+        "mods.conf",
+    )
+    hold(mods, "mods")
+
+    // 7. two generations alive at once, each under its OWN rows —
+    //    the model is immutable after parse, so a row cannot go stale
+    let gen1 = config.parse_str(
+        "http {{ server {{ listen 8080; root /g1; location /api/ {{ proxy_pass http://127.0.0.1:9001; }} }} }}\n",
+        "g1.conf",
+    )
+    let gen2 = config.parse_str(
+        "http {{ server {{ listen 8080; root /g2; location /api/ {{ proxy_pass http://127.0.0.1:9002; }} }} }}\n",
+        "g2.conf",
+    )
+    hold(gen1, "gen1")
+    hold(gen2, "gen2")
+    assert(config.route_pass(gen1, 0) == "http://127.0.0.1:9001", "gen1: its own pass")
+    assert(config.route_pass(gen2, 0) == "http://127.0.0.1:9002", "gen2: the reloaded pass")
+    assert(config.route_root(gen1, 1) == "/g1", "gen1: its own server row")
+    assert(config.route_root(gen2, 1) == "/g2", "gen2: its own server row")
+
+    // 8. an empty/err config resolves without trapping
+    let empty = config.parse_str("", "empty.conf")
+    assert(config.route_count(empty) == 1, "empty: just the trailing row")
+    assert(config.route_root(empty, 0) == "", "empty: no root")
+    assert(!config.any_pass(empty), "empty: nothing passes")
+
+    0
+}
