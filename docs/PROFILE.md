@@ -1795,6 +1795,99 @@ space a request at one hand (ws31's rows, #298/#299/#191/#335), ~6 µs
 of preemption at four (ws32's split), and of lobo#14's own ~0.3 µs
 this lane took ~0.2 — the two residues named above are the rest.
 
+## ws34's addendum — lobo#18: the route's residue, PREDICTED then measured (2026-09-12)
+
+### What was predicted, before either tree was profiled
+
+ws33 left 0.31% of a keepalive hand in two rows and named both:
+`config.child_row` 0.18%, five bucket walks a static request for
+answers fixed at load; `proxy.plan` 0.13%, a twelve-field `Plan`
+literal built before the early return. Neither is a scan, so no second
+index was reached for.
+
+| row | predicted at ws34 |
+|---|---|
+| `config.child_row` | **gone / under the 0.1% cut** — five walks become three field reads off a resolved row |
+| `proxy.plan` | **0.08–0.13%, barely moved** — the hoist cannot remove the literal, only the walk around it |
+| summed residue | **0.08–0.15%**, against 0.31% |
+| the W8 bar | **NOT MOVED** — both rows are far under the parity instrument's floor |
+
+The `proxy.plan` prediction was revised DOWN from an initial 0.03–0.10%
+during implementation, before measuring: `plan` returns `Plan` by
+value, so every path — the new early return included — still builds
+the literal. That constraint was priced into the prediction rather
+than discovered in the result.
+
+### The measurement — two trees on ONE VM (run 34676662943, keepalive N=1, one hand, `profile_shape=keepalive profile_n=1 ref_tree=5163f11`)
+
+**The baseline is NOT trunk, and that is a defect in the rig, not a
+choice.** ws25's ref-tree leg symlinks ONE `.wolf-bin` into the ref
+worktree, whose own `wolf-toolchain.toml` then refuses on identity
+drift, so the leg cannot span a `[wolf]` pin bump — it died at "build
+the ref tree" against `ref_tree=1148318` (run **34676503607**), filed
+as **lobo#20**. The ref used instead is `5163f11`, this branch's own
+pre-item-2 commit, already past the bump. So the comparison below
+isolates **item 2's source change** exactly, and says nothing about
+what the compiler bump did to this hand. ws33's 0.31% was read at the
+0.2.11 pin and is NOT the baseline here.
+
+`ws34` = `8082c4e`, `base` = `5163f11`, built beside it with the same
+staged toolchain, profiled back to back: ws34 46,683 req/s (load
+2.64), base 48,623 (load 1.89), 4 × `ab -k -c 8` over an 8 s window,
+no failed request. Leaves in `lobo-release` over 0.1%, within this one
+run:
+
+| row | base (`5163f11`) | ws34 | predicted |
+|---|---|---|---|
+| `config.child_row` | **0.14%** | **gone** (under the 0.1% cut) | gone / under the cut |
+| `proxy.plan` | **under the 0.1% cut** | **0.11%** | 0.08–0.13% |
+| by dso: `lobo-release` | 13.49% | 13.87% | — |
+| by dso: kernel / libc | 79.84 / 6.34 | 79.41 / 6.28 | — |
+
+**One half paid, the other did not, and the second half was reverted.**
+
+- `config.child_row` **0.14% → under the cut.** The resolved route row
+  works: `decide` reads three fields where it made five bucket walks,
+  and the symbol drops off the leaf list entirely. This is the whole
+  of the lane's win on this row, and it is the predicted direction.
+- `proxy.plan` **was ALREADY under the cut on the base tree** — before
+  the change. The row ws33 sized at 0.13% at the 0.2.11 pin does not
+  read 0.13% at 0.2.12; it reads under 0.1%. With the hoist it reads
+  **0.11%**, i.e. no better and possibly a hair worse. The hoist did
+  not pay and was reverted (`93babac`); lobo#18's second half is
+  **NOT TAKEN**, by measurement.
+
+### The instrument can no longer resolve these rows, and that is the finding
+
+`wolf_rt::str::str_find` reads **0.89% on base and 0.61% on ws34** in
+these same two windows — a 0.28-point swing on a function neither tree
+changed. ws33 logged the same caution with `TwoWaySearcher` (0.74 vs
+1.25). So **run-to-run noise inside an 8 s window is ~0.3 points**,
+which is larger than either residue row. A 0.11% row and an "under
+0.1%" row are not distinguishable by this instrument.
+
+That bounds what may honestly be claimed. `config.child_row` leaving
+the list is consistent with the fix and is the predicted direction,
+but the lane does NOT claim a precise delta for it, and explicitly
+does not claim the 0.31% → some-number arithmetic ws33's table
+invited. **The route is now below this profile's resolution.** A
+further lever here needs a sharper instrument (a longer window, or a
+counter rather than a sampler) before it can be priced at all — which
+is the honest close of the ws31/ws33/ws34 arc, not another fix.
+
+The dso column moved 13.49 → 13.87 the WRONG way by a third of a
+point, which is the same noise seen from the other side: ws34 ran at a
+higher load (2.64 vs 1.89) and a lower rate. The per-function rows are
+the reading; the dso total is not.
+
+### The W8 bar
+
+Not re-run, and not re-argued (ws34 item 3). The bar stays at defaults
+(B1). Nothing in this lane moves a W8 number: both rows sit far under
+the parity instrument's floor, exactly as lobo#14's did — ws33's
+parity leg read ws33 ÷ trunk 0.983–0.992x on all four cells for a
+change four times this size.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
