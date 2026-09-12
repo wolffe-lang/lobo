@@ -1139,38 +1139,6 @@ fn location_key(c: config.Conf, i: int) -> (str, str) {
     ("", "")
 }
 
-/// The first N-argument value of directive `name` whose parent block
-/// is `blk` (`blk` -1 is the top level). Returns the value or the
-/// `none` row. lobo#14: the config's load-time child index, not a
-/// whole-arena scan — the same first match.
-fn child_arg1(c: config.Conf, blk: int, name: str) -> str ! {none} {
-    config.child_arg1(c, blk, name)
-}
-
-/// Collect the `index` file list for block `blk` (its own `index`
-/// directive; empty when it declares none — serve/ falls back to the
-/// server-level list or the built-in "index.html").
-fn index_list(c: config.Conf, blk: int) -> List[str] {
-    var out = List[str]()
-    let at0 = config.kid_first(c, blk)
-    let kn = config.kid_count(c, blk)
-    var k: int = 0
-    while k < kn {
-        let i = c.kids[at0 + k]
-        if c.names[i] == "index" {
-            let at = c.args_at[i]
-            let nn = c.args_n[i]
-            var j: int = 0
-            while j < nn {
-                (mut out).push(c.argp[at + j])
-                j = j + 1
-            }
-        }
-        k = k + 1
-    }
-    out
-}
-
 /// Find the index of the FIRST `server` block (kind "b") in context
 /// "http", or -1. v0 serves the first server; virtual-host selection
 /// by `server_name`/Host is a later sprint's matching (the table row
@@ -1281,19 +1249,33 @@ struct LocMatch {
     exact_hit: int,
     loc: int,
     matched: str,
+    tbl: int,
 }
 
 /// The location matcher: `=` exact takes precedence, else the longest
 /// plain (or `^~`) prefix; regex modifiers are parse-only at this pin
 /// and never win. Allocation-free. Total.
 fn match_location(c: config.Conf, path: str) -> LocMatch {
-    var m = LocMatch { srv: first_server(c), best: -1, exact_hit: -1, loc: -1, matched: "" }
+    // lobo#18: `tbl` is the resolved route row this match reads its
+    // alias/root/index off. It defaults to the trailing row — the
+    // server's own answer — which is exactly the block `loc` names
+    // when no location matches.
+    var m = LocMatch {
+        srv: first_server(c),
+        best: -1,
+        exact_hit: -1,
+        loc: -1,
+        matched: "",
+        tbl: config.loc_count(c),
+    }
     if m.srv < 0 {
         return m
     }
     m.loc = m.srv
     var best_len: int = -1
     var best_prefix = ""
+    var exact_tbl: int = -1
+    var best_tbl: int = -1
     var i: int = 0
     // lobo#14: the load-time location table — the same rows in the
     // same ROW order, so precedence is untouched
@@ -1304,6 +1286,7 @@ fn match_location(c: config.Conf, path: str) -> LocMatch {
         if modi == "=" {
             if path == prefix {
                 m.exact_hit = c.loc_row[i]
+                exact_tbl = i
                 best_prefix = prefix
             }
         } else if modi == "" || modi == "^~" {
@@ -1313,6 +1296,7 @@ fn match_location(c: config.Conf, path: str) -> LocMatch {
                 if prefix.len > best_len {
                     best_len = prefix.len
                     m.best = c.loc_row[i]
+                    best_tbl = i
                     best_prefix = prefix
                 }
             }
@@ -1322,10 +1306,12 @@ fn match_location(c: config.Conf, path: str) -> LocMatch {
     if m.exact_hit >= 0 {
         m.loc = m.exact_hit
         m.matched = best_prefix
+        m.tbl = exact_tbl
     } else if m.best >= 0 {
         m.loc = m.best
         let key = location_key(c, m.best)
         m.matched = key.1
+        m.tbl = best_tbl
     }
     m
 }
@@ -1345,13 +1331,17 @@ fn decide(c: config.Conf, path: str, m: LocMatch) -> Decision {
     if m.srv < 0 {
         return d
     }
-    let srv = m.srv
-    let loc = m.loc
     let matched_prefix = m.matched
     d.matched = matched_prefix
 
-    // resolve alias (replaces the matched prefix) or root (appends)
-    let alias = child_arg1(c, loc, "alias") else ""
+    // lobo#18: three field reads off the resolved route row, where
+    // this read used to make five `child_row` bucket walks a request
+    // (alias, root at the location, root at the server, the index
+    // list at both). The row was resolved at load by `build_index`
+    // with the SAME innermost-wins rule, so the decision is the one
+    // the walks returned.
+    let t = m.tbl
+    let alias = config.route_alias(c, t)
     if !alias.is_empty() {
         d.is_alias = true
         var remainder = path
@@ -1360,22 +1350,12 @@ fn decide(c: config.Conf, path: str, m: LocMatch) -> Decision {
         }
         d.fs_path = join_path(alias, remainder)
     } else {
-        // root: this location's, else the server's, else none
-        var root = child_arg1(c, loc, "root") else ""
-        if root.is_empty() {
-            root = child_arg1(c, srv, "root") else ""
-        }
+        let root = config.route_root(c, t)
         if !root.is_empty() {
             d.fs_path = join_path(root, path)
         }
     }
-
-    // index list: location's, else server's
-    var idx = index_list(c, loc)
-    if idx.is_empty() {
-        idx = index_list(c, srv)
-    }
-    d.index = idx
+    d.index = config.route_index(c, t)
     d
 }
 
