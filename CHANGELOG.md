@@ -78,6 +78,71 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws35 — 2026-09-14 — the lobo half (the pin at v0.2.14 with the string runtime; lobo#21's one word; the head enters the gather as a `str`; #298's number re-read and not moved)
+
+- **The pin moved first and alone.** `[wolf]` a7f517e (v0.2.12) →
+  **30731a6 (v0.2.14)**, `[lupin]` 0.1.33 → **0.1.36**, `[std]`
+  bd12ef5 → **2d10219**, every binary from the release archives by
+  digest (`80407e31…` darwin / `13b4de6d…` linux for wolf, `41f21002…`
+  / `31f97dac…` for lupin), whole archive pair, no source build.
+  **wolf-std's own trunk pin is v0.2.12** (`vendor/upstream/PIN` =
+  a7f517e): no wolf-std commit pins 0.2.14 when this lane runs, so
+  `[std]` is the nearest read-not-guessed sha, one release behind
+  `[wolf]`, and the note says so. Predicted before the first build,
+  measured after it: **exactly one row** moves under the new compiler
+  (lobo#21), **0 of 150** files re-lay under the formatter, **#146 is
+  still open** (twentieth measurement: the same `sc_muladd` ICE
+  without `WOLF_MIDEND=0`), and both std trees compile under 0.2.14
+  with that one lobo row as the only error — the std move is a choice,
+  not a necessity. **One prediction was wrong:** the `.wolfi` were
+  called stamp-only and moved 34 lines, not 14 — `[std]`'s dep hashes
+  for `std.net` and `std.x.tls.client` reach five surfaces' hashes
+  through the dep list. `[wolf]`'s half moved no hash (#292, third
+  bump to test it).
+
+- **lobo#21 — the one word.** `acc.addr = copy pl.pt.authority`. The
+  row is the pool-resolved-to-nothing 502 arm — no success path, never
+  the profiled static path — so the copy's cost is one ambient
+  allocation of the authority's length per such 502, beside a
+  gateway-error body that already allocates. Decided from where the
+  row sits rather than from taste; restructuring not warranted.
+
+- **The head enters the gather as a `str`** (wolf-lang#299 consumed,
+  `[os.net.writev.head]`). `serve_file`'s plaintext arm calls
+  `net_writev_head(sock, head, parts)` where it built `head.bytes()`
+  into a two-part `net_writev`. Predicted −288 B and one list per
+  response in `region resp`'s ledger and 0 change in retained bytes;
+  **measured −288 B to the byte** (`region_bytes(resp)` re-read after
+  the write on a probe build: 1,472 → 1,184) and retained bytes moved
+  +12 B on a run whose nginx control read 8 — the instrument's floor.
+  The wire is unchanged: `tests/serve/writev_sizes.lu` and the
+  differential guard it, both green.
+
+- **#298's number, re-read, has not moved — the issue stays open.**
+  `tools/lobo-strings`, keepalive, three trees on one box: trunk @
+  0.2.12 **2,386 B/request**, the pin @ 0.2.14 **2,389**, head @ 0.2.14
+  **2,393**, nginx 0/8. Against 6,373 / 2,315 that is the same
+  retention ws28 left, and neither of s160's clauses could have moved
+  it here: #191 frees `str` work built inside regions, and lobo's
+  static path builds none there; #299 removes a region-charged copy
+  this number never saw. What still allocates, by leaf, is on #298
+  with the run ids: the runtime's list headers and `net_read`'s copy —
+  #298's own items 1–3 and #374. The count is not instrumented in this
+  repo; s160's materialization-counter ask stands (registered below).
+  The profile leg ran on the CI runner in ws33/ws34's shape: run
+  34901037713, keepalive N=1, ws35 vs its own pre-item-3 commit
+  `4bf3721` on the same pin (lobo#20's constraint, handled as ws34
+  did); the rows are in docs/PROFILE.md's ws35 addendum.
+
+- **W8 not re-run, not re-argued** (B1). Nothing here can move it.
+
+- **Registered, not left as sentences:** the `control_unix_e2e`
+  shutdown race (the master's 1 s post-`stop` budget before `os_kill`
+  leaves a hand's socket file behind under load — one red in three
+  gauntlets, 5/5 green re-runs) — lobo#23; the
+  materialization counter #298 needs before its headline can be
+  re-derived — wolf-lang#380.
+
 ## ws34 — 2026-09-12 — the residue (the pin at v0.2.12 with the pass B3 owed; the route below the profile's resolution; one fix measured and reverted)
 
 - **lobo#16 — the pin moved, and the formatter pass finally ran.**
