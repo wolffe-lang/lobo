@@ -1888,6 +1888,117 @@ the parity instrument's floor, exactly as lobo#14's did — ws33's
 parity leg read ws33 ÷ trunk 0.983–0.992x on all four cells for a
 change four times this size.
 
+## ws35's addendum — the lobo half of the string runtime: the pin at v0.2.14, the head as a `str`, and #298's number re-read (2026-09-14)
+
+### What was predicted, before the first build at the new pin
+
+Written to scratch (`ws35-prediction.md`) before `.wolf-bin` held a
+0.2.14 binary. The pin moves a7f517e (v0.2.12) -> 30731a6 (v0.2.14),
+lupin 0.1.33 -> 0.1.36, std bd12ef5 -> 2d10219.
+
+| what | predicted |
+|---|---|
+| rows the new compiler moves in `src/` | **exactly 1** — `proxy.lu:1882`, `acc.addr = pl.pt.authority` -> E1004 (lobo#21, s160's projected read); 0 from s157/s158/s159 |
+| `fmt --check` re-lay at the release binary | **0 files** |
+| `.wolfi` | all 14 by the stamp line only, every hash identical |
+| wolf-lang#146 | still ICEs (twentieth measurement) |
+| lobo#21's repair | the one-word `copy`; the row is the pool-resolves-to-nothing 502 arm, on no success path and never on the profiled static path, so the profile shows no row for it by construction |
+| item 3, `net_writev_head` on the response path | removes the head's copy and its list from `region resp`: **−288 B and one list per response** in the region's ledger; **0** change in retained bytes (the copy was region-charged at both pins); syscalls unchanged; no perf leaf moves beyond ~0.3-point noise; req/s 1.00 [0.97, 1.03] |
+| #298's number (`tools/lobo-strings`, keepalive, one box, 20k requests) | A trunk@0.2.12 **2,100–2,400 B/request**; B ws35-pre-item-3@0.2.14 within **±50 B** of A; C head@0.2.14 within ±50 B of B; nginx 0 — i.e. **the 6.4 KB / 110 headline does not move at 0.2.14** on lobo's plaintext keepalive path, because nothing `str`-shaped materializes inside `region resp` and every remaining allocation is a list header or `net_read`'s copy in the ambient root |
+| the profile leg (CI runner, keepalive N=1, ws35 vs the pre-item-3 commit on the same pin) | every `lobo-release` leaf over 0.1% within ±0.3 points; dso lobo-release 13–14%, kernel ~79%, libc ~6% |
+| W8 | not re-run (B1); nothing here can move it |
+
+### The measurement — the pin (this box, macOS arm64, the release archives by digest)
+
+| what | measured | against |
+|---|---|---|
+| rows moved by the new compiler | **1**: the debug build stops on `proxy.lu:1882` E1004 and no other error, zero warnings — with the new std tree AND with the old `bd12ef5` tree (the same single error under both) | predicted 1: **held** |
+| `fmt --check` over src/ + tests/ (150 `.lu`) | **0 files** re-lay, exit 0 | predicted 0: **held** |
+| `.wolfi` | 14 files, **34 lines**: the stamp line in each, PLUS 20 hash lines in five files (`acme`, `proxy` — the importers of `std.net` and `std.x.tls.client`, whose recorded dep hashes move with bd12ef5 -> 2d10219 — and their dependents `dryrun`, `serve`, `root`) | predicted stamp-only: **WRONG on the [std] half.** The [wolf] half moves no hash (#292's content-only rule, third bump to test it). A std bump reaches the interface hash through the dep list; the prediction forgot the dep list |
+| wolf-lang#146 | a release build without `WOLF_MIDEND=0` dies `ICE: mid-end broke the module` on `sc_muladd`, `%19 is not dominated by its definition` — the twentieth measurement, OPEN | predicted open: **held** |
+| the gauntlet at `4bf3721` (the chunk's head) | `lobo-gauntlet: GREEN`, exit 0: 280/280 lane-runs, differential 3/3, proxy differential 8/8, TLS interop and dist green | — |
+
+One red on the way: the first gauntlet at this tree read
+`tests/shell/control_unix_e2e.lu [checked]` as `trap(assert)` at the
+test's line 207 (`hand 1's socket file is gone`), with lobo's own log
+saying `worker-exited worker=1 reason=signal code=-1` — the master
+reaped hand 1 with `os_kill` after its 1 s post-`stop` budget
+(`src/main.lu:3335–3342`) before the hand had closed and unlinked its
+socket. The same file then passed **5 of 5** re-runs on both lanes at
+this pin, and the second full gauntlet was green. That is a race in
+lobo's shutdown, older than this pin (the code is ws17's), surfaced
+once under a loaded box — filed, not left as a sentence (see the
+CHANGELOG entry).
+
+### The measurement — item 3, the ledger read off the real path
+
+A probe build of each side with `chg.rt = region_bytes(resp)` re-read
+AFTER the gather (the shipped read is BEFORE the head copy, on
+purpose — `mem-rt-hw` documents the body's number and does not move),
+one 1 KiB keepalive request each, `control status`'s `mem-rt-hw`:
+
+| tree | `region_bytes(resp)` after the write |
+|---|---|
+| before (`head.bytes()` into the gather) | **1,472 B** |
+| after (`net_writev_head(sock, head, parts)`) | **1,184 B** |
+| the copy | **288 B** — the 241-byte head rounded to the arena's 16 plus the list header, exactly s160's number on the same shape |
+
+Predicted −288 B: **held to the byte.** The wire is unchanged —
+`tests/serve/writev_sizes.lu` (five files at the small path's edges,
+both shapes, byte for byte) and the differential are the guard, and
+both are green at this head.
+
+### The measurement — #298's number, three trees on ONE box (`tools/lobo-strings`, keepalive, `ab -k -n 20000 -c 8` after a 2,000-request warm-up)
+
+Retained bytes per request = RSS growth over the drive ÷ requests
+completed. Since 0.2.14 this counts RETENTION (what the request path
+allocates in the ambient root and never frees, wolf-lang#191 having
+made region-charged `str` work reclaimable) — not materialization.
+The number is comparable across these three trees because all three
+serve the same path with the same regions; it is comparable to ws28's
+2,315 only as a retention figure.
+
+| run | tree | RSS before (KiB) | RSS after (KiB) | requests | failed | bytes per request |
+|---|---|---|---|---|---|---|
+| AB (19:38Z, load 3.19) | B — ws35 `4bf3721` @ 0.2.14 (the pin, before item 3) | 8,576 | 55,232 | 20,000 | 0 | **2,389** |
+| AB | A — trunk `6b74032` @ 0.2.12 | 8,512 | 55,120 | 20,000 | 0 | **2,386** |
+| AB | nginx 1.30.4 | 2,336 | 2,336 | 20,000 | 0 | **0** |
+| CB (19:41Z, load 4.06) | C — ws35 head @ 0.2.14 (item 3 in) | 8,576 | 55,312 | 20,000 | 0 | **2,393** |
+| CB | B — ws35 `4bf3721` @ 0.2.14 | 8,560 | 55,072 | 20,000 | 0 | **2,381** |
+| CB | nginx 1.30.4 | 2,208 | 2,368 | 20,000 | 0 | **8** |
+
+- **The pin moves the retained number by 3 B (B − A = +3), and item
+  3 by 12 B (C − B = +12) — both inside the instrument's floor**,
+  which the second run puts at ~8 B/request when nginx itself, with
+  no arena at all, reads 8. Predicted "within ±50 B" for both:
+  **held.** The +12 is not item 3 adding bytes: the copy it removes
+  was region-charged and freed at `}` at both pins, so it was never in
+  this number; the 12 B is the run-to-run spread of `ps`'s RSS.
+- **Against 6,373 / 2,315 (ws28, wolf v0.2.9): the retained figure at
+  v0.2.14 is ~2,385 B/request, i.e. it has NOT moved** — 2,315 -> 2,386
+  across ws29–ws34 is the metrics and route lists those lanes added
+  and removed, not the runtime. Which of s160's clauses could have
+  moved it: `[mem.region.account.1]` (#191) only moves `str` bytes
+  built INSIDE a region, and lobo's static path builds none there;
+  `[os.net.writev.head]` (#299) removes a region-charged copy, which
+  this number never saw. The remaining ~2.4 KB is exactly what ws28
+  named and #298's own closing paragraph lists: the runtime's list
+  headers and eight-slot buffers (`tls.no_sess()`'s six, the parser's
+  four, the record's two, `fs_fstat`'s `List[int]`, the route's
+  three, the per-pass loop lists) and `net_read`'s 117-byte arena
+  copy — ~25–30 arena bumps a request, all in the ambient root, all
+  #298's items 1–3 and #374's, none of them a `str` interpolation
+  (the head is a memo since ws28).
+- **The allocation count is not instrumented here** — no tool in this
+  repo counts arena bumps (the 110 was read off `str.rs` and lobo's
+  source at ws28, then confirmed by the bytes), and s160's #298
+  comment already says a materialization COUNTER is what a
+  re-derivation needs. The ~25–30 above is the same read-off-the-tree
+  count ws28's table left, minus item 3's list.
+
+So under the contract's rule #298 **stays open**: the number did not
+move, and the comment on #298 says what still allocates, by leaf.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
