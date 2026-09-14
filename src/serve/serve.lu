@@ -950,26 +950,33 @@ fn serve_file(
             // to `chg.used`.
             chg.rt = region_bytes(resp)
             if !failed {
-                // ws24 (wolf-lang#254): ONE syscall, NO copy. The head's
-                // bytes are materialized in this region (F-0072) and
-                // the body is MOVED behind them into a two-part gather
-                // (a push moves the list header, not its bytes), and
-                // `net_writev` hands both to the kernel as one
-                // `writev(2)`: one segment where ws23's copy made one
-                // buffer at ~1.8 ns per byte (2 µs for this 1 KiB
-                // body, 120 µs for a 64 KiB one). ws23's `one_write`
-                // rule — copy on keepalive up to 64 KiB, on close up
-                // to 4 KiB, two writes above — priced the copy against
-                // the stall and the second reactor trip; a gather
-                // costs neither, so the rule is retired and every
-                // small response takes this arm. The budgeted arm
+                // ws24 (wolf-lang#254): ONE syscall. The body is MOVED
+                // into a one-part gather (a push moves the list header,
+                // not its bytes) and `net_writev_head` hands the head
+                // and the body to the kernel as one `writev(2)`: one
+                // segment where ws23's copy made one buffer at ~1.8 ns
+                // per byte (2 µs for this 1 KiB body, 120 µs for a
+                // 64 KiB one). ws23's `one_write` rule — copy on
+                // keepalive up to 64 KiB, on close up to 4 KiB, two
+                // writes above — priced the copy against the stall and
+                // the second reactor trip; a gather costs neither, so
+                // the rule is retired and every small response takes
+                // this arm. ws35 (wolf-lang#299, [os.net.writev.head]):
+                // NO copy of the head either. Until 0.2.14 the head
+                // entered the gather as `head.bytes()` in a `let`, which
+                // [mem.str.view.lend] rules a materialized `List[byte]`
+                // (F-0072): the head's bytes and a list header charged
+                // to this region per response, for bytes `writev` reads
+                // in place. The head now enters as the `{ptr, len}` a
+                // `str` already is; the wire is byte-identical (the
+                // differential and tests/serve/writev_sizes.lu are the
+                // guard) and this region's ledger drops by the copy
+                // (docs/PROFILE.md, ws35). The budgeted arm
                 // (`budget.body_small`) keeps its two writes; its doc
                 // says why (D40's margin is sixteen ledger units).
-                let hb = head.bytes()
                 var parts = List[List[byte]]()
-                (mut parts).push(hb)
                 (mut parts).push(body)
-                net_writev(sock, parts) else |e| match e {
+                net_writev_head(sock, head, parts) else |e| match e {
                     closed => {
                         wcode = 1
                     },

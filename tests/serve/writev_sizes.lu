@@ -25,6 +25,13 @@
 //! it opened (`serve.read_exact`), and zero is the edge where a read
 //! answers `eof` before a byte: served as `Content-Length: 0` on both
 //! shapes, the head intact, no body.
+//!
+//! ws35 (wolf-lang#299 consumed, [os.net.writev.head] at 0.2.14): the
+//! head enters the gather as the `str` it is — `net_writev_head` —
+//! and the `head.bytes()` copy the ws24 arm made per response is
+//! gone. Nothing on the wire changes, which is exactly what this
+//! witness pins: the same five files, both shapes, byte for byte.
+//! The bytes the copy cost are docs/PROFILE.md's ws35 number.
 
 use config
 use http
