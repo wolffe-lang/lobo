@@ -1999,6 +1999,56 @@ serve the same path with the same regions; it is comparable to ws28's
 So under the contract's rule #298 **stays open**: the number did not
 move, and the comment on #298 says what still allocates, by leaf.
 
+### The measurement — the profile leg, two trees on ONE VM (run 34901037713, keepalive N=1, one hand, `profile_shape=keepalive profile_n=1 ref_tree=4bf3721`)
+
+`ws35` = `0f1b6d0` (item 3 in), `base` = `4bf3721` (this branch at the
+new pin, before item 3 — lobo#20's constraint: a ref on the old pin
+cannot be staged by this leg, so as ws34 did the baseline is the
+branch's own pre-change commit on the SAME pin, and the comparison
+isolates item 3's source change and says nothing about the compiler
+bump). Built beside each other with the same staged toolchain (CI
+builds the tag from source with the D57 stamp), profiled back to
+back on one `ubuntu-latest` runner: ws35 37,747 req/s in the perf
+window (load 2.51) and 39,255 in the untraced split window; base
+38,080 and 37,908; no failed request on either. `lobo-release` leaves
+over 0.1%, the rows that moved most, within this one run:
+
+| row | base (`4bf3721`) | ws35 (`0f1b6d0`) | Δ (points) |
+|---|---|---|---|
+| `__wolf_rt_net_writev` → `__wolf_rt_net_writev_head` | 0.20% | 0.45% | +0.25 |
+| `__wolf_rt_list_new` | 0.48% | 0.34% | −0.14 (the predicted direction: one list fewer a response) |
+| `wolf_rt::str::ambient_alloc` | 0.84% | 0.71% | −0.13 |
+| `wolf_rt::str::str_find` (neither tree touched it) | 0.83% | 0.96% | +0.13 |
+| `serve_main` | 1.08% | 0.93% | −0.15 |
+| `http.parse_request` (untouched) | 0.63% | 0.94% | +0.31 |
+| `serve.head_warm` | 0.81% | 0.71% | −0.10 |
+| by dso: kernel / lobo-release / libc | 80.28 / 13.75 / 5.55 | 80.24 / 13.82 / 5.33 | — |
+| µs cpu a request (the split, no tracer) | 26.5 | 25.5 | −1.0 |
+| syscalls a request (`strace -c`, calls ÷ requests) | writev 1, openat 1, recvfrom 1, read 1, close 1, statx 1, poll 0.031, brk 0.0097 | the same six at 1.000, poll 0.033, brk 0.0098 | unchanged |
+
+**NOT VISIBLE, as predicted — and the prediction's bracket was
+touched, not broken.** Every row is inside the ~0.3-point run-to-run
+swing ws34 measured on this exact cell (`str_find` 0.89 vs 0.61 on two
+trees that did not change it), and the two untouched rows here swing
+by 0.13 and 0.31 points on their own, which is the same floor read
+again: the largest move in the table is on a function neither tree
+changed. `list_new` and `ambient_alloc` both fall by ~0.14, which is
+the direction item 3 predicts (one list header and one 256-byte buffer
+fewer a response) and is not claimed as a delta, because it is under
+the floor. `net_writev_head` reading 0.25 points above `net_writev` is
+the same floor from the other side: the shim does one `iovec` more and
+one materialization less, and a 241-byte `memcpy` was under 0.1% to
+begin with (wolf-lang#299's own pricing at ws31). req/s ws35 ÷ base
+reads **0.991x** in the perf window and **1.036x** in the split window
+— predicted 1.00 [0.97, 1.03]; one window sits at the bracket's edge,
+the two windows straddle 1.00, and nothing is claimed either way. The
+syscall count per request is unchanged on every row — one `writev`
+with two `iovec`s where there were two — and `brk` is unchanged at
+~0.01 a request, which is the retained-bytes reading (2,381 → 2,393,
+the instrument's floor) seen from the kernel's side.
+
+**W8:** not re-run (B1). Nothing above is a W8 number and none moved.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
