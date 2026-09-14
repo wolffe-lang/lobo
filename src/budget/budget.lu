@@ -71,7 +71,7 @@ fn read_pipe(pipe_r: int, errored: bool) -> (int, int) {
 /// reads the pipe for which).
 ///
 /// TWO WRITES, on purpose (ws24). The plaintext arm in `serve` now
-/// gathers head and body into one `net_writev`; this arm does not,
+/// gathers head and body into one `net_writev_head`; this arm does not,
 /// because the gather's two-part list must live in the capped region
 /// beside the body (a region value cannot be stored outside it,
 /// E1010), and D40's envelope leaves that region exactly sixteen
