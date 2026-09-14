@@ -1879,7 +1879,7 @@ pub fn run(
             oi = oi + 1
         }
         if hosts.len == 0 {
-            acc.addr = pl.pt.authority
+            acc.addr = copy pl.pt.authority
             acc.status = 502
             acc.body_bytes = gw_body(502, token).len
             send_gateway_error(client, 502, date, token)
