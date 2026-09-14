@@ -14,142 +14,162 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
-# wolf-lang at the **v0.2.12 RELEASE TAG** (a7f517e, r18: "release:
-# wolf 0.2.12 (wolfgang)"), the release stamp `wolf 0.2.12 (wolfgang,
-# pin a7f517e)`. c9237c1 -> a7f517e is 31 commits: s156's papercuts II
-# and the r18 train. D57: the tag's own archive IS the stamped build,
-# so this box stages the RELEASE ARCHIVE by digest and builds nothing:
-#   gh release download v0.2.12 -R wolffe-lang/wolf-lang \
-#       --pattern 'wolf-0.2.12-<host>.tar.gz'
-#   sha256 6be493a91347b031b0d920786c43e3d263eadda22049aa46210af9e23e40ecc5
-#       (aarch64-apple-darwin, measured at ws34)
-#   tar -xzf … && cp wolf-0.2.12-<host>/{wolf,libwolf_rt.a,wolf-cimport-worker} .wolf-bin/
+# wolf-lang at the **v0.2.14 RELEASE TAG** (30731a6, r19: "wolf 0.2.14
+# (wolfgang)"), the release stamp `wolf 0.2.14 (wolfgang, pin
+# 30731a6)`. a7f517e -> 30731a6 is two releases: v0.2.13 (s157's ten
+# papercuts, s158's list literals / `range[T]` / error-set aliases,
+# the pairing at lupin 0.1.35) and v0.2.14 (s159's papercuts IV,
+# s160's string runtime, the pairing at lupin 0.1.36). D57: the tag's
+# own archive IS the stamped build, so this box stages the RELEASE
+# ARCHIVE by digest and builds nothing:
+#   gh release download v0.2.14 -R wolffe-lang/wolf-lang \
+#       --pattern 'wolf-0.2.14-<host>.tar.gz'
+#   sha256 80407e31b89cae684163fd9fd79c3935a5fe63873dcb16376c36c8596af61b54
+#       (aarch64-apple-darwin, measured at ws35)
+#   sha256 13b4de6d0d37fe31a719e4b89033f8e55791e2a99afe6b4c83db686f93c60d05
+#       (x86_64-unknown-linux-gnu, measured at ws35)
+#   tar -xzf … && cp wolf-0.2.14-<host>/{wolf,libwolf_rt.a,wolf-cimport-worker} .wolf-bin/
 # (the whole archive pair — the driver, the runtime staticlib it
 # links, the cimport worker beside it).
 #
-# WHAT THE BUMP BRINGS THIS REPO, measured at ws34 rather than assumed.
+# WHAT THE BUMP BRINGS THIS REPO, predicted before the first build at
+# the new pin (scratch ws35-prediction.md) and measured after it.
 #
-#   * THE FORMATTER, and it is the whole of the source motion. FOUR
-#     fmt commits ride this span, not the one lobo#16 named:
-#       0c47664  #303  a braced `if` chain breaks as one
-#       491b65f  #314  a closure body keeps its space after the params
-#       e47567b  #339  the break that achieves the width, outermost first
-#       5a27527  #340  a binary `else` fallback keeps the author's parens
-#     lobo#16 said #339 "may move more files at whatever pin carries
-#     their fix; that is a second pass, not this one". THAT WAS WRONG:
-#     #339's fix is e47567b, inside this tag. The second pass IS this
-#     pass, and #339 — not #303 — is what moved the tree.
-#     MEASURED with the RELEASE binary over src/ + tests/ (149 .lu):
-#     **30 files re-lay**. Exactly one of them, src/main.lu, carries
-#     #303 chain motion (the three mixed-shape chains lobo#16
-#     tabulated, at 1377/1385/3018); the other 29 are #339's, almost
-#     all the orphaned receiver-dot break rejoining. #314: zero — this
-#     tree's closures already carry the space. #340: zero — `else (`
-#     followed by a binary operand occurs nowhere here.
-#     The re-lay is pure layout: every `.wolfi` hash is unchanged
-#     across it (below), and the gauntlet is green on both sides.
+#   * ONE ROW, and it is the one wolf-lang s160 swept for: s160's
+#     `[mem.region.escape]` second half — a `str` read carries its
+#     place's allocation sites through a PROJECTION, not only out of
+#     a whole local — turns `acc.addr = pl.pt.authority`
+#     (src/proxy/proxy.lu:1882) into E1004 under `[mem.region.edge]`'s
+#     field-store arm (lobo#21). PREDICTED exactly one row moved by
+#     the new compiler; MEASURED: the debug-tier build at this pin
+#     stops on exactly that one error and no other, with zero
+#     warnings. The repair is the one-word `copy`, taken in the
+#     commit after this one; the row is the pool-resolves-to-nothing
+#     502 arm, on no success path, so the copy's cost (one ambient
+#     allocation of the authority's length per such 502) is paid
+#     beside a gateway-error body that already allocates.
+#   * THE FORMATTER: ZERO. PREDICTED 0 files (v0.2.13's notes measured
+#     lobo unchanged file-for-file; v0.2.14 carries no fmt commit);
+#     MEASURED with the release binary over src/ + tests/ (150 .lu):
+#     `fmt --check` exits 0, no file re-lays. ws34's pass at 0.2.12
+#     was the last re-lay this tree owed.
+#   * THE STRING RUNTIME (s160), which is what this bump is FOR:
+#       #191  a `str` materialization charges the CURRENT region, not
+#             the process root (`[mem.region.account.1]`'s per-tier
+#             gap closed). On this serving path nothing `str`-shaped
+#             materializes inside `region resp` / `region chunkr`
+#             (the head is a memo since ws28, the body a `List[byte]`)
+#             so the retained bytes per request are predicted to hold;
+#             a `str` built inside a region anywhere else now frees
+#             with it instead of leaking (docs/PROFILE.md, ws35).
+#       #299  `net_writev_head(fd, head: str, parts)` —
+#             `[os.net.writev.head]`: the response head enters the
+#             gather as the `{ptr, len}` it already is, no `List[byte]`
+#             copy. RT_SYMBOLS 143 -> 144. Taken on the response path
+#             in a later commit of ws35 (docs/PROFILE.md carries the
+#             prediction and the number).
+#       #355  `[mem.region.proc]` — a spawned proc's ambient is its own
+#             region. ZERO HERE: lobo's procs (the signal forwarder,
+#             the hands' control tasks) send no `str` they built.
+#       #321  `upper`/`lower`/`repeat`/`replace`/`str_from_utf8` are
+#             sites; the projected read above is the one row.
+#   * s157 / s158 / s159 (v0.2.13 and the papercuts IV): every one a
+#     widening this tree does not spell (no list literal, no
+#     `range[T]` type, no `error` alias, no closure-parameter call, no
+#     `take` on a `read` parameter — the two `take` sites here move
+#     values) or a wording/parser-recovery change. PREDICTED ZERO;
+#     MEASURED by the build above (one error, the s160 row) and by
+#     the corpus at this pin.
+#   * r19 — the `.wolfi` toolchain stamp 0.2.12 -> 0.2.14 in every
+#     header. MEASURED: all 14 `.wolfi` carry the stamp line; the
+#     [wolf] half moves NO hash (#292's content-only rule, third pin
+#     bump to test it). The hash motion in five of them is [std]'s —
+#     see that section.
 #
-#   * The upstream release note is TWO FILES LIGHT for this repo, and
-#     the error is systematic, not local. v0.2.12's notes record
-#     "lobo `1148318` 28 files (71 to 0, 8 to 0)" — measured at THIS
-#     repo's exact trunk sha, off a branch build. The released binary
-#     moves 30 over that same sha. wolf-std logged the identical
-#     delta in the same span (F-0124: 33 predicted on a branch build,
-#     35 measured with the release binary, twice, by two independent
-#     walks). Same span, same sign, same magnitude. Filed upstream.
-#     The rule this pins for the next bumper: a re-lay count is only
-#     as good as the binary it was taken with — re-measure at the pin,
-#     never quote the release notes' number.
-#
-#   * NOTHING ELSE IN THE SPAN TOUCHES THIS TREE, and that is measured
-#     by the gauntlet at the new pin, not argued. The span's typing
-#     and lowering work is #297, #318, #323, #325, #326, #327, #329,
-#     #331, #332, #333, #334, #336, #337, #341 — every one a
-#     TIGHTENING or a widening this corpus does not spell. Two of them
-#     could have reddened a green tree and did not: **#329's W0318**
-#     (a defaulting `else` that swallows the next term) and **#326's
-#     W0601** (a `!T` tail in a unit context) are new WARNINGS, and
-#     this repo's corpus runner denies warnings on every declared
-#     lane — 300+ lane-runs green at the new pin, so neither fires
-#     here. **#335** (`str.find` dispatches on the needle's length) is
-#     the one runtime change on the serving path; it is a speedup with
-#     no surface, and ws34's profile leg carries what it is worth.
-#     s158's list literals and `range[int]` and s157's ten papercuts
-#     are NOT in this tag — they are 0.2.13's, which was not cut when
-#     ws34 ran.
-#
-#   * r18 — the version sites and the `.wolfi` toolchain stamp
-#     0.2.11 -> 0.2.12 in every header. MEASURED under s148's
-#     content-only rule (#292): all 14 `.wolfi` moved by exactly one
-#     line each, the stamp, and **every export_hash and pkg_hash is
-#     byte-identical** — the second pin bump to test that rule, and
-#     the first to test it across a 30-file layout re-lay. Layout does
-#     not reach the interface hash. Confirmed.
-#
-# Source motion in lobo for the pin's own sake: the `.wolfi` stamp and
-# the two shell.lu constants. The 30-file re-lay is the formatter's,
-# committed separately, zero behaviour motion.
-# Pairing note (F-0064, reported never gated): wolf@v0.2.12 declares
-# lupin **0.1.34** (pin c9237c1 — the v0.2.11 TAG) and [lupin] below
-# names **0.1.33**, which declares wolf **662b14c = v0.2.10**. The gap
-# is unchanged in shape from ws31 — one release each way — but both
-# ends moved up one. Nothing in this corpus spells a clause on either
-# side of it (s156 here, is46 there), so no lane can diverge; the 63
-# lupin-lane files agree with their headers on both machines, which is
-# what the gauntlet measures.
-# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, NINETEENTH
-# measurement — **still OPEN at v0.2.12**. A plain release build of
-# src/main.lu without the flag still dies `ICE: mid-end broke the
-# module` on `@std.x.crypto.curve25519.sc_muladd` (`%19 is not
-# dominated by its definition`), measured at ws34. The gauntlet's
-# release step and the release archive's build keep WOLF_MIDEND=0
-# until the fix enters the [wolf] pin. See [std]'s note. The shipped
+# Source motion in lobo for the pin's own sake: the `.wolfi` stamp
+# and the three shell.lu constants (toolchain_version, toolchain_pin,
+# std_rev — the third moves because [std] moves in the same commit).
+# Pairing note (F-0064, reported never gated): wolf@v0.2.14 declares
+# lupin **0.1.36** (pin a7f517e — the v0.2.12 TAG) and [lupin] below
+# names **0.1.36**: the compiler's side of the pairing is CLOSED for
+# the first time since ws30. The interpreter's side is two releases
+# behind (0.1.36 conforms to v0.2.12; v0.2.13 and v0.2.14 unanswered,
+# wolf-interp#111 holds the rows). Nothing in this corpus spells an
+# s157–s160 clause on a lupin lane, so no lane can diverge; the
+# lupin-lane files agree with their headers on both machines, which
+# is what the gauntlet measures.
+# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, TWENTIETH
+# measurement — **still OPEN at v0.2.14**. A plain release build of
+# src/main.lu without the flag dies `ICE: mid-end broke the module`
+# on `@std.x.crypto.curve25519.sc_muladd` (`%19 is not dominated by
+# its definition`) at std 2d10219 exactly as at bd12ef5, measured at
+# ws35. The gauntlet's release step and the release archive's build
+# keep WOLF_MIDEND=0 until the fix enters the [wolf] pin. The shipped
 # binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "a7f517e1f667f142ffaf61b57aa2bff06e32b520"
-version_line = "wolf 0.2.12 (wolfgang, pin a7f517e)"
+rev = "30731a6509443ade03724707345da9ceb86a88bf"
+version_line = "wolf 0.2.14 (wolfgang, pin 30731a6)"
 
 [lupin]
-# lupin at the **v0.1.33 RELEASE TAG** (18de030, the is45 clippy commit
-# atop "release: lupin 0.1.33"; D57: the tag's archive, so --version
-# claims the release with no +dev suffix). Staged from the release
-# archive by digest, as [wolf] is (ws31):
-#   gh release download v0.1.33 -R wolffe-lang/wolf-interp \
-#       --pattern 'lupin-0.1.33-<host>.tar.gz'
-#   sha256 685fa60f… (aarch64-apple-darwin) / 31c2075c… (x86_64-linux)
-# 0.1.33 is is45 ("the mirror takes `then`"): the reference
-# interpreter's conformance pin is wolf-lang **662b14c — the v0.2.10
-# TAG** (0.1.32 had pinned e0ce018, a dev stamp 22 commits short of
-# it). 0.1.29 → 0.1.33 is is42–is45: a leading `else` (0.1.30), #304's
-# control ritual (0.1.31), the range arm and #79's method half
-# (0.1.32), and `then`, E0409 on either side of a row compare, E0416
-# on a `str` slice assignment, one `T` per call (#84), a type
-# argument in expression position resolving (#89), E0206 for a
-# keyword in type position (0.1.33). Every one is a TIGHTENING or a
-# widening lobo's source does not spell (grepped at the bump: no bare
-# `if`, no slice assignment, no generic `fn x[`, no row compare the
-# native tier at v0.2.10 did not already refuse), so the 63 lupin-lane
-# files are predicted to move by ZERO. `fs_open_mode` 5 and `fs_fstat`
-# are still declined by name at this pin (wolf-interp#86: s149 is past
-# v0.2.10), so the static-file arm is native-only at 0.1.33 exactly as
-# at 0.1.29, and no lupin lane reaches `classify`. Its conformance pin
-# (662b14c) is information, not this file's rev. Bumped together with
-# [wolf] as always — this is the bump that takes both with the
-# release pair.
+# lupin at the **v0.1.36 RELEASE TAG** (6e94436, "release: lupin
+# 0.1.36"; D57: the tag's archive, so --version claims the release
+# with no +dev suffix). Staged from the release archive by digest, as
+# [wolf] is:
+#   gh release download v0.1.36 -R wolffe-lang/wolf-interp \
+#       --pattern 'lupin-0.1.36-<host>.tar.gz'
+#   sha256 41f21002598dec61cd8600fe3ab28e3a882c41b482a35ca417e2467e20fc8e2a
+#       (aarch64-apple-darwin, measured at ws35)
+#   sha256 31f97dac00961b8b598696f85b2fefc4601d9c746e86f9eb8ccd28c1c1257d24
+#       (x86_64-unknown-linux-gnu, measured at ws35)
+# 0.1.33 -> 0.1.36 is is46–is48: the conformance pin moves 662b14c
+# (v0.2.10) -> a7f517e (v0.2.12) at 0.1.34/0.1.35 — `then` in the
+# contextual table, #323's format spec on a `!T` hole, #325's
+# bare-receiver lint — and 0.1.36 is THE FILESYSTEM TIER: `fs_open_mode`,
+# `fs_fstat`, the byte-producer ledger and the unix-socket echo the
+# interpreter had declined by name since s38 (wolf-interp#86), nine
+# corpus files leaving `unsupported` upstream. What that changes HERE,
+# predicted then measured: ZERO lane verdicts, because a lobo test
+# declares its lanes per file and the static-file arm's tests are
+# `lanes: native` — a lane the interpreter could now run is still a
+# lane nobody declared. Widening a test's lanes to lupin at this pin
+# is a later lane's, measured file by file, not a pin bump's.
+# Its conformance pin (a7f517e) is information, not this file's rev.
+# Bumped together with [wolf] as always.
 repo = "wolffe-lang/wolf-interp"
-rev = "18de0308e5b43c8aa1e63e9b433a879cf56a998f"
-version_line = "lupin 0.1.33 (wolf-interp, reference interpreter at pin 662b14c)"
+rev = "6e94436b2cae285bf2ffc19477600535e33ccbbb"
+version_line = "lupin 0.1.36 (wolf-interp, reference interpreter at pin a7f517e)"
 
 [std]
-# wolf-std, pinned at TRUNK bd12ef5 (the sc37 docs commit atop the sc37
-# merge, "the words come true"): the bump that ANSWERS wolf-std#6.
-# `std.net.listen_with(addr, opts)` / `std.net.adopt_listener(fd)` /
-# `std.net.wait(fds, deadline_ms)` and a new `std.os.cpus()` now exist,
-# both acquisition calls answering the ORDINARY `Listener`.
-# **THE DECISION, taken deliberately at ws18 and not by default: lobo's
-# serving loop STAYS ON THE BUILTINS at this pin, and the reason is the
-# loop's own shape, not inertia.** Three facts, each checked against
-# the source rather than assumed:
+# wolf-std, pinned at TRUNK 2d10219 (the sc47 CHANGELOG commit atop
+# the sc47 merge, 2026-09-12). bd12ef5 -> 2d10219 is 148 commits,
+# sc38–sc47; under std/ it is 16 files, +1303/-129. **wolf-std's OWN
+# upstream pin at this sha is a7f517e = v0.2.12** (vendor/upstream/PIN):
+# no wolf-std commit pins v0.2.14 when ws35 runs — no "the std takes
+# the release" lane has run for 0.2.13 or 0.2.14 — so this is the
+# NEAREST trunk sha, read rather than guessed, one release behind
+# [wolf]. Measured at ws35 rather than assumed: the tree compiles
+# under 0.2.14 with the s160 escape rules (wolf-lang s160's sweep
+# read 0 rows across its 50 module entries at this trunk), and so
+# does bd12ef5 — the same single lobo row (lobo#21) is the only error
+# under either std tree, so the move is a CHOICE (the newest tree
+# s160 swept) and not a necessity.
+# What the span changes among the modules lobo imports (std.net,
+# std.hex, std.base64, std.x.jose, std.x.crypto.curve25519, std.x.tls
+# cert/client/handshake/record): `std/net/net.lu` +211 (c7e9897: the
+# gathered write and Nagle's default said out loud; 5d20ed6: accept's
+# clause agrees with [os.net.accept]) and the three std.x.tls files
+# (6b36d99 / fde6cda: `wolf fmt std` onto the fixed point, no
+# behaviour byte moved; 3fe916e: F-0112, net.write's doc). MEASURED
+# consequence in this tree: the `.wolfi` dep hashes of `std.net` and
+# `std.x.tls.client` move, so `acme` and `proxy` (their importers) and
+# `dryrun`, `serve`, `root` (their dependents) carry new
+# export_hash/pkg_hash lines — 20 hash lines across five files,
+# recorded in the stamp commit and named there as [std]'s, not
+# [wolf]'s. Behaviour: the differential, the proxy differential and
+# the TLS interop witnesses gate it (gauntlet green at this pin).
+# THE DECISION taken at ws18 stands unchanged: lobo's serving loop
+# STAYS ON THE BUILTINS. Three facts, each checked against the source
+# rather than assumed:
 #   1. The loop is RAW-FD end to end. `net_wait` multiplexes ONE
 #      `List[int]` holding the control listener, both http listeners
 #      and every open connection, and the connection table is parallel
@@ -166,19 +186,9 @@ version_line = "lupin 0.1.33 (wolf-interp, reference interpreter at pin 662b14c)
 #      read than one.
 #   3. Nothing behavioral is on offer. Every one of the four is a pure
 #      delegate; moving would buy a spelling.
-# So the posture is UNIFORM and stated: the many-hands listener path,
-# the readiness wait and the cpu count all call the builtins, exactly
-# as the rest of the loop does. What WOULD move it is a sprint that
-# adopts `std.net`'s types through the whole serving loop — routed as
-# residue, not smuggled into a pin bump. lobo's preference on
-# `os_spawn_with`'s std shape is posted on wolf-std#6, which sc37 asked
-# for by name.
-# c0f75e8 → bd12ef5 also carries sc37's wolf-side bump (982f857 →
-# 6ade878, all three std pins on one sha), the ten byte-domain ledger
-# rows coming true, API-CONVENTIONS §14's amendments, and F-0110: every
-# one of the six new rows is `lupin = "unsupported"` because lupin
-# 0.1.26 conforms to v0.2.4 — a CALENDAR, not a semantics, and the same
-# lane gap [wolf] names.
+# What WOULD move it is a sprint that adopts `std.net`'s types through
+# the whole serving loop — routed as residue, not smuggled into a pin
+# bump.
 # NOT a binary: a SOURCE TREE the toolchain resolves `use std.…`
 # against (`--std-root` / $WOLF_STD — the driver's own mechanism;
 # lib-toolchain.sh exports it). Staged, like every pinned artifact, by
@@ -189,8 +199,8 @@ version_line = "lupin 0.1.33 (wolf-interp, reference interpreter at pin 662b14c)
 # from `rev` (a tree has no --version; the marker is its identity).
 # KNOWN CAVEAT at this pin trio: wolf-lang#146 (the loop-versioning
 # noalias guard built from a non-dominating len load, sc_muladd) —
-# re-probed at 32f66bf at THIS bump (the ELEVENTH measurement): the
+# re-probed at THIS bump (the TWENTIETH measurement, see [wolf]): the
 # issue is OPEN and the gauntlet's release step keeps WOLF_MIDEND=0
 # until the fix enters the [wolf] pin; the flip-back rides that bump.
 repo = "wolffe-lang/wolf-std"
-rev = "bd12ef5f78111383073ff44049c585dda3e85551"
+rev = "2d1021996da6cde7b14c41ee4ef9d10125182e13"
