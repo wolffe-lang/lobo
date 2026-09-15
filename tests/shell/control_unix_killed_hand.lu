@@ -1,0 +1,175 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! LOBO#23, THE RACE MADE DETERMINISTIC (ws36): a hand the master has
+//! to KILL at `stop` leaves no socket file behind.
+//!
+//! After `stop` the master gives each hand a 1 s budget to make its
+//! control endpoint unreachable, then reaps it with `os_kill`
+//! (`src/main.lu`, the shutdown tail — nginx's fast stop). A hand's
+//! `<sock>.wN` is unlinked by the runtime inside the hand's own
+//! `net_close` of that listener, and `close` drops the descriptor
+//! BEFORE it removes the path, so there are two ways for the master to
+//! kill a hand that has not unlinked: the budget runs out first, or the
+//! master's 50 ms probe lands between the drop (the endpoint refuses)
+//! and the unlink. ws35 saw one of them once under load
+//! (`control_unix_e2e.lu:207`, `worker-exited worker=1 reason=signal`);
+//! ws36 measured the rate with a loop of runs and fixed it on the
+//! master's side: a path the master MINTED for a hand is the master's
+//! to remove once that hand is reaped (`worker_endpoint` already
+//! removes a SIGKILLed predecessor's file before a respawn, by the same
+//! ownership rule).
+//!
+//! This witness does not wait for the scheduler to lose the race. It
+//! STOPS hand 1 (SIGSTOP from a host `kill`, the hand found by its own
+//! argv: this checkout's binary and its `--worker-control` endpoint),
+//! so the hand can never reach its close, then sends `stop`. The master
+//! must spend its budget, kill the hand — its log says
+//! `worker-exited worker=1 reason=signal`, which is the arm under test
+//! — and still leave NO `.w1` behind. Before the fix this is red on
+//! every run, not one in N.
+//!
+//! Loopback only; the socket lives under the repo's own `target/`
+//! (`control_unix_e2e.lu`'s sun_path note). Idempotent: the scratch
+//! tree is cleared at the START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll `ep` until it answers `ping`, up to ~8s. Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 160 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Poll the master's status until both hands serve, up to ~8s. Total.
+fn wait_hands(ep: str) -> bool {
+    var i: int = 0
+    while i < 160 {
+        let st = shell.control_fetch(ep, "status") else |_| { "" }
+        var serving: int = 0
+        for line in st.lines() {
+            if line.starts_with("worker ") && line.contains(": serving ") {
+                serving = serving + 1
+            }
+        }
+        if serving == 2 {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// SIGSTOP the ONE process whose argv[0] is `exe` and whose command
+/// line names `mark`, through the host's `ps`/`awk`/`kill` (lobo has
+/// no pid surface of its own, wolf-lang#126). Answers the script's exit
+/// code: 0 stopped exactly one, 3 found none or several.
+fn stop_process(exe: str, mark: str) -> int {
+    var argv = List[str]()
+    (mut argv).push("/bin/sh")
+    (mut argv).push("-c")
+    (mut argv).push(
+        "p=$(ps -axo pid=,command= | awk -v a=\"$1\" -v b=\"$2\" '$2 == a && index($0, b) {{ print $1 }}'); n=$(printf '%s\\n' \"$p\" | grep -c .); [ \"$n\" = 1 ] || exit 3; kill -STOP \"$p\"",
+    )
+    (mut argv).push("sh")
+    (mut argv).push(exe)
+    (mut argv).push(mark)
+    let h = os_spawn(argv) else |_| {
+        return 2
+    }
+    os_wait(h) else |_| {
+        -1
+    }
+}
+
+fn main() -> !int {
+    let dir = "target/ux_kill"
+    fs_remove_dir_all(dir) else |_| {}
+    fs_create_dir_all("{dir}/www")?
+    fs_write_text("{dir}/www/index.html", "kill-body\n")?
+
+    let sock = "{dir}/c.sock"
+    let ep = "unix:{sock}"
+    let hp = free_port()?
+    let confp = "{dir}/lobo.conf"
+    fs_write_text(
+        confp,
+        "worker_processes 2;\npid {dir}/lobo.pid;\ncontrol {ep};\nhttp {{\n  types {{ text/html html; }}\n  error_log {dir}/error.log notice;\n  server {{ listen 127.0.0.1:{hp}; root {dir}/www; }}\n}}\n",
+    )?
+
+    // the ABSOLUTE binary path (lobo#1's reaper looks for this checkout's
+    // root in argv[0]), which is also how stop_process tells THIS
+    // checkout's hand from any other lobo on the box
+    let root = os_cwd() else |_| "."
+    let exe = "{root}/target/lobo-debug"
+    var argv = List[str]()
+    (mut argv).push(exe)
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(confp)
+    let child = os_spawn(argv) else |_| {
+        assert(
+            false,
+            "could not spawn the master (target/lobo-debug — the gauntlet's tiers step builds it)",
+        )
+        return 1
+    }
+    if !wait_alive(ep) || !wait_hands(ep) {
+        os_kill(child) else |_| {}
+        assert(false, "the master and both hands never came up on {ep}")
+    }
+    assert(fs_exists("{sock}.w1") && fs_exists("{sock}.w2"), "both hand sockets exist on disk")
+
+    // hand 1 can no longer reach its own close: the master must kill it
+    let sc = stop_process(exe, "--worker-control unix:{sock}.w1")
+    if sc != 0 {
+        os_kill(child) else |_| {}
+        assert(false, "could not SIGSTOP hand 1 (exit {sc}: 3 is not exactly one match)")
+    }
+
+    // the master's reply waits on fan_out's 2 s deadline for the stopped
+    // hand, longer than control_send's own read, so the REPLY is not the
+    // witness — the exit, the log and the disk are
+    let _rs = shell.control_send(ep, "stop") else |_| { "" }
+    let code = os_wait(child) else |_| {
+        -1
+    }
+    assert(code == 0, "the master exits 0 after killing a hand: {code}")
+    let mlog = fs_read_text("{dir}/error.log") else |_| { "" }
+    assert(
+        mlog.contains("worker-exited worker=1 reason=signal"),
+        "the master KILLED hand 1 (the arm under test was taken): {mlog}",
+    )
+    assert(!fs_exists("{sock}.w1"), "the killed hand's socket file is gone (the master removed it)")
+    assert(!fs_exists("{sock}.w2"), "hand 2's socket file is gone")
+    assert(!fs_exists(sock), "the master's socket file is gone")
+    assert(!fs_exists("{dir}/lobo.pid"), "pid file removed on stop")
+
+    fs_remove_dir_all(dir) else |_| {}
+    print("control unix killed hand: ok")
+    0
+}

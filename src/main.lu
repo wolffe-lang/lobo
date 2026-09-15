@@ -2661,6 +2661,32 @@ fn worker_endpoint(master_ctrl: str, i: int) -> str {
     free_endpoint()
 }
 
+/// lobo#23 (ws36): remove the socket file of a hand the master has
+/// just REAPED, when its endpoint is a `unix:` path.
+///
+/// A hand's own `net_close` of its control listener unlinks the path,
+/// but the runtime drops the descriptor BEFORE it removes the file, so
+/// a hand can be unreachable (the master's probe is refused) and still
+/// alive with its `.wN` on disk. The shutdown tail reaps an unreachable
+/// hand at once and a slow one after its 1 s budget, both with
+/// `os_kill`, and either way the kill can land before the unlink —
+/// measured at ws36: 0 in 1,200 lane-runs of `control_unix_e2e.lu` as
+/// the box schedules it, and 285 of 300 checked lane-runs red once the
+/// drop-to-unlink gap is widened to 100 µs. The path is one the master
+/// MINTED (`worker_endpoint`, which already removes a SIGKILLed
+/// predecessor's file before a respawn by the same rule), and the hand
+/// that bound it is dead by the time this runs, so the removal is the
+/// master's to make. A loopback endpoint has no file. Total.
+fn forget_endpoint(ep: str) {
+    if !shell.is_unix_addr(ep) {
+        return
+    }
+    let path = shell.unix_path_of(ep)
+    if !path.is_empty() && fs_exists(path) {
+        fs_remove(path) else |_| {}
+    }
+}
+
 /// A free loopback endpoint: bind :0, read the port, release it.
 /// "" when the host refuses the probe. Total.
 fn free_endpoint() -> str {
@@ -3304,6 +3330,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             }
             let reason = if quitting { "" } else { "unreachable" }
             let _code = reap_worker(wslot[j], j + 1, reason, mut elog)
+            forget_endpoint(ep)
             if quitting {
                 wgone = replace_bool(wgone, j, true)
                 wslot = replace_int(wslot, j, -1)
@@ -3340,6 +3367,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                 waited = waited + 1
             }
             let _c = reap_worker(wslot[k], k + 1, "", mut elog)
+            forget_endpoint(wctl[k])
         }
         k = k + 1
     }
