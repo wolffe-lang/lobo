@@ -1,0 +1,201 @@
+#!/bin/sh
+# lobo-stage-ref — lobo#20 (ws36): give a SECOND lobo tree the toolchain
+# its OWN wolf-toolchain.toml pins, so the ws25 two-tree legs (parity,
+# profile) can span a pin bump.
+#
+#   tools/lobo-stage-ref <ref-tree> [--host <triple>] [--plan]
+#
+# Run from THIS checkout's root, with this checkout's `.wolf-bin/`
+# already staged. For each of the three pins it compares the ref tree's
+# `rev` with this checkout's:
+#   * the same rev — the ref tree reuses this checkout's artifact by
+#     symlink (all three the same is ws25's original shape: one link);
+#   * `[wolf]` / `[lupin]` on another rev — the RELEASE ARCHIVE of the
+#     tag that points at that rev, downloaded with `gh release download`
+#     and checked against the release asset's sha256 digest before it
+#     is unpacked (D57: the tag's archive IS the stamped build; the
+#     ref's own toml notes name the same archives). The whole archive
+#     pair: the driver, the runtime staticlib beside it, the cimport
+#     worker when the archive has one;
+#   * `[std]` on another rev — `git archive <rev> std` plus `STD-REV`,
+#     the documented staging action.
+# A rev NO release tag names (a dev-stamped pin) has no archive, and a
+# source build of a second compiler is not this leg's job: it REFUSES
+# by name, in seconds, before anything is fetched (the issue's early
+# refusal, kept for that case). The refusal of a toolchain that does not
+# match its tree is not moved or weakened: the ref tree's own
+# `tools/lib-toolchain.sh` is run last and has the final word.
+#
+# Needs: git clones with tags of the three sibling repos, named by
+# $WOLF_LANG_GIT, $WOLF_INTERP_GIT, $WOLF_STD_GIT (default: siblings of
+# this checkout, ../wolf-lang ../wolf-interp ../wolf-std); `gh` with a
+# token that reads the private releases ($GH_TOKEN in CI); tar; a
+# sha256 tool. `--plan` prints what it would do and fetches nothing.
+# Exit: 0 staged (or planned), 1 refused, 2 usage.
+
+set -u
+cd "$(dirname "$0")/.." || exit 2
+THIS=$(pwd)
+
+ref=""; host=""; plan=0
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --host) host=${2:-}; shift 2 ;;
+        --plan) plan=1; shift ;;
+        -*) echo "usage: tools/lobo-stage-ref <ref-tree> [--host <triple>] [--plan]" >&2; exit 2 ;;
+        *) ref=$1; shift ;;
+    esac
+done
+[ -n "$ref" ] && [ -f "$ref/wolf-toolchain.toml" ] || {
+    echo "usage: tools/lobo-stage-ref <ref-tree> [--host <triple>] [--plan] — <ref-tree> must hold a wolf-toolchain.toml" >&2
+    exit 2
+}
+REF=$(cd "$ref" && pwd)
+
+made_bin=""
+refuse() {
+    echo "stage-ref: REFUSED — $1 (lobo#20)" >&2
+    # a partial staging is not left for the next leg to trust
+    [ -z "$made_bin" ] || rm -rf "$made_bin"
+    exit 1
+}
+
+# pin <toml> <section> <key> — lib-toolchain.sh's toml_value, on a named file
+pin() {
+    awk -v s="[$2]" -v k="$3" '
+        $0 == s { in_s = 1; next }
+        /^\[/ { in_s = 0 }
+        in_s && $1 == k { sub(/^[^=]*= */, ""); gsub(/"/, ""); print; exit }
+    ' "$1"
+}
+
+if [ -z "$host" ]; then
+    case "$(uname -s) $(uname -m)" in
+        "Darwin arm64") host=aarch64-apple-darwin ;;
+        "Linux x86_64") host=x86_64-unknown-linux-gnu ;;
+        "Linux aarch64") host=aarch64-unknown-linux-gnu ;;
+        *) refuse "no release archive host for $(uname -s) $(uname -m); pass --host" ;;
+    esac
+fi
+
+sha256_of() {
+    if command -v sha256sum > /dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    else shasum -a 256 "$1" | cut -d' ' -f1; fi
+}
+
+WOLF_LANG_GIT=${WOLF_LANG_GIT:-$THIS/../wolf-lang}
+WOLF_INTERP_GIT=${WOLF_INTERP_GIT:-$THIS/../wolf-interp}
+WOLF_STD_GIT=${WOLF_STD_GIT:-$THIS/../wolf-std}
+
+echo "stage-ref: this checkout $THIS"
+echo "stage-ref: ref tree      $REF ($(git -C "$REF" rev-parse --short HEAD 2>/dev/null || echo '?'))"
+echo "stage-ref: host          $host"
+
+same=0
+for sec in wolf lupin std; do
+    t=$(pin "$THIS/wolf-toolchain.toml" "$sec" rev)
+    r=$(pin "$REF/wolf-toolchain.toml" "$sec" rev)
+    [ -n "$r" ] || refuse "the ref tree's wolf-toolchain.toml has no [$sec] rev"
+    if [ "$t" = "$r" ]; then
+        echo "stage-ref: [$sec] same rev $(echo "$r" | cut -c1-7) — reuse this checkout's"
+        same=$((same + 1))
+    else
+        echo "stage-ref: [$sec] this $(echo "$t" | cut -c1-7), ref $(echo "$r" | cut -c1-7) — the ref's own"
+    fi
+done
+
+# the tag that names a rev, from a clone (refuse before any fetch)
+tag_of() { # tag_of <clone> <rev> <section>
+    [ -d "$1" ] || refuse "no clone at $1 to resolve [$3] rev $(echo "$2" | cut -c1-7) to a release tag (set \$WOLF_LANG_GIT / \$WOLF_INTERP_GIT)"
+    tg=$(git -C "$1" tag --points-at "$2" 2> /dev/null | grep '^v[0-9]' | head -1)
+    [ -n "$tg" ] || refuse "the ref tree pins [$3] at $(echo "$2" | cut -c1-7), and no release tag in $1 points at it — a dev-stamped pin has no archive, and this leg does not build a second compiler from source. Use a ref on a released pin, or this branch's own pre-change commit on the same pin"
+    echo "$tg"
+}
+
+wolf_rev=$(pin "$REF/wolf-toolchain.toml" wolf rev)
+lupin_rev=$(pin "$REF/wolf-toolchain.toml" lupin rev)
+std_rev=$(pin "$REF/wolf-toolchain.toml" std rev)
+wolf_same=0; lupin_same=0; std_same=0
+[ "$wolf_rev" = "$(pin "$THIS/wolf-toolchain.toml" wolf rev)" ] && wolf_same=1
+[ "$lupin_rev" = "$(pin "$THIS/wolf-toolchain.toml" lupin rev)" ] && lupin_same=1
+[ "$std_rev" = "$(pin "$THIS/wolf-toolchain.toml" std rev)" ] && std_same=1
+
+wolf_tag=""; lupin_tag=""
+[ "$wolf_same" = 1 ] || wolf_tag=$(tag_of "$WOLF_LANG_GIT" "$wolf_rev" wolf) || exit 1
+[ "$lupin_same" = 1 ] || lupin_tag=$(tag_of "$WOLF_INTERP_GIT" "$lupin_rev" lupin) || exit 1
+if [ "$std_same" = 0 ]; then
+    git -C "$WOLF_STD_GIT" cat-file -e "$std_rev^{commit}" 2> /dev/null \
+        || refuse "no commit $(echo "$std_rev" | cut -c1-7) in $WOLF_STD_GIT to archive the ref's [std] from (set \$WOLF_STD_GIT)"
+fi
+[ -z "$wolf_tag" ] || echo "stage-ref: [wolf] ref rev is release tag $wolf_tag — wolf-${wolf_tag#v}-$host.tar.gz"
+[ -z "$lupin_tag" ] || echo "stage-ref: [lupin] ref rev is release tag $lupin_tag — lupin-${lupin_tag#v}-$host.tar.gz"
+
+if [ "$plan" = 1 ]; then
+    echo "stage-ref: PLAN only — nothing fetched, nothing staged"
+    exit 0
+fi
+
+[ ! -e "$REF/.wolf-bin" ] || refuse "$REF/.wolf-bin already exists — stage into a fresh ref tree"
+if [ "$same" = 3 ]; then
+    ln -s "$THIS/.wolf-bin" "$REF/.wolf-bin"
+    echo "stage-ref: every pin the same — $REF/.wolf-bin -> $THIS/.wolf-bin (ws25's shape)"
+else
+    mkdir -p "$REF/.wolf-bin"
+    made_bin="$REF/.wolf-bin"
+    tmp=$(mktemp -d "${TMPDIR:-/tmp}/lobo-stage-ref.XXXXXX") || refuse "no scratch directory"
+    trap 'rm -rf "$tmp"' EXIT
+
+    # fetch <repo> <tag> <asset> — download, check the digest, unpack
+    fetch() {
+        want=$(gh api "repos/$1/releases/tags/$2" --jq ".assets[] | select(.name == \"$3\") | .digest" 2> /dev/null)
+        case "$want" in
+            sha256:*) want=${want#sha256:} ;;
+            *) refuse "release $2 of $1 carries no asset $3 with a sha256 digest (read: \"$want\")" ;;
+        esac
+        gh release download "$2" -R "$1" --pattern "$3" --dir "$tmp" --clobber \
+            || refuse "gh release download $2 -R $1 --pattern $3 failed"
+        have=$(sha256_of "$tmp/$3")
+        [ "$have" = "$want" ] || refuse "digest mismatch on $3: have $have, the release names $want"
+        echo "stage-ref: $3 sha256 $have (the release asset's digest)"
+        tar -xzf "$tmp/$3" -C "$tmp" || refuse "could not unpack $3"
+    }
+
+    if [ "$wolf_same" = 1 ]; then
+        for f in wolf libwolf_rt.a wolf-cimport-worker; do
+            [ ! -e "$THIS/.wolf-bin/$f" ] || ln -s "$THIS/.wolf-bin/$f" "$REF/.wolf-bin/$f"
+        done
+    else
+        repo=$(pin "$REF/wolf-toolchain.toml" wolf repo)
+        a="wolf-${wolf_tag#v}-$host"
+        fetch "$repo" "$wolf_tag" "$a.tar.gz"
+        for f in wolf libwolf_rt.a; do
+            [ -f "$tmp/$a/$f" ] || refuse "$a.tar.gz has no $f"
+            cp "$tmp/$a/$f" "$REF/.wolf-bin/"
+        done
+        [ ! -f "$tmp/$a/wolf-cimport-worker" ] || cp "$tmp/$a/wolf-cimport-worker" "$REF/.wolf-bin/"
+    fi
+
+    if [ "$lupin_same" = 1 ]; then
+        ln -s "$THIS/.wolf-bin/lupin" "$REF/.wolf-bin/lupin"
+    else
+        repo=$(pin "$REF/wolf-toolchain.toml" lupin repo)
+        a="lupin-${lupin_tag#v}-$host"
+        fetch "$repo" "$lupin_tag" "$a.tar.gz"
+        [ -f "$tmp/$a/lupin" ] || refuse "$a.tar.gz has no lupin"
+        cp "$tmp/$a/lupin" "$REF/.wolf-bin/"
+    fi
+
+    if [ "$std_same" = 1 ]; then
+        ln -s "$THIS/.wolf-bin/std" "$REF/.wolf-bin/std"
+    else
+        git -C "$WOLF_STD_GIT" archive "$std_rev" std | tar -x -C "$REF/.wolf-bin/" \
+            || refuse "git archive $std_rev std failed"
+        echo "$std_rev" > "$REF/.wolf-bin/std/STD-REV"
+        echo "stage-ref: [std] $(echo "$std_rev" | cut -c1-7) archived into the ref tree"
+    fi
+fi
+
+# the final word is the ref tree's own identity gate
+if ! (cd "$REF" && sh -c '. tools/lib-toolchain.sh; echo "stage-ref: the ref tree accepts its toolchain — $have_wolf / $have_lupin / std $(cat "$WOLF_STD/STD-REV" | cut -c1-7)"'); then
+    refuse "the ref tree's own tools/lib-toolchain.sh refused what was staged (above)"
+fi
