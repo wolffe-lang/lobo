@@ -78,6 +78,91 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws36 — 2026-09-15 — the race (lobo#23: the master removes a killed hand's socket; lobo#24: the test's own startup race; lobo#20: the ref tree takes its own pin)
+
+- **lobo#23, measured first.** `control_unix_e2e.lu` was run in a loop
+  on nomad-1 (macOS arm64, v0.2.14): twelve copies of the tree at once
+  beside twelve busy loops, 50 runs each, both lanes. **At trunk
+  `cdf9149`: 0 of 1,200 lane-runs red on the race** (20:52:59–20:59:30Z,
+  load(1m) rising to 35.4). The 3 reds were native 180 s ceilings, which
+  turned out to be lobo#24 below. Pilots agreed: 0 of 40 at 18 spinners,
+  0 of 60 in parallel, and 0 races in 480 lane-runs with twelve
+  file-churning loops added. So under load alone N is past 1,200
+  lane-runs on this box, and ws35's one red in three gauntlets does not
+  reproduce by load alone.
+- **The window, read off the runtime.** `NetTable::close` does
+  `drop(listener)` and THEN `remove_file(path)`. From the drop on, the
+  master's 50 ms `control_reachable` probe is refused, so the shutdown
+  tail stops waiting and `os_kill`s a hand that is alive and has not
+  unlinked. The 1 s budget running out is the second way to get there.
+  Both leave `<sock>.wN` behind. To make N measurable, a DYLD interpose
+  (scratch, never committed) delayed `unlink(2)` of a `.w1` path by
+  **100 µs** inside the real binary. **At trunk: 572 of 600 lane-runs
+  red** (285 checked with `worker-exited worker=1 reason=signal` and the
+  `:207` trap, 287 native `trap(assert)`, 1 native ceiling), 27 green
+  (21:25:50–21:30:26Z). A 300 µs delay and up read 120 of 120 red.
+- **The fix is the master's, as the issue proposed.** `forget_endpoint`
+  in `src/main.lu` removes a reaped hand's `unix:` endpoint path, after
+  both reaps: the shutdown tail's, and the supervision loop's (an
+  unreachable hand, under `quit` or before a respawn). The master MINTED
+  that path (`worker_endpoint`, which already removes a SIGKILLed
+  predecessor's file by the same rule), and the hand that bound it is
+  dead when this runs. A loopback endpoint has no file. **After, the
+  same loops: 0 race reds in 600 amplified lane-runs** (599 green, 1
+  native ceiling from lobo#24; 21:35:41–21:40:12Z) **and 0 in 1,200
+  unamplified** (21:40:30–21:43:29Z, load(1m) to 30.5).
+- **A witness that does not wait for the scheduler:**
+  `tests/shell/control_unix_killed_hand.lu` SIGSTOPs hand 1 (found by
+  this checkout's binary path and its `--worker-control` argument),
+  sends `stop`, and requires the master to kill it (`worker-exited
+  worker=1 reason=signal` in the error log) and leave no `.w1`. **At the
+  unfixed binary it is red on every run** (checked trap at `:167`, the
+  `.w1` assert, with the kill in the log); after the fix it is green on
+  both lanes. Corpus 280 → **282** lane-runs.
+- **lobo#24 (filed here): a second race in the same file, in the test.**
+  `wait_alive` waits for the MASTER to answer, and the test then asserts
+  on the hands (`:175` their socket files, `:182` their `serving` rows)
+  before they have exec'd and bound. Under load that is 4 checked reds
+  in 1,200 lane-runs of the post-fix loop. And an assert that traps
+  after the spawn orphans the master, whose inherited stdout (`lsof`:
+  fd 1 a `PIPE`, PPID 1) holds `conform-run`'s pipe open, so the native
+  lane read a 180 s ceiling with no line. The test now waits for both
+  hands to serve, and every post-spawn failure goes through `bail`,
+  which stops and kills the master before it asserts. **1,200 of 1,200
+  lane-runs green** in the same loop (21:51:53–21:54:36Z, load(1m) to
+  26.4). A planted failure at `:124` now reds in 1.9 s on both lanes
+  with no process left, where it was a 180 s ceiling. `bail` asserts
+  `"{msg}"`, not `msg`: the native tier refuses a bare name as an assert
+  message and accepts an interpolation, **wolf-lang#398**.
+- **lobo#20, the ref tree takes its own pin.** `tools/lobo-stage-ref`
+  stages a second tree's `[wolf]`/`[lupin]`/`[std]` from ITS OWN
+  `wolf-toolchain.toml`. Matching pins keep ws25's one link. Otherwise
+  it uses the tag's release archive checked against the asset's sha256
+  digest (`--from archive`), or a build at the rev with ci.yml's D57
+  stamp (`--from source`), plus `git archive` for std. The ref's own
+  `lib-toolchain.sh` has the last word. ci.yml's ref step calls it with
+  `--from source`. **Two CI runs red on the way, both at the step's
+  first network call:** 35029511177 read no digest, and 35030562781,
+  once the tool printed gh's own error, named the cause: the org forbids
+  a fine-grained token with a lifetime over 366 days the REST API, and
+  `WOLF_CI_TOKEN` is one, while git over HTTPS still serves it
+  (registered in the ws36 report for the token's owner).
+- **The proof run: run 35032387634**, keepalive N=1, one hand,
+  `ref_tree=6b74032` (trunk at ws34, **wolf 0.2.12**) against `ws36`
+  (**wolf 0.2.14**). The ref step printed `the ref tree accepts its
+  toolchain — wolf 0.2.12 (wolfgang, pin a7f517e)`, and both legs ran.
+  Predicted before dispatch, then measured: syscalls per request
+  identical (six rows 1.000, `poll` 0.031/0.033, `brk` 0.010/0.010);
+  **µs cpu a request 26.7 → 26.5**; req/s 1.040 and 0.995 in the two
+  windows; `net_writev` → `net_writev_head` the one renamed row; every
+  other leaf inside the ~0.3-point floor. **The compiler bump is not
+  visible on this path.** One prediction was wrong: the dso split moved
+  by 1.2–1.3 points on kernel and libc against "within 1 point".
+  docs/PROFILE.md's ws36 addendum has the table.
+- **Filed, not left as sentences:** lobo#24, wolf-lang#398. The token's
+  REST refusal goes to the orchestrator in the report; it is the org's
+  secret, not lobo's code.
+
 ## ws35 — 2026-09-14 — the lobo half (the pin at v0.2.14 with the string runtime; lobo#21's one word; the head enters the gather as a `str`; #298's number re-read and not moved)
 
 - **The pin moved first and alone.** `[wolf]` a7f517e (v0.2.12) →
