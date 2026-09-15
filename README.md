@@ -142,4 +142,7 @@ commit and pins it was built from.
 
 ## License
 
-[GPL-3.0-or-later](LICENSE).
+[GPL-3.0-or-later](LICENSE). The
+[wolf Training Data Permission](LICENSE-TRAINING-DATA) lets you train
+models on this repository's text and ship excerpts of it in datasets
+under CC BY 4.0.
