@@ -2049,6 +2049,100 @@ the instrument's floor) seen from the kernel's side.
 
 **W8:** not re-run (B1). Nothing above is a W8 number and none moved.
 
+## ws36's addendum — lobo#20: the ref tree takes its own pin, and the profile spans the bump (2026-09-15)
+
+### What lobo#20 was, and what changed
+
+ws25's `ref_tree` leg symlinked THIS checkout's `.wolf-bin` into the
+ref worktree, whose own `wolf-toolchain.toml` then refused on identity
+drift the moment the ref sat on another `[wolf]` pin (run
+**34676503607**, `ref_tree=1148318`). So ws34 and ws35 could only
+profile a branch against its own pre-change commit on the SAME pin:
+a control for a source change that said nothing about the compiler.
+
+`tools/lobo-stage-ref` gives the ref tree the toolchain ITS OWN pin
+file names. Every pin the same keeps ws25's one link. Otherwise the
+tool stages `[wolf]` and `[lupin]` either from the release archive of
+the tag at that rev, checked against the release asset's sha256
+digest (`--from archive`, the default), or built at that rev from the
+clones with ci.yml's own D57 stamp (`--from source`). `[std]` comes
+from `git archive` plus `STD-REV`. The ref tree's own
+`lib-toolchain.sh` has the last word, so the refusal lobo#20 said
+should stay does stay. The CI leg uses `--from source`, because the
+org refuses `WOLF_CI_TOKEN` the REST API a release download needs (a
+fine-grained token whose lifetime exceeds 366 days: run
+**35030562781**, where the digest read answered that message) while
+git over HTTPS still serves it. CI already builds THIS checkout's
+toolchain that way too, so both trees are built alike.
+
+Checked on nomad-1 before the CI leg: a 0.2.12 ref (`6b74032`) staged
+from the darwin archives (digests `6be493a9…` / `685fa60f…`, equal to
+ws34's recorded ones) and built `lobo/0.1.0+dev (built with wolf
+0.2.12, pin a7f517e)`; a ref whose pins all match got the one link; a
+mixed ref (`1148318`, only `[wolf]` differing) staged one archive and
+linked the other two; a dev-stamped ref (`3c064d2`, `[wolf]` fc07cc5)
+was refused by name under `--from archive` before anything was
+fetched; and a planted digest mismatch was refused and left no
+partial `.wolf-bin` behind.
+
+### What was predicted, before the dispatch (scratch `ws36-prediction.md`, 22:04Z)
+
+| leg | predicted |
+|---|---|
+| the ref step | stages v0.2.12 / v0.1.33 / bd12ef5; the ref's `lib-toolchain.sh` accepts `wolf 0.2.12 (wolfgang, pin a7f517e)`; it does NOT die where 34676503607 died |
+| syscalls per request | `writev`/`openat`/`recvfrom`/`read`/`close`/`statx` 1.000 on both trees; `poll` ~0.03, `brk` ~0.01 on both; no row moves by more than 0.01 |
+| dso split | kernel ~79–81 / lobo-release ~13–15 / libc ~5–6 on both, **within 1 point** |
+| `lobo-release` leaves over 0.1% | `__wolf_rt_net_writev` → `__wolf_rt_net_writev_head`, the one renamed row; everything else inside ws34/ws35's ~0.3-point floor; no new row over 0.3% on head |
+| µs cpu a request (split) | within ±2 µs |
+| req/s, head ÷ ref | 1.00 [0.95, 1.05] in either window |
+
+### The measurement — two trees on ONE VM ACROSS the pin bump (run 35032387634, keepalive N=1, one hand, `profile_shape=keepalive profile_n=1 ref_tree=6b74032`)
+
+`ws36` = `0fcc676` at **wolf 0.2.14** (pin 30731a6, lupin 0.1.36, std
+2d10219); `trunk-0.2.12` = `6b74032`, **trunk as ws34 left it**, at
+**wolf 0.2.12** (pin a7f517e, lupin 0.1.33, std bd12ef5). The ref step
+(22:46:09–22:48:20Z) built a7f517e and 18de030 from source and printed
+`the ref tree accepts its toolchain — wolf 0.2.12 (wolfgang, pin
+a7f517e) / lupin 0.1.33 … / std bd12ef5`, and the ref binary answered
+`lobo/0.1.0+dev (built with wolf 0.2.12, pin a7f517e)`. **Held: the leg
+spans the bump.** The prediction had the ref staged from archives, and
+it was built from source, for the token reason above.
+
+What differs between the trees: the compiler, runtime and std across
+two releases (s157–s160); ws35's lobo#21 copy (on a 502 arm, off this
+path) and its head as a `str`; ws36's shutdown unlink (off this path).
+
+| row | trunk-0.2.12 | ws36 @ 0.2.14 | predicted |
+|---|---|---|---|
+| req/s, perf window / split window | 36,555 / 37,731 (load 2.14) | 38,002 / 37,538 (load 2.93) | ratio **1.040 / 0.995**, inside [0.95, 1.05]: **held** |
+| µs cpu a request (split, no tracer) | **26.7** | **26.5** | ±2 µs: **held** |
+| `writev` / `openat` / `recvfrom` / `read` / `statx` (strace, per request) | 1.000 each (23,029 calls) | 1.000 each (22,770) | **held** |
+| `close` | 1.0001 | 1.0014 | held; the 0.0013 is 30 accepted connections in the head's window against 2 in the ref's (`accept4` and `setsockopt` 30 vs 2), connection turnover inside the traced window, under a hundredth and not claimed |
+| `poll` / `brk` | 0.031 / 0.0097 | 0.033 / 0.0098 | **held** |
+| `futex` (all errors, #302's clock) | 1,570 (0.068) | 1,551 (0.068) | not predicted; unchanged |
+| by dso: kernel / lobo-release / libc | 78.92 / 14.01 / 6.64 | 80.09 / 14.06 / 5.35 | within 1 point: **WRONG by a third of a point** on kernel (+1.17) and libc (−1.29); lobo-release +0.05. Window noise of the size ws34 read on this cell's dso column (13.49 → 13.87 on two trees at one pin) |
+| `__wolf_rt_net_writev` → `__wolf_rt_net_writev_head` | 0.29% | 0.36% | the renamed row: **held** |
+| `wolf_rt::str::str_find` | 1.39% | 1.18% | inside the floor |
+| `serve_main` / `http.parse_request` / `serve.head_warm` | 1.04 / 0.66 / 0.93 | 1.19 / 0.86 / 0.93 | inside the floor |
+| `wolf_rt::str::ambient_alloc` / `__wolf_rt_list_new` | 0.83 / 0.40 | 0.73 / 0.38 | inside the floor |
+| the fstat's path through the runtime | `std::sys::fs::unix::try_statx` 0.14, `std::fs::File::metadata` 0.11 | both under the cut; `__wolf_rt_fs_fstat` **0.18** appears | a naming shift between the runtimes (the same one `statx` a request, per the count), **not predicted**; under the floor, not claimed |
+| other rows over 0.1% on one side only | `http.decide` 0.13, `http.is_canonical` 0.14 | `from_utf8` 0.15, `list_push` 0.15, `proxy.plan` 0.14, `is_tchar` 0.13, `fill_req_acc` 0.11 | "no new row over 0.3%": **held** (the largest is 0.18) |
+
+**NOT VISIBLE, and now askable.** The question lobo#20 said a pin-bump
+lane could not ask ("what did the new compiler do to this hand") has
+an answer for the static keepalive path at N=1 across v0.2.12 →
+v0.2.14. That answer is nothing this instrument resolves: the syscall
+count is identical to three decimals on every per-request row, the cpu
+a request is 26.7 → 26.5 µs, both req/s windows straddle 1.00, and
+every leaf that moved sits inside the ~0.3-point window-to-window
+swing ws34 measured. It agrees with ws35's same-pin reading (26.5 →
+25.5 µs, run 34901037713) and with ws35's bytes: the string runtime's
+clauses do not reach this path's retained allocations. One prediction
+row was wrong, the dso split by a third of a point, and it is the
+column this page already calls noise.
+
+**W8:** not re-run (B1). Nothing above is a W8 number.
+
 ## What this does NOT say
 
 - Nothing here was profiled on linux. `sample` is macOS's; the linux
