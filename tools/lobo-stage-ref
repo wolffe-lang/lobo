@@ -147,10 +147,10 @@ else
 
     # fetch <repo> <tag> <asset> — download, check the digest, unpack
     fetch() {
-        want=$(gh api "repos/$1/releases/tags/$2" --jq ".assets[] | select(.name == \"$3\") | .digest" 2> /dev/null)
+        want=$(gh api "repos/$1/releases/tags/$2" --jq ".assets[] | select(.name == \"$3\") | .digest" 2> "$tmp/gh-api.err")
         case "$want" in
             sha256:*) want=${want#sha256:} ;;
-            *) refuse "release $2 of $1 carries no asset $3 with a sha256 digest (read: \"$want\")" ;;
+            *) refuse "release $2 of $1 carries no asset $3 with a sha256 digest (read: \"$want\"; gh: $(tr '\n' ' ' < "$tmp/gh-api.err"))" ;;
         esac
         gh release download "$2" -R "$1" --pattern "$3" --dir "$tmp" --clobber \
             || refuse "gh release download $2 -R $1 --pattern $3 failed"
