@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       ref_tree:
-        description: "ws25 (lobo#6): a SECOND lobo ref (branch, tag or sha) built beside this one with the toolchain ITS OWN wolf-toolchain.toml pins (ws36, lobo#20: tools/lobo-stage-ref; a pin no release tag names is refused by name); with parity=true the set is three fresh servers per pair on ONE VM and the table carries this ÷ ref against the VM's own nginx"
+        description: "ws25 (lobo#6): a SECOND lobo ref (branch, tag or sha) built beside this one with the toolchain ITS OWN wolf-toolchain.toml pins (ws36, lobo#20: tools/lobo-stage-ref --from source); with parity=true the set is three fresh servers per pair on ONE VM and the table carries this ÷ ref against the VM's own nginx"
         type: string
         default: ""
       ref_name:
@@ -228,11 +228,16 @@ jobs:
       # ref sat on another [wolf] pin (run 34676503607), so a pin-bump
       # lane could not profile itself against the trunk it branched
       # from. tools/lobo-stage-ref keeps the one link when every pin
-      # agrees; otherwise it stages the ref's own release archives
-      # (checked against the release asset's digest) and its own std
-      # tree, and the ref tree's lib-toolchain.sh still has the final
-      # word. A ref on a dev-stamped pin has no archive and is refused
-      # by name here, before anything is built.
+      # agrees; otherwise it builds the ref's own [wolf] and [lupin] at
+      # their pinned revs from the clones this job already holds, with
+      # the step above's D57 stamp, and archives the ref's own [std],
+      # and the ref tree's lib-toolchain.sh still has the final word.
+      # --from source, not the release archives the tool defaults to:
+      # the org refuses WOLF_CI_TOKEN the REST API a release download
+      # needs (a fine-grained token past 366 days; run 35030562781)
+      # while git over HTTPS still serves it, and a source build is how
+      # this job acquires its OWN toolchain, so both trees are built
+      # alike. A dev-stamped ref pin builds the same way.
       - name: "build the ref tree (ws25; ws36 — its own pinned toolchain, lobo#20)"
         if: steps.acquire.outputs.toolchain == 'full' && (inputs.parity == true || inputs.profile == true) && inputs.ref_tree != ''
         shell: bash
@@ -243,7 +248,7 @@ jobs:
           git -C lobo worktree add ../lobo-ref "${{ inputs.ref_tree }}"
           ln -s "$PWD/lobo/tests/differential/bin" lobo-ref/tests/differential/bin
           WOLF_LANG_GIT="$PWD/wolf-lang" WOLF_INTERP_GIT="$PWD/wolf-interp" WOLF_STD_GIT="$PWD/wolf-std" \
-            lobo/tools/lobo-stage-ref "$PWD/lobo-ref" --host x86_64-unknown-linux-gnu
+            lobo/tools/lobo-stage-ref "$PWD/lobo-ref" --host x86_64-unknown-linux-gnu --from source
           cd lobo-ref
           echo "ref tree: $(git rev-parse --short HEAD) $(git log -1 --format=%s | cut -c1-90)"
           mkdir -p target
