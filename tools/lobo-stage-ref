@@ -3,7 +3,7 @@
 # its OWN wolf-toolchain.toml pins, so the ws25 two-tree legs (parity,
 # profile) can span a pin bump.
 #
-#   tools/lobo-stage-ref <ref-tree> [--host <triple>] [--plan]
+#   tools/lobo-stage-ref <ref-tree> [--host <triple>] [--from archive|source] [--plan]
 #
 # Run from THIS checkout's root, with this checkout's `.wolf-bin/`
 # already staged. For each of the three pins it compares the ref tree's
@@ -19,10 +19,21 @@
 #     worker when the archive has one;
 #   * `[std]` on another rev — `git archive <rev> std` plus `STD-REV`,
 #     the documented staging action.
-# A rev NO release tag names (a dev-stamped pin) has no archive, and a
-# source build of a second compiler is not this leg's job: it REFUSES
-# by name, in seconds, before anything is fetched (the issue's early
-# refusal, kept for that case). The refusal of a toolchain that does not
+# A rev NO release tag names (a dev-stamped pin) has no archive: with
+# `--from archive` (the default) it REFUSES by name, in seconds, before
+# anything is fetched (the issue's early refusal, kept for that case).
+#
+# `--from source` builds `[wolf]` and `[lupin]` at the ref's revs from
+# the clones instead, with the D57 stamp ci.yml's own build step uses
+# (WOLF_RELEASE when a release tag points at the rev, WOLF_COMMIT the
+# short rev), in a detached worktree of each clone, sharing the clone's
+# `target/` so the dependency graph is not compiled twice. It is the CI
+# leg's mode for two reasons, both measured at ws36: the org refuses the
+# REST API (release digests, `gh release download`) to a fine-grained
+# token whose lifetime exceeds 366 days while it still serves git over
+# HTTPS to the same token (run 35030562781), and it is how CI already
+# acquires THIS checkout's toolchain, so both trees are built the same
+# way. It stages a dev-stamped pin too. The refusal of a toolchain that does not
 # match its tree is not moved or weakened: the ref tree's own
 # `tools/lib-toolchain.sh` is run last and has the final word.
 #
@@ -37,12 +48,13 @@ set -u
 cd "$(dirname "$0")/.." || exit 2
 THIS=$(pwd)
 
-ref=""; host=""; plan=0
+ref=""; host=""; plan=0; from=archive
 while [ $# -gt 0 ]; do
     case "$1" in
         --host) host=${2:-}; shift 2 ;;
+        --from) from=${2:-}; shift 2 ;;
         --plan) plan=1; shift ;;
-        -*) echo "usage: tools/lobo-stage-ref <ref-tree> [--host <triple>] [--plan]" >&2; exit 2 ;;
+        -*) echo "usage: tools/lobo-stage-ref <ref-tree> [--host <triple>] [--from archive|source] [--plan]" >&2; exit 2 ;;
         *) ref=$1; shift ;;
     esac
 done
@@ -51,6 +63,10 @@ done
     exit 2
 }
 REF=$(cd "$ref" && pwd)
+case "$from" in
+    archive | source) ;;
+    *) echo "usage: --from archive|source (read \"$from\")" >&2; exit 2 ;;
+esac
 
 made_bin=""
 refuse() {
@@ -90,6 +106,7 @@ WOLF_STD_GIT=${WOLF_STD_GIT:-$THIS/../wolf-std}
 echo "stage-ref: this checkout $THIS"
 echo "stage-ref: ref tree      $REF ($(git -C "$REF" rev-parse --short HEAD 2>/dev/null || echo '?'))"
 echo "stage-ref: host          $host"
+echo "stage-ref: from          $from"
 
 same=0
 for sec in wolf lupin std; do
@@ -104,11 +121,13 @@ for sec in wolf lupin std; do
     fi
 done
 
-# the tag that names a rev, from a clone (refuse before any fetch)
+# the tag that names a rev, from a clone (refuse before any fetch; with
+# --from source an untagged rev is a dev stamp, not a refusal)
 tag_of() { # tag_of <clone> <rev> <section>
     [ -d "$1" ] || refuse "no clone at $1 to resolve [$3] rev $(echo "$2" | cut -c1-7) to a release tag (set \$WOLF_LANG_GIT / \$WOLF_INTERP_GIT)"
+    git -C "$1" cat-file -e "$2^{commit}" 2> /dev/null || refuse "no commit $(echo "$2" | cut -c1-7) in $1 for the ref's [$3] pin"
     tg=$(git -C "$1" tag --points-at "$2" 2> /dev/null | grep '^v[0-9]' | head -1)
-    [ -n "$tg" ] || refuse "the ref tree pins [$3] at $(echo "$2" | cut -c1-7), and no release tag in $1 points at it — a dev-stamped pin has no archive, and this leg does not build a second compiler from source. Use a ref on a released pin, or this branch's own pre-change commit on the same pin"
+    [ -n "$tg" ] || [ "$from" = source ] || refuse "the ref tree pins [$3] at $(echo "$2" | cut -c1-7), and no release tag in $1 points at it — a dev-stamped pin has no archive. Pass --from source to build it from the clone, or use a ref on a released pin"
     echo "$tg"
 }
 
@@ -127,8 +146,13 @@ if [ "$std_same" = 0 ]; then
     git -C "$WOLF_STD_GIT" cat-file -e "$std_rev^{commit}" 2> /dev/null \
         || refuse "no commit $(echo "$std_rev" | cut -c1-7) in $WOLF_STD_GIT to archive the ref's [std] from (set \$WOLF_STD_GIT)"
 fi
-[ -z "$wolf_tag" ] || echo "stage-ref: [wolf] ref rev is release tag $wolf_tag — wolf-${wolf_tag#v}-$host.tar.gz"
-[ -z "$lupin_tag" ] || echo "stage-ref: [lupin] ref rev is release tag $lupin_tag — lupin-${lupin_tag#v}-$host.tar.gz"
+if [ "$from" = archive ]; then
+    [ -z "$wolf_tag" ] || echo "stage-ref: [wolf] ref rev is release tag $wolf_tag — wolf-${wolf_tag#v}-$host.tar.gz"
+    [ -z "$lupin_tag" ] || echo "stage-ref: [lupin] ref rev is release tag $lupin_tag — lupin-${lupin_tag#v}-$host.tar.gz"
+else
+    [ "$wolf_same" = 1 ] || echo "stage-ref: [wolf] build $(echo "$wolf_rev" | cut -c1-7) from $WOLF_LANG_GIT (${wolf_tag:-no release tag: a dev stamp})"
+    [ "$lupin_same" = 1 ] || echo "stage-ref: [lupin] build $(echo "$lupin_rev" | cut -c1-7) from $WOLF_INTERP_GIT (${lupin_tag:-no release tag})"
+fi
 
 if [ "$plan" = 1 ]; then
     echo "stage-ref: PLAN only — nothing fetched, nothing staged"
@@ -146,6 +170,22 @@ else
     trap 'rm -rf "$tmp"' EXIT
 
     # fetch <repo> <tag> <asset> — download, check the digest, unpack
+    # build <clone> <rev> <tag> <cargo args…> — a detached worktree at the
+    # rev, the clone's own target/ (the dependency graph compiled once)
+    build() {
+        c=$1; r=$2; t=$3; shift 3
+        wt="$tmp/src-$(basename "$c")"
+        git -C "$c" worktree add --detach "$wt" "$r" > /dev/null 2>&1 \
+            || refuse "git worktree add $wt $(echo "$r" | cut -c1-7) in $c failed"
+        echo "stage-ref: building $(basename "$c") at $(echo "$r" | cut -c1-7)${t:+ ($t)}: cargo build $*"
+        if ! (cd "$wt" && if [ -n "$t" ]; then export WOLF_RELEASE="$t"; fi \
+            && WOLF_COMMIT=$(echo "$r" | cut -c1-7) CARGO_TARGET_DIR="$c/target" cargo build "$@"); then
+            git -C "$c" worktree remove --force "$wt" > /dev/null 2>&1
+            refuse "cargo build of $(basename "$c") at $(echo "$r" | cut -c1-7) failed (above)"
+        fi
+        git -C "$c" worktree remove --force "$wt" > /dev/null 2>&1
+    }
+
     fetch() {
         want=$(gh api "repos/$1/releases/tags/$2" --jq ".assets[] | select(.name == \"$3\") | .digest" 2> "$tmp/gh-api.err")
         case "$want" in
@@ -164,6 +204,12 @@ else
         for f in wolf libwolf_rt.a wolf-cimport-worker; do
             [ ! -e "$THIS/.wolf-bin/$f" ] || ln -s "$THIS/.wolf-bin/$f" "$REF/.wolf-bin/$f"
         done
+    elif [ "$from" = source ]; then
+        build "$WOLF_LANG_GIT" "$wolf_rev" "$wolf_tag" --release -p wolf_driver -p wolf_rt
+        for f in wolf libwolf_rt.a; do
+            [ -f "$WOLF_LANG_GIT/target/release/$f" ] || refuse "the build left no target/release/$f"
+            cp "$WOLF_LANG_GIT/target/release/$f" "$REF/.wolf-bin/"
+        done
     else
         repo=$(pin "$REF/wolf-toolchain.toml" wolf repo)
         a="wolf-${wolf_tag#v}-$host"
@@ -177,6 +223,10 @@ else
 
     if [ "$lupin_same" = 1 ]; then
         ln -s "$THIS/.wolf-bin/lupin" "$REF/.wolf-bin/lupin"
+    elif [ "$from" = source ]; then
+        build "$WOLF_INTERP_GIT" "$lupin_rev" "$lupin_tag" --release --bin lupin
+        [ -f "$WOLF_INTERP_GIT/target/release/lupin" ] || refuse "the build left no target/release/lupin"
+        cp "$WOLF_INTERP_GIT/target/release/lupin" "$REF/.wolf-bin/"
     else
         repo=$(pin "$REF/wolf-toolchain.toml" lupin repo)
         a="lupin-${lupin_tag#v}-$host"
