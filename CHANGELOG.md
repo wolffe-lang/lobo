@@ -78,6 +78,186 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws37 — 2026-09-24 — the pin at 0.2.16 (the push that copies, the lend rule that refuses, and a CI that can no longer green-skip)
+
+Three items. The prediction for all three was written down in
+`docs/ws37-prediction.md` and committed (`4dad50b`) before `.wolf-bin`
+held the new pair; **two of its five predictions were wrong** and the
+numbers below say by how much.
+
+- **Item 1 — the pin, both halves, from the release archives by
+  digest.** `[wolf]` moves 30731a6 (v0.2.14) → **93a5fe5 (v0.2.16**,
+  r21, release 395302343) and `[lupin]` 6e94436 (0.1.36) → **ba357aa
+  (0.1.38**, release 393623352), both staged from the release
+  ARCHIVES, hashed by member name, never a clone and never
+  `~/.local/bin`. The x86_64-linux archives measured on kasumi are
+  `84e30c05…` (wolf) and `828b5c55…` (lupin), each equal to the
+  release asset's own digest.
+  - **The member hashes, and the trap they carry.** `_wolf` —the zsh
+    completion script— hashes `2d1e4801…` at 0.2.14 **and** at 0.2.16,
+    and `wolf.bash` (`29eb2d75…`) and `wolf.fish` (`51a1b6a8…`) are
+    likewise constant. The members that move are `wolf`
+    (`8a70caaf…` → `b53b5328…`), `libwolf_rt.a` (`92741bfe…` →
+    `c4c5f670…`), `wolf-cimport-worker` (`d46990be…` → `cf2c47a9…`),
+    `wolf.1` and `README.md`. A check that hashes "the first binary it
+    finds" reads the same constant at every pin on every platform and
+    cannot go red at any release (sc51's lesson, re-measured here).
+  - **The pairing gap is ZERO and the lane gap is one release.**
+    wolf 0.2.16 declares lupin **0.1.38**; lupin 0.1.38's conformance
+    pin is `2e4ca76` = **v0.2.15**, 148 commits behind this `[wolf]`
+    and an ancestor of it. 0.1.38 is the first lupin any downstream
+    could pin since 0.1.36 — 0.1.37's pin sat off the released line.
+  - **`[std]` had to move too, and that is drift against the
+    contract's "both halves".** The 2d10219 tree lobo carried **does
+    not compile at 0.2.16 at all**: `wolf build` stops with **100
+    diagnostics**, the first `E1014` at `std://x/tls/cert/cert.lu:846`
+    under s165's lend rule (wolf-lang#366). wolf-std's own answer is
+    sc51's `9ca0139` and `cccd2fd`, neither of which is in 2d10219, so
+    `[std]` moves to trunk **070884c** (whose vendored binary pin is
+    wolf 0.2.15 / lupin 0.1.37). Three artifacts moved, not two.
+  - **wolf-lang#146 is CLOSED and the twenty-first probe agrees.**
+    `wolf build --release ./src/main.lu` with **no `WOLF_MIDEND=0`**
+    exits 0 at this trio — twenty measurements running said `ICE:
+    mid-end broke the module` on `sc_muladd`. The probe cannot say
+    which of the two moved artifacts carried the fix, so **the
+    flip-back is owed and is not taken here**: the gauntlet, the dist
+    tool and ci.yml still pass the flag, the shipped binary is
+    unchanged, and retiring it is its own lane.
+
+- **Item 2 — the `push` census, and the copies it implies.**
+  `[mem.region.edge.elem]` at 93a5fe5 (wolf-lang#385 option 3, shipped
+  in 0.2.15) makes a plain `push` **COPY** a non-`Copy` element. This
+  is the first pin bump that changes what an accepted lobo program
+  COSTS rather than what it means.
+  - **The count, and the two numbers that were wrong before it.** The
+    wave-45 plan said "12 `push` sites"; the orchestrator's grep said
+    "0". Trunk carries **807** — 406 under `src/`, 401 under `tests/`
+    — because lobo's sources are `.lu` and a grep scoped to the usual
+    extensions cannot reach them (the seventh false-signal shape). A
+    third reading was available and also wrong: the planning host's
+    lobo checkout sits at `9a4a9051`, a ws27-era commit still pinning
+    0.2.9 / 0.1.29.
+  - **807 is not the interesting number.** The clause prices a plain
+    push at nothing for a scalar, a `str`, or a struct of them, and at
+    one allocation plus a byte copy per list or map reached otherwise.
+    Classed by the receiver's element type against the checked-in
+    `.wolfi` shapes: **15 of 806 resolved sites reach heap storage**,
+    all of them in `src/`, **none in `tests/`** —
+
+    | element type | sites | cost at 0.2.16 |
+    |---|---|---|
+    | `List[str]` | 128 | free (a `str`'s bytes are immutable and shared by the copy) |
+    | `List[int]` | 112 | free |
+    | `List[byte]` | 87 | free |
+    | `List[VarSpec]`, `List[Spec]`, `List[SinkRow]` | 55 | free (structs of `str`/`int`/`bool`) |
+    | `List[bool]` | 5 | free |
+    | **`List[GenRow]`** | **13** | **a deep copy of a whole `config.Conf` (~30 lists) per push** |
+    | **`List[AccRow]`** | **1** | an `obs.Access`; already spelled `copy` |
+    | **`List[List[byte]]`** | **1** | **the whole response body — the per-response gathered write** |
+
+    (Four sites the resolver could not type are listed in the census
+    output and read by hand: two `"index.html"` into a `List[str]` and
+    two bytes into a `List[byte]`, all free.) **Zero `push(take …)`
+    existed in this repo before this bump.**
+  - **The one on the serving path is fixed, not shrugged at.**
+    `serve.lu`'s `(mut parts).push(body)` feeds `net_writev_head`, so
+    at 0.2.16 a plain push would copy **the whole response body, per
+    response**, on exactly the path ws23 and ws35 spent two sprints
+    clearing of copies. `body` is dead after the push, so it takes
+    `take` (`b6a9240`) and costs nothing.
+  - **The cost that remains, measured on lobo's own instrument.**
+    `tools/lobo-membudget`, same checks, same config, before and after:
+    per-request retention **19 KB/req → 24 KB/req**, and through the
+    capped proc **20 → 26 KB/req**. Both are inside the 64 KB/req
+    ratchet and 17/17 checks stay green. The +5 KB is the generation
+    table: `bump_live` and `on_conn_close` fire per connection and
+    rebuild `List[GenRow]`, so each accepted connection now pays a deep
+    copy of the config model per row. Routed as **lobo#28**, not fixed
+    here: making the five rebuilds take their list and MOVE their rows
+    is a refactor, not a pin bump's side effect.
+  - **wolf-lang#438's index-store ruling is with the maintainer**, so
+    lobo's index stores are counted and reported, not changed: there
+    is **no `Map` anywhere in `src/`**, and no `xs[i] = v` store of a
+    non-`Copy` value.
+
+- **Item 3 — the CI that reported success having run nothing.**
+  `ci.yml`'s acquire step answered `toolchain=none` and exited 0 when
+  `WOLF_CI_TOKEN` was absent, and every step after it was guarded on
+  `== 'full'`.
+  - **Seen, before it was fixed.** The secret name was deliberately
+    misspelled on this branch (`17cbeaf`) and the job **went green in
+    nine seconds**: run **35957256102**, job `gauntlet` `success`,
+    04:49:06Z → 04:49:15Z, with **twelve of sixteen steps skipped** —
+    `build pinned wolf`, `stage .wolf-bin`, `build pinned nginx`,
+    **`lobo-gauntlet` itself**. lobo's only automated gate could be
+    switched off by a secret lapsing, and the check mark would look
+    exactly like the 6–8 minutes a real run takes.
+  - **The fix is tl10's shape** (wolf-lsp#28): one composite action,
+    `.github/actions/acquire-toolchain`, that reads the three revs from
+    `wolf-toolchain.toml`, clones each sibling at its pinned rev,
+    **keeps git's stderr on every failure path** and **treats absence
+    as failure**. There is no output value meaning "no toolchain"; a
+    job that reaches the next step has one. Every `if:
+    steps.acquire.outputs.toolchain == 'full'` guard is gone.
+  - **Seen red before it was trusted.** The same misspelled secret
+    against the new action reds at the acquisition: run
+    **35957399446**, `failure`, annotation *"the pinned toolchain
+    cannot be acquired — the sibling repositories are private and this
+    job has no token for them"*. The real secret is restored in
+    `f587b21` and the head's run acquires and runs the gauntlet in
+    full.
+
+### What the pin cost this repository, honestly
+
+**27 distinct sites in seven files did not compile at 0.2.16**, and
+they are two different things that a report must not blend:
+
+- **11 are TRUE finds** under wolf-lang#366's lend rule (0.2.15), every
+  one a place lobo handed a value out of something it was only lent —
+  `conf_for`, the four `ReqOut`/`ConnStep` constructors,
+  `conn.tls_conn`, `shell.gen_new`, `shell.reload`, and two in the
+  tests. Fixed with `take` where the caller gives the value up (free)
+  and with `copy` only where it genuinely escapes. The two SERVING
+  callers of `conf_for` take neither: they read the Conf through the
+  new `conf_index` and LEND it into the call, because the compiler's
+  own `copy` fix-it there is a deep copy of the whole model **per
+  connection step**. `note_request` grew a `note_needed` companion for
+  the same reason — the per-request path pays a comparison, as its doc
+  comment has always claimed.
+- **16 are wolf-lang#449, an OPEN 0.2.16 regression.** The new E1002
+  exclusivity leg flags a `mut` claim that is not in the outer call's
+  argument list at all: a claim inside a branch or a handler arm is
+  reported as "a second claim inside the outer call's extent" of a call
+  that comes LATER in the same function. Every release through 0.2.15
+  compiles the same code and lupin 0.1.38 runs it. boreutils hit it at
+  12 sites in 7 of 15 utilities and filed it; lobo is the second
+  downstream. Worked around under the issue's number — the message is
+  chosen before the one claim, and the `mut` parameter moves LAST on
+  the five helpers the bad walk names (the issue's own `l2` control) —
+  and every workaround is marked to be reverted when #449 lands.
+
+**A 22-line witness, narrowed here and added to #449:** the trigger
+needs **both** arms of an `if`/`else` to claim the same **non-`Copy`**
+place, and a later claim after the branch. `if` without `else`
+compiles; the same shape on an `int` compiles; 0.2.14, 0.2.15 and
+lupin 0.1.38 all print the right answer.
+
+### The predictions, and the two that were wrong
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | ≤ 12 heap-reaching push sites in `src/` | **15** | **WRONG** — by three, and the error is the whole `List[GenRow]` family |
+| P2 | zero of them on the per-request serving path | **one** — `serve.lu`'s gathered write | **WRONG** — and it was the most expensive one in the tree |
+| P3 | `[conf.exit]` moves no gauntlet row | zero rows moved | right |
+| P4 | no `move` on a `Copy` place, so no new refusal | zero `move` expressions in `src/` or `tests/` | right |
+| P5 | source motion is the 13 `.wolfi` stamps + 2 constants, ≤ 2 red rows | **27 sites in 7 files, plus a forced `[std]` bump** | **WRONG** — the bump was nothing like mechanical |
+| P6 | the token-absent run is green in under 60 s having run nothing | green in **9 s**, 12 of 16 steps skipped | right |
+
+Three of six right. P5's failure is the interesting one: the
+prediction was written from the pin file's own ritual, which has
+described every bump since 0.2.8 as a stamp change — and the ritual
+was true right up until a release changed the lend rules.
+
 ## ws36 — 2026-09-15 — the race (lobo#23: the master removes a killed hand's socket; lobo#24: the test's own startup race; lobo#20: the ref tree takes its own pin)
 
 - **lobo#23, measured first.** `control_unix_e2e.lu` was run in a loop
