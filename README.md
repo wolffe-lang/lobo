@@ -103,13 +103,15 @@ hosts.
 
 ## Compatibility
 
-108 nginx directives are supported. [`docs/directives.md`](docs/directives.md)
-lists each one and every place lobo's behaviour differs from nginx's.
-Where it differs, lobo says so when the configuration loads.
+[`docs/directives.md`](docs/directives.md) has a row for each of 108
+nginx directives: 46 implemented, 49 planned and 13 refused by name
+when the configuration loads. It lists every place lobo's behaviour
+differs from nginx's, and where it differs, lobo says so when the
+configuration loads.
 
-Windows and linux-aarch64 builds do not exist yet, because the
-compiler's native code generator does not serve those hosts. On those
-hosts the compiler refuses and names the reason.
+Windows and linux-aarch64 builds do not exist yet. wolf's release
+tier refuses windows by name, and its native code generator does not
+serve linux aarch64.
 
 ## Documentation
 
