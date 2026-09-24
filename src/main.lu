@@ -1757,7 +1757,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     ok: true,
                     note: "",
                 }
-                let ng = shell.reload(prefix, conf, prev)
+                let ng = shell.reload(prefix, conf, take prev)
                 if ng.ok && ng.gen > curgen {
                     let held = gens[ci].live
                     let nhash = shell.conf_hash(ng.conf)
@@ -3271,7 +3271,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                 // the wire, and a rejected config reaches no hand), then
                 // rolls the verb through the hands one at a time
                 let prev = shell.Gen { conf: copy mconf, gen: mgen, ok: true, note: "" }
-                let ng = shell.reload(prefix, conf, prev)
+                let ng = shell.reload(prefix, conf, take prev)
                 if ng.ok && ng.gen > mgen {
                     let nhash = shell.conf_hash(ng.conf)
                     ev_event(mut elog, "notice", shell.ev_generation_draining(mgen, 0))

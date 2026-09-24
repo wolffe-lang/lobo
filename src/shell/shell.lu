@@ -97,18 +97,18 @@ pub fn release_channel() -> str {
 /// The wolf this binary was built with — wolf-toolchain.toml [wolf]'s
 /// version (bare at a release tag; `0.2.5+dev.32f66bf` at a trunk pin).
 pub fn toolchain_version() -> str {
-    "0.2.14"
+    "0.2.16"
 }
 
 /// …and its commit: the short sha `wolf --version` names as `pin`.
 pub fn toolchain_pin() -> str {
-    "30731a6"
+    "93a5fe5"
 }
 
 /// The wolf-std tree compiled in — wolf-toolchain.toml [std]'s rev,
 /// short. A tree has no --version; its sha is its identity.
 pub fn std_rev() -> str {
-    "2d10219"
+    "070884c"
 }
 
 /// The pin file's [wolf] version_line, reassembled: what `wolf
@@ -879,7 +879,7 @@ pub struct Gen {
 /// The initial generation from a loaded config. `gen` starts at 1
 /// (nginx's first master is generation 1). Total (the load already
 /// happened; this just tags it).
-pub fn gen_new(c: config.Conf) -> Gen {
+pub fn gen_new(take c: config.Conf) -> Gen {
     Gen { conf: c, gen: 1, ok: true, note: "started (generation 1)" }
 }
 
@@ -890,7 +890,7 @@ pub fn gen_new(c: config.Conf) -> Gen {
 /// caller to SWAP the routing reference to. The listen-set diff is the
 /// caller's (`listen_addrs`): a surviving address reuses its live
 /// listener, a removed one drains, a new one opens. Total.
-pub fn reload(prefix: str, conf_rel: str, prev: Gen) -> Gen {
+pub fn reload(prefix: str, conf_rel: str, take prev: Gen) -> Gen {
     let c = config.load(prefix, conf_rel)
     if config.ok(c) {
         let g = prev.gen + 1
