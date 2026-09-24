@@ -1015,13 +1015,13 @@ pub fn normalize_path(p: str) -> str ! {malformed} {
         let b = b_raw as int
         if b == 47 {
             let seg = p[start..i]
-            apply_segment( seg, mut segs)?
+            apply_segment(seg, mut segs)?
             start = i + 1
         }
         i = i + 1
     }
     let last = p[start..n]
-    apply_segment( last, mut segs)?
+    apply_segment(last, mut segs)?
     var out = ""
     for s in segs {
         out = "{out}/{s}"
@@ -1071,7 +1071,7 @@ fn is_canonical(p: str) -> bool {
 /// Fold one path segment into the running stack: `.` and empty drop,
 /// `..` pops (escaping the root is `malformed` — the traversal
 /// reject), anything else pushes. RFC 3986 §5.2.4 shape.
-fn apply_segment( seg: str, mut segs: List[str]) -> () ! {malformed} {
+fn apply_segment(seg: str, mut segs: List[str]) -> () ! {malformed} {
     if seg == ".." {
         if segs.is_empty() {
             return malformed

@@ -372,7 +372,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
                 } else {
                     nd = nd + 1
                 }
-                ev_event( "notice", shell.ev_connection_retired(gen, nlive), mut el)
+                ev_event("notice", shell.ev_connection_retired(gen, nlive), mut el)
             }
             (mut out).push(GenRow {
                 conf: g.conf,
@@ -406,7 +406,9 @@ fn retire_zero(gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
             let age = now - g.since_ms
             ev_event(
                 "notice",
-                shell.ev_generation_retired(g.gen, g.drained, g.aborted, age), mut el)
+                shell.ev_generation_retired(g.gen, g.drained, g.aborted, age),
+                mut el,
+            )
         } else {
             (mut out).push(g)
         }
@@ -1000,7 +1002,7 @@ fn ev_log(mut el: ELog, level: str, rawbody: str) {
 /// keep calling `ev_log` directly and are never stamped: the seq
 /// stream is the vocabulary stream, the loop's own event order made
 /// quotable in a bug report (docs/REPLAY.md). Total.
-fn ev_event( level: str, body: str, mut el: ELog) {
+fn ev_event(level: str, body: str, mut el: ELog) {
     el.seq = el.seq + 1
     ev_log(mut el, level, shell.ev_seq(body, el.seq))
 }
@@ -1492,8 +1494,8 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         mem_rt_hw: 0,
         bud_hits: 0,
     })
-    ev_event( "notice", shell.ev_generation_loaded(1, h1), mut elog)
-    ev_event( "notice", shell.ev_generation_activated(1), mut elog)
+    ev_event("notice", shell.ev_generation_loaded(1, h1), mut elog)
+    ev_event("notice", shell.ev_generation_activated(1), mut elog)
 
     // the connection table (parallel primitive lists — a List of a
     // local/primitive type constructs on every lane; rebuilt each pass)
@@ -1634,10 +1636,10 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             let body = revs[ri]
             if body.starts_with("upstream-resolved ") {
                 counters.res_ok = counters.res_ok + 1
-                ev_event( "notice", body, mut elog)
+                ev_event("notice", body, mut elog)
             } else {
                 counters.res_failed = counters.res_failed + 1
-                ev_event( "error", body, mut elog)
+                ev_event("error", body, mut elog)
             }
             ri = ri + 1
         }
@@ -1706,7 +1708,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             let mtrig = shell.signal_meaning(verb)
             if mtrig > 0 {
                 let src = if cc >= 0 { "control" } else { "signal" }
-                ev_event( "notice", shell.ev_signal_received(mtrig, src), mut elog)
+                ev_event("notice", shell.ev_signal_received(mtrig, src), mut elog)
             }
             if verb == "ping" {
                 reply(cc, "pong\n")
@@ -1742,7 +1744,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 quitting = true
                 let held = held_of(gens, curgen)
                 gens = mark_draining(gens, curgen, now)
-                ev_event( "notice", shell.ev_generation_draining(curgen, held), mut elog)
+                ev_event("notice", shell.ev_generation_draining(curgen, held), mut elog)
                 gens = retire_zero(gens, now, mut elog)
             } else if verb == "reopen" {
                 asinks = reopen_sinks(asinks)
@@ -1776,9 +1778,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                         )
                     }
                     gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
-                    ev_event( "notice", shell.ev_generation_draining(curgen, held), mut elog)
-                    ev_event( "notice", shell.ev_generation_loaded(ng.gen, nhash), mut elog)
-                    ev_event( "notice", shell.ev_generation_activated(ng.gen), mut elog)
+                    ev_event("notice", shell.ev_generation_draining(curgen, held), mut elog)
+                    ev_event("notice", shell.ev_generation_loaded(ng.gen, nhash), mut elog)
+                    ev_event("notice", shell.ev_generation_activated(ng.gen), mut elog)
                     gens = retire_zero(gens, now, mut elog)
                     // ws09: the log outputs follow the CURRENT
                     // generation (named delta — nginx's old workers
@@ -2125,11 +2127,15 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                             st.bud_limit,
                             st.bud_would,
                             st.bud_cap,
-                        ), mut elog)
+                        ),
+                        mut elog,
+                    )
                 } else if !st.bud_site.is_empty() {
                     ev_event(
                         "error",
-                        shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would), mut elog)
+                        shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would),
+                        mut elog,
+                    )
                 } else if adm_hit {
                     ev_event(
                         "error",
@@ -2138,7 +2144,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                             "admin",
                             lim_for(gens, cg).memory_budget,
                             adm_would,
-                        ), mut elog)
+                        ),
+                        mut elog,
+                    )
                 }
                 var admitted = st.mem_hw
                 if adm_hit {
@@ -2773,22 +2781,20 @@ fn spawn_worker(
         var ok = true
         var wlevel = ""
         var wwhy = ""
-        let hh = os_spawn_with(
-            exe,
-            shell.worker_args(prefix, conf, i, ep, handed),
-            lfds,
-        ) else |e| {
+        let hh = os_spawn_with(exe, shell.worker_args(prefix, conf, i, ep, handed), lfds) else |e| {
             let word = match e {
-                unsupported => (
-                    "warn",
-                    "worker {i}: this host does not hand descriptors to a child (os_spawn_with unsupported) — falling back to the bind-and-stand-by shape (docs/WORKERS.md)",
-                ),
+                unsupported =>
+                    (
+                        "warn",
+                        "worker {i}: this host does not hand descriptors to a child (os_spawn_with unsupported) — falling back to the bind-and-stand-by shape (docs/WORKERS.md)",
+                    ),
                 not_found => ("error", "worker {i}: spawn failed — executable not found ({exe})"),
                 denied => ("error", "worker {i}: spawn failed — the host refused to execute {exe}"),
-                io => (
-                    "error",
-                    "worker {i}: spawn failed (io) with {handed} listener(s) in the inherit set",
-                ),
+                io =>
+                    (
+                        "error",
+                        "worker {i}: spawn failed (io) with {handed} listener(s) in the inherit set",
+                    ),
             }
             wlevel = word.0
             wwhy = word.1
@@ -2830,7 +2836,7 @@ fn spawn_worker(
             return (-1, "")
         }
     }
-    ev_event( "notice", shell.ev_worker_started(i, restarts), mut el)
+    ev_event("notice", shell.ev_worker_started(i, restarts), mut el)
     (h, ep)
 }
 
@@ -2856,7 +2862,7 @@ fn reap_worker(h: int, i: int, reason: str, mut el: ELog) -> int {
     if r.is_empty() {
         r = if sig { "signal" } else { "exit" }
     }
-    ev_event( "notice", shell.ev_worker_exited(i, r, code), mut el)
+    ev_event("notice", shell.ev_worker_exited(i, r, code), mut el)
     code
 }
 
@@ -3129,8 +3135,8 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     ev_log(mut elog, "notice", sigword)
     var mgen = 1
     var mconf = copy c0
-    ev_event( "notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)), mut elog)
-    ev_event( "notice", shell.ev_generation_activated(1), mut elog)
+    ev_event("notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)), mut elog)
+    ev_event("notice", shell.ev_generation_activated(1), mut elog)
 
     // the worker table (parallel primitive lists, rebuilt on change):
     // child handle (-1 = none yet), control endpoint, replacements,
@@ -3233,7 +3239,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             let mtrig = shell.signal_meaning(verb)
             if mtrig > 0 {
                 let src = if cc >= 0 { "control" } else { "signal" }
-                ev_event( "notice", shell.ev_signal_received(mtrig, src), mut elog)
+                ev_event("notice", shell.ev_signal_received(mtrig, src), mut elog)
             }
             if verb == "ping" {
                 reply(cc, "pong\n")
@@ -3265,10 +3271,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                 let ng = shell.reload(prefix, conf, take prev)
                 if ng.ok && ng.gen > mgen {
                     let nhash = shell.conf_hash(ng.conf)
-                    ev_event( "notice", shell.ev_generation_draining(mgen, 0), mut elog)
-                    ev_event( "notice", shell.ev_generation_loaded(ng.gen, nhash), mut elog)
-                    ev_event( "notice", shell.ev_generation_activated(ng.gen), mut elog)
-                    ev_event( "notice", shell.ev_generation_retired(mgen, 0, 0, 0), mut elog)
+                    ev_event("notice", shell.ev_generation_draining(mgen, 0), mut elog)
+                    ev_event("notice", shell.ev_generation_loaded(ng.gen, nhash), mut elog)
+                    ev_event("notice", shell.ev_generation_activated(ng.gen), mut elog)
+                    ev_event("notice", shell.ev_generation_retired(mgen, 0, 0, 0), mut elog)
                     mgen = ng.gen
                     mconf = copy ng.conf
                     elog = reopen_elog(elog)
