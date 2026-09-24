@@ -16,7 +16,7 @@ mkdir -p ~/lobo && cd ~/lobo
 cp -R "$(brew --prefix lobo)"/share/lobo/{conf,html} .   # or /usr/share/lobo
 mkdir -p logs
 lobo -c conf/lobo.conf serve      # serves html/ on 127.0.0.1:8080
-lobo -s stop
+lobo -s stop -c conf/lobo.conf
 ```
 
 `lobo -v` prints the version and the compiler that built it:
