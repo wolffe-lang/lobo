@@ -457,8 +457,8 @@ pub fn version_token() -> str {
 /// the toolchain pin the binary was built with — W7's acceptance
 /// criterion (D57: a binary that cannot name its own provenance is
 /// one nobody can debug). nginx's prefix (`nginx version:
-/// nginx/1.30.4`) with wolf's parenthetical: "lobo version: lobo/0.1.0
-/// (built with wolf 0.2.6, pin 398e5f5)". Total.
+/// nginx/1.30.4`) with wolf's parenthetical: "lobo version: lobo/0.1.1
+/// (built with wolf 0.2.16, pin 93a5fe5)". Total.
 pub fn version_report() -> str {
     "lobo version: {version_token()}{release_channel()} (built with wolf {toolchain_version()}, pin {toolchain_pin()})"
 }
