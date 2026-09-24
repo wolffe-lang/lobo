@@ -204,12 +204,32 @@ fn index_of(gens: List[GenRow], gen: int) -> int {
 fn conf_for(gens: List[GenRow], gen: int) -> config.Conf {
     let i = index_of(gens, gen)
     if i >= 0 {
-        return gens[i].conf
+        return copy gens[i].conf
     }
     if gens.len > 0 {
-        return gens[0].conf
+        return copy gens[0].conf
     }
     config.parse_str("http {{\n}}\n", "empty")
+}
+
+/// The ROW `conf_for` would read, for a caller that only wants to LEND
+/// the Conf onward (ws37): `gens` is `read` here, so handing the value
+/// out of it is E1002 under wolf-lang#366's lend rule and the fix-it is
+/// `copy` — one deep copy of every list in the model, per call. A read
+/// ARGUMENT is lent, not moved, so `gens[conf_index(gens, g)].conf`
+/// passed straight into a call costs nothing and says the same thing.
+/// `-1` when there is no row at all; a caller on the serving path
+/// cannot see it (generation 1 is pushed before the loop and a
+/// generation retires only at zero live). Total.
+fn conf_index(gens: List[GenRow], gen: int) -> int {
+    let i = index_of(gens, gen)
+    if i >= 0 {
+        return i
+    }
+    if gens.len > 0 {
+        return 0
+    }
+    -1
 }
 
 /// A generation's age in ms in its current role: since load while
@@ -279,7 +299,7 @@ fn lim_for(gens: List[GenRow], gen: int) -> http.Limits {
 /// aggregates: raise the high-water mark, count a refusal. Rebuilds
 /// only when something changed (the per-request hot path pays a
 /// comparison, not a rebuild). Total.
-fn note_request(gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> List[GenRow] {
+fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> List[GenRow] {
     let i = index_of(gens, gen)
     if i < 0 {
         return gens
@@ -1872,7 +1892,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             if got_tls {
                 let tgen = current_gen(gens)
                 gens = bump_live(gens, tgen, 1)
-                let tconf = conf_for(gens, tgen)
+                let tci = conf_index(gens, tgen)
                 var aborted_t = false
                 counters.accepted = counters.accepted + 1
                 if !lim_for(gens, tgen).nodelay {
@@ -1900,7 +1920,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 } else {
                     counters.tls_ok = counters.tls_ok + 1
                     var tcn = conn.tls_conn(tconn, z)
-                    serve.serve_conn_cn(mut tcn, tconf, opts, lim_for(gens, tgen), hport, mut rs)
+                    serve.serve_conn_cn(
+                        mut tcn,
+                        gens[tci].conf,
+                        opts,
+                        lim_for(gens, tgen),
+                        hport,
+                        mut rs,
+                    )
                 }
                 gens = on_conn_close(gens, tgen, false, mut elog)
             }
@@ -1943,7 +1970,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 k = k + 1
                 continue
             }
-            let cconf = conf_for(gens, cg)
+            let cci = conf_index(gens, cg)
             // ws17: a connection is STEPPED only when the wait named
             // it. A socket the poll did not name has nothing to read,
             // so ws16's 12 ms deadline-and-read on it was the loop
@@ -1972,7 +1999,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             let st = if must_step || ready_has(ready, fd) {
                 serve.conn_step(
                     fd,
-                    cconf,
+                    gens[cci].conf,
                     opts,
                     lim_for(gens, cg),
                     hport,
@@ -2123,7 +2150,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 if adm_hit {
                     admitted = adm_would
                 }
-                gens = note_request(gens, cg, admitted, st.mem_rt, hit)
+                gens = note_request(take gens, cg, admitted, st.mem_rt, hit)
                 // ws12: the same record that becomes an access line
                 // becomes counter movement — one fold, no second pass
                 note_served(mut counters, a2, admitted)
