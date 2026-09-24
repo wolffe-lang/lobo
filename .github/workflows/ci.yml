@@ -98,7 +98,9 @@ jobs:
         id: acquire
         shell: bash
         env:
-          TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
+          # ws37, PLANTED: the same job with the secret absent — the
+          # run this names is the evidence the green-skip is real.
+          TOKEN: ${{ secrets.WOLF_CI_TOKEN_PLANTED_ABSENT }}
         run: |
           set -uo pipefail
           if [ -z "${TOKEN:-}" ]; then
