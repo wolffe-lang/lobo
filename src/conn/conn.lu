@@ -50,7 +50,7 @@ pub fn plain(fd: int) -> Conn {
 
 /// A TLS connection wrapping an established session (the fd is the
 /// same socket, kept for deadline arming). Total.
-pub fn tls_conn(fd: int, sess: tls.Sess) -> Conn {
+pub fn tls_conn(fd: int, take sess: tls.Sess) -> Conn {
     Conn { kind: 1, fd: fd, sess: sess }
 }
 

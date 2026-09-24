@@ -1919,7 +1919,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     net_close(tconn) else |_| {}
                 } else {
                     counters.tls_ok = counters.tls_ok + 1
-                    var tcn = conn.tls_conn(tconn, z)
+                    var tcn = conn.tls_conn(tconn, take z)
                     serve.serve_conn_cn(
                         mut tcn,
                         gens[tci].conf,
