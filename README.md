@@ -74,27 +74,32 @@ the master binds the listeners and passes them to each worker, every
 worker accepts on the same socket, and the kernel distributes the
 connections.
 
-lobo is slower than nginx, and on linux it is much slower on keepalive
-traffic. [`docs/PARITY.md`](docs/PARITY.md) defines the comparison (it
-was written before the first measurement) as the ratio nginx ÷ lobo on
-one machine, with workers equal to cpus, over five interleaved runs:
+lobo is within ten percent of nginx on macOS and not yet on linux.
+[`docs/PARITY.md`](docs/PARITY.md) defines the comparison (it was
+written before the first measurement) as the ratio nginx ÷ lobo on one
+machine, with workers equal to cpus and 32 concurrent clients, over
+five interleaved runs; 1.10 or under is parity. The current ledger:
 
-| host | connection-per-request | keepalive |
-|---|---|---|
-| macOS arm64, 18 cpus | 1.15x | 2.76x |
-| linux x86-64, 4 cpus | 2.27x | 110.9x |
+| host | measured | connection-per-request | keepalive |
+|---|---|---|---|
+| macOS arm64, 18 cpus | 2026-09-09 | 1.033x | 1.072x |
+| linux x86-64, 4 cpus (GitHub Actions runner) | 2026-09-11 | 1.197x | 1.263x |
 
-The linux keepalive figure is a stall. lobo answers about one request
-every 41 ms per connection because the kernel's 40 ms delayed ACK
-interacts with Nagle's algorithm on lobo's two-write response. macOS
-does not show it, which is how 0.1.0 shipped with it. A single-buffer
-write removes it and is the next change.
+On linux, `listen … reuseport` takes the connection-per-request ratio
+to 1.089x against 1.138x without it on the same VM; the table keeps
+lobo's default. The runner's speed differs from VM to VM, so ratios
+compare only within one ledger entry. Both rows were taken before the
+move to wolf 0.2.16 (macOS with wolf 0.2.8, linux with 0.2.11) and
+have not been re-taken on the 0.1.1 build.
 
-[`docs/PROFILE.md`](docs/PROFILE.md) has the rest: 63 µs per request
-against nginx's 19 on the same machine, with about half of the
-difference spent in the runtime parking on its reactor thread before
-syscalls on sockets that were already ready. That part is the
-language's, and is filed upstream.
+The 110.9x linux keepalive figure this page gave for 0.1.0 was a
+delayed-ACK stall on lobo's two-write response, fixed in 0.1.1.
+
+[`docs/PROFILE.md`](docs/PROFILE.md) has where the time goes. Its
+first profile (2026-09-08, macOS arm64, 0.1.0's source built with wolf
+0.2.6, pin 398e5f5) measured 63 µs per keepalive request against
+nginx's 19; the addenda after it follow each change since, on both
+hosts.
 
 ## Compatibility
 
