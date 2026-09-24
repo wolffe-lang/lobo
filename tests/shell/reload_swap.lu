@@ -31,7 +31,7 @@ fn main() -> !int {
         "{root}/lobo.conf",
         "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
     )?
-    let g1 = shell.gen_new(config.load(root, "lobo.conf"))
+    let g1 = shell.gen_new(take config.load(root, "lobo.conf"))
     assert(g1.gen == 1, "first generation is 1")
     assert(g1.ok, "generation 1 loaded ok")
     let d1 = http.route(g1.conf, "/index.html")
@@ -42,7 +42,12 @@ fn main() -> !int {
         "{root}/lobo.conf",
         "http {{\n  server {{ listen 8080; root ws04_reload/B; }}\n}}\n",
     )?
-    let g2 = shell.reload(root, "lobo.conf", g1)
+    // ws37: `reload` TAKES the previous generation at the 0.2.16 pin
+    // (wolf-lang#366 — it carries `prev.conf` into the rejected-reload
+    // answer), and this test reads `g1.conf` again at line 54 to show
+    // the frozen model survives. `take copy g1` is what wanting both
+    // costs, and it is the test's whole point.
+    let g2 = shell.reload(root, "lobo.conf", take copy g1)
     assert(g2.ok, "reload succeeded")
     assert(g2.gen == 2, "generation bumped to 2")
     let d2 = http.route(g2.conf, "/index.html")
@@ -57,7 +62,7 @@ fn main() -> !int {
     // reload a BROKEN config: the old generation KEEPS serving, the
     // generation does not move (nginx contract).
     fs_write_text("{root}/lobo.conf", "http {{\n  server {{ listen\n")?
-    let g3 = shell.reload(root, "lobo.conf", g2)
+    let g3 = shell.reload(root, "lobo.conf", take g2)
     assert(!g3.ok, "a broken reload is rejected")
     assert(g3.gen == 2, "a rejected reload keeps the generation at 2")
     let d3 = http.route(g3.conf, "/index.html")
@@ -71,7 +76,7 @@ fn main() -> !int {
         "{root}/lobo.conf",
         "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
     )?
-    let g4 = shell.reload(root, "lobo.conf", g3)
+    let g4 = shell.reload(root, "lobo.conf", take g3)
     assert(g4.ok && g4.gen == 3, "a good reload after a bad one advances to 3")
     assert(
         http.route(g4.conf, "/index.html").fs_path == "ws04_reload/A/index.html",
