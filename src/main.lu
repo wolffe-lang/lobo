@@ -295,18 +295,25 @@ fn lim_for(gens: List[GenRow], gen: int) -> http.Limits {
     http.default_limits()
 }
 
-/// Fold one served request's budget outcome into its generation's
-/// aggregates: raise the high-water mark, count a refusal. Rebuilds
-/// only when something changed (the per-request hot path pays a
-/// comparison, not a rebuild). Total.
-fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> List[GenRow] {
+/// Whether one served request's budget outcome changes its
+/// generation's aggregates at all — the per-request hot path pays THIS
+/// comparison and nothing else (ws37: it used to be `note_request`'s
+/// own early return, which made the list a `take` the function never
+/// consumed (W1003) and whose fix-it was `copy gens` — a deep copy of
+/// every row's Conf, per request, under wolf-lang#366's lend rule).
+/// Total.
+fn note_needed(gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> bool {
     let i = index_of(gens, gen)
     if i < 0 {
-        return gens
+        return false
     }
-    if !hit && hw <= gens[i].mem_hw && rt <= gens[i].mem_rt_hw {
-        return gens
-    }
+    hit || hw > gens[i].mem_hw || rt > gens[i].mem_rt_hw
+}
+
+/// Fold one served request's budget outcome into its generation's
+/// aggregates: raise the high-water mark, count a refusal. Called only
+/// when `note_needed` says something changed. Total.
+fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.gen == gen {
@@ -365,7 +372,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
                 } else {
                     nd = nd + 1
                 }
-                ev_event(mut el, "notice", shell.ev_connection_retired(gen, nlive))
+                ev_event( "notice", shell.ev_connection_retired(gen, nlive), mut el)
             }
             (mut out).push(GenRow {
                 conf: g.conf,
@@ -398,10 +405,8 @@ fn retire_zero(gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
         if g.state == "draining" && g.live == 0 {
             let age = now - g.since_ms
             ev_event(
-                mut el,
                 "notice",
-                shell.ev_generation_retired(g.gen, g.drained, g.aborted, age),
-            )
+                shell.ev_generation_retired(g.gen, g.drained, g.aborted, age), mut el)
         } else {
             (mut out).push(g)
         }
@@ -995,7 +1000,7 @@ fn ev_log(mut el: ELog, level: str, rawbody: str) {
 /// keep calling `ev_log` directly and are never stamped: the seq
 /// stream is the vocabulary stream, the loop's own event order made
 /// quotable in a bug report (docs/REPLAY.md). Total.
-fn ev_event(mut el: ELog, level: str, body: str) {
+fn ev_event( level: str, body: str, mut el: ELog) {
     el.seq = el.seq + 1
     ev_log(mut el, level, shell.ev_seq(body, el.seq))
 }
@@ -1460,19 +1465,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
         }
     }
-    if sig_on {
-        ev_log(
-            mut elog,
-            "notice",
-            "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])",
-        )
+    // wolf-lang#449: the claim in a branch is refused at 0.2.16 against
+    // a later claim it does not nest inside. One claim, message chosen.
+    let sigword = if sig_on {
+        "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])"
     } else {
-        ev_log(
-            mut elog,
-            "notice",
-            "signal reception unavailable on this platform; the control channel is the trigger",
-        )
+        "signal reception unavailable on this platform; the control channel is the trigger"
     }
+    ev_log(mut elog, "notice", sigword)
 
     // generation 1 is current
     let h1 = shell.conf_hash(c0)
@@ -1492,8 +1492,8 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         mem_rt_hw: 0,
         bud_hits: 0,
     })
-    ev_event(mut elog, "notice", shell.ev_generation_loaded(1, h1))
-    ev_event(mut elog, "notice", shell.ev_generation_activated(1))
+    ev_event( "notice", shell.ev_generation_loaded(1, h1), mut elog)
+    ev_event( "notice", shell.ev_generation_activated(1), mut elog)
 
     // the connection table (parallel primitive lists — a List of a
     // local/primitive type constructs on every lane; rebuilt each pass)
@@ -1634,10 +1634,10 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             let body = revs[ri]
             if body.starts_with("upstream-resolved ") {
                 counters.res_ok = counters.res_ok + 1
-                ev_event(mut elog, "notice", body)
+                ev_event( "notice", body, mut elog)
             } else {
                 counters.res_failed = counters.res_failed + 1
-                ev_event(mut elog, "error", body)
+                ev_event( "error", body, mut elog)
             }
             ri = ri + 1
         }
@@ -1706,7 +1706,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             let mtrig = shell.signal_meaning(verb)
             if mtrig > 0 {
                 let src = if cc >= 0 { "control" } else { "signal" }
-                ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
+                ev_event( "notice", shell.ev_signal_received(mtrig, src), mut elog)
             }
             if verb == "ping" {
                 reply(cc, "pong\n")
@@ -1742,7 +1742,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 quitting = true
                 let held = held_of(gens, curgen)
                 gens = mark_draining(gens, curgen, now)
-                ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
+                ev_event( "notice", shell.ev_generation_draining(curgen, held), mut elog)
                 gens = retire_zero(gens, now, mut elog)
             } else if verb == "reopen" {
                 asinks = reopen_sinks(asinks)
@@ -1776,9 +1776,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                         )
                     }
                     gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
-                    ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
-                    ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
-                    ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
+                    ev_event( "notice", shell.ev_generation_draining(curgen, held), mut elog)
+                    ev_event( "notice", shell.ev_generation_loaded(ng.gen, nhash), mut elog)
+                    ev_event( "notice", shell.ev_generation_activated(ng.gen), mut elog)
                     gens = retire_zero(gens, now, mut elog)
                     // ws09: the log outputs follow the CURRENT
                     // generation (named delta — nginx's old workers
@@ -2118,7 +2118,6 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     // ws13: the runtime's own refusal — the cap in
                     // ledger units rides as the appended field
                     ev_event(
-                        mut elog,
                         "error",
                         shell.ev_budget_exceeded_cap(
                             cg,
@@ -2126,31 +2125,28 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                             st.bud_limit,
                             st.bud_would,
                             st.bud_cap,
-                        ),
-                    )
+                        ), mut elog)
                 } else if !st.bud_site.is_empty() {
                     ev_event(
-                        mut elog,
                         "error",
-                        shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would),
-                    )
+                        shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would), mut elog)
                 } else if adm_hit {
                     ev_event(
-                        mut elog,
                         "error",
                         shell.ev_budget_exceeded(
                             cg,
                             "admin",
                             lim_for(gens, cg).memory_budget,
                             adm_would,
-                        ),
-                    )
+                        ), mut elog)
                 }
                 var admitted = st.mem_hw
                 if adm_hit {
                     admitted = adm_would
                 }
-                gens = note_request(take gens, cg, admitted, st.mem_rt, hit)
+                if note_needed(gens, cg, admitted, st.mem_rt, hit) {
+                    gens = note_request(take gens, cg, admitted, st.mem_rt, hit)
+                }
                 // ws12: the same record that becomes an access line
                 // becomes counter movement — one fold, no second pass
                 note_served(mut counters, a2, admitted)
@@ -2770,41 +2766,42 @@ fn spawn_worker(
     var handed = lfds.len
     var h: int = -1
     if handed > 0 {
+        // wolf-lang#449: 0.2.16 refuses a claim made inside a handler
+        // arm against a later call it does not nest inside. The level
+        // and the sentence ride out of the handler; the claim is made
+        // once, at the top level. Revert when #449 lands.
         var ok = true
+        var wlevel = ""
+        var wwhy = ""
         let hh = os_spawn_with(
             exe,
             shell.worker_args(prefix, conf, i, ep, handed),
             lfds,
-        ) else |e| match e {
-            unsupported => {
-                ok = false
-                ev_log(
-                    mut el,
+        ) else |e| {
+            let word = match e {
+                unsupported => (
                     "warn",
                     "worker {i}: this host does not hand descriptors to a child (os_spawn_with unsupported) — falling back to the bind-and-stand-by shape (docs/WORKERS.md)",
-                )
-                -1
-            },
-            not_found => {
-                ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
-                return (-1, "")
-            },
-            denied => {
-                ev_log(
-                    mut el,
-                    "error",
-                    "worker {i}: spawn failed — the host refused to execute {exe}",
-                )
-                return (-1, "")
-            },
-            io => {
-                ev_log(
-                    mut el,
+                ),
+                not_found => ("error", "worker {i}: spawn failed — executable not found ({exe})"),
+                denied => ("error", "worker {i}: spawn failed — the host refused to execute {exe}"),
+                io => (
                     "error",
                     "worker {i}: spawn failed (io) with {handed} listener(s) in the inherit set",
-                )
-                return (-1, "")
-            },
+                ),
+            }
+            wlevel = word.0
+            wwhy = word.1
+            -1
+        }
+        if wwhy != "" {
+            ev_log(mut el, wlevel, wwhy)
+        }
+        if wlevel == "error" {
+            return (-1, "")
+        }
+        if wlevel == "warn" {
+            ok = false
         }
         if ok {
             h = hh
@@ -2814,26 +2811,26 @@ fn spawn_worker(
     }
     if h < 0 {
         let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0)
-        h = os_spawn(argv) else |e| match e {
-            not_found => {
-                ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
-                return (-1, "")
-            },
-            denied => {
-                ev_log(
-                    mut el,
-                    "error",
-                    "worker {i}: spawn failed — the host refused to execute {exe}",
-                )
-                return (-1, "")
-            },
-            io => {
-                ev_log(mut el, "error", "worker {i}: spawn failed (io)")
-                return (-1, "")
-            },
+        // wolf-lang#449: 0.2.16 refuses a claim made inside a branch or
+        // a handler block against a later call it does not nest inside
+        // — here the three `ev_log`s in the three match arms against
+        // the `ev_event` below. The reason is carried OUT of the
+        // handler and the one claim is made at the top level.
+        var why = ""
+        h = os_spawn(argv) else |e| {
+            why = match e {
+                not_found => "worker {i}: spawn failed — executable not found ({exe})",
+                denied => "worker {i}: spawn failed — the host refused to execute {exe}",
+                io => "worker {i}: spawn failed (io)",
+            }
+            -1
+        }
+        if why != "" {
+            ev_log(mut el, "error", why)
+            return (-1, "")
         }
     }
-    ev_event(mut el, "notice", shell.ev_worker_started(i, restarts))
+    ev_event( "notice", shell.ev_worker_started(i, restarts), mut el)
     (h, ep)
 }
 
@@ -2859,7 +2856,7 @@ fn reap_worker(h: int, i: int, reason: str, mut el: ELog) -> int {
     if r.is_empty() {
         r = if sig { "signal" } else { "exit" }
     }
-    ev_event(mut el, "notice", shell.ev_worker_exited(i, r, code))
+    ev_event( "notice", shell.ev_worker_exited(i, r, code), mut el)
     code
 }
 
@@ -3123,23 +3120,17 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
         }
     }
-    if sig_on {
-        ev_log(
-            mut elog,
-            "notice",
-            "signal reception armed by meaning (reload, terminate=stop, quit): every meaning fans out to the workers",
-        )
+    // wolf-lang#449, as above: one claim, message chosen.
+    let sigword = if sig_on {
+        "signal reception armed by meaning (reload, terminate=stop, quit): every meaning fans out to the workers"
     } else {
-        ev_log(
-            mut elog,
-            "notice",
-            "signal reception unavailable on this platform; the control channel is the trigger",
-        )
+        "signal reception unavailable on this platform; the control channel is the trigger"
     }
+    ev_log(mut elog, "notice", sigword)
     var mgen = 1
     var mconf = copy c0
-    ev_event(mut elog, "notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)))
-    ev_event(mut elog, "notice", shell.ev_generation_activated(1))
+    ev_event( "notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)), mut elog)
+    ev_event( "notice", shell.ev_generation_activated(1), mut elog)
 
     // the worker table (parallel primitive lists, rebuilt on change):
     // child handle (-1 = none yet), control endpoint, replacements,
@@ -3242,7 +3233,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             let mtrig = shell.signal_meaning(verb)
             if mtrig > 0 {
                 let src = if cc >= 0 { "control" } else { "signal" }
-                ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
+                ev_event( "notice", shell.ev_signal_received(mtrig, src), mut elog)
             }
             if verb == "ping" {
                 reply(cc, "pong\n")
@@ -3274,10 +3265,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                 let ng = shell.reload(prefix, conf, take prev)
                 if ng.ok && ng.gen > mgen {
                     let nhash = shell.conf_hash(ng.conf)
-                    ev_event(mut elog, "notice", shell.ev_generation_draining(mgen, 0))
-                    ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
-                    ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
-                    ev_event(mut elog, "notice", shell.ev_generation_retired(mgen, 0, 0, 0))
+                    ev_event( "notice", shell.ev_generation_draining(mgen, 0), mut elog)
+                    ev_event( "notice", shell.ev_generation_loaded(ng.gen, nhash), mut elog)
+                    ev_event( "notice", shell.ev_generation_activated(ng.gen), mut elog)
+                    ev_event( "notice", shell.ev_generation_retired(mgen, 0, 0, 0), mut elog)
                     mgen = ng.gen
                     mconf = copy ng.conf
                     elog = reopen_elog(elog)
