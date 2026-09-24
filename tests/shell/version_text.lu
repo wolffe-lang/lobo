@@ -13,14 +13,14 @@ use shell
 
 fn main() -> int {
     // the wire identity — bare on every channel, nginx's way
-    assert(shell.version_token() == "lobo/0.1.0", "identity token")
+    assert(shell.version_token() == "lobo/0.1.1", "identity token")
 
     // the release stamp (ws19): five constants, held equal to wolf.pkg
     // and wolf-toolchain.toml by tools/lobo-stamp — this test pins the
     // SHAPES, the gate pins the values, so a pin bump moves neither
     let chan = shell.release_channel()
     assert(chan == "" || chan == "+dev", "the channel is the release or +dev, nothing else")
-    assert(shell.release_version() == "0.1.0", "the package version (wolf.pkg's)")
+    assert(shell.release_version() == "0.1.1", "the package version (wolf.pkg's)")
     assert(shell.toolchain_pin().len == 7, "the toolchain pin is a short sha")
     assert(shell.toolchain_version().len > 0, "the toolchain version is named")
     assert(shell.std_rev().len == 7, "the std rev is a short sha")
@@ -32,10 +32,10 @@ fn main() -> int {
 
     // -v: the version, the channel and the toolchain pin — W7's criterion
     let report = shell.version_report()
-    assert(report.starts_with("lobo version: lobo/0.1.0"), "version line (nginx shape)")
+    assert(report.starts_with("lobo version: lobo/0.1.1"), "version line (nginx shape)")
     assert(
         report ==
-            "lobo version: lobo/0.1.0{chan} (built with wolf {shell.toolchain_version()}, pin {shell.toolchain_pin()})",
+            "lobo version: lobo/0.1.1{chan} (built with wolf {shell.toolchain_version()}, pin {shell.toolchain_pin()})",
         "-v names the version, the channel and the toolchain pin",
     )
 

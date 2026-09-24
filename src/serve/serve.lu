@@ -289,7 +289,7 @@ pub struct ServerOpts {
 /// this literal equal to shell.release_version() (ws19). Total.
 pub fn default_opts() -> ServerOpts {
     ServerOpts {
-        token: "lobo/0.1.0",
+        token: "lobo/0.1.1",
         keepalive_timeout_ms: 75000,
         keepalive_requests: 1000,
         read_timeout_ms: 60000,

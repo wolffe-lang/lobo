@@ -84,14 +84,14 @@ pub fn version() -> str {
 
 /// The package version — MAJOR.MINOR.PATCH, wolf.pkg's `version`.
 pub fn release_version() -> str {
-    "0.1.0"
+    "0.1.1"
 }
 
 /// The channel: "" exactly at the tree a `v<release_version>` tag
 /// points at (or is about to), "+dev" at every other tree. Printed
 /// after the version by `-v`, carried in the archive's name.
 pub fn release_channel() -> str {
-    "+dev"
+    ""
 }
 
 /// The wolf this binary was built with — wolf-toolchain.toml [wolf]'s
