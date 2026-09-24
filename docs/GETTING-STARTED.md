@@ -38,12 +38,12 @@ the wolf compiler's commit, and `BUILD` beside the binary records the
 same line:
 
 ```
-lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)
+lobo version: lobo/0.1.1 (built with wolf 0.2.16, pin 93a5fe5)
 ```
 
 `./lobo -V` adds the standard-library pin, the tier and the module
 set, one fact per line, nginx's shape. A build that is not a release
-says so: `lobo/0.1.0+dev`.
+says so: `lobo/0.1.1+dev`.
 
 ```sh
 ./lobo -t -c conf/lobo.conf
@@ -64,7 +64,7 @@ serves in the foreground. In another shell:
 curl -i http://127.0.0.1:8080/
 ```
 
-answers `200`, `Server: lobo/0.1.0`, and the bytes of
+answers `200`, `Server: lobo/0.1.1`, and the bytes of
 `html/index.html`. Edit `conf/lobo.conf` (it is an `nginx.conf`, and
 docs/directives.md is the directive table with its deltas), then:
 
