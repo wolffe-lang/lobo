@@ -1,5 +1,125 @@
 # Changelog
 
+## 0.1.1 — 2026-09-24 — the linux keepalive stall gone, built with wolf 0.2.16
+
+The second release. The linux keepalive stall that shipped in 0.1.0
+is gone, `listen … reuseport` is served, the per-request path makes
+fewer syscalls and keeps fewer bytes, and the binary is built with
+wolf 0.2.16. The directive table and the command line are 0.1.0's,
+with `tcp_nodelay` moved from planned to implemented.
+
+### Install
+
+```sh
+brew install wolffe-lang/wolf/lobo     # macOS arm64
+yay -S lobo-bin                        # Arch x86-64
+```
+
+or download the archive for your host, unpack it, and run it in place:
+
+```sh
+tar -xzf lobo-0.1.1-x86_64-unknown-linux-gnu.tar.gz   # macOS: lobo-0.1.1-aarch64-apple-darwin
+cd lobo-0.1.1-x86_64-unknown-linux-gnu
+./lobo -v
+./lobo -t -c conf/lobo.conf
+./lobo -c conf/lobo.conf serve      # then: curl -i http://127.0.0.1:8080/
+```
+
+`GETTING-STARTED.md` in the archive is the learner path. The
+release workflow's last job downloads the published archive on a
+clean runner, checks its digest, runs `lobo -v`, serves the stock
+page and compares the bytes.
+
+### `lobo -v`
+
+```
+lobo version: lobo/0.1.1 (built with wolf 0.2.16, pin 93a5fe5)
+```
+
+`wolf-toolchain.toml` pins wolf 0.2.16 (`93a5fe5`), lupin 0.1.38
+(`ba357aa`) and wolf-std `070884c`; the release workflow builds that
+toolchain from source on each host, and the archive's `BUILD` file
+records it.
+
+### What changed since 0.1.0
+
+- **The linux keepalive stall is gone** (ws23, lobo#3). 0.1.0 wrote a
+  small response as two segments, and on linux the second waited for
+  the peer's 40 ms delayed ACK: about one request every 41 ms per
+  connection, 781 req/s over 32 connections. A small response is one
+  write now. On the CI runner (4 cpus, run 34296065145) the keepalive
+  ratio to nginx went from 110.7x to 3.3x in that one change. Since
+  ws24 the write is a single gathered `writev` rather than a copy.
+- **`tcp_nodelay` is served** (ws24). On by default, as in nginx; lobo
+  applies it to every accepted connection where nginx applies it to
+  keepalive connections only, and `docs/directives.md` names the
+  difference.
+- **`listen … reuseport`** (ws32, lobo#5), nginx's flag with
+  nginx's default (off). With it each worker binds its own
+  `SO_REUSEPORT` socket and the kernel wakes one worker per connection
+  instead of all of them. On the CI runner at four workers it took the
+  connection-per-request ratio to nginx from 1.138x to 1.089x on the
+  same VM (run 34603185051). `docs/WORKERS.md` has what it trades on
+  each host.
+- **Fewer syscalls and fewer bytes per request.** A static request
+  opens the file once and reads its kind, size and mtime off the open
+  handle (ws25, ws30): 10.20 syscalls per connection on the close
+  shape against nginx's 10.13 in ws31's count, where ws30 counted
+  12.27 before its change. The serving path stopped building strings
+  it did not need (ws28): the bytes a keepalive request leaves behind
+  went from 6,373 to 2,315 on `tools/lobo-strings` (2,393 when ws35
+  re-read it). The routing table is built once when the config loads
+  instead of scanned on every request (ws33, ws34, lobo#14, lobo#18):
+  0.76% of a worker's cpu to under the profiler's 0.3-point floor,
+  too small for the parity bar to see.
+- **Memory retained per request: 19 KB** on `tools/lobo-membudget`
+  (ws38, lobo#28), inside the 64 KB ratchet CI enforces. Under wolf
+  0.2.16 a plain `push` copies its element; lobo's generation table
+  pushed whole configurations, which took the figure to 24 KB at the
+  pin bump, and now moves them instead.
+- **A stopped worker leaves no socket file** (ws36, lobo#23). With a
+  `unix:` control endpoint, a worker killed during shutdown could
+  leave its socket file (the control path plus `.w1`, `.w2`, …)
+  behind; the master removes it now.
+- **Built with wolf 0.2.16** (ws37). The new compiler refused 27
+  places in lobo's source. Eleven were real: lobo handed out a value
+  it had only borrowed, and each is fixed with an explicit move, or a
+  copy where the value escapes. Sixteen are a 0.2.16 compiler bug
+  (wolf-lang#449), worked around and marked for revert. The nginx
+  differential in CI is unchanged and green.
+- The historical nginx CVE inputs in `tests/cve-corpus/` are unchanged
+  since 0.1.0 and still refused on every CI run.
+
+### Against nginx
+
+`docs/PARITY.md` defines the comparison: nginx ÷ lobo, workers equal
+to cpus, c = 32, the median of five interleaved pairs; within 1.10 is
+parity. The current ledger:
+
+| host | date | close | keepalive |
+|---|---|---|---|
+| macOS arm64, nomad-1, 18 cpus (ws26) | 2026-09-09 | 1.033x | 1.072x |
+| linux x86-64, the CI runner, 4 cpus (ws33, run 34631705651) | 2026-09-11 | 1.197x | 1.263x |
+
+Parity is met on macOS and not on linux. The first linux set, taken
+on 2026-09-08 with 0.1.0's toolchain (run 34251691870), read 2.27x
+and 110.9x.
+
+### The hosts, and what is still refused
+
+| host | archive |
+|---|---|
+| `x86_64-unknown-linux-gnu` | yes |
+| `aarch64-apple-darwin` | yes |
+| `x86_64-pc-windows-msvc` | no: wolf's release tier refuses it by name (upstream s60c) |
+| `aarch64-unknown-linux-gnu` | no: wolf's native tier does not serve it |
+
+Thirteen nginx directives are refused by name when a config loads,
+never ignored: `user`, `daemon`, `master_process`, `worker_priority`,
+`worker_rlimit_nofile`, the six `*_by_lua*`/`lua_*` directives and the
+two `perl*` ones. `docs/directives.md` lists every directive's status;
+46 of its 108 rows are implemented.
+
 ## 0.1.0 — 2026-09-07 — the first artifact
 
 The first release of lobo, a web server written from parts in
