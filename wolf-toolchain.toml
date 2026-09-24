@@ -123,11 +123,20 @@
 # **v0.2.15**, one release behind this [wolf] — so s169's exit
 # classes, s177's move fix and #449's leg are wolf-side only, and the
 # 63 lupin-lane files of this corpus are the measurement.
-# The #146 WOLF_MIDEND caveat: re-probed at THIS pin, TWENTY-FIRST
-# measurement — see the ws37 CHANGELOG entry for the state read at the
-# bump. The gauntlet's release step and the release archive's build
-# keep WOLF_MIDEND=0 until the fix enters the [wolf] pin. The shipped
-# binary is the gauntlet's release-tier build, flag for flag.
+# The #146 WOLF_MIDEND caveat, TWENTY-FIRST measurement and the first
+# one that is not an ICE: **wolf-lang#146 is CLOSED (2026-09-15) and
+# the probe agrees.** `wolf build --release ./src/main.lu` with NO
+# WOLF_MIDEND=0 exits 0 at this pin trio (ws37, kasumi linux x86-64) —
+# twenty measurements running said `ICE: mid-end broke the module` on
+# `@std.x.crypto.curve25519.sc_muladd`. The probe cannot say by itself
+# whether the compiler or the std tree carried the fix, because both
+# moved in this bump. **The flip-back is therefore OWED and is NOT
+# taken here**: `tools/lobo-gauntlet`, `tools/lobo-dist` and ci.yml
+# still pass WOLF_MIDEND=0, so the shipped binary is the same build
+# lobo has shipped since wsm02 and this bump changes no optimization
+# profile. Retiring the flag is its own lane, with the gauntlet green
+# both ways and docs/BUDGET.md and docs/PARITY.md following. The
+# shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
 rev = "93a5fe504593ca7642b78ba83b4986e7a03cfe71"
 version_line = "wolf 0.2.16 (wolfgang, pin 93a5fe5)"
