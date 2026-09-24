@@ -484,7 +484,7 @@ fn main() -> !int {
                 net_close(fd) else |_| {}
                 continue
             }
-            cn = conn.tls_conn(fd, sess)
+            cn = conn.tls_conn(fd, take sess)
         }
         let req = read_req(mut cn) else |_| {
             conn.conn_close(mut cn)
