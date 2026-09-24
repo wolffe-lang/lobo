@@ -107,9 +107,11 @@ jobs:
         id: acquire
         uses: ./lobo/.github/actions/acquire-toolchain
         with:
-          # ws37, STILL PLANTED: the red this produces is the evidence
-          # the new gate can fail. Restored in the next commit.
-          token: ${{ secrets.WOLF_CI_TOKEN_PLANTED_ABSENT }}
+          # Seen red before it was trusted: the same job with this name
+          # misspelled reds at the acquisition with the reason in its
+          # annotation (run 35957399446), where the old step reported
+          # success in nine seconds (run 35957256102).
+          token: ${{ secrets.WOLF_CI_TOKEN }}
           path: lobo
 
       - uses: Swatinem/rust-cache@v2
