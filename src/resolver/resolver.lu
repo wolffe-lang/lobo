@@ -488,7 +488,7 @@ fn cache_put(mut rs: Resolver, host: str, set: str, fail: str, expires: int) {
 
 /// Remove pending row `at`, closing nothing (the caller closed the
 /// socket). Total.
-fn pending_drop(mut rs: Resolver, at: int) {
+fn pending_drop( at: int, mut rs: Resolver) {
     var nh = List[str]()
     var nf = List[int]()
     var ni = List[int]()
@@ -571,7 +571,7 @@ fn settle(mut rs: Resolver, at: int, ans: Answer, now: int) {
         cache_put(mut rs, host, "", ans.reason, now + failure_hold_ms())
         (mut rs.events).push(ev_resolve_failed(host, ans.reason, took))
     }
-    pending_drop(mut rs, at)
+    pending_drop( at, mut rs)
 }
 
 /// The `upstream-resolved` vocabulary event (ws13, appended — nothing
