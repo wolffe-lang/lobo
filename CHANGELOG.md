@@ -78,6 +78,58 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws38 — 2026-09-24 — the generation table (lobo#28: the rebuilds move their rows; 24 → 19 KB/req)
+
+- **The fix.** Every `List[GenRow]` rebuild in `src/main.lu` now takes
+  its list and moves its rows: `bump_live`, `on_conn_close`,
+  `retire_zero`, `start_reload` and `mark_draining` declare `take gens`
+  (`note_request` already did), their nine call sites spell
+  `take gens`, and all **13** pushes are `push(take g)` or
+  `push(take GenRow { … })`. At 0.2.16 a plain push copies a non-`Copy`
+  element (`[mem.region.edge.elem]`, wolf-lang#385), and a `GenRow`
+  carries a whole `config.Conf`, so the old spelling deep-copied the
+  model once per row per rebuild. The one copy left is spelled:
+  `start_reload`'s new row is `copy newconf`, because the reload path
+  still reads `ng.conf` after it — once per reload, the copy the plain
+  push used to make silently.
+- **Which rebuild the instrument was seeing.** lobo#28 blamed the
+  per-connection pair (`bump_live`, `on_conn_close`).
+  `tools/lobo-membudget` sends 400 requests over **one** connection per
+  round, so that pair runs twice per round. It could not add 5 KB per
+  request. A throwaway probe build, with one `eprint` per rebuild and
+  never committed, counted the calls on the plain server during one
+  instrument run: **`retire_zero` 1,807**, `bump_live` 3,
+  `on_conn_close` 3, `note_request` 2. The capped server counted
+  1,916 / 7 / 7 / 4. `retire_zero` runs at the end of **every poll
+  pass** and rebuilt the table whether or not anything retired, so
+  each pass deep-copied the model, about two copies per request. With
+  the change the counts are the same (1,807 / 1,917) and the copies
+  are gone.
+- **Measured on lobo's own instrument, five runs each side, kasumi:**
+
+  | | trunk `1055f84` | this change |
+  |---|---|---|
+  | per-request retention ratchet | **24 KB/req** ×5 | **19 KB/req** ×5 |
+  | …through the capped proc | **26 KB/req** ×5 | **20 KB/req** ×5 |
+  | round B growth (plain server) | 9,684–9,692 KB | 7,956 KB |
+
+  This is ws37's pre-pin 19 / 20 again. The ratchet stays 64 KB/req
+  and 17/17 checks are green on both sides.
+- **Nothing served changed.** The full gauntlet is green at 28 steps,
+  with 282/282 corpus lane-runs and the nginx, proxy, control and log
+  differentials all byte-compared against pinned nginx/1.30.4.
+- **The push census, re-run** (ws37's method): 807 `.push(` sites
+  (406 `src/`, 401 `tests/`), of which 15 reach heap storage. Before
+  this change **14 of the 15** were plain pushes, so each one copied.
+  Now **1** is: the `List[AccRow]` pass record in the serving loop,
+  whose element is already spelled `copy`. It only runs when an access
+  output is configured, and this change reports it without touching
+  it. `push(take …)` sites: 1 → 14.
+- The prediction (`docs/ws38-prediction.md`) was committed before the
+  edit. All six parts held: P1 the shape, P2 the 13 sites and the one
+  `copy`, P3 19 ± 1 and 20 ± 1, P4 no served byte moved, P5 the call
+  counts unchanged, P6 14 → 1.
+
 ## ws37 — 2026-09-24 — the pin at 0.2.16 (the push that copies, the lend rule that refuses, and a CI that can no longer green-skip)
 
 Three items. The prediction for all three was written down in
