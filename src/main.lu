@@ -140,7 +140,12 @@ fn read_command(conn: int) -> str {
 // is fine, so the row type lives here and shell formats it one field at
 // a time. Rows are never mutated in place (index-assignment is a
 // one-lane shape) — every update REBUILDS the list, which is cheap: a
-// server holds a handful of generations, never more.
+// server holds a handful of generations, never more. ws38 (lobo#28):
+// cheap only because every rebuild TAKES the list and MOVES its rows
+// (`push(take g)`). At 0.2.16 a plain push copies a non-Copy element
+// ([mem.region.edge.elem], wolf-lang#385), and a GenRow carries a whole
+// config.Conf — so the old spelling deep-copied the model per row per
+// rebuild, and `retire_zero` rebuilds on EVERY poll pass.
 // ------------------------------------------------------------------
 
 /// One live generation. `state` is "current" (the one accepting new
@@ -256,11 +261,11 @@ fn gen_remaining(g: GenRow, shutdown_ms: int, now: int) -> int {
 }
 
 /// Rebuild `gens` with `gen`'s live count changed by `delta`. Total.
-fn bump_live(gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
+fn bump_live(take gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.gen == gen {
-            (mut out).push(GenRow {
+            (mut out).push(take GenRow {
                 conf: g.conf,
                 gen: g.gen,
                 live: g.live + delta,
@@ -276,7 +281,7 @@ fn bump_live(gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
                 bud_hits: g.bud_hits,
             })
         } else {
-            (mut out).push(g)
+            (mut out).push(take g)
         }
     }
     out
@@ -329,7 +334,7 @@ fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) 
             if hit {
                 nhits = nhits + 1
             }
-            (mut out).push(GenRow {
+            (mut out).push(take GenRow {
                 conf: g.conf,
                 gen: g.gen,
                 live: g.live,
@@ -345,7 +350,7 @@ fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) 
                 bud_hits: nhits,
             })
         } else {
-            (mut out).push(g)
+            (mut out).push(take g)
         }
     }
     out
@@ -358,7 +363,7 @@ fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) 
 /// (checked-arithmetic spirit — a leak that made a generation immortal
 /// would be loud). Returns the rebuilt table. Total unless the
 /// invariant breaks (then it traps, by design).
-fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> List[GenRow] {
+fn on_conn_close(take gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.gen == gen {
@@ -374,7 +379,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
                 }
                 ev_event("notice", shell.ev_connection_retired(gen, nlive), mut el)
             }
-            (mut out).push(GenRow {
+            (mut out).push(take GenRow {
                 conf: g.conf,
                 gen: g.gen,
                 live: nlive,
@@ -390,7 +395,7 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
                 bud_hits: g.bud_hits,
             })
         } else {
-            (mut out).push(g)
+            (mut out).push(take g)
         }
     }
     out
@@ -398,8 +403,9 @@ fn on_conn_close(gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> L
 
 /// Retire every DRAINING generation that has reached zero connections:
 /// emit `generation-retired` with its accounting and drop it from the
-/// table. Total.
-fn retire_zero(gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
+/// table. Runs at the end of every poll pass, so it takes the list and
+/// moves the rows it keeps (ws38). Total.
+fn retire_zero(take gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.state == "draining" && g.live == 0 {
@@ -410,7 +416,7 @@ fn retire_zero(gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
                 mut el,
             )
         } else {
-            (mut out).push(g)
+            (mut out).push(take g)
         }
     }
     out
@@ -420,7 +426,7 @@ fn retire_zero(gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
 /// and append the freshly frozen `newconf` as the new current
 /// generation `newgen`. Total.
 fn start_reload(
-    gens: List[GenRow],
+    take gens: List[GenRow],
     curgen: int,
     newconf: config.Conf,
     newgen: int,
@@ -430,7 +436,7 @@ fn start_reload(
     var out = List[GenRow]()
     for g in gens {
         if g.gen == curgen {
-            (mut out).push(GenRow {
+            (mut out).push(take GenRow {
                 conf: g.conf,
                 gen: g.gen,
                 live: g.live,
@@ -446,12 +452,12 @@ fn start_reload(
                 bud_hits: g.bud_hits,
             })
         } else {
-            (mut out).push(g)
+            (mut out).push(take g)
         }
     }
     let nlim = serve.resolve_limits(newconf)
-    (mut out).push(GenRow {
-        conf: newconf,
+    (mut out).push(take GenRow {
+        conf: copy newconf,
         gen: newgen,
         live: 0,
         state: "current",
@@ -470,11 +476,11 @@ fn start_reload(
 
 /// Mark `gen` draining (as of `now`) without creating a successor — the
 /// quit path (drain everything, then exit). Total.
-fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
+fn mark_draining(take gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.gen == gen && g.state == "current" {
-            (mut out).push(GenRow {
+            (mut out).push(take GenRow {
                 conf: g.conf,
                 gen: g.gen,
                 live: g.live,
@@ -490,7 +496,7 @@ fn mark_draining(gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
                 bud_hits: g.bud_hits,
             })
         } else {
-            (mut out).push(g)
+            (mut out).push(take g)
         }
     }
     out
@@ -1479,7 +1485,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // generation 1 is current
     let h1 = shell.conf_hash(c0)
     var gens = List[GenRow]()
-    (mut gens).push(GenRow {
+    (mut gens).push(take GenRow {
         conf: c0,
         gen: 1,
         live: 0,
@@ -1743,9 +1749,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 reply(cc, "quit: draining then exiting (generation {curgen})\n")
                 quitting = true
                 let held = held_of(gens, curgen)
-                gens = mark_draining(gens, curgen, now)
+                gens = mark_draining(take gens, curgen, now)
                 ev_event("notice", shell.ev_generation_draining(curgen, held), mut elog)
-                gens = retire_zero(gens, now, mut elog)
+                gens = retire_zero(take gens, now, mut elog)
             } else if verb == "reopen" {
                 asinks = reopen_sinks(asinks)
                 elog = reopen_elog(elog)
@@ -1777,11 +1783,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                             "lobo: [error] reloaded config has invalid TLS ({nssl.err}); keeping the previous certificates",
                         )
                     }
-                    gens = start_reload(gens, curgen, ng.conf, ng.gen, nhash, now)
+                    gens = start_reload(take gens, curgen, ng.conf, ng.gen, nhash, now)
                     ev_event("notice", shell.ev_generation_draining(curgen, held), mut elog)
                     ev_event("notice", shell.ev_generation_loaded(ng.gen, nhash), mut elog)
                     ev_event("notice", shell.ev_generation_activated(ng.gen), mut elog)
-                    gens = retire_zero(gens, now, mut elog)
+                    gens = retire_zero(take gens, now, mut elog)
                     // ws09: the log outputs follow the CURRENT
                     // generation (named delta — nginx's old workers
                     // keep old-config logs; lobo's one process logs
@@ -1856,7 +1862,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 }
                 let curgen = current_gen(gens)
                 counters.accepted = counters.accepted + 1
-                gens = bump_live(gens, curgen, 1)
+                gens = bump_live(take gens, curgen, 1)
                 // ws24: `tcp_nodelay off` is the one value that moves
                 // anything — every accepted stream is already NODELAY
                 // ([os.net.nodelay]); a host that declines is an
@@ -1893,7 +1899,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             }
             if got_tls {
                 let tgen = current_gen(gens)
-                gens = bump_live(gens, tgen, 1)
+                gens = bump_live(take gens, tgen, 1)
                 let tci = conf_index(gens, tgen)
                 var aborted_t = false
                 counters.accepted = counters.accepted + 1
@@ -1931,7 +1937,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                         mut rs,
                     )
                 }
-                gens = on_conn_close(gens, tgen, false, mut elog)
+                gens = on_conn_close(take gens, tgen, false, mut elog)
             }
         }
 
@@ -2176,7 +2182,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             }
             if close_it {
                 net_close(fd) else |_| {}
-                gens = on_conn_close(gens, cg, aborted_flag, mut elog)
+                gens = on_conn_close(take gens, cg, aborted_flag, mut elog)
             } else {
                 (mut nfds).push(fd)
                 (mut ngens).push(cg)
@@ -2238,7 +2244,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         }
 
         // 4. retire drained generations, 5. finish a quit once empty
-        gens = retire_zero(gens, now, mut elog)
+        gens = retire_zero(take gens, now, mut elog)
         if quitting && cfds.len == 0 {
             running = false
         }
