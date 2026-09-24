@@ -975,7 +975,15 @@ fn serve_file(
                 // (`budget.body_small`) keeps its two writes; its doc
                 // says why (D40's margin is sixteen ledger units).
                 var parts = List[List[byte]]()
-                (mut parts).push(body)
+                // ws37, at the 0.2.16 pin: a plain push COPIES a
+                // non-`Copy` element ([mem.region.edge.elem],
+                // wolf-lang#385 option 3) — one allocation and a byte
+                // copy of the WHOLE body, per response, on the one
+                // gathered-write path ws23 and ws35 spent two sprints
+                // clearing. `body` is dead after this push (the gather
+                // is the next statement and nothing reads it again),
+                // so `take` is the truthful spelling and it is free.
+                (mut parts).push(take body)
                 net_writev_head(sock, head, parts) else |e| match e {
                     closed => {
                         wcode = 1
