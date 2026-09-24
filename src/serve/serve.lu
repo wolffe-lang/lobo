@@ -510,7 +510,7 @@ fn hline(name: str, value: str) -> str {
 
 /// Write the full bytes of `s` to `conn`. Rows: the net builtins'
 /// `closed`/`io` — a peer that vanished mid-write.
-fn write_all(mut cn: conn.Conn, s: str) -> () ! {closed, io} {
+fn write_all( s: str, mut cn: conn.Conn) -> () ! {closed, io} {
     conn.conn_write(mut cn, s)?
 }
 
@@ -586,7 +586,7 @@ fn err_len(code: int, special: bool, token: str) -> int {
 /// record already held (ws28). The names arrive lowercased from the
 /// parser and are pushed as they are — `obs.access_header` lowers its
 /// name, which lowered every name a second time. Total.
-fn fill_req_acc(mut acc: obs.Access, req: http.Request) {
+fn fill_req_acc( req: http.Request, mut acc: obs.Access) {
     var i: int = 0
     for h in req.hnames {
         (mut acc.hnames).push(h)
@@ -783,7 +783,7 @@ fn serve_file(
         h304 = "{h304}{hline("Connection", conn_hdr)}"
         h304 = "{h304}{hline("ETag", etag)}"
         h304 = "{h304}\r\n"
-        write_all(mut cn, h304)?
+        write_all( h304, mut cn)?
         return !keep
     }
 
@@ -837,7 +837,7 @@ fn serve_file(
 
     if is_head {
         fs_close(fd) else |_| {}
-        write_all(mut cn, head)?
+        write_all( head, mut cn)?
         return !keep
     }
 
@@ -1010,7 +1010,7 @@ fn serve_file(
     // stream in bounded byte chunks (fs_read_chunk has no utf8 row —
     // a lone 0x80 is data). A mid-stream read error can only close —
     // bytes are already on the wire.
-    write_all(mut cn, head) else |e| match e {
+    write_all( head, mut cn) else |e| match e {
         closed => {
             fs_close(fd) else |_| {}
             return closed
@@ -1255,8 +1255,8 @@ pub fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> 
     head = "{head}{hline("Connection", keep_token(keep))}"
     head = "{head}{hline("Cache-Control", "no-store")}"
     head = "{head}\r\n"
-    write_all(mut cn, head)?
-    write_all(mut cn, body)?
+    write_all( head, mut cn)?
+    write_all( body, mut cn)?
     body.len
 }
 
@@ -1550,7 +1550,7 @@ fn handle_request(
             if !is_head {
                 h = "{h}{body}"
             }
-            write_all(mut cn, h)?
+            write_all( h, mut cn)?
             return !keep
         }
     }
@@ -1611,7 +1611,7 @@ fn handle_request(
             h = "{h}{hline("Location", loc)}"
             h = "{h}{hline("Connection", keep_token(keep))}"
             h = "{h}\r\n{body}"
-            write_all(mut cn, h)?
+            write_all( h, mut cn)?
             return !keep
         }
         if cl.kind == 4 {
@@ -2188,7 +2188,7 @@ pub fn serve_request(
             return req_out(true, "", take acc, chg)
         },
     }
-    fill_req_acc(mut acc, req)
+    fill_req_acc( req, mut acc)
 
     // ws10, the `head` site: the fences above (414/400) fire first;
     // the budget rules what they admitted (docs/BUDGET.md's order).
