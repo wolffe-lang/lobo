@@ -31,7 +31,9 @@ fn eq(a: List[byte], b: List[byte]) -> bool {
 }
 
 fn lit(bytes: List[byte]) -> List[byte] {
-    bytes
+    // wolf-lang#366 at 0.2.15: a `read` parameter is lent, never
+    // given, so handing it back needs a value of this function's own
+    copy bytes
 }
 
 fn main() -> int {
