@@ -92,39 +92,33 @@ jobs:
           echo "std=$(rev std)" >> "$GITHUB_OUTPUT"
 
       # The sibling repos are private; the default token cannot read
-      # them (the wolf-book lesson). With WOLF_CI_TOKEN the job runs
-      # in full; without it every toolchain step below SKIPs loudly.
-      - name: acquire pinned siblings
+      # them (the wolf-book lesson), so WOLF_CI_TOKEN is how the org
+      # grants it. **ws37: absence is FAILURE.** Until this commit the
+      # step answered `toolchain=none` and exited 0 when the secret was
+      # absent, and every step below was guarded on `== 'full'` — so
+      # this job reported SUCCESS in nine seconds having built nothing
+      # and run no gauntlet (the planted run 35957256102: twelve of
+      # sixteen steps skipped, `lobo-gauntlet` among them). lobo's only
+      # automated gate could be switched off by a secret lapsing, with
+      # no signal anywhere. The acquisition is one composite action now
+      # (tl10's shape in wolf-lsp#28), it keeps git's stderr, and it
+      # reds the job when it cannot acquire.
+      - name: acquire the pinned toolchain
         id: acquire
-        shell: bash
-        env:
-          # ws37, PLANTED: the same job with the secret absent — the
-          # run this names is the evidence the green-skip is real.
-          TOKEN: ${{ secrets.WOLF_CI_TOKEN_PLANTED_ABSENT }}
-        run: |
-          set -uo pipefail
-          if [ -z "${TOKEN:-}" ]; then
-            echo "::notice::WOLF_CI_TOKEN absent — sibling repos unreachable; the gauntlet lane skips (local runs remain the gate)"
-            echo "toolchain=none" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          ok=1
-          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-lang" wolf-lang \
-            && git -C wolf-lang checkout --quiet "${{ steps.pins.outputs.wolf }}" || ok=0
-          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-interp" wolf-interp \
-            && git -C wolf-interp checkout --quiet "${{ steps.pins.outputs.lupin }}" || ok=0
-          git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/wolf-std" wolf-std || ok=0
-          if [ "$ok" = 1 ]; then echo "toolchain=full" >> "$GITHUB_OUTPUT"
-          else echo "::error::token present but sibling acquisition failed"; exit 1; fi
+        uses: ./lobo/.github/actions/acquire-toolchain
+        with:
+          # ws37, STILL PLANTED: the red this produces is the evidence
+          # the new gate can fail. Restored in the next commit.
+          token: ${{ secrets.WOLF_CI_TOKEN_PLANTED_ABSENT }}
+          path: lobo
 
       - uses: Swatinem/rust-cache@v2
-        if: steps.acquire.outputs.toolchain == 'full'
         with:
           workspaces: |
             wolf-lang
             wolf-interp
 
       - name: build pinned wolf (release) + runtime staticlib
-        if: steps.acquire.outputs.toolchain == 'full'
         shell: bash
         working-directory: wolf-lang
         run: |
@@ -144,7 +138,6 @@ jobs:
             cargo build --release -p wolf_driver -p wolf_rt
 
       - name: build pinned lupin (release)
-        if: steps.acquire.outputs.toolchain == 'full'
         shell: bash
         working-directory: wolf-interp
         run: cargo build --release --bin lupin
@@ -153,7 +146,6 @@ jobs:
       # what makes `--version` claim the rev, and lib-toolchain.sh
       # refuses the unstamped `+dev.unknown` a plain cargo build emits.
       - name: stage .wolf-bin
-        if: steps.acquire.outputs.toolchain == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -171,7 +163,6 @@ jobs:
       # the interpretation). The build recipe is docs/DIFFERENTIAL.md's,
       # driven by the values in NGINX-PIN itself.
       - name: cache pinned nginx
-        if: steps.acquire.outputs.toolchain == 'full'
         id: nginx-cache
         uses: actions/cache@v4
         with:
@@ -179,7 +170,7 @@ jobs:
           key: nginx-${{ runner.os }}-${{ hashFiles('lobo/tests/differential/NGINX-PIN') }}
 
       - name: build pinned nginx (cache miss only)
-        if: steps.acquire.outputs.toolchain == 'full' && steps.nginx-cache.outputs.cache-hit != 'true'
+        if: steps.nginx-cache.outputs.cache-hit != 'true'
         shell: bash
         working-directory: lobo
         run: |
@@ -202,7 +193,6 @@ jobs:
       # steps, plus nc for the acme/proxy/metrics drives. ubuntu-latest
       # ships awk/jq/diff/openssl-3.x; netcat is the only add.
       - name: host tools
-        if: steps.acquire.outputs.toolchain == 'full'
         shell: bash
         run: |
           set -euo pipefail
@@ -211,7 +201,7 @@ jobs:
           openssl version
 
       - name: lobo-gauntlet
-        if: steps.acquire.outputs.toolchain == 'full' && inputs.parity != true && inputs.profile != true && inputs.syscalls != true
+        if: inputs.parity != true && inputs.profile != true && inputs.syscalls != true
         shell: bash
         working-directory: lobo
         run: tools/lobo-gauntlet
@@ -241,7 +231,7 @@ jobs:
       # this job acquires its OWN toolchain, so both trees are built
       # alike. A dev-stamped ref pin builds the same way.
       - name: "build the ref tree (ws25; ws36 — its own pinned toolchain, lobo#20)"
-        if: steps.acquire.outputs.toolchain == 'full' && (inputs.parity == true || inputs.profile == true) && inputs.ref_tree != ''
+        if: (inputs.parity == true || inputs.profile == true) && inputs.ref_tree != ''
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.WOLF_CI_TOKEN }}
@@ -258,7 +248,7 @@ jobs:
           ./target/lobo-release -v
 
       - name: lobo-parity (the W8 bar — a number, never a gate)
-        if: steps.acquire.outputs.toolchain == 'full' && inputs.parity == true
+        if: inputs.parity == true
         shell: bash
         working-directory: lobo
         env:
@@ -289,7 +279,7 @@ jobs:
       # under its exact release, and when it is not the tool SKIPS by
       # name (a skip is not a number). strace is the syscall counter.
       - name: "lobo-profile (ws25 — perf record + strace -c on one hand; ws27 both shapes; ws31 at N hands)"
-        if: steps.acquire.outputs.toolchain == 'full' && inputs.profile == true
+        if: inputs.profile == true
         shell: bash
         working-directory: lobo
         run: |
@@ -321,7 +311,7 @@ jobs:
       # per-time rows (wolf-lang#302's futex) read with the clock as
       # the divisor, which is the only divisor they have.
       - name: "lobo-syscalls (ws27 — strace -c over both servers, calls per request, both shapes; ws30 — and per second at idle)"
-        if: steps.acquire.outputs.toolchain == 'full' && inputs.syscalls == true
+        if: inputs.syscalls == true
         shell: bash
         working-directory: lobo
         run: |

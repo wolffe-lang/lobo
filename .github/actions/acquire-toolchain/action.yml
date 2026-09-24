@@ -1,0 +1,149 @@
+# ONE acquisition of the pinned toolchain, for every job in every
+# workflow that needs a compiler.
+#
+# It lives here, and it FAILS when it cannot acquire, because of what
+# the inline version did. `ci.yml`'s acquire step used to answer
+# `toolchain=none` when `WOLF_CI_TOKEN` was absent and `exit 0`; every
+# step after it was guarded by `if: steps.acquire.outputs.toolchain ==
+# 'full'`, so the `gauntlet` job ran the checkout, read three revs out
+# of a TOML file, and reported SUCCESS in about ten seconds having
+# built nothing, run no corpus entry and compared nothing against the
+# oracle. A green like that is indistinguishable, at the check mark,
+# from the 6–8 minutes a real run takes — and lobo's gate is the
+# gauntlet, so the repository's only automated gate could be switched
+# off by a secret quietly lapsing, with no signal anywhere. tl10 fixed
+# the same shape one repo over in wolf-lsp (#28), and the rule it
+# landed is this file's rule:
+#
+#   **ABSENCE IS FAILURE.** There is no output value meaning "no
+#   toolchain". A caller that reaches the next step has a toolchain,
+#   and a caller that has no token has a RED job with the reason in
+#   its annotation.
+#
+# The siblings are PRIVATE, so `actions/checkout`'s default token
+# cannot read them (the wolf-book lesson) and `WOLF_CI_TOKEN` is how
+# this org grants that. The acquisition is by CLONE-AND-CHECKOUT, not
+# by release download, and that is deliberate: the org refuses this
+# token the REST API a release download needs (a fine-grained token
+# past 366 days; run 35030562781 is the refusal) while git over HTTPS
+# still serves it — ws36 recorded that when `tools/lobo-stage-ref`
+# gained `--from source` for the same reason.
+#
+# **stderr is KEPT.** Every failure path prints git's own words. Under
+# a `2>/dev/null` a wrong rev, a renamed repo and a lapsed token are
+# one silent non-zero, and the step that reports them is the only
+# place anyone will look.
+name: Acquire the pinned wolf toolchain
+description: >-
+  Clone wolf-lang, wolf-interp and wolf-std at the revisions
+  wolf-toolchain.toml pins, beside the lobo checkout. Fails when the
+  token is absent or any pinned revision cannot be reached.
+
+inputs:
+  token:
+    description: A token that can read the private sibling repositories
+    required: true
+  path:
+    description: The lobo checkout holding wolf-toolchain.toml
+    required: false
+    default: lobo
+
+outputs:
+  wolf:
+    description: The wolf-lang revision from [wolf]
+    value: ${{ steps.acquire.outputs.wolf }}
+  lupin:
+    description: The wolf-interp revision from [lupin]
+    value: ${{ steps.acquire.outputs.lupin }}
+  std:
+    description: The wolf-std revision from [std]
+    value: ${{ steps.acquire.outputs.std }}
+
+runs:
+  using: composite
+  steps:
+    - id: acquire
+      shell: bash
+      env:
+        TOKEN: ${{ inputs.token }}
+        LOBO: ${{ inputs.path }}
+      run: |
+        set -uo pipefail
+
+        # 1. The token. This is the whole defect: the old step turned an
+        #    absent secret into a green job. It is an error now, and it
+        #    names what the reader has to do about it.
+        if [ -z "${TOKEN:-}" ]; then
+          echo "::error title=No WOLF_CI_TOKEN::the pinned toolchain cannot be acquired — the sibling repositories are private and this job has no token for them. This is a RED job on purpose: until 2026-09-24 it reported success in ten seconds having run nothing. Set the WOLF_CI_TOKEN secret (repo or org) with read access to wolffe-lang/wolf-lang, wolf-interp and wolf-std."
+          {
+            echo "### No toolchain: WOLF_CI_TOKEN is absent"
+            echo
+            echo "lobo's gate is \`tools/lobo-gauntlet\`, and the gauntlet needs the"
+            echo "toolchain \`wolf-toolchain.toml\` pins. Without the token the siblings"
+            echo "cannot be cloned, so there is nothing to gate with — and a job that"
+            echo "cannot run its gate is red, never green."
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit 1
+        fi
+
+        # 2. The three revisions, read from the pin file itself — the
+        #    same parse `tools/lib-toolchain.sh` does, so CI and a dev
+        #    box cannot drift apart on what "the pin" means.
+        rev() {
+          awk -v s="[$1]" '$0==s{f=1} f&&/^rev = /{gsub(/"/,"",$3); print $3; exit}' \
+            "$LOBO/wolf-toolchain.toml"
+        }
+        ok=1
+        for sect in wolf lupin std; do
+          v="$(rev "$sect")"
+          if [ -z "$v" ]; then
+            echo "::error::wolf-toolchain.toml has no rev for [$sect]"
+            ok=0
+            continue
+          fi
+          echo "$sect=$v" >> "$GITHUB_OUTPUT"
+          echo "pin [$sect] = $v"
+        done
+        [ "$ok" = 1 ] || exit 1
+
+        # 3. Clone and check out each pinned revision, keeping git's own
+        #    stderr on every failure.
+        acquire_one() { # acquire_one <repo> <dir> <rev|->
+          if ! git clone --quiet "https://x-access-token:${TOKEN}@github.com/wolffe-lang/$1" "$2" \
+               2> "$RUNNER_TEMP/git-err"; then
+            echo "::error::cannot clone wolffe-lang/$1 — the token cannot read it, or it has moved"
+            sed 's/^/  git: /' "$RUNNER_TEMP/git-err"
+            return 1
+          fi
+          if [ "$3" != "-" ] && ! git -C "$2" checkout --quiet "$3" 2> "$RUNNER_TEMP/git-err"; then
+            echo "::error::wolffe-lang/$1 has no revision $3 — wolf-toolchain.toml pins a commit this clone does not carry"
+            sed 's/^/  git: /' "$RUNNER_TEMP/git-err"
+            return 1
+          fi
+          echo "acquired $1 at ${3}"
+          return 0
+        }
+
+        acquire_one wolf-lang   wolf-lang   "$(rev wolf)"  || ok=0
+        acquire_one wolf-interp wolf-interp "$(rev lupin)" || ok=0
+        # [std] is staged out of the clone by rev, so the clone itself
+        # stays at trunk; the rev is verified below rather than checked
+        # out, so a pin naming a commit wolf-std does not carry is red
+        # HERE and not four steps later inside `git archive`.
+        acquire_one wolf-std    wolf-std    "-"            || ok=0
+        if [ "$ok" = 1 ] && ! git -C wolf-std cat-file -e "$(rev std)^{commit}" 2> "$RUNNER_TEMP/git-err"; then
+          echo "::error::wolf-std has no revision $(rev std) — wolf-toolchain.toml's [std] pin is unreachable"
+          sed 's/^/  git: /' "$RUNNER_TEMP/git-err"
+          ok=0
+        fi
+        [ "$ok" = 1 ] || exit 1
+
+        {
+          echo "### Toolchain acquired"
+          echo
+          echo "| pin | revision |"
+          echo "|---|---|"
+          echo "| wolf-lang | \`$(rev wolf)\` |"
+          echo "| wolf-interp | \`$(rev lupin)\` |"
+          echo "| wolf-std | \`$(rev std)\` |"
+        } >> "$GITHUB_STEP_SUMMARY"
