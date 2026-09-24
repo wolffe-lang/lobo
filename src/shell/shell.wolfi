@@ -1,9 +1,10 @@
 module pkg :: shell
-  wolfi v0 · toolchain 0.2.14 · edition v1
-  export_hash af589fcdee6ebeed6c0c046a401a1559ad03bbd8178cfb1cf46f77648d7f80f2
-  pkg_hash    af589fcdee6ebeed6c0c046a401a1559ad03bbd8178cfb1cf46f77648d7f80f2
+  wolfi v0 · toolchain 0.2.16 · edition v1
+  export_hash 77bf90176187a1f0cec15b0da85e630ad2dbed6f3f23beb528cb062a92d33b9d
+  pkg_hash    77bf90176187a1f0cec15b0da85e630ad2dbed6f3f23beb528cb062a92d33b9d
   deps:
-    config  aeaff0ba273b2ed89aba97bde7dc9fc6c1df2f383086613738a6c50deacd0c50
+    config  a1b7c795a231cd20865a1e5433d6322e5f7d11f0a80c99c0e35db5a2b9e5b324
+    std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:
     [0] pub conf_hash — fn conf_hash(c: config.Conf) -> str · regions (ρ1) -> -
     [1] pub control_addr — fn control_addr(c: config.Conf) -> str · regions (ρ1) -> -
@@ -29,7 +30,7 @@ module pkg :: shell
     [21] pub ev_worker_exited — fn ev_worker_exited(worker: int, reason: str, code: int) -> str
     [22] pub ev_worker_field — fn ev_worker_field(body: str, worker: int) -> str
     [23] pub ev_worker_started — fn ev_worker_started(worker: int, restarts: int) -> str
-    [24] pub gen_new — fn gen_new(c: config.Conf) -> self.Gen · regions (ρ1) -> ρ_caller
+    [24] pub gen_new — fn gen_new(take c: config.Conf) -> self.Gen · regions (ρ1) -> ρ_caller
     [25] pub is_unix_addr — fn is_unix_addr(addr: str) -> bool
     [26] pub listen_added — fn listen_added(old: prelude.List[str], new: prelude.List[str]) -> prelude.List[str] · regions (ρ1, ρ2) -> ρ_caller
     [27] pub listen_addrs — fn listen_addrs(c: config.Conf) -> prelude.List[str] · regions (ρ1) -> ρ_caller
@@ -42,7 +43,7 @@ module pkg :: shell
     [34] pub pid_write — fn pid_write(path: str, endpoint: str) -> () ! {io}
     [35] pub release_channel — fn release_channel() -> str
     [36] pub release_version — fn release_version() -> str
-    [37] pub reload — fn reload(prefix: str, conf_rel: str, prev: self.Gen) -> self.Gen · regions (-, -, ρ1) -> ρ_caller
+    [37] pub reload — fn reload(prefix: str, conf_rel: str, take prev: self.Gen) -> self.Gen · regions (-, -, ρ1) -> ρ_caller
     [38] pub shutdown_timeout_ms — fn shutdown_timeout_ms(c: config.Conf) -> int · regions (ρ1) -> -
     [39] pub sig_mask — fn sig_mask() -> int
     [40] pub sig_probe — fn sig_probe() -> int

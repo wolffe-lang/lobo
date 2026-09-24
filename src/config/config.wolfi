@@ -1,8 +1,11 @@
 module pkg :: config
-  wolfi v0 · toolchain 0.2.14 · edition v1
-  export_hash aeaff0ba273b2ed89aba97bde7dc9fc6c1df2f383086613738a6c50deacd0c50
-  pkg_hash    aeaff0ba273b2ed89aba97bde7dc9fc6c1df2f383086613738a6c50deacd0c50
+  wolfi v0 · toolchain 0.2.16 · edition v1
+  export_hash a1b7c795a231cd20865a1e5433d6322e5f7d11f0a80c99c0e35db5a2b9e5b324
+  pkg_hash    a1b7c795a231cd20865a1e5433d6322e5f7d11f0a80c99c0e35db5a2b9e5b324
   deps:
+    std.list  b867c3c66c3aa0dbae1cef22897684da1333874100bc1412d65681a5c310cfc9
+    std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
+    std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
     std.x.crypto.curve25519  ad4d209666678283c13835ca645a325b6cf065108eb6d553801931b914710d27
     std.x.tls.cert  daea0d9c5e79a960033f0d461b469eb865d2b365caf0743e508562de83b0301e
   items:
