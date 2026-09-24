@@ -2067,7 +2067,7 @@ pub struct ReqOut {
 /// A ReqOut off a finished (or refused) request — every serve_request
 /// exit builds through here so the budget fields never straggle.
 /// Total.
-fn req_out(close: bool, carry: str, acc: obs.Access, chg: Charge) -> ReqOut {
+fn req_out(close: bool, carry: str, take acc: obs.Access, chg: Charge) -> ReqOut {
     ReqOut {
         close: close,
         carry: carry,
@@ -2092,7 +2092,7 @@ fn req_out(close: bool, carry: str, acc: obs.Access, chg: Charge) -> ReqOut {
 /// the upstream host the request cannot dial until the resolver
 /// answers. The loop parks the connection (its whole buffer carried
 /// back) and steps it again once the name settles. Total.
-fn req_out_wait(acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
+fn req_out_wait(take acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
     ReqOut {
         close: false,
         carry: "",
@@ -2116,7 +2116,7 @@ fn req_out_wait(acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
 /// and `admin` names which surface the entry must render. The access
 /// record is filled except for status and body bytes, which only the
 /// entry knows. Total.
-fn req_out_admin(close: bool, carry: str, acc: obs.Access, chg: Charge, kind: str) -> ReqOut {
+fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kind: str) -> ReqOut {
     ReqOut {
         close: close,
         carry: carry,
@@ -2167,25 +2167,25 @@ pub fn serve_request(
             acc.status = 400
             acc.body_bytes = err_len(400, false, opts.token)
             send_err(mut cn, 400, false, opts.token)
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         },
         uri_too_long => {
             acc.status = 414
             acc.body_bytes = err_len(414, false, opts.token)
             send_err(mut cn, 414, false, opts.token)
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         },
         too_large => {
             acc.status = 400
             acc.body_bytes = err_len(400, true, opts.token)
             send_err(mut cn, 400, true, opts.token)
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         },
         unimplemented => {
             acc.status = 501
             acc.body_bytes = err_len(501, false, opts.token)
             send_err(mut cn, 501, false, opts.token)
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         },
     }
     fill_req_acc(mut acc, req)
@@ -2200,7 +2200,7 @@ pub fn serve_request(
         acc.status = 503
         acc.body_bytes = err_len(503, false, opts.token)
         send_err(mut cn, 503, false, opts.token)
-        return req_out(true, "", acc, chg)
+        return req_out(true, "", take acc, chg)
     }
 
     // ws13: THE WAIT — before a byte past the head is consumed, ask
@@ -2213,7 +2213,7 @@ pub fn serve_request(
     // replay.
     let need = proxy.resolve_need(c, req.path, rs, time_unix_ms())
     if !need.host.is_empty() {
-        return req_out_wait(acc, chg, need)
+        return req_out_wait(take acc, chg, need)
     }
 
     var rest = rest0
@@ -2224,7 +2224,7 @@ pub fn serve_request(
             acc.body_bytes = err_len(413, false, opts.token)
             send_err(mut cn, 413, false, opts.token)
             half_close_drain(mut cn)
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         }
         // the ws10 `body` site: refused PRE-ADMISSION — the declared
         // length would blow the budget, so zero body bytes are read
@@ -2235,10 +2235,10 @@ pub fn serve_request(
             acc.body_bytes = err_len(503, false, opts.token)
             send_err(mut cn, 503, false, opts.token)
             half_close_drain(mut cn)
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         }
         let taken = take_length(mut cn, rest, req.content_length) else |_| {
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         }
         body = taken.0
         rest = taken.1
@@ -2249,14 +2249,14 @@ pub fn serve_request(
                 acc.status = 400
                 acc.body_bytes = err_len(400, false, opts.token)
                 send_err(mut cn, 400, false, opts.token)
-                return req_out(true, "", acc, chg)
+                return req_out(true, "", take acc, chg)
             },
             big => {
                 acc.status = 413
                 acc.body_bytes = err_len(413, false, opts.token)
                 send_err(mut cn, 413, false, opts.token)
                 half_close_drain(mut cn)
-                return req_out(true, "", acc, chg)
+                return req_out(true, "", take acc, chg)
             },
             over => {
                 // the ws10 `body-chunked` site: the accumulating body
@@ -2267,10 +2267,10 @@ pub fn serve_request(
                 acc.body_bytes = err_len(503, false, opts.token)
                 send_err(mut cn, 503, false, opts.token)
                 half_close_drain(mut cn)
-                return req_out(true, "", acc, chg)
+                return req_out(true, "", take acc, chg)
             },
             io => {
-                return req_out(true, "", acc, chg)
+                return req_out(true, "", take acc, chg)
             },
         }
         rest = ck.0
@@ -2281,19 +2281,19 @@ pub fn serve_request(
         acc.status = 400
         acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return req_out(true, "", acc, chg)
+        return req_out(true, "", take acc, chg)
     }
     if http.has_control(decoded) {
         acc.status = 400
         acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return req_out(true, "", acc, chg)
+        return req_out(true, "", take acc, chg)
     }
     let norm = http.normalize_path(decoded) else {
         acc.status = 400
         acc.body_bytes = err_len(400, false, opts.token)
         send_err(mut cn, 400, false, opts.token)
-        return req_out(true, "", acc, chg)
+        return req_out(true, "", take acc, chg)
     }
 
     let keep = req.keepalive && served + 1 < opts.keepalive_requests
@@ -2308,7 +2308,7 @@ pub fn serve_request(
     if opts.metrics_on && (req.method == "GET" || req.method == "HEAD") {
         let kind = admin_kind(true, norm)
         if !kind.is_empty() {
-            return req_out_admin(!keep, if keep { rest } else { "" }, acc, chg, kind)
+            return req_out_admin(!keep, if keep { rest } else { "" }, take acc, chg, kind)
         }
     }
 
@@ -2340,7 +2340,7 @@ pub fn serve_request(
         acc.status = pacc.status
         acc.body_bytes = pacc.body_bytes
         if raised {
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         }
     } else {
         var raised = false
@@ -2361,18 +2361,18 @@ pub fn serve_request(
             true
         }
         if raised {
-            return req_out(true, "", acc, chg)
+            return req_out(true, "", take acc, chg)
         }
     }
     if !chg.site.is_empty() {
         // a budget refusal deeper in the tree (the `file` site) wrote
         // its 503; a budget 503 always closes
-        return req_out(true, "", acc, chg)
+        return req_out(true, "", take acc, chg)
     }
     if should_close || !keep {
-        return req_out(true, "", acc, chg)
+        return req_out(true, "", take acc, chg)
     }
-    req_out(false, rest, acc, chg)
+    req_out(false, rest, take acc, chg)
 }
 
 /// A header-block boundary search: `ready` when `buf` holds a full
@@ -2446,7 +2446,7 @@ fn step_out(
     carry: str,
     served: int,
     logged: bool,
-    acc: obs.Access,
+    take acc: obs.Access,
 ) -> ConnStep {
     ConnStep {
         active: active,
@@ -2487,7 +2487,7 @@ pub fn carry_has_head(carry: str) -> bool {
 /// and attempt a read just to learn what the poll already told it —
 /// which is the whole of wolf-lang#127's cost. Pure and total.
 pub fn conn_idle(carry: str, served: int) -> ConnStep {
-    step_out(false, false, carry, served, false, obs.access_new())
+    step_out(false, false, carry, served, false, take obs.access_new())
 }
 
 /// A full head is present in `buf` at `cut`: split it, arm the
@@ -2513,7 +2513,7 @@ fn step_serve(
         // (the head is unconsumed as far as the loop is concerned),
         // nothing was served, and the loop steps this connection
         // again once `resolve` settles
-        var w = step_out(false, false, buf, served, false, obs.access_new())
+        var w = step_out(false, false, buf, served, false, take obs.access_new())
         w.resolve = ro.resolve
         w.resolve_addr = ro.resolve_addr
         w.resolve_timeout_ms = ro.resolve_timeout_ms
@@ -2577,17 +2577,17 @@ pub fn conn_step(
         acc4.request = raw_line(buf)
         acc4.status = 400
         acc4.body_bytes = err_len(400, true, opts.token)
-        return step_out(true, true, "", served, true, acc4)
+        return step_out(true, true, "", served, true, take acc4)
     }
     net_deadline(conn, poll_ms) else |_| {
-        return step_out(false, true, buf, served, false, obs.access_new())
+        return step_out(false, true, buf, served, false, take obs.access_new())
     }
     let piece = net_read(conn, 4096) else |e| match e {
         closed => {
-            return step_out(false, true, buf, served, false, obs.access_new())
+            return step_out(false, true, buf, served, false, take obs.access_new())
         },
         timeout => {
-            return step_out(false, false, buf, served, false, obs.access_new())
+            return step_out(false, false, buf, served, false, take obs.access_new())
         },
         utf8 => {
             var cn = conn_mod_plain(conn)
@@ -2596,14 +2596,14 @@ pub fn conn_step(
             acc5.request = raw_line(buf)
             acc5.status = 400
             acc5.body_bytes = err_len(400, false, opts.token)
-            return step_out(true, true, "", served, true, acc5)
+            return step_out(true, true, "", served, true, take acc5)
         },
         io => {
-            return step_out(false, true, buf, served, false, obs.access_new())
+            return step_out(false, true, buf, served, false, take obs.access_new())
         },
     }
     if piece.is_empty() {
-        return step_out(false, true, buf, served, false, obs.access_new())
+        return step_out(false, true, buf, served, false, take obs.access_new())
     }
     // ws28: with an empty carry the read IS the buffer — the
     // interpolation copied every request head twice (into a String,
@@ -2617,7 +2617,7 @@ pub fn conn_step(
     if cut.ready {
         return step_serve(conn, c, opts, limits, local_port, buf, cut, served, mut rs, mut ft)
     }
-    step_out(true, false, buf, served, false, obs.access_new())
+    step_out(true, false, buf, served, false, take obs.access_new())
 }
 
 // ------------------------------------------------------------------
