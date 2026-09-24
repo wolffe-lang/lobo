@@ -22,10 +22,10 @@ lobo -s stop
 `lobo -v` prints the version and the compiler that built it:
 
 ```
-lobo version: lobo/0.1.0 (built with wolf 0.2.6, pin 398e5f5)
+lobo version: lobo/0.1.1 (built with wolf 0.2.16, pin 93a5fe5)
 ```
 
-> **Version 0.1.0.** Static serving, reverse proxy, TLS, ACME, prefork
+> **Version 0.1.1.** Static serving, reverse proxy, TLS, ACME, prefork
 > workers, reload with connection draining, structured logs and a
 > control socket all work and are tested. It has not carried anyone's
 > production traffic. Please file what breaks.
