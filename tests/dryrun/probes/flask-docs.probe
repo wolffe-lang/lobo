@@ -1,0 +1,6 @@
+# flask-docs — lobo -t refuses this config (directive "user" is not implemented in lobo (privilege drop is ws14's — run lobo as the target user for now (nginx only warns when unprivileged)) in nginx.conf:),
+# so the dry-run predicts nothing: exit 1, nothing on stdout.
+# tests/config-corpus/INDEX.md names what blocks it (ws40).
+args: --request 'GET http://localhost/'
+exit: 1
+--- expect
