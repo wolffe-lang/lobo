@@ -1065,6 +1065,17 @@ pub fn table() -> Table {
         "named_error",
         "embedded Perl — out of scope permanently",
     )
+    // ---- ws41: byte ranges (RFC 9110 §14), as nginx serves them
+    row(
+        mut t,
+        "max_ranges",
+        "http server location",
+        "",
+        1,
+        1,
+        "implemented",
+        "ws41: nginx's range filter — the most ranges one request may ask for before the whole file is served (200); 0 turns ranges off and drops Accept-Ranges; absent is unlimited. Ranges themselves: single (206 + Content-Range), multipart/byteranges (a per-process boundary counter, nginx's first is 00000000000000000001), 416 with Content-Range: bytes */N, If-Range by ETag or by the exact Last-Modified string, 304 before 206 — the differential's 19 range_* cases. Named deltas: an If-Range date in RFC 850 or asctime form is not parsed (a full 200, which RFC 9110 allows); a range starting at byte N reads and drops N bytes first (no seek at this pin, wolf-lang#426); under memory_budget a Range is ignored and the capped path serves the whole file",
+    )
     // ---- ws41: ws40's top blockers, refused BY NAME (INDEX.md's table,
     // rows #2-#7 and #13-#21 that are directives). None is implemented;
     // each note says why a silent skip would be the wrong answer.

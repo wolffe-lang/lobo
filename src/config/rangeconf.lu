@@ -1,0 +1,50 @@
+//! member: true
+//! config/rangeconf — `max_ranges` (ws41), nginx's range-filter knob:
+//! the most byte ranges one request may ask for before the whole file
+//! is served instead; 0 turns ranges off (no `Accept-Ranges` either).
+//! The value's grammar is nginx's `ngx_conf_set_num_slot`, probed
+//! against nginx/1.30.4: a run of decimal digits that fits a 64-bit
+//! signed int; `abc`, `-1`, `5x` and a 20-digit number are each
+//! `"max_ranges" directive invalid number`. The value is resolved per
+//! route row at load (`route_max_ranges`, parse.lu); serve/ applies it.
+
+/// The number a `max_ranges` argument names, or -1 when it is empty
+/// or not nginx's number (the -t half names that). Total.
+pub fn ranges_value(s: str) -> int {
+    let raw = s.trim()
+    if raw.is_empty() {
+        return -1
+    }
+    // ngx_atoi's overflow guard: past 9223372036854775807 is invalid
+    let cutoff: int = 922337203685477580
+    var n: int = 0
+    for b_raw in raw.bytes() {
+        let b = b_raw as int
+        if b < 48 || b > 57 {
+            return -1
+        }
+        let d = b - 48
+        if n > cutoff || n == cutoff && d > 7 {
+            return -1
+        }
+        n = n * 10 + d
+    }
+    n
+}
+
+/// The `max_ranges` half of `-t`: every row's argument is nginx's
+/// number, or the oracle's own diagnostic, located. "" when clean.
+/// Total.
+pub fn ranges_check(c: Conf) -> str {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "max_ranges" && c.args_n[i] >= 1 {
+            if ranges_value(c.argp[c.args_at[i]]) < 0 {
+                return "\"max_ranges\" directive invalid number in {c.files[i]}:{c.lines[i]}"
+            }
+        }
+        i = i + 1
+    }
+    ""
+}

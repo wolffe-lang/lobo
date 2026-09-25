@@ -143,6 +143,15 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
             verdict = 1
         }
     }
+    // ws41: the `max_ranges` half of -t — nginx's number, the oracle's
+    // diagnostic otherwise
+    if verdict == 0 {
+        let rgerr = ranges_check(c)
+        if !rgerr.is_empty() {
+            eprint("lobo: [emerg] {rgerr}")
+            verdict = 1
+        }
+    }
     // wsm04: the upstream-TLS half of -t — an https proxy_pass names
     // its trust anchors (the client verifies always) and the file
     // loads. One named [emerg], first failure wins.

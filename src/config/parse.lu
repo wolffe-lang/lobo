@@ -78,6 +78,7 @@ pub struct Conf {
     rr_index: List[str],
     rr_index_at: List[int],
     rr_index_n: List[int],
+    rr_ranges: List[int],
 }
 
 /// Include-walk state: resolution mode and the open-file chain the
@@ -121,6 +122,7 @@ fn empty_conf() -> Conf {
         rr_index: List[str](),
         rr_index_at: List[int](),
         rr_index_n: List[int](),
+        rr_ranges: List[int](),
     }
 }
 
@@ -776,6 +778,17 @@ fn build_index(mut c: Conf) {
         (mut c.rr_alias).push(al)
         (mut c.rr_root).push(rt)
         (mut c.rr_pass).push(pp)
+        // ws41: `max_ranges`, innermost wins — the location's, else the
+        // server's, else http's; -1 when none is in effect (nginx's
+        // default is unlimited)
+        var mr = kid_arg1_at(c, blk, "max_ranges")
+        if mr.is_empty() && blk != srv {
+            mr = kid_arg1_at(c, srv, "max_ranges")
+        }
+        if mr.is_empty() && c.ix_http >= 0 {
+            mr = kid_arg1_at(c, c.ix_http, "max_ranges")
+        }
+        (mut c.rr_ranges).push(ranges_value(mr))
         t = t + 1
     }
 }
@@ -811,6 +824,16 @@ pub fn route_pass(c: Conf, t: int) -> str {
         return ""
     }
     c.rr_pass[t]
+}
+
+/// The `max_ranges` in effect for resolved route row `t`: the count,
+/// 0 for ranges off, -1 when no directive is in effect (unlimited,
+/// nginx's default) or the row is out of range. Total.
+pub fn route_max_ranges(c: Conf, t: int) -> int {
+    if t < 0 || t >= c.rr_ranges.len {
+        return -1
+    }
+    c.rr_ranges[t]
 }
 
 /// The index list in effect for resolved route row `t` — the
