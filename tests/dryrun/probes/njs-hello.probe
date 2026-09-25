@@ -1,0 +1,6 @@
+# njs-hello — lobo -t refuses this config (unknown directive "load_module" in nginx.conf:4),
+# so the dry-run predicts nothing: exit 1, nothing on stdout.
+# tests/config-corpus/INDEX.md names what blocks it (ws40).
+args: --request 'GET http://localhost/'
+exit: 1
+--- expect

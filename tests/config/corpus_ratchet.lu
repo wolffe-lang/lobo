@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="corpus ratchet: 23 configs — 7 parse-clean / 3 named-delta / 13 refused-by-name / 0 silent")
+//! check: run(exit=0, stdout="corpus ratchet: 26 configs — 7 parse-clean / 3 named-delta / 16 refused-by-name / 0 silent")
 //! phase: run
 //! lanes: native
 //! stage-src: config
@@ -46,7 +46,7 @@ use config
 /// OpenResty lua named_error exhibit — 7 parse clean, 1 carries its
 /// named delta, 0 silent anything.
 fn ratchet_configs() -> int {
-    23
+    26
 }
 
 fn ratchet_parse_clean() -> int {
@@ -62,7 +62,7 @@ fn ratchet_named_delta() -> int {
 /// is the good direction (a directive landed); it still needs the
 /// reason in the commit message, like every count here.
 fn ratchet_refused() -> int {
-    13
+    16
 }
 
 fn main() -> int {

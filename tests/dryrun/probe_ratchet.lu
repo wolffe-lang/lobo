@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="dry-run probes: 24 (23 configs covered)\n")
+//! check: run(exit=0, stdout="dry-run probes: 27 (26 configs covered)\n")
 //! phase: run
 //! lanes: native checked
 //!
@@ -18,7 +18,7 @@
 /// redirect-farm (`return` is parse-only, named), map-and-if, and
 /// lua-openresty (a -t-refused config predicts NOTHING: exit 1).
 fn ratchet_probes() -> int {
-    24
+    27
 }
 
 fn main() -> int {
