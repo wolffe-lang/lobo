@@ -1,9 +1,9 @@
 module pkg :: shell
   wolfi v0 · toolchain 0.2.16 · edition v1
-  export_hash 8dbe2969264399285a980ecbc98fb8643ed1a58c43628a72502a631c0972d929
-  pkg_hash    8dbe2969264399285a980ecbc98fb8643ed1a58c43628a72502a631c0972d929
+  export_hash da04b81af2623ab892c96f3b39f91458d4aef4e9d1be8b72a616b1b7610eee25
+  pkg_hash    da04b81af2623ab892c96f3b39f91458d4aef4e9d1be8b72a616b1b7610eee25
   deps:
-    config  d28501cd6afa5d00716d2adc046a169e8e9f00f2c72563d44612bdf45c7944d4
+    config  db51a05ca8e0024d428441441958374efbd0aa239415cb86d44e0acbe8058706
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:
     [0] pub conf_hash — fn conf_hash(c: config.Conf) -> str · regions (ρ1) -> -

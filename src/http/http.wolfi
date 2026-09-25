@@ -1,9 +1,9 @@
 module pkg :: http
   wolfi v0 · toolchain 0.2.16 · edition v1
-  export_hash 8da454208d1cbaae1d636d6ea2af72eab160ec35530d9628acc01cd7d6e6181b
-  pkg_hash    8da454208d1cbaae1d636d6ea2af72eab160ec35530d9628acc01cd7d6e6181b
+  export_hash 8a85cf86b0ec1e5d6b738d70d5e52ef8e1436694eba0bd68328c70af30b3c714
+  pkg_hash    8a85cf86b0ec1e5d6b738d70d5e52ef8e1436694eba0bd68328c70af30b3c714
   deps:
-    config  d28501cd6afa5d00716d2adc046a169e8e9f00f2c72563d44612bdf45c7944d4
+    config  db51a05ca8e0024d428441441958374efbd0aa239415cb86d44e0acbe8058706
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:
     [0] pub decode_chunked — fn decode_chunked(body: str, limits: self.Limits) -> str ! {malformed, too_large} · regions (-, ρ1) -> -
@@ -22,7 +22,7 @@ module pkg :: http
     [13] pub route_traced — fn route_traced(c: config.Conf, path: str, mut tr: self.RouteTrace, want: bool) -> self.Decision · regions (ρ1, -, ρ2, -) -> ρ_caller
     [14] pub trace_new — fn trace_new() -> self.RouteTrace · regions () -> ρ_caller
     [15] pub version — fn version() -> str
-    [16] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str }
+    [16] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str, max_ranges: int }
     [17] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int, memory_budget: int, nodelay: bool }
     [18] pub Request — struct Request { method: str, target: str, version: str, host: str, path: str, query: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int, keepalive: bool }
     [19] pub RouteTrace — struct RouteTrace { kinds: prelude.List[str], rows: prelude.List[int], mods: prelude.List[str], prefixes: prelude.List[str], outcomes: prelude.List[str], whys: prelude.List[str], details: prelude.List[str] }

@@ -1,11 +1,11 @@
 module pkg :: dryrun
   wolfi v0 · toolchain 0.2.16 · edition v1
-  export_hash a68350502a24869963b006b6d28db107fd52dbe82ddb65072bda1fc94f5d72b4
-  pkg_hash    a68350502a24869963b006b6d28db107fd52dbe82ddb65072bda1fc94f5d72b4
+  export_hash 02589b413e344607a9239a703f77122c97566be5e39d0a36910b5b6ba7766101
+  pkg_hash    02589b413e344607a9239a703f77122c97566be5e39d0a36910b5b6ba7766101
   deps:
-    config  d28501cd6afa5d00716d2adc046a169e8e9f00f2c72563d44612bdf45c7944d4
-    http  8da454208d1cbaae1d636d6ea2af72eab160ec35530d9628acc01cd7d6e6181b
-    proxy  98c6d01db7407dadb5e0e5c2df02093fd469632a73b7412c59fcfdae6304714e
+    config  db51a05ca8e0024d428441441958374efbd0aa239415cb86d44e0acbe8058706
+    http  8a85cf86b0ec1e5d6b738d70d5e52ef8e1436694eba0bd68328c70af30b3c714
+    proxy  f8917aec90eed05fdad110e67ee83b01e7aabef858ce8fb3fffabf34692a3076
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:
     [0] pub chain_notes — fn chain_notes(c: config.Conf, loc: int) -> str · regions (ρ1, -) -> -

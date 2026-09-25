@@ -1,7 +1,7 @@
 module pkg :: config
   wolfi v0 · toolchain 0.2.16 · edition v1
-  export_hash d28501cd6afa5d00716d2adc046a169e8e9f00f2c72563d44612bdf45c7944d4
-  pkg_hash    d28501cd6afa5d00716d2adc046a169e8e9f00f2c72563d44612bdf45c7944d4
+  export_hash db51a05ca8e0024d428441441958374efbd0aa239415cb86d44e0acbe8058706
+  pkg_hash    db51a05ca8e0024d428441441958374efbd0aa239415cb86d44e0acbe8058706
   deps:
     std.list  b867c3c66c3aa0dbae1cef22897684da1333874100bc1412d65681a5c310cfc9
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
@@ -72,43 +72,46 @@ module pkg :: config
     [60] pub pkcs8_parse — fn pkcs8_parse(der_bytes: prelude.List[byte]) -> self.KeyInfo · regions (ρ1) -> ρ_caller
     [61] pub proxy_tls_check — fn proxy_tls_check(c: self.Conf) -> str · regions (ρ1) -> -
     [62] pub proxy_tls_probe — fn proxy_tls_probe(c: self.Conf) -> str · regions (ρ1) -> -
-    [63] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
-    [64] pub render_conf — fn render_conf(c: self.Conf) -> str · regions (ρ1) -> -
-    [65] pub render_spans — fn render_spans(t: self.Toks) -> str · regions (ρ1) -> -
-    [66] pub render_t — fn render_t(c: self.Conf) -> str · regions (ρ1) -> -
-    [67] pub resolver_address — fn resolver_address(c: self.Conf, r: int) -> str · regions (ρ1, -) -> -
-    [68] pub resolver_check — fn resolver_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [69] pub resolver_in_effect — fn resolver_in_effect(c: self.Conf, at: int) -> bool · regions (ρ1, -) -> -
-    [70] pub resolver_is_literal — fn resolver_is_literal(host: str) -> bool
-    [71] pub resolver_row_for — fn resolver_row_for(c: self.Conf, at: int) -> int · regions (ρ1, -) -> -
-    [72] pub resolver_timeout_for — fn resolver_timeout_for(c: self.Conf, at: int) -> int · regions (ρ1, -) -> -
-    [73] pub resolver_valid_ms — fn resolver_valid_ms(c: self.Conf, r: int) -> int · regions (ρ1, -) -> -
-    [74] pub route_alias — fn route_alias(c: self.Conf, t: int) -> str · regions (ρ1, -) -> -
-    [75] pub route_count — fn route_count(c: self.Conf) -> int · regions (ρ1) -> -
-    [76] pub route_index — fn route_index(c: self.Conf, t: int) -> prelude.List[str] · regions (ρ1, -) -> ρ_caller
-    [77] pub route_pass — fn route_pass(c: self.Conf, t: int) -> str · regions (ρ1, -) -> -
-    [78] pub route_root — fn route_root(c: self.Conf, t: int) -> str · regions (ρ1, -) -> -
-    [79] pub self_euid — fn self_euid() -> int
-    [80] pub size_bytes — fn size_bytes(s: str) -> int
-    [81] pub spec_at — fn spec_at(t: self.Table, i: int) -> self.Spec · regions (ρ1, -) -> ρ_caller
-    [82] pub spec_count — fn spec_count(t: self.Table) -> int · regions (ρ1) -> -
-    [83] pub ssl_none — fn ssl_none() -> self.SslConf · regions () -> ρ_caller
-    [84] pub ssl_ok — fn ssl_ok(s: self.SslConf) -> bool · regions (ρ1) -> -
-    [85] pub ssl_resolve — fn ssl_resolve(c: self.Conf, prefix: str) -> self.SslConf · regions (ρ1, -) -> ρ_caller
-    [86] pub ssl_select — fn ssl_select(s: self.SslConf, sni_host: str) -> int · regions (ρ1, -) -> -
-    [87] pub status_euid — fn status_euid(text: str) -> int
-    [88] pub table — fn table() -> self.Table · regions () -> ρ_caller
-    [89] pub time_ms — fn time_ms(s: str) -> int
-    [90] pub upstream_exists — fn upstream_exists(c: self.Conf, name: str) -> bool · regions (ρ1, -) -> -
-    [91] pub user_gate — fn user_gate(c: self.Conf) -> bool · regions (ρ1) -> -
-    [92] pub user_verdict — fn user_verdict(c: self.Conf, euid: int) -> str · regions (ρ1, -) -> -
-    [93] pub version — fn version() -> str
-    [94] pub word_segments — fn word_segments(text: str) -> str
-    [95] pub worker_check — fn worker_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [96] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int, ix_http: int, ix_server: int, loc_row: prelude.List[int], loc_mod: prelude.List[str], loc_prefix: prelude.List[str], kids: prelude.List[int], kid_at: prelude.List[int], kid_n: prelude.List[int], rr_alias: prelude.List[str], rr_root: prelude.List[str], rr_pass: prelude.List[str], rr_index: prelude.List[str], rr_index_at: prelude.List[int], rr_index_n: prelude.List[int] }
-    [97] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[byte] }
-    [98] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
-    [99] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[byte], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[byte], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
-    [100] pub Table — struct Table { specs: prelude.List[self.Spec] }
-    [101] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
+    [63] pub ranges_check — fn ranges_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [64] pub ranges_value — fn ranges_value(s: str) -> int
+    [65] pub render — fn render(t: self.Toks) -> str · regions (ρ1) -> -
+    [66] pub render_conf — fn render_conf(c: self.Conf) -> str · regions (ρ1) -> -
+    [67] pub render_spans — fn render_spans(t: self.Toks) -> str · regions (ρ1) -> -
+    [68] pub render_t — fn render_t(c: self.Conf) -> str · regions (ρ1) -> -
+    [69] pub resolver_address — fn resolver_address(c: self.Conf, r: int) -> str · regions (ρ1, -) -> -
+    [70] pub resolver_check — fn resolver_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [71] pub resolver_in_effect — fn resolver_in_effect(c: self.Conf, at: int) -> bool · regions (ρ1, -) -> -
+    [72] pub resolver_is_literal — fn resolver_is_literal(host: str) -> bool
+    [73] pub resolver_row_for — fn resolver_row_for(c: self.Conf, at: int) -> int · regions (ρ1, -) -> -
+    [74] pub resolver_timeout_for — fn resolver_timeout_for(c: self.Conf, at: int) -> int · regions (ρ1, -) -> -
+    [75] pub resolver_valid_ms — fn resolver_valid_ms(c: self.Conf, r: int) -> int · regions (ρ1, -) -> -
+    [76] pub route_alias — fn route_alias(c: self.Conf, t: int) -> str · regions (ρ1, -) -> -
+    [77] pub route_count — fn route_count(c: self.Conf) -> int · regions (ρ1) -> -
+    [78] pub route_index — fn route_index(c: self.Conf, t: int) -> prelude.List[str] · regions (ρ1, -) -> ρ_caller
+    [79] pub route_max_ranges — fn route_max_ranges(c: self.Conf, t: int) -> int · regions (ρ1, -) -> -
+    [80] pub route_pass — fn route_pass(c: self.Conf, t: int) -> str · regions (ρ1, -) -> -
+    [81] pub route_root — fn route_root(c: self.Conf, t: int) -> str · regions (ρ1, -) -> -
+    [82] pub self_euid — fn self_euid() -> int
+    [83] pub size_bytes — fn size_bytes(s: str) -> int
+    [84] pub spec_at — fn spec_at(t: self.Table, i: int) -> self.Spec · regions (ρ1, -) -> ρ_caller
+    [85] pub spec_count — fn spec_count(t: self.Table) -> int · regions (ρ1) -> -
+    [86] pub ssl_none — fn ssl_none() -> self.SslConf · regions () -> ρ_caller
+    [87] pub ssl_ok — fn ssl_ok(s: self.SslConf) -> bool · regions (ρ1) -> -
+    [88] pub ssl_resolve — fn ssl_resolve(c: self.Conf, prefix: str) -> self.SslConf · regions (ρ1, -) -> ρ_caller
+    [89] pub ssl_select — fn ssl_select(s: self.SslConf, sni_host: str) -> int · regions (ρ1, -) -> -
+    [90] pub status_euid — fn status_euid(text: str) -> int
+    [91] pub table — fn table() -> self.Table · regions () -> ρ_caller
+    [92] pub time_ms — fn time_ms(s: str) -> int
+    [93] pub upstream_exists — fn upstream_exists(c: self.Conf, name: str) -> bool · regions (ρ1, -) -> -
+    [94] pub user_gate — fn user_gate(c: self.Conf) -> bool · regions (ρ1) -> -
+    [95] pub user_verdict — fn user_verdict(c: self.Conf, euid: int) -> str · regions (ρ1, -) -> -
+    [96] pub version — fn version() -> str
+    [97] pub word_segments — fn word_segments(text: str) -> str
+    [98] pub worker_check — fn worker_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [99] pub Conf — struct Conf { names: prelude.List[str], kinds: prelude.List[str], argp: prelude.List[str], args_at: prelude.List[int], args_n: prelude.List[int], parent: prelude.List[int], ctx: prelude.List[str], files: prelude.List[str], lines: prelude.List[int], chains: prelude.List[str], raws: prelude.List[str], delta_at: prelude.List[int], delta_note: prelude.List[str], err: str, err_file: str, err_line: int, ix_http: int, ix_server: int, loc_row: prelude.List[int], loc_mod: prelude.List[str], loc_prefix: prelude.List[str], kids: prelude.List[int], kid_at: prelude.List[int], kid_n: prelude.List[int], rr_alias: prelude.List[str], rr_root: prelude.List[str], rr_pass: prelude.List[str], rr_index: prelude.List[str], rr_index_at: prelude.List[int], rr_index_n: prelude.List[int], rr_ranges: prelude.List[int] }
+    [100] pub KeyInfo — struct KeyInfo { alg: str, seed: prelude.List[byte] }
+    [101] pub Spec — struct Spec { name: str, contexts: str, opens: str, min_args: int, max_args: int, status: str, note: str }
+    [102] pub SslConf — struct SslConf { on: bool, err: str, err_file: str, err_line: int, warns: str, names: prelude.List[str], der: prelude.List[byte], der_at: prelude.List[int], der_n: prelude.List[int], leaf_n: prelude.List[int], seed: prelude.List[byte], cert_path: prelude.List[str], key_path: prelude.List[str], default_at: int }
+    [103] pub Table — struct Table { specs: prelude.List[self.Spec] }
+    [104] pub Toks — struct Toks { kinds: prelude.List[str], texts: prelude.List[str], starts: prelude.List[int], ends: prelude.List[int], lines: prelude.List[int], err: str, err_line: int }
 
