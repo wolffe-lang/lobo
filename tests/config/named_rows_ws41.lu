@@ -1,0 +1,45 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! ws41: thirteen `named_error` rows for ws40's top blockers (the
+//! blocked-directive table in tests/config-corpus/INDEX.md, rows #2-#7
+//! and #13-#21 that are directives). Each parses at its nginx arity in
+//! an nginx context and is carried as a named delta — `-t` refuses it
+//! BY NAME with its note, never as an unknown directive. Pure: all
+//! three lanes.
+
+use config
+
+fn one(body: str, name: str) {
+    let c = config.parse_str("http {{\n  server {{\n    listen 8080;\n{body}\n  }}\n}}\n", "t.conf")
+    assert(config.ok(c), "{name}: parses (err: {c.err})")
+    assert(config.delta_count(c) == 1, "{name}: exactly one named delta")
+    assert(c.names[c.delta_at[0]] == name, "{name}: the delta names it")
+    assert(!c.delta_note[0].is_empty(), "{name}: the delta carries its note")
+}
+
+fn main() -> !int {
+    one("    location / {{ deny all; }}", "deny")
+    one("    location / {{ allow 127.0.0.1; }}", "allow")
+    one("    location / {{ uwsgi_pass 127.0.0.1:3031; }}", "uwsgi_pass")
+    one("    location / {{ uwsgi_param HTTPS $https if_not_empty; }}", "uwsgi_param")
+    one("    uwsgi_read_timeout 300s;", "uwsgi_read_timeout")
+    one("    charset_types text/css text/plain application/json;", "charset_types")
+    one("    http2 on;", "http2")
+    one("    http2_max_concurrent_streams 128;", "http2_max_concurrent_streams")
+    one("    proxy_buffer_size 4k;", "proxy_buffer_size")
+    one("    proxy_buffers 8 4k;", "proxy_buffers")
+    one("    ssl_ecdh_curve X25519:prime256v1;", "ssl_ecdh_curve")
+    one("    ssl_session_tickets off;", "ssl_session_tickets")
+    one("    location / {{ auth_request /auth; }}", "auth_request")
+
+    // the arity is nginx's: a wrong count is the table's generic error,
+    // not a silent pass
+    let bad = config.parse_str("http {{\n  proxy_buffers 8;\n}}\n", "t.conf")
+    assert(!config.ok(bad), "proxy_buffers takes two arguments")
+    let bad2 = config.parse_str("http {{\n  uwsgi_pass x;\n}}\n", "t.conf")
+    assert(!config.ok(bad2), "uwsgi_pass is location-only")
+    0
+}

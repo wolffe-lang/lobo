@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="corpus ratchet: 40 configs — 16 parse-clean / 1 named-delta / 23 refused-by-name / 0 silent")
+//! check: run(exit=0, stdout="corpus ratchet: 40 configs — 16 parse-clean / 6 named-delta / 18 refused-by-name / 0 silent")
 //! phase: run
 //! lanes: native
 //! stage-src: config
@@ -48,7 +48,11 @@ use config
 /// repositories (tests/config-corpus/INDEX.md) — 40 in all: 11 parse
 /// clean, 6 named-delta (5 of them `user` alone), 23 refused by name,
 /// 0 silent. ws41: `user` is gated, not refused (nginx's warning when
-/// unprivileged), so those five parse clean — 16 / 1 / 23.
+/// unprivileged), so those five parse clean — 16 / 1 / 23; then
+/// thirteen named_error rows for ws40's next blockers (`deny`, `allow`,
+/// uwsgi, `charset_types`, http2, proxy buffers, two ssl rows,
+/// `auth_request`) move five refused configs to named-delta, refused at
+/// -t BY NAME instead of as unknown — 16 / 6 / 18.
 fn ratchet_configs() -> int {
     40
 }
@@ -58,7 +62,7 @@ fn ratchet_parse_clean() -> int {
 }
 
 fn ratchet_named_delta() -> int {
-    1
+    6
 }
 
 /// ws40: real configs lobo refuses by name at load (no table row for
@@ -66,7 +70,7 @@ fn ratchet_named_delta() -> int {
 /// is the good direction (a directive landed); it still needs the
 /// reason in the commit message, like every count here.
 fn ratchet_refused() -> int {
-    23
+    18
 }
 
 fn main() -> int {
