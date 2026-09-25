@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="corpus ratchet: 8 configs — 7 parse-clean / 1 named-delta / 0 silent")
+//! check: run(exit=0, stdout="corpus ratchet: 8 configs — 7 parse-clean / 1 named-delta / 0 refused-by-name / 0 silent")
 //! phase: run
 //! lanes: native checked
 //! stage-src: config
@@ -15,9 +15,16 @@
 //!   named-delta — load() ok, ≥1 named_error rows, each carried in
 //!                 Conf.delta_at/delta_note BY NAME (the class-C
 //!                 posture: lua-openresty's exhibit)
+//!   refused-by-name — load() refuses with a message AND a located
+//!                 file:line (ws40: a real config lobo has no row for —
+//!                 `unknown directive "uwsgi_pass"` — or one nginx
+//!                 refuses too, like a missing include). Every one is
+//!                 annotated per config in tests/config-corpus/INDEX.md
+//!                 with the directive that blocks it; the refusal names
+//!                 what it refuses, so it is not silent.
 //!   silent      — anything else would land here, and the count is
-//!                 pinned at ZERO: a structural error or an unnamed
-//!                 outcome in the corpus fails this test loudly.
+//!                 pinned at ZERO: a refusal with no message or no
+//!                 location fails this test loudly.
 
 use config
 
@@ -44,6 +51,14 @@ fn ratchet_named_delta() -> int {
     1
 }
 
+/// ws40: real configs lobo refuses by name at load (no table row for
+/// a directive, or a structural refusal nginx shares). LOWERING this
+/// is the good direction (a directive landed); it still needs the
+/// reason in the commit message, like every count here.
+fn ratchet_refused() -> int {
+    0
+}
+
 fn main() -> int {
     let root = "tests/config-corpus"
     let names = fs_read_dir(root) else |e| {
@@ -53,12 +68,19 @@ fn main() -> int {
     var configs: int = 0
     var clean: int = 0
     var delta: int = 0
+    var refused: int = 0
     for nm in names {
         if fs_is_dir("{root}/{nm}") {
             configs = configs + 1
             let c = config.load("{root}/{nm}", "nginx.conf")
             if !config.ok(c) {
-                assert(false, "SILENT-OR-BROKEN corpus config {nm}: {config.render_conf(c)}")
+                // Refused BY NAME: a message and a located line, or it
+                // is the silent class and this test fails.
+                assert(
+                    !c.err.is_empty() && !c.err_file.is_empty() && c.err_line > 0,
+                    "SILENT corpus refusal {nm}: err=\"{c.err}\" at {c.err_file}:{c.err_line}",
+                )
+                refused = refused + 1
             } else if config.delta_count(c) > 0 {
                 delta = delta + 1
                 // Named means NAMED: every delta row carries its note.
@@ -84,8 +106,12 @@ fn main() -> int {
         delta == ratchet_named_delta(),
         "named-delta moved: {delta} vs ratchet {ratchet_named_delta()}",
     )
+    assert(
+        refused == ratchet_refused(),
+        "refused-by-name moved: {refused} vs ratchet {ratchet_refused()}",
+    )
     print(
-        "corpus ratchet: {configs} configs — {clean} parse-clean / {delta} named-delta / 0 silent",
+        "corpus ratchet: {configs} configs — {clean} parse-clean / {delta} named-delta / {refused} refused-by-name / 0 silent",
     )
     0
 }
