@@ -1,0 +1,21 @@
+// range_suffix — ws41: a suffix range, `bytes=-10`: the last ten bytes, 206.
+// Expected reply generated against the pinned nginx/1.30.4 (corpus mtime
+// 2026-01-01T00:00:00Z); stored pre-normalized.
+--- request
+GET /index.html HTTP/1.1
+Host: 127.0.0.1
+Range: bytes=-10
+Connection: close
+
+--- expect
+HTTP/1.1 206 Partial Content
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: 10
+Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
+Connection: close
+ETag: "6955b900-4f"
+Content-Range: bytes 69-78/79
+
+y></html>

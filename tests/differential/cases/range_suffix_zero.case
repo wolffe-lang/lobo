@@ -1,0 +1,25 @@
+// range_suffix_zero — ws41: `bytes=-0`: a zero-length suffix — 416.
+// Expected reply generated against the pinned nginx/1.30.4 (corpus mtime
+// 2026-01-01T00:00:00Z); stored pre-normalized.
+--- request
+GET /index.html HTTP/1.1
+Host: 127.0.0.1
+Range: bytes=-0
+Connection: close
+
+--- expect
+HTTP/1.1 416 Requested Range Not Satisfiable
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: <normalized>
+Connection: close
+Content-Range: bytes */79
+
+<html>
+<head><title>416 Requested Range Not Satisfiable</title></head>
+<body>
+<center><h1>416 Requested Range Not Satisfiable</h1></center>
+<hr><center><normalized></center>
+</body>
+</html>

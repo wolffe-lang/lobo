@@ -1,0 +1,22 @@
+// range_overlap_declined — ws41: `bytes=0-78,0-78`: the ranges sum past the file — nginx declines, a full 200.
+// Expected reply generated against the pinned nginx/1.30.4 (corpus mtime
+// 2026-01-01T00:00:00Z); stored pre-normalized.
+--- request
+GET /index.html HTTP/1.1
+Host: 127.0.0.1
+Range: bytes=0-78,0-78
+Connection: close
+
+--- expect
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: 79
+Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
+Connection: close
+ETag: "6955b900-4f"
+Accept-Ranges: bytes
+
+<!doctype html>
+<html><body>lobo differential case: static_basic</body></html>

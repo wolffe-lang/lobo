@@ -1,0 +1,22 @@
+// range_ifrange_etag — ws41: If-Range carrying the current ETag: the range applies, 206 (RFC 9110 §13.1.5).
+// Expected reply generated against the pinned nginx/1.30.4 (corpus mtime
+// 2026-01-01T00:00:00Z); stored pre-normalized.
+--- request
+GET /index.html HTTP/1.1
+Host: 127.0.0.1
+If-Range: "6955b900-4f"
+Range: bytes=0-9
+Connection: close
+
+--- expect
+HTTP/1.1 206 Partial Content
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: 10
+Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
+Connection: close
+ETag: "6955b900-4f"
+Content-Range: bytes 0-9/79
+
+<!doctype 
