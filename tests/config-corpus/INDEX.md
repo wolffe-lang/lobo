@@ -73,7 +73,7 @@ licensed public repositories.
 | **lobo-lenient**: lobo loads, and every nginx build refuses | **2** (certbot-vhost, crossplane-empty-value-map; lobo#38) | `LOBO_LENIENT=2`, `tools/lobo-confcheck` |
 | lobo refuses, stock nginx loads | 16 | per-config annotation + the blocked table below |
 | both refuse | 8 | per-config annotation |
-| **total** | **40** | `tests/config/corpus_ratchet.lu`: 16 parse-clean / 1 named-delta / 23 refused-by-name / **0 silent** |
+| **total** | **40** | `tests/config/corpus_ratchet.lu`: 16 parse-clean / 6 named-delta / 18 refused-by-name / **0 silent** (ws41: `user` gated, then 13 `named_error` rows) |
 
 Every config's exits are pinned in its own `# lobo-corpus: oracle-exit=N
 lobo-exit=M delta=…` line. `tools/lobo-confcheck` runs both binaries on
@@ -200,26 +200,26 @@ many of those configs a stock nginx loads.
 | # | what blocks | kind | configs blocked | of which stock nginx loads | sole blocker in | configs |
 |---|---|---|---|---|---|---|
 | 1 | `user` (**resolved at ws41**: warns and loads when unprivileged) | `named_error` row at ws40 | 18 | 16 | `crossplane-messy`, `flask-docs`, `netbox`, `nginx-pkg-oss`, `synapse-docs` | certbot-nginx-fixture, crossplane-messy, flask-docs, gunicorn-asgi-uwsgi, gunicorn-example, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, jupyterhub-docs, laravel-docs, netbox, nginx-pkg-oss, nginx-proxy-manager, puma-docs, superset, synapse-docs, ubuntu-trusty-default, uwsgi-django-docs |
-| 2 | `deny` | no row | 5 | 4 | — | certbot-nginx-fixture, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, laravel-docs |
-| 3 | `uwsgi_param` | no row | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
-| 4 | `uwsgi_pass` | no row | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
-| 5 | `charset_types` | no row | 3 | 3 | — | h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts |
-| 6 | `http2_max_concurrent_streams` | no row | 3 | 3 | — | gunicorn-asgi-compliance, gunicorn-http2, gunicorn-stress |
-| 7 | `http2` | no row | 3 | 3 | — | gunicorn-asgi-compliance, gunicorn-http2, gunicorn-stress |
+| 2 | `deny` | `named_error` row since ws41 (was: no row) | 5 | 4 | — | certbot-nginx-fixture, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, laravel-docs |
+| 3 | `uwsgi_param` | `named_error` row since ws41 (was: no row) | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
+| 4 | `uwsgi_pass` | `named_error` row since ws41 (was: no row) | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
+| 5 | `charset_types` | `named_error` row since ws41 (was: no row) | 3 | 3 | — | h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts |
+| 6 | `http2_max_concurrent_streams` | `named_error` row since ws41 (was: no row) | 3 | 3 | — | gunicorn-asgi-compliance, gunicorn-http2, gunicorn-stress |
+| 7 | `http2` | `named_error` row since ws41 (was: no row) | 3 | 3 | — | gunicorn-asgi-compliance, gunicorn-http2, gunicorn-stress |
 | 8 | `worker_rlimit_nofile` | `named_error` row | 3 | 3 | — | h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts |
 | 9 | `js_content` | no row | 3 | 0 | — | njs-complex-redirects, njs-decode-uri, njs-hello |
 | 10 | `js_import` | no row | 3 | 0 | — | njs-complex-redirects, njs-decode-uri, njs-hello |
 | 11 | `js_path` | no row | 3 | 0 | — | njs-complex-redirects, njs-decode-uri, njs-hello |
 | 12 | `load_module` | no row | 3 | 0 | — | njs-complex-redirects, njs-decode-uri, njs-hello |
-| 13 | `proxy_buffer_size` | no row | 2 | 2 | — | gunicorn-asgi-compliance, gunicorn-http2 |
-| 14 | `proxy_buffers` | no row | 2 | 2 | — | gunicorn-asgi-compliance, gunicorn-http2 |
+| 13 | `proxy_buffer_size` | `named_error` row since ws41 (was: no row) | 2 | 2 | — | gunicorn-asgi-compliance, gunicorn-http2 |
+| 14 | `proxy_buffers` | `named_error` row since ws41 (was: no row) | 2 | 2 | — | gunicorn-asgi-compliance, gunicorn-http2 |
 | 15 | `proxy_pass https://` with no `proxy_ssl_trusted_certificate` (lobo verifies always) | not a directive | 2 | 2 | — | gunicorn-http2, gunicorn-stress |
-| 16 | `ssl_ecdh_curve` | no row | 2 | 2 | — | h5bp-ssl, h5bp-test-vhosts |
+| 16 | `ssl_ecdh_curve` | `named_error` row since ws41 (was: no row) | 2 | 2 | — | h5bp-ssl, h5bp-test-vhosts |
 | 17 | `ssl_protocols` without TLSv1.3 (lobo serves 1.3 only) | not a directive | 2 | 2 | — | h5bp-ssl, h5bp-test-vhosts |
-| 18 | `ssl_session_tickets` | no row | 2 | 2 | — | h5bp-ssl, h5bp-test-vhosts |
-| 19 | `uwsgi_read_timeout` | no row | 2 | 2 | — | gunicorn-stress, gunicorn-uwsgi |
-| 20 | `allow` | no row | 2 | 1 | — | jupyterhub-docs, nginx-proxy-manager |
-| 21 | `auth_request` | no row | 2 | 1 | — | nginx-proxy-manager, njs-complex-redirects |
+| 18 | `ssl_session_tickets` | `named_error` row since ws41 (was: no row) | 2 | 2 | — | h5bp-ssl, h5bp-test-vhosts |
+| 19 | `uwsgi_read_timeout` | `named_error` row since ws41 (was: no row) | 2 | 2 | — | gunicorn-stress, gunicorn-uwsgi |
+| 20 | `allow` | `named_error` row since ws41 (was: no row) | 2 | 1 | — | jupyterhub-docs, nginx-proxy-manager |
+| 21 | `auth_request` | `named_error` row since ws41 (was: no row) | 2 | 1 | — | nginx-proxy-manager, njs-complex-redirects |
 | 22 | `listen … ssl` with no certificate (NPM: `ssl_reject_handshake on` server) | not a directive | 2 | 1 | — | certbot-nginx-fixture, nginx-proxy-manager |
 | 23 | `ssl` | removed from nginx in 1.25.1; nginx 1.30 refuses too | 2 | 0 | — | certbot-nginx-fixture, jupyterhub-docs |
 | 24 | `$connection_requests` in a log_format (planned variable) | not a directive | 1 | 1 | — | superset |
@@ -288,7 +288,12 @@ identical loads), 15 named exit deltas`). Next come the access module (`deny`,
 three-way tie among `charset_types`, HTTP/2 (`http2`,
 `http2_max_concurrent_streams`) and `worker_rlimit_nofile`. The njs
 rows (`js_*`, `load_module`) block 3 configs that no nginx here loads
-either, because the stock build has no njs module.
+either, because the stock build has no njs module. **ws41** gave the
+directives among rows #2–#7 and #13–#21 a `named_error` row each (13
+rows; #8 already had one, #15 and #17 are not directives), so `-t`
+refuses them by name with a reason instead of as unknown; five
+configs moved from refused to named-delta in the classification
+ratchet.
 
 ## §3 against the measurement (`docs/ws40-prediction.md`)
 
