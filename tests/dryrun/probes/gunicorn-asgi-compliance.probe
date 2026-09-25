@@ -1,0 +1,6 @@
+# gunicorn-asgi-compliance — lobo -t refuses this config (unknown directive "chunked_transfer_encoding" in nginx.conf:90),
+# so the dry-run predicts nothing: exit 1, nothing on stdout.
+# tests/config-corpus/INDEX.md names what blocks it (ws40).
+args: --request 'GET http://localhost/'
+exit: 1
+--- expect
