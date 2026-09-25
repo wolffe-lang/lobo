@@ -892,7 +892,11 @@ pub fn gen_new(take c: config.Conf) -> Gen {
 /// listener, a removed one drains, a new one opens. Total.
 pub fn reload(prefix: str, conf_rel: str, take prev: Gen) -> Gen {
     let c = config.load(prefix, conf_rel)
-    if config.ok(c) {
+    // ws41: a reload refuses what a start refuses — a `named_error`
+    // row (the -t refusal) and a `user` lobo cannot honour as root
+    let refused = !config.delta_refusal(c).is_empty() ||
+        config.user_verdict(c, config.self_euid()).starts_with("emerg:")
+    if config.ok(c) && !refused {
         let g = prev.gen + 1
         return Gen { conf: c, gen: g, ok: true, note: "reload complete (generation {g})" }
     }

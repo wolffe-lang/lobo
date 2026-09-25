@@ -1,0 +1,88 @@
+//! check: run(exit=0, stdout="start=refused exit=1\nreload=rejected gen=1\n")
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config http
+//!
+//! ws41: a `named_error` row refuses a START and a RELOAD, not only
+//! `-t`. Before ws41 the serving entries checked only for a parse
+//! error, so a directive with a `named_error` row loaded and a running
+//! server ignored it; that was inert while the rows were exotic (lua,
+//! perl, `daemon`), and it became a hole the moment ws41 gave `deny` a
+//! row (before, `deny` had none and refused as unknown): a live lobo
+//! served a file under `location / { deny all; }` with 200. Now the
+//! real binary refuses to start on it (exit 1, nothing bound), and a
+//! reload onto it keeps the old generation. The checked lane is the
+//! driver only (the server is the native debug binary). Loopback only.
+
+use config
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn main() -> !int {
+    let d = "ws41_named"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/s.txt", "secret\n")?
+    let port = free_port()?
+    // every path absolute: a relative `-c` is read under the prefix, so
+    // a relative pair would refuse the start for the wrong reason (a
+    // missing file) and this test would pass on the unfixed tree — it
+    // did, once, before the paths were made absolute
+    let root = os_cwd() else |_| "."
+    let ad = "{root}/{d}"
+    fs_write_text(
+        "{d}/lobo.conf",
+        "http {{\n  server {{\n    listen 127.0.0.1:{port};\n    root {ad}/www;\n    location / {{ deny all; }}\n  }}\n}}\n",
+    )?
+
+    // ---- the start: the real binary, absolute path (ws25, lobo#1)
+    var argv = List[str]()
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(ad)
+    (mut argv).push("-c")
+    (mut argv).push("{ad}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    time_sleep_ms(1500)
+    var served = false
+    let probe = net_connect("127.0.0.1:{port}") else |_| -1
+    if probe >= 0 {
+        served = true
+        net_close(probe) else |_| {}
+        os_kill(child) else |_| {}
+    }
+    let code = os_wait(child) else |_| -1
+    assert(!served, "lobo started and bound a config carrying a named_error row")
+    print("start=refused exit={code}")
+
+    // ---- the reload: onto the refused config, the old generation stays
+    fs_write_text("{d}/ok.conf", "http {{\n  server {{ listen 8080; root {d}/www; }}\n}}\n")?
+    let g1 = shell.gen_new(take config.load(d, "ok.conf"))
+    assert(g1.ok, "generation 1 loads")
+    let g2 = shell.reload(d, "lobo.conf", take g1)
+    assert(!g2.ok, "the reload onto deny is rejected")
+    assert(
+        config.delta_refusal(
+            config.load(d, "lobo.conf"),
+        ).starts_with("directive \"deny\" is not implemented in lobo"),
+        "the refusal names the directive",
+    )
+    print("reload=rejected gen={g2.gen}")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

@@ -1083,8 +1083,15 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         eprint("lobo: [emerg] configuration file {conf} test failed")
         return 1
     }
-    // ws41: `user` — a hand inherits its master's verdict, which the
-    // master printed once
+    // ws41: a `named_error` row refuses the start as it refuses -t
+    // (before ws41 a running server ignored it), and `user` — a hand
+    // inherits its master's verdict, which the master printed once
+    let dref = config.delta_refusal(c0)
+    if !dref.is_empty() {
+        eprint("lobo: [emerg] {dref}")
+        eprint("lobo: [emerg] configuration file {conf} test failed")
+        return 1
+    }
     if worker == 0 && !config.user_gate(c0) {
         return 1
     }
@@ -2979,6 +2986,12 @@ fn master_stanza(
 fn master_main(prefix: str, conf: str, n: int) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
+        eprint("lobo: [emerg] configuration file {conf} test failed")
+        return 1
+    }
+    let dref = config.delta_refusal(c0)
+    if !dref.is_empty() {
+        eprint("lobo: [emerg] {dref}")
         eprint("lobo: [emerg] configuration file {conf} test failed")
         return 1
     }
