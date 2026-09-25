@@ -5,8 +5,11 @@
 # ledger and is NEVER hand-edited: the gauntlet runs --check after
 # the tiers build; drift is a named failure telling the ritual.
 #
-#   tools/lobo-directives --emit    regenerate docs/directives.md
-#   tools/lobo-directives --check   regenerate and diff (default)
+# ws41: README.md's counted sentence ("has a row for each of N nginx
+# directives: …") is derived from the same page and gated the same way.
+#
+#   tools/lobo-directives --emit    regenerate docs/directives.md and the README sentence
+#   tools/lobo-directives --check   regenerate and diff both (default)
 set -u
 cd "$(dirname "$0")/.." || exit 2
 
@@ -24,10 +27,31 @@ if ! "$BIN" directives-md > "$tmp"; then
     exit 1
 fi
 
+# ws41: the README's counts are DERIVED from the same table, never
+# typed — the generated page's "Status counts" line is the one source.
+counts=$(sed -n 's/^Status counts: \*\*\([0-9]*\) implemented\*\* \/ \*\*\([0-9]*\) planned\*\* \/ \*\*\([0-9]*\) named_error\*\* (\([0-9]*\) rows)\.$/\4 \1 \2 \3/p' "$tmp")
+set -- $counts
+if [ $# != 4 ]; then
+    echo "lobo-directives: FAILED — the generated page carries no parsable \"Status counts\" line" >&2
+    rm -f "$tmp"
+    exit 1
+fi
+readme_line="[\`docs/directives.md\`](docs/directives.md) has a row for each of $1 nginx directives: $2 implemented, $3 planned and $4 refused by name when the configuration loads."
+readme_pat='has a row for each of [0-9]* nginx directives: [0-9]* implemented, [0-9]* planned and [0-9]* refused by name when the configuration loads\.$'
+if [ "$(grep -c "$readme_pat" README.md)" != 1 ]; then
+    echo "lobo-directives: FAILED — README.md must carry the counted sentence exactly once, on one line (\"has a row for each of N nginx directives: …\")" >&2
+    rm -f "$tmp"
+    exit 1
+fi
+
 case "$mode" in
 --emit)
     mv "$tmp" docs/directives.md
     echo "lobo-directives: wrote docs/directives.md"
+    rtmp="target/README.md.$$"
+    at=$(grep -n "$readme_pat" README.md | cut -d: -f1)
+    LINE="$readme_line" awk -v at="$at" 'NR == at { print ENVIRON["LINE"]; next } { print }' README.md > "$rtmp" && mv "$rtmp" README.md
+    echo "lobo-directives: wrote README.md's counted sentence ($1 rows: $2 implemented, $3 planned, $4 named_error)"
     ;;
 --check)
     if [ ! -f docs/directives.md ]; then
@@ -41,7 +65,11 @@ case "$mode" in
         exit 1
     fi
     rm -f "$tmp"
-    echo "lobo-directives: docs/directives.md matches the table"
+    if ! grep -qxF "$readme_line" README.md; then
+        echo "lobo-directives: FAILED — README.md's counts drifted from the table; the table says: $readme_line — run tools/lobo-directives --emit" >&2
+        exit 1
+    fi
+    echo "lobo-directives: docs/directives.md and README.md's counts match the table ($1 rows: $2 implemented, $3 planned, $4 named_error)"
     ;;
 *)
     echo "usage: tools/lobo-directives [--emit|--check]" >&2
