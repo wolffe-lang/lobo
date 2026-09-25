@@ -127,3 +127,41 @@ So the ask carries **~330 µs per MiB** (lobo − nginx-on), of which
 ~150 µs is what sendfile alone buys nginx (off − on). Cores: nginx-on
 well under 1 core, lobo pinned near **1.0** (the serving process is
 the bottleneck at this size).
+
+## §3 against the measurement
+
+Measured on kasumi (i9-11900K, 16 threads, linux 7.2.3-cachyos) on
+the tree at `9f78c5f`, the lane's head when each was run.
+
+| prediction | measured | verdict |
+|---|---|---|
+| P1: `user` warns and loads when unprivileged; the confcheck line `25 exit-parity (4 identical loads), 15 named exit deltas (2 lobo-lenient), 0 red` | exactly that line. Seen red first: CI run 36086771893 at `856bd58` (`confcheck: FAILED — identical loads moved: 4 vs ratchet 2`), with the annotations moved and `IDENTICAL_LOADS` not; before the annotations moved, the five configs each red by name (`kasumi:~/lanes/ws41/red-user-confcheck.log`). The warning is byte for byte nginx's own, which the pinned oracle prints on the same five configs | **held** |
+| P1: the classification ratchet 11/6/23 → 16/1/23 | 16/1/23 (`tests/config/corpus_ratchet.lu` at `856bd58`) | **held** |
+| P2: 13 rows; ratchet 16/6/18; counts 48/49/25 of 122 | 13 rows; 16/6/18; `122 rows: 48 implemented, 49 planned, 25 named_error` once `max_ranges` landed (121/47 before it). The README sentence is now derived and gated; seen red on a planted drift (`kasumi:~/lanes/ws41/readme-gate-red.log`) | **held** |
+| P3: 19 Range cases, each nginx status as tabled | 19 of 19 statuses as tabled; the boundary `00000000000000000001`, the 206 header order and the 416 shape as predicted | **held** per case |
+| P3: the tally line "11 × 206, 4 × 416, 3 × 200, 1 × 304" | the table above it says 9 × 206 and 5 × 200; the line was my arithmetic, not the oracle's | **wrong** (the tally, not a status) |
+| P3: at trunk lobo matches 4 and diverges on 15, two because `max_ranges` stops it starting | 7/22 green, the same 4 range cases green, 15 red, `range_max0`/`range_max1` "lobo never answered": `kasumi:~/lanes/ws41/diff-red-trunk.log` (a `d65cce0` build with only the new cases added) and CI run 36087334136 at `7330eaa` | **held** |
+| P4: nginx `sendfile on`, 70 µs (band 30–150) | **33.8** µs (33.7–34.2) | **held**, at the band's low edge |
+| P4: nginx `sendfile off`, 220 µs (band 110–440) | **161.3** µs (161.0–162.6) | **held** |
+| P4: lobo, 400 µs (band 200–800) | **187.2** µs (186.2–189.1) | **wrong**: below the band. lobo's copy loop is 26 µs (16 %) above nginx's own, not 2× it |
+| P4: cores — nginx-on well under 1, lobo near 1.0 | nginx-on 0.356, nginx-copy 0.855, lobo 0.872 | **held** for nginx; lobo is 0.87, not saturated — the four curl clients reading 1 MiB each are the other half of the loopback copy |
+
+The 1 MiB table (`tools/lobo-mib-bench 5 4000 4`, five interleaved
+rounds with the arm order rotated each round, 4000 requests per arm
+per round, raw rows `kasumi:~/lanes/ws41/mib-results.tsv`, sha256
+`e65b6179…`):
+
+| arm | µs server CPU / 1 MiB request (median, min–max) | user : system ticks | cores |
+|---|---|---|---|
+| nginx, `sendfile on` | 33.8 (33.7–34.2) | 4 : 63 | 0.356 |
+| nginx, `sendfile off` | 161.3 (161.0–162.6) | 18 : 304 | 0.855 |
+| lobo | 187.2 (186.2–189.1) | 68 : 306 | 0.872 |
+
+**The number the ask carries: lobo spends 153 µs more server CPU than
+nginx with sendfile on every 1 MiB it serves — 5.5× — and 127 µs of
+that gap is what sendfile saves nginx itself.** The copy is the cost,
+not lobo: against nginx's own user-space loop lobo is within 16 %.
+Both copy arms spend over 80 % of their CPU in the kernel (the two
+copies across the user boundary); sendfile removes one of them and
+the user-space buffer with it. 22 of the corpus's 40 configs say
+`sendfile on`.
