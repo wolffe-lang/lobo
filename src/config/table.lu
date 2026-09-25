@@ -732,8 +732,8 @@ pub fn table() -> Table {
     // each one spawn-free inside (D7 kept). Foreground is the only
     // mode (systemd/container reality; the oracle runs daemon off in
     // every harness case), so daemon/master_process are named_error.
-    // privilege drop (user) is unclaimed (run as the target user for
-    // now). control is lobo-native: the loopback order desk.
+    // privilege drop is unclaimed; `user` is gated, not applied (ws41,
+    // config/userconf). control is lobo-native: the loopback order desk.
     row(
         mut t,
         "worker_processes",
@@ -791,8 +791,8 @@ pub fn table() -> Table {
         "",
         1,
         2,
-        "named_error",
-        "privilege drop is ws14's — run lobo as the target user for now (nginx only warns when unprivileged)",
+        "implemented",
+        "ws41: parsed and gated, never applied — lobo has no privilege drop at this pin (wolf has no setuid). Unprivileged (effective uid off /proc/self/status, not 0): nginx's own [warn] (\"makes sense only if the master process runs with super-user privileges, ignored\") and the config loads, as nginx does. Root, or a host with no /proc/self/status (macOS, windows): refused BY NAME at -t and at start — staying root while the config names another user would be silently inert",
     )
     row(
         mut t,

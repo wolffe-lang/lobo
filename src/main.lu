@@ -1083,6 +1083,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         eprint("lobo: [emerg] configuration file {conf} test failed")
         return 1
     }
+    // ws41: `user` — a hand inherits its master's verdict, which the
+    // master printed once
+    if worker == 0 && !config.user_gate(c0) {
+        return 1
+    }
     // ws16: a HAND takes its control endpoint from the master's argv
     // (the config's `control` is the master's) and never touches the
     // pid file (the master's rendezvous)
@@ -2975,6 +2980,9 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
         eprint("lobo: [emerg] configuration file {conf} test failed")
+        return 1
+    }
+    if !config.user_gate(c0) {
         return 1
     }
     let exe = os_exe() else |_| {

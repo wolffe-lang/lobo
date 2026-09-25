@@ -1,0 +1,112 @@
+//! member: true
+//! config/userconf — the `user` directive (ws41). nginx drops the
+//! workers' privileges to the named user when its master runs as
+//! root, and when it does not it cannot, so it warns and goes on
+//! (`ngx_set_user`, probed against nginx/1.30.4: `[warn] the "user"
+//! directive makes sense only if the master process runs with
+//! super-user privileges, ignored in <file>:<line>`). lobo has no
+//! privilege drop at this pin: wolf 0.2.16 has no setuid and no
+//! getuid, so the only reading of the effective uid is linux's
+//! `/proc/self/status`. The posture follows from that:
+//!   - unprivileged (effective uid known and not 0): nginx's own
+//!     warning, and the config loads — nginx does the same thing;
+//!   - root: refused BY NAME, because lobo would keep running as root
+//!     while the config names someone else — silently inert is the
+//!     one outcome the table forbids;
+//!   - unknown (no `/proc/self/status`): refused by name too, for the
+//!     same reason, with the reason in the message.
+//! The decision is pure (`user_verdict`, the uid passed in) so it runs
+//! on every lane; `self_euid` is the one fs read.
+
+/// The effective uid in a `/proc/<pid>/status` text: the second
+/// number on the `Uid:` line (real, effective, saved, fs), or -1 when
+/// the line is missing or malformed. Pure. Total.
+pub fn status_euid(text: str) -> int {
+    for line in text.lines() {
+        if line.starts_with("Uid:") {
+            var field: int = 0
+            var cur: int = -1
+            for b_raw in line[4..line.len].bytes() {
+                let b = b_raw as int
+                if b >= 48 && b <= 57 {
+                    if cur < 0 {
+                        cur = 0
+                    }
+                    cur = cur * 10 + (b - 48)
+                } else if cur >= 0 {
+                    field = field + 1
+                    if field == 2 {
+                        return cur
+                    }
+                    cur = -1
+                }
+            }
+            if cur >= 0 && field == 1 {
+                return cur
+            }
+            return -1
+        }
+    }
+    -1
+}
+
+/// This process's effective uid, read off `/proc/self/status`; -1
+/// where the host has no such file (macOS, windows) or it cannot be
+/// read. fs tier.
+pub fn self_euid() -> int {
+    let text = fs_read_text("/proc/self/status") else |_| {
+        return -1
+    }
+    status_euid(text)
+}
+
+/// The first `user` row in the main context, or -1. Total.
+fn user_row(c: Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "user" && c.ctx[i] == "main" {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The `user` directive's verdict for a process whose effective uid is
+/// `euid` (-1 = unknown): "" when the config has no `user`;
+/// `warn:<line>` when the process is unprivileged (nginx's warning,
+/// the config loads); `emerg:<line>` when it is root or the uid is
+/// unknown (refused by name — lobo cannot drop privileges). Pure.
+/// Total.
+pub fn user_verdict(c: Conf, euid: int) -> str {
+    let r = user_row(c)
+    if r < 0 {
+        return ""
+    }
+    let at = "{c.files[r]}:{c.lines[r]}"
+    if euid > 0 {
+        return "warn:the \"user\" directive makes sense only if the master process runs with super-user privileges, ignored in {at}"
+    }
+    if euid == 0 {
+        return "emerg:the \"user\" directive asks for a privilege drop and lobo cannot drop privileges at this pin (wolf has no setuid surface) — run lobo unprivileged, as the target user, in {at}"
+    }
+    "emerg:the \"user\" directive cannot be checked on this host: lobo reads its effective uid from /proc/self/status, which is absent, and it cannot drop privileges — remove the directive and run lobo as the target user, in {at}"
+}
+
+/// The `user` gate every entry that loads a config for serving runs
+/// (`-t`, the single-process server, the master): prints the verdict
+/// in nginx's stream (`[warn]` or `[emerg]`) and answers false on a
+/// refusal. fs tier (the uid read).
+pub fn user_gate(c: Conf) -> bool {
+    let v = user_verdict(c, self_euid())
+    if v.starts_with("warn:") {
+        eprint("lobo: [warn] {v[5..v.len]}")
+        return true
+    }
+    if v.starts_with("emerg:") {
+        eprint("lobo: [emerg] {v[6..v.len]}")
+        return false
+    }
+    true
+}

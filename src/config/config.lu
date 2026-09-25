@@ -45,6 +45,11 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
         )
         verdict = 1
     }
+    // ws41: the `user` half — nginx warns about it while parsing, so
+    // its line comes first; refused by name when lobo would stay root
+    if verdict == 0 && !user_gate(c) {
+        verdict = 1
+    }
     // ws05: the ssl half of -t — certificates load, pairs MATCH
     // (public-key comparison), leaf-first order holds, and an alg
     // outside the sc22 ladder is a NAMED refusal. Warns (protocol/

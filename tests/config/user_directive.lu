@@ -1,0 +1,59 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! ws41: the `user` directive. nginx drops privileges when its master
+//! is root and warns when it is not (probed against nginx/1.30.4: `[warn]
+//! the "user" directive makes sense only if the master process runs
+//! with super-user privileges, ignored in <file>:<line>`, exit 0). lobo
+//! has no privilege drop at this pin, so the unprivileged case is
+//! nginx's warning and a load, and root — or a host where lobo cannot
+//! read its uid — is a refusal by name. The verdict is pure (the uid
+//! passed in), so all three lanes run it; the /proc read is the
+//! corpus's and tools/lobo-confcheck's to exercise live.
+
+use config
+
+fn conf_of(main: str) -> config.Conf {
+    config.parse_str("{main}\nhttp {{\n  server {{ listen 8080; }}\n}}\n", "t.conf")
+}
+
+fn main() -> !int {
+    // ---- the row: implemented, one or two arguments, main only
+    let c1 = conf_of("user www-data;")
+    assert(config.ok(c1), "user parses")
+    assert(config.delta_count(c1) == 0, "user is no longer a named_error delta")
+    let c2 = conf_of("user nginx nginx;")
+    assert(config.ok(c2), "user with a group parses")
+    let c3 = conf_of("user a b c;")
+    assert(!config.ok(c3), "three arguments are refused (nginx's arity: 1 or 2)")
+    let cin = config.parse_str("http {{\n  user nobody;\n}}\n", "t.conf")
+    assert(!config.ok(cin), "user inside http is not allowed here")
+
+    // ---- the verdict
+    let c0 = conf_of("")
+    assert(config.user_verdict(c0, 1000).is_empty(), "no directive, no verdict")
+    assert(config.user_verdict(c0, 0).is_empty(), "no directive, no verdict as root either")
+    let w = config.user_verdict(c1, 1000)
+    assert(
+        w ==
+            "warn:the \"user\" directive makes sense only if the master process runs with super-user privileges, ignored in t.conf:1",
+        "unprivileged: nginx's warning, located: {w}",
+    )
+    let r = config.user_verdict(c1, 0)
+    assert(r.starts_with("emerg:the \"user\" directive"), "root: refused by name: {r}")
+    assert(r.ends_with("in t.conf:1"), "root: located: {r}")
+    let u = config.user_verdict(c1, -1)
+    assert(u.starts_with("emerg:"), "unknown uid: refused by name: {u}")
+    assert(u.contains("/proc/self/status"), "unknown uid: the reason names the missing file: {u}")
+
+    // ---- the /proc/self/status reader (effective = the second field)
+    let status = "Name:\tlobo\nUid:\t1000\t1001\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n"
+    assert(config.status_euid(status) == 1001, "the effective uid is the second Uid field")
+    assert(config.status_euid("Uid:\t0\t0\t0\t0\n") == 0, "root reads 0")
+    assert(config.status_euid("Name:\tx\n") == -1, "no Uid line: unknown")
+    assert(config.status_euid("Uid:\t7\n") == -1, "one field: unknown")
+    assert(config.status_euid("Uid:\t5\t6") == 6, "no trailing separator")
+    0
+}
