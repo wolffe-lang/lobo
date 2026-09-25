@@ -198,6 +198,59 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws41 — 2026-09-25 — Range as nginx serves it; `user` gated; thirteen blockers refused by name; the sendfile ask carries a number
+
+- **Byte ranges.** A static GET or HEAD with `Range` is answered as
+  nginx 1.30.4 answers it: a 206 with `Content-Range` for one part,
+  `multipart/byteranges` for several (a per-process boundary counter;
+  a fresh server's first boundary is nginx's, `00000000000000000001`),
+  a 416 with `Content-Range: bytes */N` and the default page, a full
+  200 when the unit is not `bytes` or the parts sum past the file,
+  `If-Range` by ETag or by the exact Last-Modified string, and a
+  matching `If-Modified-Since` still answering 304 first. `max_ranges`
+  is implemented (0 turns ranges off and drops `Accept-Ranges`), with
+  nginx's `invalid number` at `-t`. The differential gains nineteen
+  `range_*` cases, a per-case `--- server` section and one checked-in
+  body rule (`@error-footer`, for a 416 page's identity footer). Before
+  the implementation, 15 of the 19 were red against lobo (CI run
+  36087334136). Named deltas: an If-Range date in RFC 850 or asctime
+  form is not parsed (a full 200). A range starting at byte N reads and
+  drops N bytes first, because there is no seek at this pin
+  (wolf-lang#426). Under `memory_budget` a Range is ignored. The
+  CVE-2017-7529 exploit's ranges get the whole file, as the pinned
+  nginx gives it.
+- **`user`.** It loads now. When lobo is unprivileged it prints nginx's
+  own warning (`the "user" directive makes sense only if the master
+  process runs with super-user privileges, ignored`). As root, or on a
+  host where `/proc/self/status` is absent, it is refused by name,
+  because lobo cannot drop privileges and would run as root. Five
+  corpus configs load, and two of them load identically:
+  `IDENTICAL_LOADS` 2 → 4. The confcheck line is `25 exit-parity (4
+  identical loads), 15 named exit deltas (2 lobo-lenient), 0 red`. It
+  was seen red first on the ratchet (CI run 36086771893).
+- **Thirteen `named_error` rows** for ws40's next blockers: `deny`,
+  `allow`, `uwsgi_pass`, `uwsgi_param`, `uwsgi_read_timeout`,
+  `charset_types`, `http2`, `http2_max_concurrent_streams`,
+  `proxy_buffer_size`, `proxy_buffers`, `ssl_ecdh_curve`,
+  `ssl_session_tickets` and `auth_request`. `-t` refuses each one by
+  name with a reason. The classification ratchet goes 11/6/23 → 16/6/18.
+- **A named_error row now refuses the start and a reload, not only
+  `-t`.** Before this, a running server ignored such a row. That was
+  inert while the rows were lua, perl and `daemon`. It became a hole
+  when `deny` got its row: a live lobo served a file under `location /
+  { deny all; }` with a 200 (`tests/shell/named_refusal_e2e.lu` is red
+  on the tree before the fix).
+- **The table's counts are derived.** The table has 122 rows: 48
+  implemented, 49 planned and 25 `named_error`. `tools/lobo-directives`
+  now writes the README's sentence from the generated page and reds
+  when the README drifts from it.
+- **The sendfile ask** (wolf-lang#417) now carries a measurement.
+  `tools/lobo-mib-bench` ran on kasumi, five interleaved rounds. A
+  1 MiB response costs lobo **187 µs** of server CPU. nginx costs
+  **34 µs** with `sendfile on` and **161 µs** with it off. So lobo's
+  copy is within 16 % of nginx's own copy loop, and 5.5× what sendfile
+  costs. The `sendfile` row now cites the issue.
+
 ## ws40 — 2026-09-25 — the configs carry (the real-config corpus from 8 to 40; 2 identical loads, ratcheted; the blocked-directive table)
 
 - **The corpus.** `tests/config-corpus/` goes from 8 configs (7 of
