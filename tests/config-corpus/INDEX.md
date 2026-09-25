@@ -59,7 +59,10 @@ licensed public repositories.
   gate) removes the reported directive from a scratch copy and re-runs,
   until the config loads or stops on something it cannot remove. The
   raw results are `kasumi:~/lanes/ws40/measure-trunk.jsonl` (sha256
-  `2e1ba025…`), one line per config.
+  `2e1ba025…`), one line per config. One entry was renamed after the
+  measurement: `ubuntu-1.4.6-default` became `ubuntu-trusty-default`,
+  because `tools/lobo-dryrun` reads a probe's config name up to the
+  first dot.
 
 ## The count (ratcheted)
 
@@ -135,7 +138,7 @@ a named gap for the lane that implements `return` and `server_name`.
 | `puma-docs` | [puma/puma](https://github.com/puma/puma/blob/306daddfd07fdf0ca902eb7ea89ceb7dd6139050/docs/nginx.md) | BSD-3-Clause | 1 | 0 | 1 | lobo refuses, nginx loads | `break`, `user` |
 | `superset` | [apache/superset](https://github.com/apache/superset/blob/599026a0e5a82f9728a333aea0e07b6a7bf8f771/docker/nginx/nginx.conf) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `output_buffers`, `port_in_redirect`, `user`, (stop: log format variable "$connection_requests" is not implemente) |
 | `synapse-docs` | [matrix-org/synapse](https://github.com/matrix-org/synapse/blob/be65a8ec0195955c15fdb179c9158b187638e39a/docs/reverse_proxy.md) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `user` |
-| `ubuntu-1.4.6-default` | [certbot/certbot](https://github.com/certbot/certbot/blob/485649333422392901e7ef891630f0129985df8e/certbot/src/certbot/_internal/tests/plugins/nginx/testdata/etc_nginx/ubuntu_nginx_1_4_6/default_vhost/nginx/nginx.conf) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `types_hash_max_size`, `user` |
+| `ubuntu-trusty-default` | [certbot/certbot](https://github.com/certbot/certbot/blob/485649333422392901e7ef891630f0129985df8e/certbot/src/certbot/_internal/tests/plugins/nginx/testdata/etc_nginx/ubuntu_nginx_1_4_6/default_vhost/nginx/nginx.conf) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `types_hash_max_size`, `user` |
 | `uwsgi-django-docs` | [unbit/uwsgi-docs](https://github.com/unbit/uwsgi-docs/blob/5784c30866a94942a5200db4d5f6c2850afb1caa/tutorials/Django_and_nginx.rst) | MIT | 0 | 0 | 1 | lobo refuses, nginx loads | `uwsgi_pass`, `uwsgi_param`, `user` |
 
 ## Provenance: source at a pinned commit, and what was edited or stripped
@@ -180,7 +183,7 @@ a named gap for the lane that implements `return` and `server_name`.
 | `puma-docs` | https://github.com/puma/puma/blob/306daddfd07fdf0ca902eb7ea89ceb7dd6139050/docs/nginx.md (the fenced nginx block), as conf.d/site.conf, wrapped in nginx/pkg-oss's packaged nginx.conf (BSD-2-Clause, d16a981d5921b9d27985a24998d3438fb73bb1d7) license=BSD-3-Clause | listen privileged N -> 18000+N; wrapper paths prefix-relative, logs -> logs/, pid -> logs/nginx.pid; /myapp/log/ -> logs/ (nginx -t opens log files); nothing stripped |
 | `superset` | https://github.com/apache/superset/blob/599026a0e5a82f9728a333aea0e07b6a7bf8f771/docker/nginx/nginx.conf + docker/nginx/templates/superset.conf.template rendered as the image's envsubst does with SUPERSET_APP_ROOT="/" (docker/.env's default) license=Apache-2.0 | /etc/nginx/ -> prefix-relative; /var/log/nginx/ -> logs/; an absolute pid -> logs/nginx.pid (nginx -t opens it); listen 80 -> 18080; STRIPPED: host.docker.internal (a docker-internal hostname nginx -t would resolve) -> 127.0.0.1 |
 | `synapse-docs` | https://github.com/matrix-org/synapse/blob/be65a8ec0195955c15fdb179c9158b187638e39a/docs/reverse_proxy.md (the fenced nginx block), as conf.d/site.conf, wrapped in nginx/pkg-oss's packaged nginx.conf (BSD-2-Clause, d16a981d5921b9d27985a24998d3438fb73bb1d7) license=Apache-2.0 | listen privileged N -> 18000+N; wrapper paths prefix-relative, logs -> logs/, pid -> logs/nginx.pid; ADDED the two ssl_certificate lines (lobo's TEST pair) the doc leaves to the reader — without them nginx -t refuses every 'listen … ssl' server; nothing stripped |
-| `ubuntu-1.4.6-default` | https://github.com/certbot/certbot/blob/485649333422392901e7ef891630f0129985df8e/certbot/src/certbot/_internal/tests/plugins/nginx/testdata/etc_nginx/ubuntu_nginx_1_4_6/default_vhost/nginx/nginx.conf (Ubuntu 14.04's stock nginx 1.4.6 /etc/nginx tree as certbot carries it; sites-enabled/default was a symlink to sites-available/default, materialized) license=Apache-2.0 | /etc/nginx/ -> prefix-relative; /var/log/nginx/ -> logs/; an absolute pid -> logs/nginx.pid (nginx -t opens it); listen 80 -> 18080; naxsi*/sites-available copies omitted (not included by nginx.conf); nothing stripped |
+| `ubuntu-trusty-default` | https://github.com/certbot/certbot/blob/485649333422392901e7ef891630f0129985df8e/certbot/src/certbot/_internal/tests/plugins/nginx/testdata/etc_nginx/ubuntu_nginx_1_4_6/default_vhost/nginx/nginx.conf (Ubuntu 14.04's stock nginx 1.4.6 /etc/nginx tree as certbot carries it; sites-enabled/default was a symlink to sites-available/default, materialized) license=Apache-2.0 | /etc/nginx/ -> prefix-relative; /var/log/nginx/ -> logs/; an absolute pid -> logs/nginx.pid (nginx -t opens it); listen 80 -> 18080; naxsi*/sites-available copies omitted (not included by nginx.conf); nothing stripped |
 | `uwsgi-django-docs` | https://github.com/unbit/uwsgi-docs/blob/5784c30866a94942a5200db4d5f6c2850afb1caa/tutorials/Django_and_nginx.rst (the mysite_nginx.conf block), as conf.d/site.conf, wrapped in nginx/pkg-oss's packaged nginx.conf (BSD-2-Clause, d16a981d5921b9d27985a24998d3438fb73bb1d7) license=MIT | listen privileged N -> 18000+N; wrapper paths prefix-relative, logs -> logs/, pid -> logs/nginx.pid; include /path/to/your/mysite/uwsgi_params -> uwsgi_params (nginx-1.30.4's, which the tutorial says to copy); nothing stripped |
 
 ## The blocked-directive table: ws41+'s input, ordered by configs blocked
@@ -196,7 +199,7 @@ many of those configs a stock nginx loads.
 
 | # | what blocks | kind | configs blocked | of which stock nginx loads | sole blocker in | configs |
 |---|---|---|---|---|---|---|
-| 1 | `user` | `named_error` row | 18 | 16 | `crossplane-messy`, `flask-docs`, `netbox`, `nginx-pkg-oss`, `synapse-docs` | certbot-nginx-fixture, crossplane-messy, flask-docs, gunicorn-asgi-uwsgi, gunicorn-example, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, jupyterhub-docs, laravel-docs, netbox, nginx-pkg-oss, nginx-proxy-manager, puma-docs, superset, synapse-docs, ubuntu-1.4.6-default, uwsgi-django-docs |
+| 1 | `user` | `named_error` row | 18 | 16 | `crossplane-messy`, `flask-docs`, `netbox`, `nginx-pkg-oss`, `synapse-docs` | certbot-nginx-fixture, crossplane-messy, flask-docs, gunicorn-asgi-uwsgi, gunicorn-example, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, jupyterhub-docs, laravel-docs, netbox, nginx-pkg-oss, nginx-proxy-manager, puma-docs, superset, synapse-docs, ubuntu-trusty-default, uwsgi-django-docs |
 | 2 | `deny` | no row | 5 | 4 | — | certbot-nginx-fixture, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, laravel-docs |
 | 3 | `uwsgi_param` | no row | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
 | 4 | `uwsgi_pass` | no row | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
@@ -257,7 +260,7 @@ many of those configs a stock nginx loads.
 | 59 | `set_real_ip_from` | no row | 1 | 1 | — | nginx-proxy-manager |
 | 60 | `ssl_reject_handshake` | no row | 1 | 1 | — | nginx-proxy-manager |
 | 61 | `stream` | no row | 1 | 1 | — | nginx-proxy-manager |
-| 62 | `types_hash_max_size` | no row | 1 | 1 | — | ubuntu-1.4.6-default |
+| 62 | `types_hash_max_size` | no row | 1 | 1 | — | ubuntu-trusty-default |
 | 63 | `uwsgi_buffer_size` | no row | 1 | 1 | — | gunicorn-uwsgi |
 | 64 | `uwsgi_buffers` | no row | 1 | 1 | — | gunicorn-uwsgi |
 | 65 | `uwsgi_busy_buffers_size` | no row | 1 | 1 | — | gunicorn-uwsgi |
