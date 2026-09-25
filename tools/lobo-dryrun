@@ -127,7 +127,9 @@ cross_static() {
     rm -rf "$scratch"; mkdir -p "$scratch/logs"
     cp -r "$DIFF_DIR/www" "$scratch/www"
     port=$(free_port) || { echo "dryrun: FAILED — no free port for the static cross check" >&2; return 1; }
-    sed -e "s|@PORT@|$port|" -e "s|@ROOT@|$(pwd)/$scratch|" "$DIFF_DIR/lobo.conf.in" > "$scratch/lobo.conf"
+    # ws41: the template's @SERVER@ line is the differential's per-case
+    # splice point; the cross check has no case, so it splices nothing
+    sed -e "s|@PORT@|$port|" -e "s|@ROOT@|$(pwd)/$scratch|" -e '/^[[:space:]]*@SERVER@[[:space:]]*$/d' "$DIFF_DIR/lobo.conf.in" > "$scratch/lobo.conf"
 
     # the prediction, offline (--stat is the fs half of the claim)
     "$LOBO" -t -p "$(pwd)/$scratch" -c lobo.conf \

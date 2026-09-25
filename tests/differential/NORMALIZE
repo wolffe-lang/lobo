@@ -6,3 +6,9 @@
 # that quietly normalizes is a differ that lies).
 Server   # implementation identity: the two servers legitimately differ here forever
 Date     # wall clock: legitimately different on every run
+@error-footer   # ws41, a BODY rule: a default error page (4xx/5xx, the 416 a Range
+                # can draw) ends in the server's identity footer — nginx's token on
+                # nginx, lobo's on lobo (the documented body analogue of Server; see
+                # serve.error_body). The footer's text and that response's
+                # Content-Length are normalized, and the length only when it equals
+                # the body's real byte count, so a wrong length still reds.

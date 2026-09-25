@@ -63,6 +63,11 @@ then a `--- expect` section holding
 the expected reply, stored pre-normalized (see below). git must
 never translate these files (no autocrlf).
 
+An optional `--- server` section (ws41) holds directives spliced into
+BOTH servers' `server {}` block at the templates' `@SERVER@` line, so
+a case can carry the one directive it is about (`max_ranges 1;`)
+without a second template pair. A case without one splices nothing.
+
 ## The normalization list is checked in, never folklore
 
 `tests/differential/NORMALIZE` lists the response headers whose
@@ -70,6 +75,26 @@ VALUES the differ replaces with `<normalized>`, on BOTH sides, before
 byte-comparing. At ws00 it is `Server` and `Date`, each with its
 reason in the file. Everything else byte-compares, CRLF included.
 Adding an entry requires a why-comment in the file.
+
+One entry is a BODY rule (ws41): `@error-footer`. A default error page
+ends in the server's identity footer (`<hr><center>nginx/1.30.4
+</center>` on the oracle, lobo's token on lobo), so a 416's body and
+its `Content-Length` differ by exactly the token. On a 4xx/5xx reply
+whose body carries that footer line, the footer's text becomes
+`<normalized>`, and so does `Content-Length` — only when the declared
+length equals the body's real byte count, so a wrong length still
+reds.
+
+## Range (ws41)
+
+Nineteen `range_*` cases over the 79-byte `index.html`: single,
+suffix, open and clamped ranges; a multipart set (a fresh nginx's
+first boundary is `00000000000000000001`, and lobo counts per process
+the same way); a set with one unsatisfiable member; four 416 shapes;
+an unknown unit and an oversized set (both a full 200); `If-Range` by
+ETag, by a stale ETag and by date; `HEAD`; a 304 that outranks the
+range; and `max_ranges 1` / `max_ranges 0`. At trunk `d65cce0` lobo
+matched 4 of them and 15 were red (`docs/ws41-prediction.md`).
 
 ## Determinism
 
