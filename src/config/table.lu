@@ -255,7 +255,16 @@ pub fn table() -> Table {
         "implemented",
         "lobo-native (ws09, linted): request headers the JSON door nests under \"headers\"",
     )
-    row(mut t, "sendfile", "http server location", "", 1, 1, "planned(ws02)", "kernel file send")
+    row(
+        mut t,
+        "sendfile",
+        "http server location",
+        "",
+        1,
+        1,
+        "planned(wolf-lang#417)",
+        "kernel file send — parsed, not applied: wolf has no sendfile/splice/copy_file_range surface at this pin (wolf-lang#417). Measured ws41 (tools/lobo-mib-bench, kasumi): a 1 MiB response costs lobo 187 µs of server CPU, nginx 34 µs with sendfile on and 161 µs with it off. 22 of the corpus's 40 configs say `sendfile on`",
+    )
     row(
         mut t,
         "tcp_nopush",
