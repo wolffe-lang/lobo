@@ -68,19 +68,19 @@ licensed public repositories.
 
 | class | configs | gate |
 |---|---|---|
-| **identical load**: pinned `-t` 0 and lobo `-t` 0 | **2** (distro-default, reverse-proxy) | `IDENTICAL_LOADS=2`, `tools/lobo-confcheck` |
-| loads on lobo and on stock nginx; the pinned build lacks rewrite, gzip or PCRE | 7 | the per-config annotation, `oracle-build` |
+| **identical load**: pinned `-t` 0 and lobo `-t` 0 | **4** (distro-default, reverse-proxy; flask-docs and nginx-pkg-oss since ws41's `user`) | `IDENTICAL_LOADS=4`, `tools/lobo-confcheck` |
+| loads on lobo and on stock nginx; the pinned build lacks rewrite, gzip, PCRE or HTTP/2 | 10 (crossplane-messy, netbox and synapse-docs joined at ws41) | the per-config annotation, `oracle-build` |
 | **lobo-lenient**: lobo loads, and every nginx build refuses | **2** (certbot-vhost, crossplane-empty-value-map; lobo#38) | `LOBO_LENIENT=2`, `tools/lobo-confcheck` |
-| lobo refuses, stock nginx loads | 21 | per-config annotation + the blocked table below |
+| lobo refuses, stock nginx loads | 16 | per-config annotation + the blocked table below |
 | both refuse | 8 | per-config annotation |
-| **total** | **40** | `tests/config/corpus_ratchet.lu`: 11 parse-clean / 6 named-delta / 23 refused-by-name / **0 silent** |
+| **total** | **40** | `tests/config/corpus_ratchet.lu`: 16 parse-clean / 1 named-delta / 23 refused-by-name / **0 silent** |
 
 Every config's exits are pinned in its own `# lobo-corpus: oracle-exit=N
 lobo-exit=M delta=…` line. `tools/lobo-confcheck` runs both binaries on
 every entry and reds on any exit that differs from its annotation. So a
 lobo change that flips one config reds by name, and a hand edit that
 lowers the count reds on the constant. Against the stock build, lobo
-loads 11 of 40 and nginx loads 30 of 40.
+loads 16 of 40 (11 before ws41's `user`) and nginx loads 30 of 40.
 
 **Identical routing.** Every entry carries a `lobo -t --request`
 dry-run probe under `tests/dryrun/probes/` (41 probes, gated by
@@ -112,12 +112,12 @@ a named gap for the lane that implements `return` and `server_name`.
 | `crossplane-empty-value-map` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/empty-value-map/nginx.conf) | Apache-2.0 | 1 | 1 | 0 | **lobo-lenient** | — |
 | `crossplane-includes-globbed` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/includes-globbed/nginx.conf) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks a module) | — |
 | `crossplane-includes-regular` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/includes-regular/nginx.conf) | Apache-2.0 | 1 | 1 | 1 | both refuse | `include*` |
-| `crossplane-messy` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/messy/nginx.conf) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `user` |
+| `crossplane-messy` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/messy/nginx.conf) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks a module; `user` resolved at ws41) | — |
 | `crossplane-quote-behavior` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/quote-behavior/nginx.conf) | Apache-2.0 | 1 | 1 | 1 | both refuse | `outer-quote*`, `*` |
 | `crossplane-russian-text` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/russian-text/nginx.conf) | Apache-2.0 | 0 | 0 | 1 | lobo refuses, nginx loads | `env` |
 | `crossplane-simple` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/simple/nginx.conf) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks a module) | — |
 | `crossplane-with-comments` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/with-comments/nginx.conf) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks a module) | — |
-| `flask-docs` | [pallets/flask](https://github.com/pallets/flask/blob/d73fa1cdcbd8b1465c151db8924ba58b1dd14e35/docs/deploying/nginx.rst) | BSD-3-Clause | 0 | 0 | 1 | lobo refuses, nginx loads | `user` |
+| `flask-docs` | [pallets/flask](https://github.com/pallets/flask/blob/d73fa1cdcbd8b1465c151db8924ba58b1dd14e35/docs/deploying/nginx.rst) | BSD-3-Clause | 0 | 0 | 0 | **identical load** (since ws41's `user`) | — |
 | `gunicorn-asgi-compliance` | [benoitc/gunicorn](https://github.com/benoitc/gunicorn/blob/afc7d2fd5dd9f1de455b1be6c10044030c0adf8e/tests/docker/asgi_compliance/nginx.conf) | MIT | 1 | 0 | 1 | lobo refuses, nginx loads | `chunked_transfer_encoding`, `proxy_next_upstream`, `proxy_next_upstream_tries`, `proxy_buffer_size`, `proxy_buffers`, `http2`, `http2_max_concurrent_streams` |
 | `gunicorn-asgi-uwsgi` | [benoitc/gunicorn](https://github.com/benoitc/gunicorn/blob/afc7d2fd5dd9f1de455b1be6c10044030c0adf8e/tests/docker/test_asgi_uwsgi/nginx.conf) | MIT | 1 | 0 | 1 | lobo refuses, nginx loads | `uwsgi_pass`, `uwsgi_param`, `user` |
 | `gunicorn-example` | [benoitc/gunicorn](https://github.com/benoitc/gunicorn/blob/afc7d2fd5dd9f1de455b1be6c10044030c0adf8e/examples/nginx.conf) | MIT | 1 | 0 | 1 | lobo refuses, nginx loads | `accept_mutex`, `user`, `client_max_body_size*` |
@@ -129,15 +129,15 @@ a named gap for the lane that implements `return` and `server_name`.
 | `h5bp-test-vhosts` | [h5bp/server-configs-nginx](https://github.com/h5bp/server-configs-nginx/blob/d2f2c3e2fac76f429adb738894499b8fb756d2f3/nginx.conf) | MIT | 1 | 0 | 1 | lobo refuses, nginx loads | `charset_types`, `ssl_session_tickets`, `ssl_ecdh_curve`, `deny`, `gzip_static`, `user`, `worker_rlimit_nofile`, `ssl_protocols*` |
 | `jupyterhub-docs` | [jupyterhub/jupyterhub](https://github.com/jupyterhub/jupyterhub/blob/9abe5fb83f4c21754ed12adac2f834c33ee9ea39/docs/source/howto/configuration/config-proxy.md) | BSD-3-Clause | 1 | 1 | 1 | both refuse | `ssl`, `allow`, `user` |
 | `laravel-docs` | [laravel/docs](https://github.com/laravel/docs/blob/eff8739e9090c2a0216fefac8e33dacdd689f8f6/deployment.md) | MIT | 1 | 0 | 1 | lobo refuses, nginx loads | `log_not_found`, `fastcgi_buffer_size`, `fastcgi_buffers`, `fastcgi_busy_buffers_size`, `fastcgi_hide_header`, `deny`, `user` |
-| `netbox` | [netbox-community/netbox](https://github.com/netbox-community/netbox/blob/b56c866d4c23e8a9a4ecd4c0d85a04b4e83c286c/contrib/nginx.conf) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `user` |
-| `nginx-pkg-oss` | [nginx/pkg-oss](https://github.com/nginx/pkg-oss/blob/d16a981d5921b9d27985a24998d3438fb73bb1d7/debian/debian/nginx.conf) | BSD-2-Clause | 0 | 0 | 1 | lobo refuses, nginx loads | `user` |
+| `netbox` | [netbox-community/netbox](https://github.com/netbox-community/netbox/blob/b56c866d4c23e8a9a4ecd4c0d85a04b4e83c286c/contrib/nginx.conf) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks a module; `user` resolved at ws41) | — |
+| `nginx-pkg-oss` | [nginx/pkg-oss](https://github.com/nginx/pkg-oss/blob/d16a981d5921b9d27985a24998d3438fb73bb1d7/debian/debian/nginx.conf) | BSD-2-Clause | 0 | 0 | 0 | **identical load** (since ws41's `user`) | — |
 | `nginx-proxy-manager` | [NginxProxyManager/nginx-proxy-manager](https://github.com/NginxProxyManager/nginx-proxy-manager/blob/2cfd3395cf979b901cecb390dd3d78810c46b596/docker/rootfs/etc/nginx/nginx.conf) | MIT | 1 | 0 | 1 | lobo refuses, nginx loads | `pcre_jit`, `client_body_temp_path`, `proxy_ignore_client_abort`, `server_names_hash_bucket_size`, `proxy_cache_path`, `set_real_ip_from`, `real_ip_header`, `real_ip_recursive`, `if_modified_since`, `proxy_cache_key`, `proxy_ignore_headers`, `proxy_hide_header`, `proxy_cache_bypass`, `proxy_no_cache`, `proxy_cache_use_stale`, `if*`, `auth_basic`, `auth_request`, `allow`, `ssl_reject_handshake`, `stream`, `daemon`, `user`, `listen*`, (stop: unknown "upstream_cache_status" variable) |
 | `njs-complex-redirects` | [nginx/njs-examples](https://github.com/nginx/njs-examples/blob/d5de982e5f720f8aaaad9996080209195fee01b2/conf/http/complex_redirects.conf) | BSD-2-Clause | 1 | 1 | 1 | both refuse | `load_module`, `js_path`, `js_import`, `js_content`, `auth_request`, `auth_request_set`, `internal` |
 | `njs-decode-uri` | [nginx/njs-examples](https://github.com/nginx/njs-examples/blob/d5de982e5f720f8aaaad9996080209195fee01b2/conf/http/decode_uri.conf) | BSD-2-Clause | 1 | 1 | 1 | both refuse | `load_module`, `js_path`, `js_import`, `js_set`, `js_content` |
 | `njs-hello` | [nginx/njs-examples](https://github.com/nginx/njs-examples/blob/d5de982e5f720f8aaaad9996080209195fee01b2/conf/http/hello.conf) | BSD-2-Clause | 1 | 1 | 1 | both refuse | `load_module`, `js_path`, `js_import`, `js_content` |
 | `puma-docs` | [puma/puma](https://github.com/puma/puma/blob/306daddfd07fdf0ca902eb7ea89ceb7dd6139050/docs/nginx.md) | BSD-3-Clause | 1 | 0 | 1 | lobo refuses, nginx loads | `break`, `user` |
 | `superset` | [apache/superset](https://github.com/apache/superset/blob/599026a0e5a82f9728a333aea0e07b6a7bf8f771/docker/nginx/nginx.conf) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `output_buffers`, `port_in_redirect`, `user`, (stop: log format variable "$connection_requests" is not implemente) |
-| `synapse-docs` | [matrix-org/synapse](https://github.com/matrix-org/synapse/blob/be65a8ec0195955c15fdb179c9158b187638e39a/docs/reverse_proxy.md) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `user` |
+| `synapse-docs` | [matrix-org/synapse](https://github.com/matrix-org/synapse/blob/be65a8ec0195955c15fdb179c9158b187638e39a/docs/reverse_proxy.md) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks HTTP/2; `user` resolved at ws41) | — |
 | `ubuntu-trusty-default` | [certbot/certbot](https://github.com/certbot/certbot/blob/485649333422392901e7ef891630f0129985df8e/certbot/src/certbot/_internal/tests/plugins/nginx/testdata/etc_nginx/ubuntu_nginx_1_4_6/default_vhost/nginx/nginx.conf) | Apache-2.0 | 1 | 0 | 1 | lobo refuses, nginx loads | `types_hash_max_size`, `user` |
 | `uwsgi-django-docs` | [unbit/uwsgi-docs](https://github.com/unbit/uwsgi-docs/blob/5784c30866a94942a5200db4d5f6c2850afb1caa/tutorials/Django_and_nginx.rst) | MIT | 0 | 0 | 1 | lobo refuses, nginx loads | `uwsgi_pass`, `uwsgi_param`, `user` |
 
@@ -199,7 +199,7 @@ many of those configs a stock nginx loads.
 
 | # | what blocks | kind | configs blocked | of which stock nginx loads | sole blocker in | configs |
 |---|---|---|---|---|---|---|
-| 1 | `user` | `named_error` row | 18 | 16 | `crossplane-messy`, `flask-docs`, `netbox`, `nginx-pkg-oss`, `synapse-docs` | certbot-nginx-fixture, crossplane-messy, flask-docs, gunicorn-asgi-uwsgi, gunicorn-example, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, jupyterhub-docs, laravel-docs, netbox, nginx-pkg-oss, nginx-proxy-manager, puma-docs, superset, synapse-docs, ubuntu-trusty-default, uwsgi-django-docs |
+| 1 | `user` (**resolved at ws41**: warns and loads when unprivileged) | `named_error` row at ws40 | 18 | 16 | `crossplane-messy`, `flask-docs`, `netbox`, `nginx-pkg-oss`, `synapse-docs` | certbot-nginx-fixture, crossplane-messy, flask-docs, gunicorn-asgi-uwsgi, gunicorn-example, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, jupyterhub-docs, laravel-docs, netbox, nginx-pkg-oss, nginx-proxy-manager, puma-docs, superset, synapse-docs, ubuntu-trusty-default, uwsgi-django-docs |
 | 2 | `deny` | no row | 5 | 4 | — | certbot-nginx-fixture, h5bp-no-ssl, h5bp-ssl, h5bp-test-vhosts, laravel-docs |
 | 3 | `uwsgi_param` | no row | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
 | 4 | `uwsgi_pass` | no row | 4 | 4 | — | gunicorn-asgi-uwsgi, gunicorn-stress, gunicorn-uwsgi, uwsgi-django-docs |
@@ -278,9 +278,12 @@ many of those configs a stock nginx loads.
 The top of the table in one line: **`user` blocks 18 of 40 configs, 16
 of which a stock nginx loads, and it is the only blocker in 5.** Two of
 those five are identical loads in waiting: `flask-docs` and
-`nginx-pkg-oss` load on the pinned oracle. `user` is a `named_error`
-row today ("privilege drop is ws14's"), and nginx itself only warns
-about it when unprivileged. Next come the access module (`deny`,
+`nginx-pkg-oss` load on the pinned oracle. `user` was a `named_error`
+row at ws40 ("privilege drop is ws14's"), and nginx itself only warns
+about it when unprivileged. **ws41 resolved it**: lobo now warns as
+nginx does when unprivileged and loads, so the five load and the two
+became identical loads (the confcheck line went to `25 exit-parity (4
+identical loads), 15 named exit deltas`). Next come the access module (`deny`,
 `allow`), uwsgi (`uwsgi_pass`, `uwsgi_param`, 4 configs), and a
 three-way tie among `charset_types`, HTTP/2 (`http2`,
 `http2_max_concurrent_streams`) and `worker_rlimit_nofile`. The njs

@@ -27,7 +27,9 @@
 # nginx build refuses them too, so the pinned build is not the reason).
 # That count must never grow silently: a new one is a named delta, and
 # the constant moves with it.
-IDENTICAL_LOADS=2
+# ws41: 2 -> 4 — `user` warns and loads when unprivileged (as nginx
+# does), so flask-docs and nginx-pkg-oss load identically.
+IDENTICAL_LOADS=4
 LOBO_LENIENT=2
 set -u
 cd "$(dirname "$0")/.." || exit 2
