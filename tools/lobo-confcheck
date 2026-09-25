@@ -16,6 +16,19 @@
 # verdict, dump on stdout).
 # This lives in sh because a wolf runner cannot read a child's exit
 # without os_spawn stdout capture (F-0065 → wolf-lang#129, ws00's D3).
+#
+# THE IDENTICAL-LOAD RATCHET (ws40): the W2 claim, counted. A config
+# loads IDENTICALLY when the pinned oracle's -t and lobo's -t both exit
+# 0. The count is pinned below, the lane-coverage convention: RAISING it
+# is routine (a directive landed, a config flipped — bump the number in
+# the same commit); LOWERING it needs the reason spelled out in the
+# commit message. LOBO_LENIENT pins the other direction: configs lobo
+# loads and nginx refuses, annotated `delta=lobo-lenient:` (the stock
+# nginx build refuses them too, so the pinned build is not the reason).
+# That count must never grow silently: a new one is a named delta, and
+# the constant moves with it.
+IDENTICAL_LOADS=2
+LOBO_LENIENT=1
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-rigproc.sh
@@ -38,6 +51,8 @@ total=0
 red=0
 parity=0
 annotated_delta=0
+identical=0
+lenient=0
 for dir in tests/config-corpus/*/; do
     [ -d "$dir" ] || continue
     name=$(basename "$dir")
@@ -100,6 +115,10 @@ for dir in tests/config-corpus/*/; do
         red=$((red + 1))
         continue
     fi
+    if [ "$want_oracle" = 0 ] && [ "$want_lobo" = 0 ]; then
+        identical=$((identical + 1))
+    fi
+    case "$delta" in lobo-lenient:*) lenient=$((lenient + 1)) ;; esac
     if [ "$want_oracle" = "$want_lobo" ]; then
         parity=$((parity + 1))
         echo "confcheck: ok — $name (oracle $got_oracle = lobo $got_lobo)"
@@ -109,5 +128,13 @@ for dir in tests/config-corpus/*/; do
     fi
 done
 
-echo "confcheck: $total configs — $parity exit-parity, $annotated_delta named oracle-build deltas, $red red"
+echo "confcheck: $total configs — $parity exit-parity ($identical identical loads), $annotated_delta named exit deltas ($lenient lobo-lenient), $red red"
+if [ "$identical" != "$IDENTICAL_LOADS" ]; then
+    echo "confcheck: FAILED — identical loads moved: $identical vs ratchet $IDENTICAL_LOADS (raising is routine: bump IDENTICAL_LOADS in the same commit; lowering needs the reason in the commit message)" >&2
+    red=$((red + 1))
+fi
+if [ "$lenient" != "$LOBO_LENIENT" ]; then
+    echo "confcheck: FAILED — lobo-lenient configs moved: $lenient vs ratchet $LOBO_LENIENT (lobo loading what nginx refuses is a named delta; move LOBO_LENIENT with its annotation)" >&2
+    red=$((red + 1))
+fi
 [ "$red" = 0 ] && [ "$total" -gt 0 ] || exit 1
