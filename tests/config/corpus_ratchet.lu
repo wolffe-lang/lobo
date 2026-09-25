@@ -44,7 +44,10 @@ use config
 /// options include), a redirect/rewrite farm, the fastcgi/php-fpm
 /// shape, a map + if config (the L001/L003 exhibits), and the
 /// OpenResty lua named_error exhibit — 7 parse clean, 1 carries its
-/// named delta, 0 silent anything.
+/// named delta, 0 silent anything. ws40: 32 real configs from public
+/// repositories (tests/config-corpus/INDEX.md) — 40 in all: 11 parse
+/// clean, 6 named-delta (5 of them `user` alone), 23 refused by name,
+/// 0 silent.
 fn ratchet_configs() -> int {
     40
 }

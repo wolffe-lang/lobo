@@ -129,8 +129,9 @@ tests/rig/           the harness, in wolf, all of it loopback:
   *.lu               drivers: freeport, diffsend, holdconn, memdrive,
                      nowms, reloadhold, resolvedrive, …
 tests/differential/  the pinned-nginx differential (docs/DIFFERENTIAL.md)
-tests/config-corpus/ eight real-world nginx.conf fixtures (certbot
-                     vhost, distro default, php-fpm, openresty, …)
+tests/config-corpus/ forty nginx.confs, 32 of them real (INDEX.md: the
+                     source, licence and verdict of each, and the
+                     blocked-directive table)
 tests/cve-corpus/    the historical-CVE corpus ws02 declared
 tools/               the gauntlet and thirty-odd single-purpose tools
                      beside it (sh + jq; the tests themselves are wolf)
