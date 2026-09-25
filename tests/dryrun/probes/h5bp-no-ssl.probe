@@ -1,0 +1,6 @@
+# h5bp-no-ssl — lobo -t refuses this config (unknown directive "charset_types" in h5bp/media_types/character_encodings.conf:32),
+# so the dry-run predicts nothing: exit 1, nothing on stdout.
+# tests/config-corpus/INDEX.md names what blocks it (ws40).
+args: --request 'GET http://localhost/'
+exit: 1
+--- expect
