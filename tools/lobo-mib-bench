@@ -1,0 +1,198 @@
+#!/bin/sh
+# lobo-mib-bench — what a 1 MiB static response costs the SERVER, in
+# CPU, on lobo and on nginx (ws41: the number wolf-lang#417's sendfile
+# ask carries). NOT a gauntlet step and never a gate: a number depends
+# on the box, and this tool names the box in its output.
+#
+#   tools/lobo-mib-bench [runs] [requests] [clients]
+#     runs      interleaved rounds (default 5); each round runs the
+#               three arms in turn, every server fresh
+#     requests  1 MiB GETs per arm per round (default 4000)
+#     clients   concurrent keepalive curl clients sharing them
+#               (default 4)
+#
+# THREE ARMS, so the difference is the copy's and not the servers':
+#   nginx-sendfile   the pinned nginx, `sendfile on` — the kernel moves
+#                    the file's pages to the socket
+#   nginx-copy       the same nginx, `sendfile off` — nginx's own
+#                    read(2)/write(2) loop through user space
+#   lobo             target/lobo-release: fs_read_chunk + net_write
+#                    through user space, the only route at this pin
+# Each server is ONE process (nginx `master_process off`, lobo
+# `worker_processes 1`), loopback, access log off, one 1 MiB file of
+# random bytes. A round warms each server with 200 requests, then
+# reads the server's CPU off /proc — utime+stime from
+# /proc/<pid>/stat (the whole thread group, clock ticks) and the
+# nanosecond sum of /proc/<pid>/task/*/schedstat — drives `requests`
+# GETs from `clients` curl processes (URL globbing: one keepalive
+# connection per client, bodies counted to the byte), and reads the
+# CPU again. Per arm and round: µs of server CPU per request, the
+# user/system split, and cores (server CPU ÷ the drive's wall time).
+# The table prints the median of the rounds with min and max; the raw
+# rows are target/mib-bench/results.tsv. Linux only (/proc); refuses
+# elsewhere by name.
+set -u
+cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
+
+runs=${1:-5}
+reqs=${2:-4000}
+clients=${3:-4}
+NGINX="$(pwd)/tests/differential/bin/nginx"
+LOBO="$(pwd)/target/lobo-release"
+out="$(pwd)/target/mib-bench"
+
+[ "$(uname -s)" = Linux ] || { echo "mib-bench: REFUSED — reads /proc; linux only" >&2; exit 1; }
+[ -x "$NGINX" ] || { echo "mib-bench: REFUSED — the pinned nginx is missing at $NGINX" >&2; exit 1; }
+[ -x "$LOBO" ] || { echo "mib-bench: REFUSED — $LOBO missing (the gauntlet's tiers step builds it)" >&2; exit 1; }
+command -v curl >/dev/null || { echo "mib-bench: REFUSED — curl is the client" >&2; exit 1; }
+
+rm -rf "$out"
+mkdir -p "$out/www" "$out/logs"
+head -c 1048576 /dev/urandom > "$out/www/mib.bin"
+tck=$(getconf CLK_TCK)
+per=$((reqs / clients))
+reqs=$((per * clients))
+
+free_port() {
+    for _ in 1 2 3 4 5; do
+        p=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu 2>/dev/null)
+        case "$p" in '' | *[!0-9]*) continue ;; esac
+        echo "$p"
+        return 0
+    done
+    return 1
+}
+
+# cpu <pid> : "<utime+stime ticks> <utime> <stime> <ns over every task>"
+cpu() {
+    set -- "$1" $(sed 's/^.*) //' "/proc/$1/stat")
+    _pid=$1
+    shift
+    # after the comm field: $12 utime, $13 stime (1-based from state)
+    _u=$(eval echo \${12})
+    _s=$(eval echo \${13})
+    _ns=$(cat /proc/"$_pid"/task/*/schedstat 2>/dev/null | awk '{ s += $1 } END { printf "%d", s }')
+    echo "$((_u + _s)) $_u $_s $_ns"
+}
+
+now_ns() { date +%s%N; }
+
+# drive <port> <n-per-client> : run the clients; echo the bytes read
+# (each client's bodies are counted by a pipe, never stored)
+drive() {
+    _i=0
+    _pids=""
+    while [ "$_i" -lt "$clients" ]; do
+        (curl -s "http://127.0.0.1:$1/mib.bin?[1-$2]" 2>/dev/null | wc -c > "$out/drive.$_i") &
+        _pids="$_pids $!"
+        _i=$((_i + 1))
+    done
+    # the clients only: a bare `wait` would wait for the server too
+    wait $_pids
+    cat "$out"/drive.* | awk '{ s += $1 } END { printf "%d", s }'
+    rm -f "$out"/drive.*
+}
+
+wait_up() {
+    for _ in $(seq 1 100); do
+        curl -s -o /dev/null "http://127.0.0.1:$1/mib.bin" 2>/dev/null && return 0
+        sleep 0.05
+    done
+    return 1
+}
+
+start_arm() { # <arm> <port> ; sets spid
+    case "$1" in
+    nginx-*)
+        sf=on
+        [ "$1" = nginx-copy ] && sf=off
+        d="$out/$1"
+        rm -rf "$d"
+        mkdir -p "$d/logs"
+        printf 'daemon off;\nmaster_process off;\nworker_processes 1;\npid nginx.pid;\nerror_log error.log;\nevents {\n}\nhttp {\n  access_log off;\n  sendfile %s;\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+            "$sf" "$2" "$out" > "$d/nginx.conf"
+        "$NGINX" -p "$d" -c nginx.conf >> "$out/logs/$1.out" 2>&1 &
+        spid=$!
+        ;;
+    lobo)
+        d="$out/lobo"
+        rm -rf "$d"
+        mkdir -p "$d/logs"
+        printf 'worker_processes 1;\nhttp {\n  server { listen 127.0.0.1:%s; root %s/www; }\n}\n' \
+            "$2" "$out" > "$d/lobo.conf"
+        "$LOBO" serve -p "$d" -c "$d/lobo.conf" >> "$out/logs/lobo.out" 2>&1 &
+        spid=$!
+        ;;
+    esac
+}
+
+host=$(hostname)
+model=$(sed -n 's/^model name[[:space:]]*: //p' /proc/cpuinfo | head -1)
+echo "mib-bench: host $host ($model, $(nproc) cpus, linux $(uname -r)); $runs rounds x 3 arms x $reqs requests of 1048576 bytes, $clients keepalive clients"
+printf 'round\tarm\trequests\tbytes\twall_ns\tcpu_ns\tutime_ticks\tstime_ticks\tus_per_req\tcores\n' > "$out/results.tsv"
+fail=0
+r=1
+while [ "$r" -le "$runs" ]; do
+    # rotate the order each round so a drift lands on every arm
+    case $((r % 3)) in
+    1) order="nginx-sendfile nginx-copy lobo" ;;
+    2) order="nginx-copy lobo nginx-sendfile" ;;
+    0) order="lobo nginx-sendfile nginx-copy" ;;
+    esac
+    for arm in $order; do
+        port=$(free_port) || { echo "mib-bench: FAILED — no free port" >&2; exit 1; }
+        start_arm "$arm" "$port"
+        if ! wait_up "$port"; then
+            echo "mib-bench: FAILED — $arm never answered on $port (see $out/logs/$arm.out)" >&2
+            kill "$spid" 2>/dev/null
+            wait "$spid" 2>/dev/null
+            fail=1
+            continue
+        fi
+        drive "$port" $((200 / clients)) > /dev/null
+        set -- $(cpu "$spid")
+        c0=$1 u0=$2 s0=$3 n0=$4
+        t0=$(now_ns)
+        got=$(drive "$port" "$per")
+        t1=$(now_ns)
+        set -- $(cpu "$spid")
+        c1=$1 u1=$2 s1=$3 n1=$4
+        kill "$spid" 2>/dev/null
+        wait "$spid" 2>/dev/null
+        want=$((reqs * 1048576))
+        if [ "$got" != "$want" ]; then
+            echo "mib-bench: FAILED — $arm round $r read $got bytes, want $want" >&2
+            fail=1
+            continue
+        fi
+        wall=$((t1 - t0))
+        cns=$((n1 - n0))
+        awk -v r="$r" -v a="$arm" -v q="$reqs" -v b="$got" -v w="$wall" -v c="$cns" \
+            -v u=$((u1 - u0)) -v s=$((s1 - s0)) 'BEGIN {
+                printf "%s\t%s\t%d\t%d\t%d\t%d\t%d\t%d\t%.1f\t%.3f\n", r, a, q, b, w, c, u, s, c / q / 1000, c / w
+            }' >> "$out/results.tsv"
+    done
+    r=$((r + 1))
+done
+
+echo ""
+echo "| arm | µs server CPU / 1 MiB request (median, min–max) | user : system (ticks, summed) | cores (median) | runs |"
+echo "|---|---|---|---|---|"
+for arm in nginx-sendfile nginx-copy lobo; do
+    awk -F'\t' -v a="$arm" 'NR > 1 && $2 == a { n++; us[n] = $9; co[n] = $10; u += $7; s += $8 }
+        END {
+            if (n == 0) { printf "| %s | (no run) | | | 0 |\n", a; exit }
+            for (i = 1; i <= n; i++) for (j = i + 1; j <= n; j++) {
+                if (us[j] < us[i]) { t = us[i]; us[i] = us[j]; us[j] = t }
+                if (co[j] < co[i]) { t = co[i]; co[i] = co[j]; co[j] = t }
+            }
+            m = int((n + 1) / 2)
+            printf "| %s | %.1f (%.1f–%.1f) | %d : %d | %.3f | %d |\n", a, us[m], us[1], us[n], u, s, co[m], n
+        }' "$out/results.tsv"
+done
+echo ""
+echo "mib-bench: raw rows $out/results.tsv"
+[ "$fail" = 0 ] || exit 1
