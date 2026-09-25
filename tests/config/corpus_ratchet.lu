@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="corpus ratchet: 40 configs — 11 parse-clean / 6 named-delta / 23 refused-by-name / 0 silent")
+//! check: run(exit=0, stdout="corpus ratchet: 40 configs — 16 parse-clean / 1 named-delta / 23 refused-by-name / 0 silent")
 //! phase: run
 //! lanes: native
 //! stage-src: config
@@ -47,17 +47,18 @@ use config
 /// named delta, 0 silent anything. ws40: 32 real configs from public
 /// repositories (tests/config-corpus/INDEX.md) — 40 in all: 11 parse
 /// clean, 6 named-delta (5 of them `user` alone), 23 refused by name,
-/// 0 silent.
+/// 0 silent. ws41: `user` is gated, not refused (nginx's warning when
+/// unprivileged), so those five parse clean — 16 / 1 / 23.
 fn ratchet_configs() -> int {
     40
 }
 
 fn ratchet_parse_clean() -> int {
-    11
+    16
 }
 
 fn ratchet_named_delta() -> int {
-    6
+    1
 }
 
 /// ws40: real configs lobo refuses by name at load (no table row for
