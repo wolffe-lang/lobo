@@ -1,0 +1,151 @@
+//! check: run(exit=0, stdout="mid=HTTP/1.1 206 Partial Content|bytes 70000-70009/150000|0123456789\nlong=206|bytes 1-70000/150000|70000|1|0\ntail=206|bytes 140000-149999/150000|10000|0\nback=206|0123456789|5|56789|01234\nhead416=HTTP/1.1 416 Requested Range Not Satisfiable|bytes */150000|0\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union, err.propagate
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws41: byte ranges end to end over a real socket, on a file past the
+//! 65536 stream chunk (150000 bytes, byte k is the digit k % 10, so any
+//! slice is checkable by its offset). The differential's 19 cases hold
+//! the wire shapes against nginx on a 79-byte file; this file holds
+//! what a small file cannot: a range deep into the file (the handle
+//! reads and drops the prefix — no seek at this pin, wolf-lang#426), a
+//! part longer than one chunk, the tail, a multipart set whose second
+//! part starts BEFORE the first (the handle is reopened), and a HEAD
+//! 416. net + fs → native + checked.
+
+use config
+use http
+use serve
+
+fn read_reply(cli: int) -> str ! {io} {
+    net_deadline(cli, 4000) else |_| {
+        return io
+    }
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 65536) else |e| match e {
+            closed => {
+                more = false
+                ""
+            },
+            timeout => {
+                return io
+            },
+            utf8 => {
+                return io
+            },
+            io => {
+                return io
+            },
+        }
+        out = "{out}{piece}"
+    }
+    out
+}
+
+/// One request on its own connection; "" when any step of the rig
+/// fails (the caller's asserts then name the step's output).
+fn ask(c: config.Conf, method: str, range: str) -> str {
+    let opts = serve.default_opts()
+    let lim = http.default_limits()
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return ""
+    }
+    let port = net_port(l) else |_| {
+        return ""
+    }
+    let cli = net_connect("127.0.0.1:{port}") else |_| {
+        return ""
+    }
+    net_write(
+        cli,
+        "{method} /big.txt HTTP/1.1\r\nHost: x\r\nRange: {range}\r\nConnection: close\r\n\r\n",
+    ) else |_| {
+        return ""
+    }
+    let conn = net_accept(l) else |_| {
+        return ""
+    }
+    serve.serve_conn(conn, c, opts, lim, port)
+    let reply = read_reply(cli) else |_| ""
+    net_close(l) else |_| {}
+    reply
+}
+
+fn hval(head: str, name: str) -> str {
+    for line in head.lines() {
+        if line.lower().starts_with("{name}:") {
+            return line[name.len + 1..line.len].trim()
+        }
+    }
+    ""
+}
+
+fn main() -> !int {
+    let root = "ws41_range"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/www")?
+    var block = ""
+    var i: int = 0
+    while i < 100 {
+        block = "{block}0123456789"
+        i = i + 1
+    }
+    var big = ""
+    var j: int = 0
+    while j < 150 {
+        big = "{big}{block}"
+        j = j + 1
+    }
+    fs_write_text("{root}/www/big.txt", big)?
+    let src = "http {{\n  types {{ text/plain txt; }}\n  server {{ root ws41_range/www; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+
+    // deep into the file: 70000 bytes read and dropped first
+    let r1 = ask(c, "GET", "bytes=70000-70009")
+    let cut1 = r1.find("\r\n\r\n") else -1
+    let h1 = r1[0..cut1]
+    let eol1 = h1.find("\r\n") else h1.len
+    print("mid={h1[0..eol1]}|{hval(h1, "content-range")}|{r1[cut1 + 4..r1.len]}")
+
+    // a part longer than one 65536 chunk
+    let r2 = ask(c, "GET", "bytes=1-70000")
+    let cut2 = r2.find("\r\n\r\n") else -1
+    let b2 = r2[cut2 + 4..r2.len]
+    print(
+        "long=206|{hval(r2[0..cut2], "content-range")}|{b2.len}|{b2[0..1]}|{b2[b2.len - 1..b2.len]}",
+    )
+
+    // the tail, open-ended
+    let r3 = ask(c, "GET", "bytes=140000-")
+    let cut3 = r3.find("\r\n\r\n") else -1
+    let b3 = r3[cut3 + 4..r3.len]
+    print("tail=206|{hval(r3[0..cut3], "content-range")}|{b3.len}|{b3[0..1]}")
+
+    // multipart, the second part BEFORE the first: the handle reopens
+    let r4 = ask(c, "GET", "bytes=100000-100009,5-9,0-4")
+    let cut4 = r4.find("\r\n\r\n") else -1
+    let b4 = r4[cut4 + 4..r4.len]
+    let p1 = b4.find("/150000\r\n\r\n") else -1
+    let d1 = b4[p1 + 11..p1 + 21]
+    let rest = b4[p1 + 21..b4.len]
+    let p2 = rest.find("/150000\r\n\r\n") else -1
+    let d2 = rest[p2 + 11..p2 + 16]
+    let rest2 = rest[p2 + 16..rest.len]
+    let p3 = rest2.find("/150000\r\n\r\n") else -1
+    let d3 = rest2[p3 + 11..p3 + 16]
+    let clen = hval(r4[0..cut4], "content-length")
+    assert(clen == "{b4.len}", "multipart Content-Length {clen} is the body's {b4.len}")
+    print("back=206|{d1}|{d2.len}|{d2}|{d3}")
+
+    // HEAD, unsatisfiable: the 416 head with no body
+    let r5 = ask(c, "HEAD", "bytes=150000-")
+    let cut5 = r5.find("\r\n\r\n") else -1
+    let h5 = r5[0..cut5]
+    let eol5 = h5.find("\r\n") else h5.len
+    print("head416={h5[0..eol5]}|{hval(h5, "content-range")}|{r5.len - cut5 - 4}")
+    fs_remove_dir_all(root) else |_| {}
+    0
+}

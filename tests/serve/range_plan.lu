@@ -1,0 +1,97 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws41: `serve.range_plan`, nginx's range filter decision for
+//! decision (ngx_http_range_filter_module at 1.30.4). The differential's
+//! 19 `range_*` cases hold the wire against the live oracle; this file
+//! holds the parser's edges the wire cases do not reach — spaces,
+//! case, overflow, `max_ranges` counting, an empty file, If-Range's two
+//! forms — on all three lanes (pure).
+
+use serve
+
+fn kinds(p: serve.RangePlan) -> str {
+    var out = "{p.kind}"
+    var i: int = 0
+    while i < p.starts.len {
+        out = "{out} {p.starts[i]}-{p.ends[i]}"
+        i = i + 1
+    }
+    out
+}
+
+fn plan(spec: str, size: int, max: int) -> str {
+    kinds(serve.range_plan(spec, "", "\"e\"", "LM", size, max))
+}
+
+fn main() -> !int {
+    // ---- 206 shapes (ends exclusive)
+    assert(plan("bytes=0-9", 79, -1) == "1 0-10", "single")
+    assert(plan("bytes=-10", 79, -1) == "1 69-79", "suffix")
+    assert(plan("bytes=70-", 79, -1) == "1 70-79", "open")
+    assert(plan("bytes=70-1000", 79, -1) == "1 70-79", "clamped")
+    assert(
+        plan("bytes=-1000", 79, -1) == "1 0-79",
+        "a suffix longer than the file is the whole file",
+    )
+    assert(plan("bytes=0-4,10-14", 79, -1) == "1 0-5 10-15", "two parts")
+    assert(plan("bytes=10-14,0-4", 79, -1) == "1 10-15 0-5", "out of order kept in order asked")
+    assert(plan("bytes=0-4,200-300", 79, -1) == "1 0-5", "an unsatisfiable member is dropped")
+    assert(plan("BYTES=0-0", 79, -1) == "1 0-1", "the unit is case-insensitive")
+    assert(plan("bytes= 0 - 9 , 20 - 29 ", 79, -1) == "1 0-10 20-30", "spaces around the parts")
+    assert(plan("bytes=78-78", 79, -1) == "1 78-79", "the last byte")
+
+    // ---- 416
+    assert(plan("bytes=100-200", 79, -1) == "2", "past the end")
+    assert(plan("bytes=79-", 79, -1) == "2", "first byte == length")
+    assert(plan("bytes=5-2", 79, -1) == "2", "reversed")
+    assert(plan("bytes=-0", 79, -1) == "2", "zero suffix")
+    assert(plan("bytes=abc", 79, -1) == "2", "garbage")
+    assert(plan("bytes=0-4;", 79, -1) == "2", "a stray byte after a part")
+    assert(plan("bytes=1-2-3", 79, -1) == "2", "two dashes")
+    assert(plan("bytes=,", 79, -1) == "2", "an empty member")
+    assert(plan("bytes=99999999999999999999-", 79, -1) == "2", "first-byte overflow")
+    assert(plan("bytes=0-99999999999999999999", 79, -1) == "2", "last-byte overflow")
+
+    // ---- declined: a full 200 with Accept-Ranges
+    assert(plan("items=0-5", 79, -1) == "0", "another unit")
+    assert(plan("bytes=", 79, -1) == "0", "nothing after bytes= (nginx needs 7 bytes)")
+    assert(plan("bytes=0-78,0-78", 79, -1) == "0", "parts summing past the file")
+    assert(plan("bytes=0-", 0, -1) == "0", "an empty file: 0- covers nothing and starts at 0")
+    assert(plan("bytes=0-4,10-14", 79, 1) == "0", "more parts than max_ranges")
+    assert(plan("bytes=0-4,10-14", 79, 2) == "1 0-5 10-15", "exactly max_ranges parts")
+    assert(plan("bytes=0-4", 79, 1) == "1 0-5", "one part under max_ranges 1")
+
+    // ---- max_ranges 0: ranges off
+    assert(plan("bytes=0-9", 79, 0) == "3", "max_ranges 0 is kind 3")
+    assert(plan("", 79, 0) == "3", "kind 3 needs no Range")
+
+    // ---- If-Range: a quoted form is an ETag, anything else a date
+    let e = "\"6955b900-4f\""
+    let lm = "Thu, 01 Jan 2026 00:00:00 GMT"
+    assert(kinds(serve.range_plan("bytes=0-9", e, e, lm, 79, -1)) == "1 0-10", "matching ETag")
+    assert(kinds(serve.range_plan("bytes=0-9", "\"x\"", e, lm, 79, -1)) == "0", "other ETag")
+    assert(kinds(serve.range_plan("bytes=0-9", lm, e, lm, 79, -1)) == "1 0-10", "matching date")
+    assert(
+        kinds(serve.range_plan("bytes=0-9", "Thursday, 01-Jan-26 00:00:00 GMT", e, lm, 79, -1)) ==
+            "0",
+        "an RFC 850 date is not parsed: a full 200 (the named delta)",
+    )
+    assert(
+        kinds(serve.range_plan("bytes=100-", e, e, lm, 79, -1)) == "2",
+        "If-Range holds, then 416",
+    )
+
+    // ---- phrases and the boundary counter
+    assert(serve.status_phrase(206) == "Partial Content", "206 phrase")
+    assert(serve.status_phrase(416) == "Requested Range Not Satisfiable", "416 phrase (nginx's)")
+    var ft = serve.file_kinds_new()
+    assert(
+        serve.next_boundary(mut ft) == "00000000000000000001",
+        "a fresh process's first boundary",
+    )
+    assert(serve.next_boundary(mut ft) == "00000000000000000002", "then counts")
+    0
+}

@@ -43,6 +43,9 @@ pub fn status_phrase(code: int) -> str {
     if code == 200 {
         return "OK"
     }
+    if code == 206 {
+        return "Partial Content"
+    }
     if code == 301 {
         return "Moved Permanently"
     }
@@ -69,6 +72,9 @@ pub fn status_phrase(code: int) -> str {
     }
     if code == 414 {
         return "Request-URI Too Large"
+    }
+    if code == 416 {
+        return "Requested Range Not Satisfiable"
     }
     if code == 500 {
         return "Internal Server Error"
@@ -180,6 +186,190 @@ pub fn http_date(secs: int) -> str {
 pub fn error_body(code: int, server: str) -> str {
     let phrase = status_phrase(code)
     "<html>\r\n<head><title>{code} {phrase}</title></head>\r\n<body>\r\n<center><h1>{code} {phrase}</h1></center>\r\n<hr><center>{server}</center>\r\n</body>\r\n</html>\r\n"
+}
+
+/// What the range filter decided for one static response (ws41).
+/// `kind` 0: no range applies — the whole file, 200, with
+/// `Accept-Ranges: bytes`; 1: 206 with the parts in `starts`/`ends`
+/// (byte offsets, `ends` exclusive), one part single, more multipart;
+/// 2: 416; 3: ranges are off (`max_ranges 0`) — the whole file, 200,
+/// and no `Accept-Ranges`.
+pub struct RangePlan {
+    kind: int,
+    starts: List[int],
+    ends: List[int],
+}
+
+/// The byte at `p` of `b` as an int, or -1 past the end (nginx reads
+/// the header value's terminating NUL there). Total.
+fn at_or_end(b: List[byte], p: int) -> int {
+    if p >= b.len {
+        return -1
+    }
+    b[p] as int
+}
+
+/// nginx's range filter, decision for decision (ngx_http_range_filter
+/// _module, 1.30.4; the differential's 19 `range_*` cases pin it):
+/// `spec` is the Range header ("" absent), `if_range` the If-Range
+/// header, `etag`/`lm` this response's ETag and Last-Modified strings,
+/// `size` the file length, `max_ranges` the knob (-1 unlimited, 0
+/// off). The header needs `bytes=` (any case) and one more byte; an
+/// If-Range ending in `"` must equal the ETag, any other must equal
+/// the Last-Modified string byte for byte (nginx parses the date; a
+/// non-IMF spelling is a named delta — a full 200). Each spec is
+/// `first-last`, `first-` or `-suffix` with spaces allowed around the
+/// parts; a malformed spec, an overflow, or no satisfiable range is
+/// 416; a range starting at 0 that covers nothing (an empty file),
+/// more ranges than `max_ranges`, or ranges whose lengths sum past the
+/// file decline to a full 200. Pure. Total.
+pub fn range_plan(
+    spec: str,
+    if_range: str,
+    etag: str,
+    lm: str,
+    size: int,
+    max_ranges: int,
+) -> RangePlan {
+    var out = RangePlan { kind: 0, starts: List[int](), ends: List[int]() }
+    if max_ranges == 0 {
+        out.kind = 3
+        return out
+    }
+    let b = spec.bytes()
+    if b.len < 7 {
+        return out
+    }
+    let unit = "bytes=".bytes()
+    var k: int = 0
+    while k < 6 {
+        var lc = b[k] as int
+        if lc >= 65 && lc <= 90 {
+            lc = lc + 32
+        }
+        if lc != unit[k] as int {
+            return out
+        }
+        k = k + 1
+    }
+    if !if_range.is_empty() {
+        if if_range.len >= 2 && if_range.ends_with("\"") {
+            if if_range != etag {
+                return out
+            }
+        } else if if_range != lm {
+            return out
+        }
+    }
+    var ranges = if max_ranges < 0 { 2147483647 } else { max_ranges }
+    let cutoff: int = 922337203685477580
+    var total: int = 0
+    var p: int = 6
+    var more = true
+    while more {
+        var start: int = 0
+        var end: int = 0
+        var suffix = false
+        var found = false
+        while at_or_end(b, p) == 32 {
+            p = p + 1
+        }
+        var ch = at_or_end(b, p)
+        if ch != 45 {
+            if ch < 48 || ch > 57 {
+                out.kind = 2
+                return out
+            }
+            while at_or_end(b, p) >= 48 && at_or_end(b, p) <= 57 {
+                let d = at_or_end(b, p) - 48
+                if start > cutoff || start == cutoff && d > 7 {
+                    out.kind = 2
+                    return out
+                }
+                start = start * 10 + d
+                p = p + 1
+            }
+            while at_or_end(b, p) == 32 {
+                p = p + 1
+            }
+            if at_or_end(b, p) != 45 {
+                out.kind = 2
+                return out
+            }
+            p = p + 1
+            while at_or_end(b, p) == 32 {
+                p = p + 1
+            }
+            ch = at_or_end(b, p)
+            if ch == 44 || ch == -1 {
+                end = size
+                found = true
+            }
+        } else {
+            suffix = true
+            p = p + 1
+        }
+        if !found {
+            ch = at_or_end(b, p)
+            if ch < 48 || ch > 57 {
+                out.kind = 2
+                return out
+            }
+            while at_or_end(b, p) >= 48 && at_or_end(b, p) <= 57 {
+                let d = at_or_end(b, p) - 48
+                if end > cutoff || end == cutoff && d > 7 {
+                    out.kind = 2
+                    return out
+                }
+                end = end * 10 + d
+                p = p + 1
+            }
+            while at_or_end(b, p) == 32 {
+                p = p + 1
+            }
+            ch = at_or_end(b, p)
+            if ch != 44 && ch != -1 {
+                out.kind = 2
+                return out
+            }
+            if suffix {
+                start = if end < size { size - end } else { 0 }
+                end = size - 1
+            }
+            if end >= size {
+                end = size
+            } else {
+                end = end + 1
+            }
+        }
+        if start < end {
+            (mut out.starts).push(start)
+            (mut out.ends).push(end)
+            if total > 9223372036854775807 - (end - start) {
+                out.kind = 2
+                return out
+            }
+            total = total + (end - start)
+            if ranges == 0 {
+                return RangePlan { kind: 0, starts: List[int](), ends: List[int]() }
+            }
+            ranges = ranges - 1
+        } else if start == 0 {
+            return RangePlan { kind: 0, starts: List[int](), ends: List[int]() }
+        }
+        ch = at_or_end(b, p)
+        p = p + 1
+        more = ch == 44
+    }
+    if out.starts.len == 0 {
+        out.kind = 2
+        return out
+    }
+    if total > size {
+        return RangePlan { kind: 0, starts: List[int](), ends: List[int]() }
+    }
+    out.kind = 1
+    out
 }
 
 /// The header-too-large 400 body (nginx's special shape: a distinct
@@ -726,7 +916,9 @@ fn send_err(mut cn: conn.Conn, code: int, special: bool, token: str) {
 /// Serve one already-resolved file at `path`, whose handle `fd`
 /// `classify` opened a moment ago and whose `fs_fstat` said regular,
 /// `size` bytes, modified at `mms`. Writes a 200 (or 304 on a matching
-/// If-Modified-Since), byte-order matching nginx's static handler:
+/// If-Modified-Since; since ws41 a 206 or 416 when the range filter,
+/// `range_plan`, takes a Range — `serve_range`), byte-order matching
+/// nginx's static handler:
 /// Server, Date, Content-Type, Content-Length, Last-Modified,
 /// Connection, ETag, Accept-Ranges. `is_head` omits the body. Reads
 /// the whole file BEFORE writing headers when it is small, so a read
@@ -746,6 +938,7 @@ fn serve_file(
     keep: bool,
     is_head: bool,
     local_port: int,
+    max_ranges: int,
     mut acc: obs.Access,
     mut chg: Charge,
     mut ft: FileKinds,
@@ -787,6 +980,39 @@ fn serve_file(
         return !keep
     }
 
+    // ws41: the range filter. nginx runs it after not_modified, so the
+    // 304 above outranks a Range. `max_ranges 0` is kind 3: the whole
+    // file and no Accept-Ranges. Under a memory budget (chg.limit > 0)
+    // a Range is ignored — the capped arms serve whole files by path —
+    // a named delta in the max_ranges row.
+    var plan = RangePlan { kind: 0, starts: List[int](), ends: List[int]() }
+    if max_ranges == 0 {
+        plan.kind = 3
+    } else if chg.limit == 0 {
+        let rspec = http.header(req, "range") else ""
+        if !rspec.is_empty() {
+            let irange = http.header(req, "if-range") else ""
+            let r_etag = "\"{to_hex(secs)}-{to_hex(size)}\""
+            plan = range_plan(rspec, irange, r_etag, http_date(secs), size, max_ranges)
+        }
+    }
+    if plan.kind == 1 || plan.kind == 2 {
+        return serve_range(
+            mut cn,
+            c,
+            path,
+            fd,
+            size,
+            secs,
+            token,
+            keep,
+            is_head,
+            plan,
+            mut acc,
+            mut ft,
+        )
+    }
+
     // ws10, the `file` site: the response body this request is about
     // to materialize, known deterministically from the stat — a whole
     // small file, or one 64 KiB stream chunk; HEAD materializes
@@ -816,7 +1042,14 @@ fn serve_file(
     // freshness (a rewritten file answers its new length at once, a
     // new second its new Date).
     let now_secs = time_unix_ms() / 1000
-    var head = head_warm(ft, path, size, mms, keep, now_secs, token)
+    // ws41: `max_ranges 0` (kind 3) drops Accept-Ranges, so its head is
+    // neither read from nor written to the memo, which holds the
+    // advertised shape
+    var head = if plan.kind == 3 {
+        ""
+    } else {
+        head_warm(ft, path, size, mms, keep, now_secs, token)
+    }
     if head.is_empty() {
         let lm = http_date(secs)
         let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
@@ -830,9 +1063,13 @@ fn serve_file(
         head = "{head}{hline("Last-Modified", lm)}"
         head = "{head}{hline("Connection", conn_hdr)}"
         head = "{head}{hline("ETag", etag)}"
-        head = "{head}{hline("Accept-Ranges", "bytes")}"
+        if plan.kind != 3 {
+            head = "{head}{hline("Accept-Ranges", "bytes")}"
+        }
         head = "{head}\r\n"
-        head_remember(mut ft, path, size, mms, keep, now_secs, token, head)
+        if plan.kind != 3 {
+            head_remember(mut ft, path, size, mms, keep, now_secs, token, head)
+        }
     }
 
     if is_head {
@@ -1164,6 +1401,266 @@ fn serve_file(
     !keep
 }
 
+/// Write `s` on `cn`: 0 written, 1 the peer closed, 2 io. The range
+/// writer's one spelling of a write, so no handler arm holds a claim
+/// on `cn` (wolf-lang#449's leg). Total.
+fn put(s: str, mut cn: conn.Conn) -> int {
+    var rc = 0
+    write_all(s, mut cn) else |e| match e {
+        closed => {
+            rc = 1
+        },
+        io => {
+            rc = 2
+        },
+    }
+    rc
+}
+
+/// Read and drop `n` bytes off `fd` — how a range reaches its first
+/// byte at this pin, which has no seek, tell or positional read
+/// (wolf-lang#426). Each chunk dies in its own region. 0 done, 3 the
+/// file ended or failed first. Rows: fs.
+fn skip_bytes(fd: int, n: int) -> int {
+    var left = n
+    var rc = 0
+    while left > 0 && rc == 0 {
+        let want = if left < 65536 { left } else { 65536 }
+        region skipr {
+            let chunk = fs_read_chunk(fd, want) else |_| {
+                rc = 3
+                List[byte]()
+            }
+            if rc == 0 && chunk.len == 0 {
+                rc = 3
+            }
+            if rc == 0 {
+                left = left - chunk.len
+            }
+            rc = rc
+        }
+    }
+    rc
+}
+
+/// Stream `n` bytes off `fd` to the plaintext socket `sock`, each
+/// chunk in its own region (the streaming path's ws10 shape). 0 done,
+/// 1 the peer closed, 2 io, 3 the file ended or failed first. Rows:
+/// fs, net.
+fn span_plain(fd: int, sock: int, n: int) -> int {
+    var left = n
+    var rc = 0
+    while left > 0 && rc == 0 {
+        let want = if left < 65536 { left } else { 65536 }
+        region spanr {
+            let chunk = fs_read_chunk(fd, want) else |_| {
+                rc = 3
+                List[byte]()
+            }
+            if rc == 0 && chunk.len == 0 {
+                rc = 3
+            }
+            if rc == 0 {
+                left = left - chunk.len
+                net_write_bytes(sock, chunk) else |e| match e {
+                    closed => {
+                        rc = 1
+                    },
+                    invalid => {
+                        rc = 2
+                    },
+                    io => {
+                        rc = 2
+                    },
+                }
+            }
+            rc = rc
+        }
+    }
+    rc
+}
+
+/// `span_plain` for a TLS connection: unregioned, as the TLS
+/// streaming arm is (the session may retain; D24 residue). Rows: fs,
+/// net.
+fn span_tls(fd: int, mut cn: conn.Conn, n: int) -> int {
+    var left = n
+    var rc = 0
+    while left > 0 && rc == 0 {
+        let want = if left < 65536 { left } else { 65536 }
+        let chunk = fs_read_chunk(fd, want) else |_| {
+            rc = 3
+            List[byte]()
+        }
+        if rc == 0 && chunk.len == 0 {
+            rc = 3
+        }
+        if rc == 0 {
+            left = left - chunk.len
+            var wc = 0
+            write_bytes_all(mut cn, chunk) else |e| match e {
+                closed => {
+                    wc = 1
+                },
+                io => {
+                    wc = 2
+                },
+            }
+            rc = wc
+        }
+    }
+    rc
+}
+
+/// Answer a Range the range filter decided on (ws41): a 416 (`plan`
+/// kind 2) or a 206 (kind 1) — one part with Content-Range, or
+/// multipart/byteranges — header for header in nginx's order (the
+/// differential's `range_*` cases). `fd` is the open handle at offset
+/// 0; a part that starts before the handle's offset reopens the file
+/// (no seek at this pin, wolf-lang#426). Bytes on the wire can only
+/// close on a later failure. Returns should_close. Rows: net.
+fn serve_range(
+    mut cn: conn.Conn,
+    c: config.Conf,
+    path: str,
+    fd: int,
+    size: int,
+    secs: int,
+    token: str,
+    keep: bool,
+    is_head: bool,
+    plan: RangePlan,
+    mut acc: obs.Access,
+    mut ft: FileKinds,
+) -> bool ! {closed, io} {
+    let conn_hdr = keep_token(keep)
+    let dnow = date_str(mut ft, time_unix_ms() / 1000)
+    if plan.kind == 2 {
+        // nginx's special response: the default page, no Last-Modified
+        // or ETag, and Content-Range naming the length (RFC 9110 §15.5.17)
+        fs_close(fd) else |_| {}
+        let body = error_body(416, token)
+        acc.status = 416
+        acc.body_bytes = if is_head { 0 } else { body.len }
+        var h = "HTTP/1.1 416 Requested Range Not Satisfiable\r\n"
+        h = "{h}{hline("Server", token)}"
+        h = "{h}{hline("Date", dnow)}"
+        h = "{h}{hline("Content-Type", "text/html")}"
+        h = "{h}{hline("Content-Length", "{body.len}")}"
+        h = "{h}{hline("Connection", conn_hdr)}"
+        h = "{h}{hline("Content-Range", "bytes */{size}")}"
+        h = "{h}\r\n"
+        if !is_head {
+            h = "{h}{body}"
+        }
+        write_all(h, mut cn)?
+        return !keep
+    }
+    let lm = http_date(secs)
+    let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
+    let mime = mime_for(c, path)
+    let nparts = plan.starts.len
+    var head = "HTTP/1.1 206 Partial Content\r\n"
+    head = "{head}{hline("Server", token)}"
+    head = "{head}{hline("Date", dnow)}"
+    var bound = ""
+    var bhead = ""
+    var body_len: int = 0
+    if nparts == 1 {
+        body_len = plan.ends[0] - plan.starts[0]
+        head = "{head}{hline("Content-Type", mime)}"
+        head = "{head}{hline("Content-Length", "{body_len}")}"
+        head = "{head}{hline("Last-Modified", lm)}"
+        head = "{head}{hline("Connection", conn_hdr)}"
+        head = "{head}{hline("ETag", etag)}"
+        let last = plan.ends[0] - 1
+        head = "{head}{hline("Content-Range", "bytes {plan.starts[0]}-{last}/{size}")}"
+    } else {
+        // nginx's part head: CRLF "--" boundary CRLF, the type (when
+        // there is one), "Content-Range: bytes " and the range; the
+        // close is CRLF "--" boundary "--" CRLF
+        bound = next_boundary(mut ft)
+        bhead = "\r\n--{bound}\r\n"
+        if !mime.is_empty() {
+            bhead = "{bhead}Content-Type: {mime}\r\n"
+        }
+        bhead = "{bhead}Content-Range: bytes "
+        body_len = 4 + bound.len + 4
+        var i: int = 0
+        while i < nparts {
+            let last = plan.ends[i] - 1
+            let rline = "{plan.starts[i]}-{last}/{size}\r\n\r\n"
+            body_len = body_len + bhead.len + rline.len + (plan.ends[i] - plan.starts[i])
+            i = i + 1
+        }
+        head = "{head}{hline("Content-Type", "multipart/byteranges; boundary={bound}")}"
+        head = "{head}{hline("Content-Length", "{body_len}")}"
+        head = "{head}{hline("Last-Modified", lm)}"
+        head = "{head}{hline("Connection", conn_hdr)}"
+        head = "{head}{hline("ETag", etag)}"
+    }
+    head = "{head}\r\n"
+    acc.status = 206
+    acc.body_bytes = if is_head { 0 } else { body_len }
+    if is_head {
+        fs_close(fd) else |_| {}
+        write_all(head, mut cn)?
+        return !keep
+    }
+    var cur = fd
+    var wr = put(head, mut cn)
+    var pos: int = 0
+    var i: int = 0
+    let tls = conn.is_tls(cn)
+    let sock = conn.fd(cn)
+    while wr == 0 && i < nparts {
+        let s0 = plan.starts[i]
+        let e0 = plan.ends[i]
+        if nparts > 1 {
+            let last = e0 - 1
+            wr = put("{bhead}{s0}-{last}/{size}\r\n\r\n", mut cn)
+        }
+        if wr == 0 && s0 < pos {
+            fs_close(cur) else |_| {}
+            cur = -1
+            cur = fs_open_mode(path, 5) else |_| {
+                wr = 3
+                -1
+            }
+            pos = 0
+        }
+        if wr == 0 {
+            wr = skip_bytes(cur, s0 - pos)
+        }
+        if wr == 0 {
+            if tls {
+                wr = span_tls(cur, mut cn, e0 - s0)
+            } else {
+                wr = span_plain(cur, sock, e0 - s0)
+            }
+            pos = e0
+        }
+        i = i + 1
+    }
+    if wr == 0 && nparts > 1 {
+        wr = put("\r\n--{bound}--\r\n", mut cn)
+    }
+    if cur >= 0 {
+        fs_close(cur) else |_| {}
+    }
+    if wr == 1 {
+        return closed
+    }
+    if wr == 2 {
+        return io
+    }
+    if wr == 3 {
+        // the file ended or failed under a head already sent
+        return true
+    }
+    !keep
+}
+
 /// ws25 (wolf-lang#261): exactly `n` bytes off an open handle, the
 /// size `fs_fstat` answered a moment ago — a regular file answers a
 /// whole read in one `fs_read_chunk` and the loop is for the host
@@ -1315,6 +1812,7 @@ pub struct FileKinds {
     hhead: List[str],
     date_secs: int,
     date_str: str,
+    boundary: int,
 }
 
 /// An empty table: the head cache empty, the date cache unset. Total.
@@ -1347,7 +1845,25 @@ pub fn file_kinds_new() -> FileKinds {
         hhead: hh,
         date_secs: -1,
         date_str: "",
+        boundary: 0,
     }
+}
+
+/// The next multipart/byteranges boundary (ws41): nginx's shape — a
+/// per-process counter from 1, printed as `%0muA`, twenty
+/// zero-padded digits (a fresh nginx's first is
+/// `00000000000000000001`). nginx's counter is shared by its workers;
+/// lobo's is per hand, so under worker_processes N two hands can hand
+/// out the same number — a boundary need only be absent from the
+/// parts, and a byte range of a file of digits could contain it on
+/// either server. Total.
+pub fn next_boundary(mut ft: FileKinds) -> str {
+    ft.boundary = ft.boundary + 1
+    var out = "{ft.boundary}"
+    while out.len < 20 {
+        out = "0{out}"
+    }
+    out
 }
 
 /// The IMF-fixdate for `secs`, from the table's one-second memo when
@@ -1600,6 +2116,7 @@ fn handle_request(
                 keep,
                 is_head,
                 local_port,
+                d.max_ranges,
                 mut acc,
                 mut chg,
                 mut ft,
@@ -1667,6 +2184,7 @@ fn handle_request(
                 keep,
                 is_head,
                 local_port,
+                d.max_ranges,
                 mut acc,
                 mut chg,
                 mut ft,
