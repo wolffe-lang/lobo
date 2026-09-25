@@ -198,6 +198,44 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws40 — 2026-09-25 — the configs carry (the real-config corpus from 8 to 40; 2 identical loads, ratcheted; the blocked-directive table)
+
+- **The corpus.** `tests/config-corpus/` goes from 8 configs (7 of
+  them synthetic) to **40**. The 32 new ones are real configs from
+  permissively licensed repositories: nginx's own packages, h5bp, the
+  Ubuntu 14.04 tree, Nginx Proxy Manager, NetBox, Superset, gunicorn,
+  njs-examples, crossplane, and the Flask, Puma, Laravel, Synapse,
+  JupyterHub and uWSGI docs. Each carries its source at a pinned
+  commit, its licence and its edits. `tests/config-corpus/INDEX.md` is
+  the index.
+- **The measurement.** A config loads identically when the pinned
+  oracle's `-t` and lobo's `-t` both exit 0. That holds for **2 of
+  40**. 7 more load on lobo and on a stock nginx build, and the pinned
+  build refuses them because it has no rewrite, gzip or PCRE. 21 are
+  refused by lobo although a stock nginx loads them. 8 are refused by
+  both. **2 are lobo-lenient**: lobo loads them and every nginx build
+  refuses them (lobo#38). One of the two is the seed's `certbot-vhost`,
+  whose annotation claimed a stock nginx accepts it; that was never
+  measured.
+- **The ratchet.** `tools/lobo-confcheck` pins `IDENTICAL_LOADS=2` and
+  `LOBO_LENIENT=2`. `tests/config/corpus_ratchet.lu` gains a
+  refused-by-name class (a refusal with a message and a file:line; one
+  without either is the silent class, still pinned at zero) and counts
+  11 parse-clean / 6 named-delta / 23 refused-by-name / 0 silent. It
+  runs native only now. At 40 configs the checked tier answers
+  `unsupported — step budget exhausted`, so `corpus_ratchet_seed.lu`
+  keeps the checked lane on the eight seed configs it already covered.
+  Every new config has a dry-run probe: 41 in total.
+- **The blocked-directive table** (in the index, ordered by configs
+  blocked) is the next implementation lane's input. `user` blocks 18
+  configs and is the only blocker in 5, two of which would be identical
+  loads. After it come `deny` (5), `uwsgi_pass`/`uwsgi_param` (4), and
+  `charset_types`, HTTP/2 and `worker_rlimit_nofile` (3 each).
+- **Filed, not fixed:** lobo#36 (a quoted `\(` inside an `if` condition
+  lexes as a close paren), lobo#37 (`client_max_body_size 4G`), and
+  lobo#38 (the two lobo-lenient configs). No directive was implemented
+  and nothing in `src/` changed.
+
 ## ws38 — 2026-09-24 — the generation table (lobo#28: the rebuilds move their rows; 24 → 19 KB/req)
 
 - **The fix.** Every `List[GenRow]` rebuild in `src/main.lu` now takes
