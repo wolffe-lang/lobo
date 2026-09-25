@@ -1,6 +1,6 @@
 //! check: run(exit=0, stdout="corpus ratchet: 8 configs — 7 parse-clean / 1 named-delta / 0 refused-by-name / 0 silent")
 //! phase: run
-//! lanes: native checked
+//! lanes: native
 //! stage-src: config
 //!
 //! THE RATCHET (contract target 4): the real-config corpus under
@@ -25,6 +25,12 @@
 //!   silent      — anything else would land here, and the count is
 //!                 pinned at ZERO: a refusal with no message or no
 //!                 location fails this test loudly.
+//! Lane: NATIVE only since ws40. Measured at this pin: with the corpus
+//! at 40 configs the checked tier answers `unsupported — step budget
+//! exhausted` (kasumi, ~/lanes/ws40), so declaring the lane would pin
+//! a refusal, not a run (the ssl_resolve_errors precedent). The
+//! checked lane keeps exactly the coverage it had: the eight ws01 seed
+//! configs, run native+checked in corpus_ratchet_seed.lu.
 
 use config
 

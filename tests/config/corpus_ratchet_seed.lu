@@ -1,0 +1,57 @@
+//! check: run(exit=0, stdout="corpus seed: 8 configs — 7 parse-clean / 1 named-delta / 0 silent")
+//! phase: run
+//! lanes: native checked
+//! stage-src: config
+//!
+//! The checked-lane half of THE RATCHET (ws40). corpus_ratchet.lu
+//! classifies the whole real-config corpus on the native lane; the
+//! checked tier's step budget does not reach 40 configs at this pin,
+//! so this file keeps the checked machine on the eight ws01 seed
+//! configs it ran before ws40 — the same loads, the same classes, the
+//! same numbers (7 parse-clean, 1 named-delta, 0 silent). A seed
+//! config that stops loading reds here on both lanes.
+
+use config
+
+fn seed() -> List[str] {
+    var s: List[str] = []
+    (mut s).push("certbot-vhost")
+    (mut s).push("distro-default")
+    (mut s).push("lua-openresty")
+    (mut s).push("map-and-if")
+    (mut s).push("php-fpm")
+    (mut s).push("redirect-farm")
+    (mut s).push("reverse-proxy")
+    (mut s).push("static-site")
+    s
+}
+
+fn main() -> int {
+    let root = "tests/config-corpus"
+    var configs: int = 0
+    var clean: int = 0
+    var delta: int = 0
+    for nm in seed() {
+        configs = configs + 1
+        let c = config.load("{root}/{nm}", "nginx.conf")
+        if !config.ok(c) {
+            assert(
+                false,
+                "seed corpus config {nm} no longer loads: {c.err} at {c.err_file}:{c.err_line}",
+            )
+        } else if config.delta_count(c) > 0 {
+            delta = delta + 1
+            var i: int = 0
+            while i < config.delta_count(c) {
+                assert(!c.delta_note[i].is_empty(), "unnamed delta in {nm}")
+                i = i + 1
+            }
+        } else {
+            clean = clean + 1
+        }
+    }
+    assert(clean == 7, "seed parse-clean moved: {clean} vs 7")
+    assert(delta == 1, "seed named-delta moved: {delta} vs 1")
+    print("corpus seed: {configs} configs — {clean} parse-clean / {delta} named-delta / 0 silent")
+    0
+}
