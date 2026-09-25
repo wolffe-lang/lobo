@@ -1101,6 +1101,8 @@ fn apply_segment(seg: str, mut segs: List[str]) -> () ! {malformed} {
 /// the server root), `is_alias` whether alias replaced the prefix.
 /// `content_type` is left "" here — serve/ maps the extension through
 /// the `types` model, which is io-free but lives with the writer.
+/// `max_ranges` is the `max_ranges` in effect (ws41): -1 unlimited
+/// (nginx's default), 0 ranges off, else the most ranges honoured.
 pub struct Decision {
     status: int,
     fs_path: str,
@@ -1108,6 +1110,7 @@ pub struct Decision {
     is_alias: bool,
     index: List[str],
     redirect: str,
+    max_ranges: int,
 }
 
 /// Join a filesystem base and a URI remainder with exactly one `/`
@@ -1327,6 +1330,7 @@ fn decide(c: config.Conf, path: str, m: LocMatch) -> Decision {
         is_alias: false,
         index: List[str](),
         redirect: "",
+        max_ranges: -1,
     }
     if m.srv < 0 {
         return d
@@ -1356,6 +1360,8 @@ fn decide(c: config.Conf, path: str, m: LocMatch) -> Decision {
         }
     }
     d.index = config.route_index(c, t)
+    // ws41: the range filter's knob, resolved at load like the rest
+    d.max_ranges = config.route_max_ranges(c, t)
     d
 }
 

@@ -1,0 +1,49 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config http
+//!
+//! ws41: `max_ranges` — nginx's grammar (probed against nginx/1.30.4:
+//! `abc`, `-1`, `5x` and a 20-digit number are each `"max_ranges"
+//! directive invalid number`; `0` and 2147483648 load), and the value
+//! resolved per route row at load with nginx's inheritance (location,
+//! else server, else http; absent is unlimited, -1 here), carried to
+//! the routing decision. Pure.
+
+use config
+use http
+
+fn main() -> !int {
+    assert(config.ranges_value("0") == 0, "0")
+    assert(config.ranges_value("5") == 5, "5")
+    assert(config.ranges_value("2147483648") == 2147483648, "past int32 loads")
+    assert(config.ranges_value("9223372036854775807") == 9223372036854775807, "the int64 max")
+    assert(config.ranges_value("9223372036854775808") == -1, "one past: invalid")
+    assert(config.ranges_value("99999999999999999999") == -1, "20 digits: invalid")
+    assert(config.ranges_value("abc") == -1, "a word")
+    assert(config.ranges_value("-1") == -1, "negative")
+    assert(config.ranges_value("5x") == -1, "a suffix")
+    assert(config.ranges_value("") == -1, "empty")
+
+    let bad = config.parse_str("http {{\n  server {{\n    max_ranges abc;\n  }}\n}}\n", "t.conf")
+    assert(config.ok(bad), "an invalid number still parses (the -t half names it)")
+    assert(
+        config.ranges_check(bad) == "\"max_ranges\" directive invalid number in t.conf:3",
+        "the oracle's diagnostic, located: {config.ranges_check(bad)}",
+    )
+
+    let src = "http {{\n  max_ranges 4;\n  server {{\n    root /srv;\n    max_ranges 2;\n    location /a/ {{ max_ranges 0; }}\n    location /b/ {{ }}\n  }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    assert(config.ok(c), "parses")
+    assert(config.ranges_check(c).is_empty(), "clean -t")
+    assert(http.route(c, "/a/x").max_ranges == 0, "the location's own")
+    assert(http.route(c, "/b/x").max_ranges == 2, "the server's, inherited")
+    assert(http.route(c, "/x").max_ranges == 2, "no location: the server's")
+    let c2 = config.parse_str("http {{\n  max_ranges 4;\n  server {{ root /srv; }}\n}}\n", "t.conf")
+    assert(http.route(c2, "/x").max_ranges == 4, "http's, inherited")
+    let c3 = config.parse_str("http {{\n  server {{ root /srv; }}\n}}\n", "t.conf")
+    assert(http.route(c3, "/x").max_ranges == -1, "absent: unlimited")
+    let bad2 = config.parse_str("http {{\n  max_ranges 1 2;\n}}\n", "t.conf")
+    assert(!config.ok(bad2), "one argument only")
+    0
+}
