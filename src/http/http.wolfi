@@ -1,9 +1,9 @@
 module pkg :: http
   wolfi v0 · toolchain 0.2.16 · edition v1
-  export_hash 8a85cf86b0ec1e5d6b738d70d5e52ef8e1436694eba0bd68328c70af30b3c714
-  pkg_hash    8a85cf86b0ec1e5d6b738d70d5e52ef8e1436694eba0bd68328c70af30b3c714
+  export_hash c4ae23a48d83a4eb91660743c9297b43ff41762f954bcf4da45d99304c06fbb0
+  pkg_hash    c4ae23a48d83a4eb91660743c9297b43ff41762f954bcf4da45d99304c06fbb0
   deps:
-    config  db51a05ca8e0024d428441441958374efbd0aa239415cb86d44e0acbe8058706
+    config  9ed939f614ce6af74036fc5df0e4e12bc6ffb495d284a298c24151b91af1b69d
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:
     [0] pub decode_chunked — fn decode_chunked(body: str, limits: self.Limits) -> str ! {malformed, too_large} · regions (-, ρ1) -> -
