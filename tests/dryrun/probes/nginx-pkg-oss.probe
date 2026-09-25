@@ -1,6 +1,30 @@
-# nginx-pkg-oss — lobo -t refuses this config (directive "user" is not implemented in lobo (privilege drop is ws14's — run lobo as the target user for now (nginx only warns when unprivileged)) in nginx.conf:),
-# so the dry-run predicts nothing: exit 1, nothing on stdout.
-# tests/config-corpus/INDEX.md names what blocks it (ws40).
+# nginx-pkg-oss — ws41: "user" loads with nginx's own warning when lobo is unprivileged,
+# so the dry-run predicts. Before ws41 lobo -t refused this config on "user"
+# alone (tests/config-corpus/INDEX.md, the blocked table).
 args: --request 'GET http://localhost/'
-exit: 1
+exit: 0
 --- expect
+== request: GET http://localhost/
+listener: 127.0.0.1:18080
+server: tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:1 [server_name localhost] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+location: / (tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:7)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location / (tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:7) — won: the longest matching prefix wins (1 bytes)
+  candidate location = /50x.html (tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:17) — lost: the path is not exactly this location's `=` argument
+effective directives (the winning chain, with provenance):
+  include       mime.types;  # from tests/config-corpus/nginx-pkg-oss/nginx.conf:18
+  default_type  application/octet-stream;  # from tests/config-corpus/nginx-pkg-oss/nginx.conf:19
+  log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';  # from tests/config-corpus/nginx-pkg-oss/nginx.conf:21
+  access_log  logs/access.log  main;  # from tests/config-corpus/nginx-pkg-oss/nginx.conf:25
+  sendfile        on;  # from tests/config-corpus/nginx-pkg-oss/nginx.conf:27
+  keepalive_timeout  65;  # from tests/config-corpus/nginx-pkg-oss/nginx.conf:30
+  include conf.d/*.conf;  # from tests/config-corpus/nginx-pkg-oss/nginx.conf:34
+  listen       18080;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:2 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
+  server_name  localhost;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:3 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
+  error_page   500 502 503 504  /50x.html;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:16 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
+  root   /usr/share/nginx/html;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:8 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
+  index  index.html index.htm;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:9 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout`, `server_name`, `error_page` (statuses: docs/directives.md)
+decision: directory request — would map to /usr/share/nginx/html/ and try index files: index.html, index.htm (not checked; 403 if none exists)

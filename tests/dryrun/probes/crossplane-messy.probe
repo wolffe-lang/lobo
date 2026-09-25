@@ -1,6 +1,23 @@
-# crossplane-messy — lobo -t refuses this config (directive "user" is not implemented in lobo (privilege drop is ws14's — run lobo as the target user for now (nginx only warns when unprivileged)) in nginx.conf:),
-# so the dry-run predicts nothing: exit 1, nothing on stdout.
-# tests/config-corpus/INDEX.md names what blocks it (ws40).
+# crossplane-messy — ws41: "user" loads with nginx's own warning when lobo is unprivileged,
+# so the dry-run predicts. Before ws41 lobo -t refused this config on "user"
+# alone (tests/config-corpus/INDEX.md, the blocked table). ROUTING DELTA,
+# named: nginx answers 200 from `return`; lobo parses `return` (planned
+# row) and predicts 404, as for crossplane-simple.
 args: --request 'GET http://localhost/'
-exit: 1
+exit: 0
 --- expect
+== request: GET http://localhost/
+listener: 127.0.0.1:8083
+server: tests/config-corpus/crossplane-messy/nginx.conf:11 — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+  candidate server tests/config-corpus/crossplane-messy/nginx.conf:15 — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
+  candidate server tests/config-corpus/crossplane-messy/nginx.conf:27 — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
+location: (none matched — the server block's own directives apply)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+effective directives (the winning chain, with provenance):
+  "access_log" off;  # from tests/config-corpus/crossplane-messy/nginx.conf:10
+  default_type "text/plain";  # from tests/config-corpus/crossplane-messy/nginx.conf:10
+  error_log "off";  # from tests/config-corpus/crossplane-messy/nginx.conf:10
+  "listen" "8083"            ;  # from tests/config-corpus/crossplane-messy/nginx.conf:12
+  "return" 200 "Ser\" ' ' ver\\ \ $server_addr:\$server_port\n\nTime: $time_local\n\n";  # from tests/config-corpus/crossplane-messy/nginx.conf:13
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `return` (statuses: docs/directives.md)
+decision: would answer 404 — no root/alias maps this path to the filesystem — the live server answers 404

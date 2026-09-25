@@ -1,6 +1,39 @@
-# netbox — lobo -t refuses this config (directive "user" is not implemented in lobo (privilege drop is ws14's — run lobo as the target user for now (nginx only warns when unprivileged)) in nginx.conf:),
-# so the dry-run predicts nothing: exit 1, nothing on stdout.
-# tests/config-corpus/INDEX.md names what blocks it (ws40).
+# netbox — ws41: "user" loads with nginx's own warning when lobo is unprivileged,
+# so the dry-run predicts. Before ws41 lobo -t refused this config on "user"
+# alone (tests/config-corpus/INDEX.md, the blocked table).
 args: --request 'GET http://localhost/'
-exit: 1
+exit: 0
 --- expect
+== request: GET http://localhost/
+listener: [::]:18080
+server: tests/config-corpus/netbox/conf.d/netbox.conf:1 [server_name netbox.example.com] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+  candidate server tests/config-corpus/netbox/conf.d/netbox.conf:34 [server_name _] — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
+location: / (tests/config-corpus/netbox/conf.d/netbox.conf:16)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location /static/ (tests/config-corpus/netbox/conf.d/netbox.conf:12) — lost: the path does not start with this prefix
+  candidate location / (tests/config-corpus/netbox/conf.d/netbox.conf:16) — won: the longest matching prefix wins (1 bytes)
+effective directives (the winning chain, with provenance):
+  include       mime.types;  # from tests/config-corpus/netbox/nginx.conf:18
+  default_type  application/octet-stream;  # from tests/config-corpus/netbox/nginx.conf:19
+  log_format  main  '$remote_addr - $remote_user [$time_local] "$request" '
+                      '$status $body_bytes_sent "$http_referer" '
+                      '"$http_user_agent" "$http_x_forwarded_for"';  # from tests/config-corpus/netbox/nginx.conf:21
+  access_log  logs/access.log  main;  # from tests/config-corpus/netbox/nginx.conf:25
+  sendfile        on;  # from tests/config-corpus/netbox/nginx.conf:27
+  keepalive_timeout  65;  # from tests/config-corpus/netbox/nginx.conf:30
+  include conf.d/*.conf;  # from tests/config-corpus/netbox/nginx.conf:34
+  listen [::]:18443 ssl ipv6only=off;  # from tests/config-corpus/netbox/conf.d/netbox.conf:2 (via tests/config-corpus/netbox/nginx.conf:34)
+  server_name netbox.example.com;  # from tests/config-corpus/netbox/conf.d/netbox.conf:5 (via tests/config-corpus/netbox/nginx.conf:34)
+  ssl_certificate certs/fullchain.pem;  # from tests/config-corpus/netbox/conf.d/netbox.conf:7 (via tests/config-corpus/netbox/nginx.conf:34)
+  ssl_certificate_key certs/privkey.pem;  # from tests/config-corpus/netbox/conf.d/netbox.conf:8 (via tests/config-corpus/netbox/nginx.conf:34)
+  client_max_body_size 25m;  # from tests/config-corpus/netbox/conf.d/netbox.conf:10 (via tests/config-corpus/netbox/nginx.conf:34)
+  proxy_pass http://127.0.0.1:8001;  # from tests/config-corpus/netbox/conf.d/netbox.conf:18 (via tests/config-corpus/netbox/nginx.conf:34)
+  proxy_set_header X-Forwarded-Host $http_host;  # from tests/config-corpus/netbox/conf.d/netbox.conf:19 (via tests/config-corpus/netbox/nginx.conf:34)
+  proxy_set_header X-Real-IP $remote_addr;  # from tests/config-corpus/netbox/conf.d/netbox.conf:20 (via tests/config-corpus/netbox/nginx.conf:34)
+  proxy_set_header X-Forwarded-Proto $scheme;  # from tests/config-corpus/netbox/conf.d/netbox.conf:21 (via tests/config-corpus/netbox/nginx.conf:34)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout`, `server_name` (statuses: docs/directives.md)
+proxy headers (sent upstream):
+  X-Forwarded-Host: $http_host -> UNRESOLVED (this variable is outside the dry-run's knowledge)
+  X-Real-IP: $remote_addr -> UNRESOLVED (the client address; pass --client to supply one)
+  X-Forwarded-Proto: $scheme -> UNRESOLVED (this variable is outside the dry-run's knowledge)
+decision: would proxy to http://127.0.0.1:8001/

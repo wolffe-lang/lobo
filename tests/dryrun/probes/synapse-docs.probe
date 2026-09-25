@@ -1,6 +1,8 @@
-# synapse-docs — lobo -t refuses this config (directive "user" is not implemented in lobo (privilege drop is ws14's — run lobo as the target user for now (nginx only warns when unprivileged)) in nginx.conf:),
-# so the dry-run predicts nothing: exit 1, nothing on stdout.
-# tests/config-corpus/INDEX.md names what blocks it (ws40).
+# synapse-docs — ws41: "user" loads with nginx's own warning when lobo is unprivileged,
+# so the dry-run predicts. Before ws41 lobo -t refused this config on "user"
+# alone (tests/config-corpus/INDEX.md, the blocked table).
 args: --request 'GET http://localhost/'
-exit: 1
+exit: 0
 --- expect
+== request: GET http://localhost/
+decision: no answer — this config has no plaintext listener (every `listen` carries `ssl`) — an http:// request has nowhere to connect
