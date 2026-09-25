@@ -165,3 +165,29 @@ Both copy arms spend over 80 % of their CPU in the kernel (the two
 copies across the user boundary); sendfile removes one of them and
 the user-space buffer with it. 22 of the corpus's 40 configs say
 `sendfile on`.
+
+## Found on the way, not predicted
+
+- **My own hole, caught before the merge.** A `named_error` row was
+  refused by `-t` only. The serving entries checked for a parse error
+  and nothing else, so a running server ignored the row. That was
+  inert while the rows were lua, perl and `daemon`. Item 0b gave `deny`
+  a row, and until then `deny` had refused as unknown. With the row in
+  place, a live lobo served a file under `location / { deny all; }`
+  with 200, found by hand on kasumi. The fix refuses the start, the
+  master and a reload on the same text `-t` prints.
+  `tests/shell/named_refusal_e2e.lu` is red on `fab1287`, the tree
+  before the fix (`kasumi:~/lanes/ws41/refusal-red-fab1287.log`: the
+  server bound and served). Its first draft passed on that tree for the
+  wrong reason: a relative `-c` is read under the prefix, so the start
+  failed on a missing file. The paths are absolute now.
+- **A lane parting in an integer literal.** `let cutoff =
+  922337203685477580` compiles and runs on the native and checked
+  lanes. lupin 0.1.38 traps it: `the literal … is outside i32, the
+  binding's type`. The range code annotates `: int`. This is recorded
+  here and not filed; it is lupin's inference of an unannotated
+  binding.
+- **The CVE corpus pinned "lobo does not implement Range".**
+  `cve_server_e2e.lu` asserted a 200 for `bytes=0-2`. It now sends the
+  CVE-2017-7529 exploit's ranges and gets the whole file (200, and the
+  pinned nginx answers the same), plus a plain range that gets a 206.
