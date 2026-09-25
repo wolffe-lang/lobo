@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="corpus ratchet: 15 configs — 7 parse-clean / 2 named-delta / 6 refused-by-name / 0 silent")
+//! check: run(exit=0, stdout="corpus ratchet: 16 configs — 7 parse-clean / 3 named-delta / 6 refused-by-name / 0 silent")
 //! phase: run
 //! lanes: native
 //! stage-src: config
@@ -46,7 +46,7 @@ use config
 /// OpenResty lua named_error exhibit — 7 parse clean, 1 carries its
 /// named delta, 0 silent anything.
 fn ratchet_configs() -> int {
-    15
+    16
 }
 
 fn ratchet_parse_clean() -> int {
@@ -54,7 +54,7 @@ fn ratchet_parse_clean() -> int {
 }
 
 fn ratchet_named_delta() -> int {
-    2
+    3
 }
 
 /// ws40: real configs lobo refuses by name at load (no table row for
