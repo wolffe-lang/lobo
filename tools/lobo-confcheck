@@ -28,7 +28,7 @@
 # That count must never grow silently: a new one is a named delta, and
 # the constant moves with it.
 IDENTICAL_LOADS=2
-LOBO_LENIENT=1
+LOBO_LENIENT=2
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-rigproc.sh

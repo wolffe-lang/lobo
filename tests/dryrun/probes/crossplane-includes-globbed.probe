@@ -1,0 +1,19 @@
+# crossplane-includes-globbed — ws40: a config lobo loads; the dry-run's prediction.
+# Routing agrees in shape: no location matches /, and neither side
+# maps a root here; the include chain carries its provenance.
+args: --request 'GET http://localhost/'
+exit: 0
+--- expect
+== request: GET http://localhost/
+listener: 127.0.0.1:8080
+server: tests/config-corpus/crossplane-includes-globbed/servers/server1.conf:1 — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+  candidate server tests/config-corpus/crossplane-includes-globbed/servers/server2.conf:1 — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
+location: (none matched — the server block's own directives apply)
+  precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location /foo (tests/config-corpus/crossplane-includes-globbed/locations/location1.conf:1) — lost: the path does not start with this prefix
+  candidate location /bar (tests/config-corpus/crossplane-includes-globbed/locations/location2.conf:1) — lost: the path does not start with this prefix
+effective directives (the winning chain, with provenance):
+  include servers/*.conf;  # from tests/config-corpus/crossplane-includes-globbed/http.conf:2 (via tests/config-corpus/crossplane-includes-globbed/nginx.conf:5)
+  listen 8080;  # from tests/config-corpus/crossplane-includes-globbed/servers/server1.conf:2 (via tests/config-corpus/crossplane-includes-globbed/nginx.conf:5 > tests/config-corpus/crossplane-includes-globbed/http.conf:2)
+  include locations/*.conf;  # from tests/config-corpus/crossplane-includes-globbed/servers/server1.conf:3 (via tests/config-corpus/crossplane-includes-globbed/nginx.conf:5 > tests/config-corpus/crossplane-includes-globbed/http.conf:2)
+decision: would answer 404 — no root/alias maps this path to the filesystem — the live server answers 404

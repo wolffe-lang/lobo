@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="corpus ratchet: 32 configs — 7 parse-clean / 5 named-delta / 20 refused-by-name / 0 silent")
+//! check: run(exit=0, stdout="corpus ratchet: 40 configs — 11 parse-clean / 6 named-delta / 23 refused-by-name / 0 silent")
 //! phase: run
 //! lanes: native
 //! stage-src: config
@@ -46,15 +46,15 @@ use config
 /// OpenResty lua named_error exhibit — 7 parse clean, 1 carries its
 /// named delta, 0 silent anything.
 fn ratchet_configs() -> int {
-    32
+    40
 }
 
 fn ratchet_parse_clean() -> int {
-    7
+    11
 }
 
 fn ratchet_named_delta() -> int {
-    5
+    6
 }
 
 /// ws40: real configs lobo refuses by name at load (no table row for
@@ -62,7 +62,7 @@ fn ratchet_named_delta() -> int {
 /// is the good direction (a directive landed); it still needs the
 /// reason in the commit message, like every count here.
 fn ratchet_refused() -> int {
-    20
+    23
 }
 
 fn main() -> int {

@@ -1,0 +1,9 @@
+# crossplane-empty-value-map — ws40: a config lobo loads; the dry-run's prediction.
+# LOBO-LENIENT, named: nginx refuses this config at load (unknown
+# "arg" variable in a map value); lobo loads it and predicts nothing
+# to route (no listener).
+args: --request 'GET http://localhost/'
+exit: 0
+--- expect
+== request: GET http://localhost/
+decision: no answer — this config has no plaintext listener (every `listen` carries `ssl`) — an http:// request has nowhere to connect

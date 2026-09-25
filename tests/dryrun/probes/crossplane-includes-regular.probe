@@ -1,0 +1,6 @@
+# crossplane-includes-regular — lobo -t refuses this config (open() "bar.conf" failed (2: No such file or directory) in conf.d/server.conf:5),
+# so the dry-run predicts nothing: exit 1, nothing on stdout.
+# tests/config-corpus/INDEX.md names what blocks it (ws40).
+args: --request 'GET http://localhost/'
+exit: 1
+--- expect
