@@ -2797,40 +2797,41 @@ fn spawn_worker(
     var handed = lfds.len
     var h: int = -1
     if handed > 0 {
-        // wolf-lang#449: 0.2.16 refuses a claim made inside a handler
-        // arm against a later call it does not nest inside. The level
-        // and the sentence ride out of the handler; the claim is made
-        // once, at the top level. Revert when #449 lands.
         var ok = true
-        var wlevel = ""
-        var wwhy = ""
-        let hh = os_spawn_with(exe, shell.worker_args(prefix, conf, i, ep, handed), lfds) else |e| {
-            let word = match e {
-                unsupported =>
-                    (
-                        "warn",
-                        "worker {i}: this host does not hand descriptors to a child (os_spawn_with unsupported) — falling back to the bind-and-stand-by shape (docs/WORKERS.md)",
-                    ),
-                not_found => ("error", "worker {i}: spawn failed — executable not found ({exe})"),
-                denied => ("error", "worker {i}: spawn failed — the host refused to execute {exe}"),
-                io =>
-                    (
-                        "error",
-                        "worker {i}: spawn failed (io) with {handed} listener(s) in the inherit set",
-                    ),
-            }
-            wlevel = word.0
-            wwhy = word.1
-            -1
-        }
-        if wwhy != "" {
-            ev_log(mut el, wlevel, wwhy)
-        }
-        if wlevel == "error" {
-            return (-1, "")
-        }
-        if wlevel == "warn" {
-            ok = false
+        let hh = os_spawn_with(
+            exe,
+            shell.worker_args(prefix, conf, i, ep, handed),
+            lfds,
+        ) else |e| match e {
+            unsupported => {
+                ok = false
+                ev_log(
+                    mut el,
+                    "warn",
+                    "worker {i}: this host does not hand descriptors to a child (os_spawn_with unsupported) — falling back to the bind-and-stand-by shape (docs/WORKERS.md)",
+                )
+                -1
+            },
+            not_found => {
+                ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
+                return (-1, "")
+            },
+            denied => {
+                ev_log(
+                    mut el,
+                    "error",
+                    "worker {i}: spawn failed — the host refused to execute {exe}",
+                )
+                return (-1, "")
+            },
+            io => {
+                ev_log(
+                    mut el,
+                    "error",
+                    "worker {i}: spawn failed (io) with {handed} listener(s) in the inherit set",
+                )
+                return (-1, "")
+            },
         }
         if ok {
             h = hh
