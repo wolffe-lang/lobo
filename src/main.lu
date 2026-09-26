@@ -2841,23 +2841,23 @@ fn spawn_worker(
     }
     if h < 0 {
         let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0)
-        // wolf-lang#449: 0.2.16 refuses a claim made inside a branch or
-        // a handler block against a later call it does not nest inside
-        // — here the three `ev_log`s in the three match arms against
-        // the `ev_event` below. The reason is carried OUT of the
-        // handler and the one claim is made at the top level.
-        var why = ""
-        h = os_spawn(argv) else |e| {
-            why = match e {
-                not_found => "worker {i}: spawn failed — executable not found ({exe})",
-                denied => "worker {i}: spawn failed — the host refused to execute {exe}",
-                io => "worker {i}: spawn failed (io)",
-            }
-            -1
-        }
-        if why != "" {
-            ev_log(mut el, "error", why)
-            return (-1, "")
+        h = os_spawn(argv) else |e| match e {
+            not_found => {
+                ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
+                return (-1, "")
+            },
+            denied => {
+                ev_log(
+                    mut el,
+                    "error",
+                    "worker {i}: spawn failed — the host refused to execute {exe}",
+                )
+                return (-1, "")
+            },
+            io => {
+                ev_log(mut el, "error", "worker {i}: spawn failed (io)")
+                return (-1, "")
+            },
         }
     }
     ev_event("notice", shell.ev_worker_started(i, restarts), mut el)
