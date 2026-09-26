@@ -776,7 +776,7 @@ fn err_len(code: int, special: bool, token: str) -> int {
 /// record already held (ws28). The names arrive lowercased from the
 /// parser and are pushed as they are — `obs.access_header` lowers its
 /// name, which lowered every name a second time. Total.
-fn fill_req_acc(req: http.Request, mut acc: obs.Access) {
+fn fill_req_acc(mut acc: obs.Access, req: http.Request) {
     var i: int = 0
     for h in req.hnames {
         (mut acc.hnames).push(h)
@@ -2714,7 +2714,7 @@ pub fn serve_request(
             return req_out(true, "", take acc, chg)
         },
     }
-    fill_req_acc(req, mut acc)
+    fill_req_acc(mut acc, req)
 
     // ws10, the `head` site: the fences above (414/400) fire first;
     // the budget rules what they admitted (docs/BUDGET.md's order).
