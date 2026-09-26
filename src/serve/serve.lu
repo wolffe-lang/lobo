@@ -1402,9 +1402,9 @@ fn serve_file(
 }
 
 /// Write `s` on `cn`: 0 written, 1 the peer closed, 2 io. The range
-/// writer's one spelling of a write, so no handler arm holds a claim
-/// on `cn` (wolf-lang#449's leg). Total.
-fn put(s: str, mut cn: conn.Conn) -> int {
+/// writer's one spelling of a write, its outcome an int the part loop
+/// can test. Total.
+fn put(mut cn: conn.Conn, s: str) -> int {
     var rc = 0
     write_all(mut cn, s) else |e| match e {
         closed => {
@@ -1608,7 +1608,7 @@ fn serve_range(
         return !keep
     }
     var cur = fd
-    var wr = put(head, mut cn)
+    var wr = put(mut cn, head)
     var pos: int = 0
     var i: int = 0
     let tls = conn.is_tls(cn)
@@ -1618,7 +1618,7 @@ fn serve_range(
         let e0 = plan.ends[i]
         if nparts > 1 {
             let last = e0 - 1
-            wr = put("{bhead}{s0}-{last}/{size}\r\n\r\n", mut cn)
+            wr = put(mut cn, "{bhead}{s0}-{last}/{size}\r\n\r\n")
         }
         if wr == 0 && s0 < pos {
             fs_close(cur) else |_| {}
@@ -1643,7 +1643,7 @@ fn serve_range(
         i = i + 1
     }
     if wr == 0 && nparts > 1 {
-        wr = put("\r\n--{bound}--\r\n", mut cn)
+        wr = put(mut cn, "\r\n--{bound}--\r\n")
     }
     if cur >= 0 {
         fs_close(cur) else |_| {}
