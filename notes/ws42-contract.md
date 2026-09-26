@@ -91,6 +91,24 @@ token lapsed.
 
 ## 4. Evidence index (filled in at the close)
 
+All kasumi paths are under `~/lanes/ws42/`. Logs are kept; build trees are pruned.
+
+| claim | artifact |
+|---|---|
+| archives by digest | `dl/*.tar.gz` sha256 = release assets: wolf 0.2.17 `a95d0f0f…` (release 397045016), lupin 0.1.40 `509929e6…` (397033025); members hashed by name in `instr-*/toolchain.txt` |
+| std pin holds at 0.2.17 (B151) | `probe/build-trunksrc-0217-std{070884c,14f0ab2}.log` (exit 0, 0 diagnostics), binaries both `d54ed342…` |
+| retention at trunk (0.2.16) | `instr-trunk/` (19/20, binary `b8d8d98e…`), `instr-trunk-acc/` (24, round B 9916–9924) |
+| gauntlet GREEN at the bump | `gauntlet-bump.log` at `04656b5` (exit 0, 246 s, 299 corpus rows ok) |
+| retention at the bump | `instr-bump/`, `instr-bump-acc/` (19/20; 24 at 9924) |
+| each reverted shape builds at 0.2.17, each commit | `checks/<sha>/summary.txt` for `47382fc bb5a29f 1ef890b 9388841 0608d3c 7d3910f dc7dcfd e13d63e cd4b3d8 0732e75 cf57e51`: `b17=build-exit=0 E1002@17=0` on all eleven; fmt clean |
+| the reverted tree is refused by 0.2.16 | `checks/0732e75/build-0216.log` (`--error-limit=0`): **30 `error[E1002]`, 21 distinct lines**, all inside the ten shapes; the running count per commit is 0,0,0,0,14,20,24,25,29,30 |
+| the inherit-set handler is never flagged | `checks/probe-handler1/` (`0732e75` with `9388841` reverted; flags only 1496, 2859, 3170) |
+| retention after the revert, before B156 | `instr-revert/`, `instr-revert-acc/` at `0732e75` (19/20; 24 at 9924) |
+| retention at the head | `instr-head/` (19/20, round B 7952–7960), `instr-head-acc/` (24, round B **9680–9684**), binary `2db67fbc…` |
+| gauntlet GREEN at the code head | `gauntlet-head.log` at `cf57e51` (exit 0, 253 s, 299 corpus rows ok) |
+| push census | 409 `.push(` in `src/`, 15 `push(take`, 0 plain pushes of a `GenRow`/`AccRow`/`List[byte]` element (`List[List[byte]]`); `SinkRow` is scalars and `str` |
+| CI at the head | the PR's run, cited in the PR body and the lane report |
+
 ## 5. Done-when
 
 - [ ] Branch `ws42` on origin; PR open against `trunk`, **unmerged**.
