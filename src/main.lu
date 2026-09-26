@@ -3158,13 +3158,19 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
         }
     }
-    // wolf-lang#449, as above: one claim, message chosen.
-    let sigword = if sig_on {
-        "signal reception armed by meaning (reload, terminate=stop, quit): every meaning fans out to the workers"
+    if sig_on {
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception armed by meaning (reload, terminate=stop, quit): every meaning fans out to the workers",
+        )
     } else {
-        "signal reception unavailable on this platform; the control channel is the trigger"
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception unavailable on this platform; the control channel is the trigger",
+        )
     }
-    ev_log(mut elog, "notice", sigword)
     var mgen = 1
     var mconf = copy c0
     ev_event("notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)), mut elog)
