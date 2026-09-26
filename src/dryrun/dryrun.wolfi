@@ -1,5 +1,5 @@
 module pkg :: dryrun
-  wolfi v0 · toolchain 0.2.16 · edition v1
+  wolfi v0 · toolchain 0.2.17 · edition v1
   export_hash 49dc7bcc90d0d8f7895c1e7e95cf6ba2da824cbc65f0bdccdfb22651f1ca812e
   pkg_hash    49dc7bcc90d0d8f7895c1e7e95cf6ba2da824cbc65f0bdccdfb22651f1ca812e
   deps:

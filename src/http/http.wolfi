@@ -1,5 +1,5 @@
 module pkg :: http
-  wolfi v0 · toolchain 0.2.16 · edition v1
+  wolfi v0 · toolchain 0.2.17 · edition v1
   export_hash c4ae23a48d83a4eb91660743c9297b43ff41762f954bcf4da45d99304c06fbb0
   pkg_hash    c4ae23a48d83a4eb91660743c9297b43ff41762f954bcf4da45d99304c06fbb0
   deps:
