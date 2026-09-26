@@ -198,6 +198,76 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws42 — 2026-09-26 — the pin at 0.2.17 (the #449 workarounds come out; the pass record moves)
+
+- **The pin**, from the release archives by digest on kasumi: wolf
+  **0.2.17** (`02afce8`, release 397045016, linux x86-64
+  `a95d0f0f…`), lupin **0.1.40** (`54f85e6`, release 397033025,
+  `509929e6…`), wolf-std **`14f0ab2`**. Members by name: `wolf`
+  `5cdd936e…`, `libwolf_rt.a` `c5384a5c…`, `wolf-cimport-worker`
+  `7031dd13…`, `lupin` `18d64444…`; `_wolf` is unchanged. Pairing gap
+  zero; lupin's conformance pin is v0.2.16, one release behind.
+- **The std pin was re-derived at 0.2.17 before the bump (B151).**
+  `070884c..14f0ab2` touches one file under `std/`, `map/map.lu`, which
+  nothing lobo imports can reach. Trunk's source built at 0.2.17
+  against either tree gives byte-identical binaries (`d54ed342…`).
+- **The bump itself moved no source for the compiler's sake.** The
+  pin file, fourteen `.wolfi` stamps (no hash moved) and three
+  `shell.lu` constants. The gauntlet was GREEN at the bump commit
+  `04656b5` on kasumi.
+- **wolf-lang#449's workarounds are gone — ten shapes, not sixteen
+  sites.** The "16" was a count of diagnostics. ws37's commits hold
+  nine shapes: four in `main.lu` where the message was chosen before
+  one claim (`serve_main` and `master_main`'s signal word,
+  `spawn_worker`'s two spawn handlers), and five helpers whose `mut`
+  parameter moved last (`ev_event`, `write_all`, `fill_req_acc`,
+  `pending_drop`, `apply_segment`). ws41 added a tenth, `put`, whose
+  doc blamed #449's leg. All ten are back in their natural shape, one
+  commit each. Each commit builds at 0.2.17 with zero E1002.
+  **The same reverted tree built with the 0.2.16 archive is refused:
+  30 E1002 at 21 distinct lines**, every one inside a reverted shape.
+  That covers ws37's `main` 5, `serve` 10 (the six `send_err` and four
+  `req_out` of the #449 comment), `resolver` 4 and `http` 1, plus
+  `put`'s 1. The reds only appear once the helpers take `mut` first
+  again, because the rotation was the part that hid them. One shape
+  was never red: `spawn_worker`'s inherit-set handler is not flagged
+  by 0.2.16 in the reverted tree, nor with its sibling handler's
+  workaround put back. ws37 rewrote it because the reports "pair with
+  whichever claim is nearest". It is reverted anyway, and both
+  compilers accept it.
+- **The pass record moves (B156).** `pass_accs` took a `copy` of the
+  access record and then pushed the row plainly, which was two deep
+  copies of its header lists per logged request. The counters are now
+  folded first, and the row is pushed with `take` and no copy. The
+  census of plain pushes of a heap-reaching element in `src/` goes
+  from 1 to **0**; all 15 such sites say `take`.
+- **Retention on `tools/lobo-membudget`, five runs per cell, kasumi.**
+  The instrument itself configures no access log, so it never reached
+  `pass_accs`. A scratch copy that adds one `access_log` line (900 log
+  lines per run, never committed) is the second column.
+
+  | tree | plain KB/req (round B) | cap KB/req | access-log variant KB/req (round B) |
+  |---|---|---|---|
+  | trunk `3fbe943`, 0.2.16 | 19 (7952–7964) | 20 | 24 (9916–9924) |
+  | bump `04656b5`, 0.2.17 | 19 (7952–7964) | 20 | 24 (9924) |
+  | reverted `0732e75` | 19 (7952–7956) | 20 | 24 (9924) |
+  | head `cf57e51` (B156) | 19 (7952–7960) | 20 | 24 (**9680–9684**) |
+
+  The pin and the revert move nothing. B156 takes **240 KB off 400
+  logged requests (about 0.6 KB/req)**. The access-log path still
+  retains about 4.3 KB/req, which is the rendered line (#191's
+  strings).
+
+### The predictions (`notes/ws42-contract.md` §3)
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | 0 E1002 at 0.2.17; 16–22 at 0.2.16, all inside the ten shapes | 0 at 0.2.17; **30** at 0.2.16 (21 distinct lines), all inside the shapes | **WRONG on the count**: it predicted distinct lines and counted diagnostics |
+| P2 | the bump is the pin, 14 stamps and 2 constants; zero red rows | GREEN; **3** constants (`std_rev` too) | right on the rows, one constant short |
+| P3 | retention 19/20 unchanged through bump and revert | 19/20; round B within 12 KB | right |
+| P4 | access-log variant drops 40–400 KB | −240 KB | right |
+| P5 | heap-reaching plain pushes 1 → 0 | 0 | right |
+
 ## ws41 — 2026-09-25 — Range as nginx serves it; `user` gated; thirteen blockers refused by name; the sendfile ask carries a number
 
 - **Byte ranges.** A static GET or HEAD with `Range` is answered as
