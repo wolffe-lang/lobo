@@ -2127,12 +2127,6 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     span = 0
                 }
                 a2.req_ms = span
-                // ws28: the pass record is a deep copy of the record
-                // (its two header lists); with no access output
-                // configured nothing renders it, so nothing copies it
-                if !asinks.is_empty() {
-                    (mut pass_accs).push(AccRow { a: copy a2 })
-                }
                 new_start = now
                 // ws10: the budget observability — a refusal is a LOUD
                 // error event (the ws09 seam) and the generation's
@@ -2181,6 +2175,15 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 // ws12: the same record that becomes an access line
                 // becomes counter movement — one fold, no second pass
                 note_served(mut counters, a2, admitted)
+                // ws28: with no access output configured nothing renders
+                // the record, so it is not kept. ws42 (B156): it is kept
+                // by MOVING it — the counters above were its last reader,
+                // so neither the record nor its row is copied (it was a
+                // `copy` and a plain push, two deep copies of the two
+                // header lists per logged request, at 0.2.16).
+                if !asinks.is_empty() {
+                    (mut pass_accs).push(take AccRow { a: a2 })
+                }
             } else if !st.active && st.carry.is_empty() {
                 new_start = now
             }
