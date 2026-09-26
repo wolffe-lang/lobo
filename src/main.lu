@@ -1485,14 +1485,19 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
         }
     }
-    // wolf-lang#449: the claim in a branch is refused at 0.2.16 against
-    // a later claim it does not nest inside. One claim, message chosen.
-    let sigword = if sig_on {
-        "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])"
+    if sig_on {
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])",
+        )
     } else {
-        "signal reception unavailable on this platform; the control channel is the trigger"
+        ev_log(
+            mut elog,
+            "notice",
+            "signal reception unavailable on this platform; the control channel is the trigger",
+        )
     }
-    ev_log(mut elog, "notice", sigword)
 
     // generation 1 is current
     let h1 = shell.conf_hash(c0)
