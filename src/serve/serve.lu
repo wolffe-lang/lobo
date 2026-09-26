@@ -700,7 +700,7 @@ fn hline(name: str, value: str) -> str {
 
 /// Write the full bytes of `s` to `conn`. Rows: the net builtins'
 /// `closed`/`io` — a peer that vanished mid-write.
-fn write_all(s: str, mut cn: conn.Conn) -> () ! {closed, io} {
+fn write_all(mut cn: conn.Conn, s: str) -> () ! {closed, io} {
     conn.conn_write(mut cn, s)?
 }
 
@@ -976,7 +976,7 @@ fn serve_file(
         h304 = "{h304}{hline("Connection", conn_hdr)}"
         h304 = "{h304}{hline("ETag", etag)}"
         h304 = "{h304}\r\n"
-        write_all(h304, mut cn)?
+        write_all(mut cn, h304)?
         return !keep
     }
 
@@ -1074,7 +1074,7 @@ fn serve_file(
 
     if is_head {
         fs_close(fd) else |_| {}
-        write_all(head, mut cn)?
+        write_all(mut cn, head)?
         return !keep
     }
 
@@ -1255,7 +1255,7 @@ fn serve_file(
     // stream in bounded byte chunks (fs_read_chunk has no utf8 row —
     // a lone 0x80 is data). A mid-stream read error can only close —
     // bytes are already on the wire.
-    write_all(head, mut cn) else |e| match e {
+    write_all(mut cn, head) else |e| match e {
         closed => {
             fs_close(fd) else |_| {}
             return closed
@@ -1406,7 +1406,7 @@ fn serve_file(
 /// on `cn` (wolf-lang#449's leg). Total.
 fn put(s: str, mut cn: conn.Conn) -> int {
     var rc = 0
-    write_all(s, mut cn) else |e| match e {
+    write_all(mut cn, s) else |e| match e {
         closed => {
             rc = 1
         },
@@ -1553,7 +1553,7 @@ fn serve_range(
         if !is_head {
             h = "{h}{body}"
         }
-        write_all(h, mut cn)?
+        write_all(mut cn, h)?
         return !keep
     }
     let lm = http_date(secs)
@@ -1604,7 +1604,7 @@ fn serve_range(
     acc.body_bytes = if is_head { 0 } else { body_len }
     if is_head {
         fs_close(fd) else |_| {}
-        write_all(head, mut cn)?
+        write_all(mut cn, head)?
         return !keep
     }
     var cur = fd
@@ -1760,8 +1760,8 @@ pub fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> 
     head = "{head}{hline("Connection", keep_token(keep))}"
     head = "{head}{hline("Cache-Control", "no-store")}"
     head = "{head}\r\n"
-    write_all(head, mut cn)?
-    write_all(body, mut cn)?
+    write_all(mut cn, head)?
+    write_all(mut cn, body)?
     body.len
 }
 
@@ -2074,7 +2074,7 @@ fn handle_request(
             if !is_head {
                 h = "{h}{body}"
             }
-            write_all(h, mut cn)?
+            write_all(mut cn, h)?
             return !keep
         }
     }
@@ -2136,7 +2136,7 @@ fn handle_request(
             h = "{h}{hline("Location", loc)}"
             h = "{h}{hline("Connection", keep_token(keep))}"
             h = "{h}\r\n{body}"
-            write_all(h, mut cn)?
+            write_all(mut cn, h)?
             return !keep
         }
         if cl.kind == 4 {
