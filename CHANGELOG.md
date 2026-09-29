@@ -198,6 +198,62 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws43 — 2026-09-28 — the pin at 0.2.18 (nothing refused, nothing to revert)
+
+- **The pin**, from the release archives by digest on kasumi: wolf
+  **0.2.18** (`ec56a08`, release 397723077, linux x86-64
+  `da027bf9…`) and lupin **0.1.41** (`0cfc0cf`, release 397709135,
+  `18848901…`). wolf-std stays at **`14f0ab2`**. Members by name:
+  `wolf` `a9556245…`, `libwolf_rt.a` `5360ecd6…`,
+  `wolf-cimport-worker` `b2525d00…`, `lupin` `c5a65edf…`; `_wolf` is
+  unchanged. The pairing gap is zero. lupin 0.1.41's conformance pin
+  is still v0.2.16, so the lane gap is now two releases.
+- **The std pin was re-derived at 0.2.18 before the bump (B151).**
+  `14f0ab2` is still wolf-std's trunk. Trunk's source built against it
+  at 0.2.18 exits 0 on both tiers with zero diagnostics at
+  `--error-limit=0`.
+- **What 0.2.18 newly refuses, in lobo: nothing.** The release
+  refuses a `mut` parameter left moved-out at a return (#464, s184) and
+  an index store that revived a moved sibling element (#460). Trunk's
+  `src/` compiles at 0.2.18 with zero diagnostics, and the gauntlet's
+  299 corpus lane-runs (every `tests/` file, on every lane it declares)
+  are green. The zero was believed only after the probe fired. Each
+  witness was planted into a copy of `src/main.lu`, and each is E1001 at
+  0.2.18 and compiles at 0.2.17 (#464's with its W1002).
+- **What 0.2.18 newly accepts, for lobo: nothing waiting.** Moves out
+  of a literal-index element now leave the siblings readable, and R1/R3
+  revive through any `Copy` key local (eg01b). lobo has no `move`
+  expression, no element `take`, no `] = take` store, no `Map` and no
+  `Pool` (`git grep` over `src/` and `tests/`, each pattern seen to
+  match a planted line), so no workaround waited on either. The 21
+  `copy <place>[…]` sites are copies out of a `read` parameter (ws37's
+  lend rule) or of an `int` element, and they stay.
+- **The bump is stamps only.** It is the pin file, fourteen `.wolfi`
+  stamps (no hash moved) and two `shell.lu` constants (`std_rev` holds).
+  The gauntlet was GREEN at the bump commit `6699b17` on kasumi, with
+  299/299 corpus lane-runs.
+- **Retention on `tools/lobo-membudget`, five runs per cell, kasumi.**
+  The access-log column is ws42's scratch variant (one `access_log`
+  line, 900 log lines per run, never committed).
+
+  | tree | plain KB/req (round B) | cap KB/req (round B) | access-log variant KB/req (round B) |
+  |---|---|---|---|
+  | trunk `8e9aaab`, 0.2.17 | 19 (7952–7956) | 20 (8132–8160) | 24 (9680–9684) |
+  | bump `6699b17`, 0.2.18 | 19 (7952–7960) | 20 (8096–8160) | 24 (9680–9684) |
+
+  Nothing moved. The release binary did (`2db67fbc…` → `932b158d…`),
+  and the bytes it serves did not.
+
+### The predictions (`notes/ws43-contract.md` §3)
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | the pin, 14 stamps with no hash moving, 2 constants | exactly that; `lobo-stamp --check` ok | right |
+| P2 | gauntlet GREEN at the bump, zero red rows | GREEN, 299/299 lane-runs, 261 s | right |
+| P3 | nothing to revert | nothing | right |
+| P4 | 19/20/24 KB/req, round B within ±150 KB of 7952/8160/9680 | 19/20/24; within 64 KB | right |
+| P5 | the binary moves, the served bytes do not | `932b158d…`; every differential green | right |
+
 ## ws42 — 2026-09-26 — the pin at 0.2.17 (the #449 workarounds come out; the pass record moves)
 
 - **The pin**, from the release archives by digest on kasumi: wolf
