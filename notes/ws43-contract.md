@@ -83,6 +83,22 @@ minutes; a green under 60 s means the token lapsed.
 
 ## 4. Evidence index (filled in at the close)
 
+All kasumi paths are under `~/lanes/ws43/`. Logs are kept; build trees are pruned.
+
+| claim | artifact |
+|---|---|
+| archives by digest | `dl/digests.txt`: sha256 = the release assets, wolf 0.2.18 `da027bf9…` (release 397723077), lupin 0.1.41 `18848901…` (397709135); 0.2.17 `a95d0f0f…` / 0.1.40 `509929e6…` for the before. Members hashed by name in `dl/toolchain-0218.txt` and `dl/toolchain-0217.txt`, restaged ones in `instr-*/toolchain.txt` |
+| std pin holds at 0.2.18 (B151) | `probe/build-trunksrc-0218-{debug,release}.log`: `build-exit=0`, 0 errors, 0 warnings, `--error-limit=0`; `probe/summary.txt`; binaries in `probe/binaries.sha256` (0.2.17 release `2db67fbc…` = ws42's head binary) |
+| nothing newly refused in `src/`, and the probe fires | `probe/build-trunksrc-0218-*.log` (0 diagnostics); `plant-summary.txt`: `plant464 0218 … E1001=1`, `plant460 0218 … E1001=1`, both 0 errors at 0.2.17; logs `plant/plant{464,460}-02{17,18}.log`; script `plant.sh` |
+| nothing newly refused in `tests/` | `gauntlet-bump.log` and `gauntlet-head.log`: `corpus: 299/299 lane-runs green` |
+| nothing newly accepted that lobo waits on | `git grep -nE` over `src/*.lu tests/*.lu` at `8e9aaab`, comment lines excluded: `\bmove [a-z_]` 0, `take [a-z_.]+\[` 0, `\] = take` 0, `Map\[` 0, `\bPool\b` 0 (each pattern matched a planted line first); `copy [a-z_.]+\[` 21, all `read`-parameter or `int` copies (§2) |
+| retention before (trunk, 0.2.17) | `instr-trunk/` (19/20, round B 7952–7956 / 8132–8160, binary `2db67fbc…`), `instr-trunk-acc/` (24, round B 9680–9684, 900 lines per run) |
+| gauntlet GREEN at the bump | `gauntlet-bump.log` at `6699b17` (`gauntlet-bump.head`), exit 0, 261 s, 299/299 lane-runs |
+| retention after (bump, 0.2.18) | `instr-bump/` (19/20, round B 7952–7960 / 8096–8160, binary `932b158d…`), `instr-bump-acc/` (24, round B 9680–9684) |
+| `.wolfi` stamps only, no hash moves | `wolfi-bump.diff` (14 `toolchain` lines, 0 `export_hash`/`pkg_hash` lines), `interface-emit.log` (exit 0) = commit `6699b17` |
+| gauntlet GREEN at the head | `gauntlet-head.log` at `fae0b0e` (`gauntlet-head.head`), exit 0, 246 s, 299/299 lane-runs, `lobo-stamp: ok` |
+| CI at the head | the PR's run, cited in the PR body and the lane report |
+
 ## 5. Done-when
 
 - [ ] Branch `ws43` on origin; PR open against `trunk`, **unmerged**.
