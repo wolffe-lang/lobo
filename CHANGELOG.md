@@ -198,6 +198,71 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws44 — 2026-09-30 — the pin at 0.2.19 (nothing refused, nothing to revert)
+
+- **The pin**, from the release archives by digest on kasumi: wolf
+  **0.2.19** (`c2401f0`, release 400208356, linux x86-64
+  `9f3873d8…`) and lupin **0.1.42** (`8e2516d`, release 400022505,
+  `9856335a…`). wolf-std stays at **`14f0ab2`**. Members by name:
+  `wolf` `3821bfaa…`, `libwolf_rt.a` `f7e7236d…`,
+  `wolf-cimport-worker` `65498b6a…`, `lupin` `03f4a710…`; `_wolf` is
+  unchanged. The pairing gap is zero. lupin 0.1.42's conformance pin
+  is v0.2.18, so the lane gap closes from two releases to one.
+- **The std pin was re-derived at 0.2.19 before the bump (B151).**
+  `14f0ab2` is still wolf-std's trunk. Trunk's source built against it
+  at 0.2.19 exits 0 on both tiers with zero diagnostics at
+  `--error-limit=0`.
+- **What 0.2.19 newly refuses, in lobo: nothing.** Trunk's `src/`
+  compiles with zero diagnostics, and the gauntlet's 299 corpus
+  lane-runs are green, lupin 0.1.42's lane included. The only narrowing
+  is #469: under `--deny-warnings`, #464's shape now reports E1001 at
+  mem, not a promoted W1002. It is a reject either way, and it was seen
+  to fire on a planted copy of `main.lu`.
+- **What 0.2.19 newly accepts, for lobo: nothing waiting.** The release
+  adds element-granular `mut` claims (EG2), an element beside its
+  container's member under a claim (#472), and header reads beside a
+  moved element (#474). Each shape planted into a copy of `main.lu` is
+  refused at 0.2.18 and compiles at 0.2.19, so the probe fires. lobo
+  has **no** element claim, no two-field claim in one call, no `move`,
+  no element `take`, no `Map` and no `Pool`. The search used portable
+  patterns, each seen to match a planted line: on macOS `git grep -E`
+  never matches `\b`, so a `\b` pattern there is dark.
+- **#470 (a release-tier ICE) could not have reached lobo.** Its
+  witness ICEs at 0.2.18 only with the mid-end on and prints `2 12`
+  under `WOLF_MIDEND=0`, which is how lobo builds. 0.2.19 prints `2 12`
+  both ways. The flip-back is still owed (ws37) and not taken here.
+- **The bump is stamps only.** It is the pin file, fourteen `.wolfi`
+  stamps (no hash moved) and two `shell.lu` constants (`std_rev` holds).
+  The gauntlet was GREEN at the bump commit `358d1ca` on kasumi in
+  258 s: 299/299 corpus lane-runs, the differential 22/22, the proxy
+  differential 8/8, the control differential 9/9, and TLS interop 8
+  cases with 0 red.
+- **Retention on `tools/lobo-membudget`, five runs per cell, kasumi.**
+  The access-log column is ws42's scratch variant (one `access_log`
+  line, 900 log lines per run, never committed).
+
+  | tree | plain KB/req (round B) | cap KB/req (round B) | access-log variant KB/req (round B) |
+  |---|---|---|---|
+  | trunk `bfa9ad6`, 0.2.18 | 19 (7952–7956) | 20 (8088–8104) | 24 (9680–9684) |
+  | bump `358d1ca`, 0.2.19 | 19 (7952–7964) | 20 (8096–8160) | 24 (9680) |
+
+  Nothing moved. The release binary did (`932b158d…` → `46565129…`),
+  and the bytes it serves did not.
+- **Named, not changed:** `src/main.lu`'s `replace_int`/`replace_str`
+  still rebuild a list because "index assignment is a one-lane shape"
+  (ws16). That predates this release and is not a pin lane's to
+  rewrite.
+
+### The predictions (`notes/ws44-contract.md` §3)
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | the pin, 14 stamps with no hash moving, 2 constants | exactly that; `lobo-stamp` ok | right |
+| P2 | gauntlet GREEN at the bump, 299/299 | GREEN, 299/299 lane-runs, 258 s | right |
+| P3 | nothing to revert | nothing | right |
+| P4 | 19/20/24 KB/req, round B within ±150 KB of 7956/8096/9680 | 19/20/24; within 64 KB | right |
+| P5 | the binary moves, the served bytes do not | `46565129…`; every differential green | right |
+
 ## ws43 — 2026-09-28 — the pin at 0.2.18 (nothing refused, nothing to revert)
 
 - **The pin**, from the release archives by digest on kasumi: wolf
