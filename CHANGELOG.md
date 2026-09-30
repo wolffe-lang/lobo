@@ -248,6 +248,17 @@ place lobo differs from nginx is a named delta in it.
 
   Nothing moved. The release binary did (`932b158d…` → `46565129…`),
   and the bytes it serves did not.
+- **Found on the way: a quit that never arrives (wolf-lang#483).** The
+  first head gauntlet hung in `lobo-signal`: `kill -QUIT` stayed pending
+  because the job had inherited SIGQUIT *blocked* from its launcher
+  (`ssh -f` under fish), and the runtime arms a meaning with `sigaction`
+  alone and never unblocks it. The 2×2 control makes it the mask, not
+  the compiler. Both builds, 0.2.18 and 0.2.19, are 21/21 green under a
+  clean mask and both time out with the signal blocked. nginx sets its
+  own mask, so it answers either way. This is filed upstream as a
+  runtime gap. It is not a 0.2.19 change, and lobo cannot unblock a
+  signal without a wolf surface. The head gauntlet was re-run under a
+  clean mask, recorded beside its log, and was GREEN.
 - **Named, not changed:** `src/main.lu`'s `replace_int`/`replace_str`
   still rebuild a list because "index assignment is a one-lane shape"
   (ws16). That predates this release and is not a pin lane's to
