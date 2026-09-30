@@ -83,6 +83,33 @@ green in 6 to 10 minutes; a green under 60 s means the token lapsed.
 
 ## 4. Evidence index (filled in at the close)
 
+All kasumi paths are under `~/lanes/ws44/`. Logs are kept; build trees are pruned.
+
+| claim | artifact |
+|---|---|
+| archives by digest | `dl/digests.txt` and `dl/digest-check.txt` (each asserted non-empty, then equal to the release asset's digest). wolf 0.2.19 is `9f3873d8…` (release 400208356) and lupin 0.1.42 `9856335a…` (400022505). For the before: 0.2.18 `da027bf9…` and 0.1.41 `18848901…`. Members are hashed by name in `dl/toolchain-0219.txt` and `dl/toolchain-0218.txt`; the restaged ones are in `instr-*/toolchain.txt` |
+| std pin holds at 0.2.19 (B151) | `probe/build-trunksrc-0219-{debug,release}.log`: `build-exit=0`, 0 errors, 0 warnings, `--error-limit=0`. Also `probe/summary.txt`, and the binaries in `probe/binaries.sha256` (the 0.2.18 release build `932b158d…` equals ws43's bump binary) |
+| newly refused in `src/`: nothing, and the probe fires | `probe/build-trunksrc-0219-*.log` (0 diagnostics). `plant-summary.txt`, `plant-dw464`: 0.2.18 `W1002=3`, 0.2.19 `E1001=2`, both exit 2 under `--deny-warnings`. Logs in `plant/logs/`, script `plant.sh` |
+| newly accepted: nothing waiting, and the probe fires | `plant-summary.txt`: `plant-eg2`, `plant-m1c` (E1002 → exit 0) and `plant-hdr` (E1001 → exit 0), each 0.2.18 → 0.2.19. The portable-pattern counts are in §2, each seen to match a planted line. `git grep -cE '\bfn main' -- src/main.lu` prints nothing on macOS, so `\b` is dark there |
+| #470 cannot reach lobo | `w470/summary.txt`: 0.2.18 `midend-on build-exit=2 ICE=1`, `midend-off … out=[2 12]`; 0.2.19 `[2 12]` both ways. The logs are `w470/02{18,19}-{on,off}.log` |
+| newly refused in `tests/`: nothing | `gauntlet-bump.log`, `gauntlet-head.log` and `gauntlet-final.log`: `corpus: 299/299 lane-runs green` |
+| retention before (trunk `bfa9ad6`, 0.2.18) | `instr-trunk/`: 19/20 KB/req, round B 7952–7956 / 8088–8104, binary `932b158d…`. `instr-trunk-acc/`: 24 KB/req, round B 9680–9684, 900 lines per run |
+| `.wolfi` stamps only, no hash moves | `wolfi-bump.diff` (14 `toolchain` lines, 0 `export_hash`/`pkg_hash` lines) and `interface-emit.log` (`emit-exit=0`) = commit `358d1ca` |
+| gauntlet GREEN at the bump | `gauntlet-bump.log` at `358d1ca` (`gauntlet-bump.head`): exit 0, 258 s, 299/299 lane-runs, differential 22/22, proxy 8/8, control 9/9, signal 21/21 |
+| retention after (bump `358d1ca`, 0.2.19) | `instr-bump/`: 19/20 KB/req, round B 7952–7964 / 8096–8160, binary `46565129…`. `instr-bump-acc/`: 24 KB/req, round B 9680 |
+| the first head gauntlet RED, and why | `gauntlet-head-masked.log` at `68fddf4`: `lobo-signal: RED — 1 of 21`, `gauntlet-exit=1`, after `kill -QUIT` pended for 5 min. `hang-head1/state.txt` shows `ShdPnd 0x4`; `hang-head1/per-task-sigblk.txt` shows all 19 threads at `SigBlk 0x6`; `hang-head1/ancestors-sig.txt` shows the launcher `head-run.sh` at `SigBlk 0x10006`. The only pid killed was the lane's own hung `lobo-release` 2259572 |
+| the mask, not the compiler | `sigctl/summary.txt`: 0.2.18 and 0.2.19 give `clean exit=0 … 21/21` and `blocked exit=124 quit=0`, with logs in `sigctl/signal-02{18,19}-{clean,blocked}.log`. Filed as **wolf-lang#483** |
+| gauntlet GREEN at the head (clean mask) | `gauntlet-head.log` at `68fddf4` (`gauntlet-head.mask`: `SigBlk 0x10000`, SIGCHLD only): exit 0, 257 s, 299/299, signal 21/21, `lobo-stamp: ok` |
+| gauntlet GREEN at the last code commit | `gauntlet-final.log` at `eb8c697` (`gauntlet-final.head`, `gauntlet-final.mask` SIGCHLD only): exit 0, 244 s, 299/299, differential 22/22, proxy 8/8, control 9/9, signal 21/21, `lobo-stamp: ok` |
+| CI at the head | the PR's run, cited in the PR body and the lane report |
+
+### §2 drift and corrections found by the lane
+
+- The brief's inputs all held: `bfa9ad6`, release 400208356 and release 400022505, with lupin 0.1.42's pin at `ec56a08` as the CHANGELOG says. **The lane gap is one release, not two.**
+- **`\b` in `git grep -E` is dark on macOS.** ws43's §4 cites `git grep -nE` with `\bmove [a-z_]` and `\bPool\b`. If those ran on this Mac, they could not match. Re-run portably at `bfa9ad6`, both are still 0, so ws43's conclusion stands and only its search was unsound.
+- `plant-ice470` (the #470 shape as an **uncalled** function in `main.lu`) did not ICE at 0.2.18 even with the mid-end on. A dead function is never inlined, so that plant cannot fire. The standalone witness `w470/` is the evidence.
+- The lane's own slip: one scratch file was written to and removed from `/tmp` on nomad-1 (a grep fixture, `/tmp/ws44-fire.txt`), outside the lane's namespace. Nothing else was touched, and later fixtures went to the scratchpad.
+
 ## 5. Done-when
 
 - [ ] Branch `ws44` on origin; PR open against `trunk`, **unmerged**.
