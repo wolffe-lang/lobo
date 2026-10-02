@@ -43,7 +43,7 @@ pub fn body_max(c: Conf) -> int {
     if r < 0 {
         return -1
     }
-    size_bytes(c.argp[c.args_at[r]])
+    offset_bytes(c.argp[c.args_at[r]])
 }
 
 /// The effective `large_client_header_buffers` pair as (count, size
@@ -74,6 +74,35 @@ pub fn mem_budget(c: Conf) -> int {
         return 0
     }
     v
+}
+
+/// Parse an nginx OFFSET ("32768", "16k", "1m", "4g") into bytes; -1
+/// for a shape that is not one. nginx reads `client_max_body_size`
+/// through `ngx_conf_set_off_slot` -> `ngx_parse_offset`, which takes
+/// k, m AND g (either case); the size directives go through
+/// `ngx_parse_size`, which stops at m — so this is a separate parser,
+/// not a wider `size_bytes` (lobo#37, ws47: gunicorn's
+/// `client_max_body_size 4G;`; `1t`, `client_header_buffer_size 1g`
+/// and `large_client_header_buffers 4 1g` are refused on the pinned
+/// and the stock 1.30.4 alike). Total.
+fn offset_bytes(s: str) -> int {
+    let n = s.len
+    if n >= 2 {
+        let last = s.bytes()[n - 1] as int
+        if last == 103 || last == 71 {
+            // the digits alone before the unit (`4mg` is not an
+            // offset), and nginx's own ceiling: off_t's max ÷ 1g
+            if n > 11 {
+                return -1
+            }
+            let v = digits_of(s[0..n - 1])
+            if v < 0 || v > 8589934591 {
+                return -1
+            }
+            return v * 1073741824
+        }
+    }
+    size_bytes(s)
 }
 
 /// A strictly-decimal positive int, or -1. Total.
@@ -107,7 +136,7 @@ pub fn limits_check(c: Conf) -> str {
     while i < total {
         let name = c.names[i]
         if name == "client_max_body_size" && c.args_n[i] >= 1 {
-            if size_bytes(c.argp[c.args_at[i]]) < 0 {
+            if offset_bytes(c.argp[c.args_at[i]]) < 0 {
                 return "\"client_max_body_size\" directive invalid value in {c.files[i]}:{c.lines[i]}"
             }
         } else if name == "large_client_header_buffers" && c.args_n[i] >= 2 {
