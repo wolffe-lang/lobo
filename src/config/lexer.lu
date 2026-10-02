@@ -9,7 +9,10 @@
 //!   - Quotes do NOT glue. `"a b"c` is `[emerg] unexpected "c"` (p02,
 //!     p05, p07): after a closing quote the oracle demands whitespace,
 //!     `;` or `{` — anything else is a named error. The contract's
-//!     "a bc" claim was folklore.
+//!     "a bc" claim was folklore. One byte more (lobo#36, ws47): a `)`
+//!     right after a closing quote STARTS a new word (`"re")` is `re`
+//!     then `)`), the `if (… "re")` shape — ngx_conf_read_token's
+//!     need_space branch, read at nginx 1.30.4's source.
 //!   - Inside quotes only `\"` `\'` `\\` splice (p10, p12, p15);
 //!     `\{` keeps its backslash (p11). The contract's `\{` `\}` escape
 //!     claim was folklore too.
@@ -200,6 +203,16 @@ pub fn lex(src: str) -> Toks {
             } else if b == 123 {
                 push_tok(mut t, "{{", "{{", i, i + 1, line)
                 state = 0
+            } else if b == 41 {
+                // lobo#36: `)` is the one byte besides the delimiters
+                // nginx takes after a closing quote — need_space clears
+                // and the `)` STARTS a new word (ngx_conf_file.c:647),
+                // which is how `if ($x ~ "re")` closes its condition
+                state = 1
+                start = i
+                startline = line
+                esc = false
+                prev_dollar = false
             } else {
                 t.err = "unexpected \"{char_at(src, i)}\""
                 t.err_line = line
