@@ -144,26 +144,94 @@ kasumi: corpus 299/299 lane-runs or more, differential 22/22, proxy
 confcheck green with `LOBO_LENIENT=0`. CI at the head runs 6–10 min;
 a green under 60 s means the token lapsed.
 
-## 4. Evidence index (filled in at the close)
+### §3 against the measurement (written at the close)
+
+- **P1 held.** Runner close **1.151x** (band 1.10–1.25), keepalive
+  **1.240x** (1.20–1.35); NOT MET (run 37056568350).
+- **P2 falsified.** kasumi was outside both bands by far: every pair
+  of three sets read N=16 close above 1.40 and keepalive above 1.56
+  (indicative medians ~1.84x / ~2.04x), and no set was valid — the
+  tool refused all three on nginx's own N=16 spread. The risk I named
+  (the generator ceiling) never fired (`ab` at most 0.77 cores); the
+  one I did not name (an oracle that will not hold still on this box
+  at sixteen workers) refused every set. My band assumed kasumi would
+  look like the runner with more hands; at sixteen hands lobo's herd
+  and its uneven keepalive distribution are the gap (PROFILE's ws47
+  addendum).
+- **P3 held.** macOS close **1.031x** (0.95–1.10), keepalive
+  **1.037x** (0.98–1.15); MET; one set, valid on the gating cell.
+- **P4 held.** One hand keepalive on the runner: lobo + libc 24.5 %
+  of the samples (≥ 15 %). The nginx-side ≤ 5 % half was not measured
+  (the profile leg profiles lobo only); the cpu a request says the same
+  thing (5.2 µs a request more than nginx at one hand). Four hands:
+  lobo 33.6 → 38.4 µs a request and 67.2 → 81.8 µs a connection; nginx
+  28.5 → 29.0 and 65.5 → 62.9.
+- **P5 held, but for one clause.** The backslash-free
+  `if ($query_string ~ "abc")` refused with `unexpected ")"` at trunk
+  (`probe-base.txt` row b), the lexer test was red at `30ab05e`
+  (`t-red1.log`), and the repro loads after the fix. **Wrong:**
+  NPM's first stop did not change; it is `pcre_jit` before and after,
+  so the `if` was never NPM's first refusal.
+- **P6 held.** `4G`/`4g` load; `1t`, `4mg`, `client_header_buffer_size
+  1g`, `large_client_header_buffers 4 1g` and `access_log … buffer=1g`
+  refuse on the pinned and stock nginx and on lobo; `0g` loads on all
+  three. gunicorn-example still stops at `accept_mutex`.
+- **P7 held**, with one correction to the means: the map refusal is
+  located at the reading row (nginx prints no location) because the
+  corpus ratchet counts a refusal with no line as silent; the ratchet
+  test caught it on the first full run (`t-green2.log`).
+  `LOBO_LENIENT` 2 → 0, `IDENTICAL_LOADS` 4 unchanged, no third config
+  moved (confcheck at the head: 27 exit-parity, 13 named deltas, 0
+  lenient, 0 red). Ratchet 16/6/18 → 15/6/19.
+- **P8 held** for #34 (dist red at `625fe40`, green after the move).
+  #32 and #33 are a document and a workflow: neither has a test that
+  can go red before a tag (the smoke's download runs only on a tag
+  push, which is the orchestrator's act), so each is fixed and the
+  evidence is the measured fact under it.
+- **P9 held**: see the index.
+
+## 4. Evidence index
+
+kasumi paths are under `~/lanes/ws47/`; Mac paths under this lane's
+scratchpad `ws47/mac/`.
+
+| claim | artifact |
+|---|---|
+| the pair by digest | `dl/digest-check.txt` (wolf 0.2.20 `24855d5e…`, lupin 0.1.43 `e957c8de…`, each asserted non-empty then equal), `dl/toolchain-0220.txt` (members by name, `--version`); darwin `mac/dl/digest-check.txt` (`c8a3f1a3…`, `24d3e8f1…`) and `mac/toolchain-0220-darwin.txt` |
+| `ab` on kasumi, lane-local | `ab/digests.txt` (apr 1.7.6 `6a10e7f7…`, apr-util 1.6.5 `f43a1c8c…`, httpd 2.4.69 `c551b986…`, each against Apache's `.sha256`), `ab/ab.identity` (`05f2f6d5…`, `2.3 <$Revision: 1934973 $>`) |
+| baseline gauntlet GREEN | `gauntlet-base.log` at `f6195bc`: exit 0, 255 s, mask `gauntlet-base.mask` (SigBlk 0x10000, SigIgn 0x6); release binary `6d0fca17…` = ws46's head bytes |
+| runner parity, profile, count | run **37056568350** (workflow_dispatch at `f6195bc`): VALID, 1.151x / 1.240x; dso 75.09 / 17.72 / 6.75; calls a request 6.30/6.14 and 10.24/10.13 |
+| macOS parity | `mac/parity-m1.log`: load 2.80, VALID (3 of 4), 1.031x / 1.037x; lobo `5c7818e3…` built by `mac/build.sh` (`mac/build.log`, the only build on this Mac); nginx `09e61975…` |
+| kasumi parity, refused ×3 | `parity-k1.log`, `parity-k2.log`, `parity-k3.log` (each `parity-exit=3`, the refusal reasons printed, SigBlk recorded); lobo `6d0fca17…`, nginx `65595ac2…` |
+| kasumi split | `split-s1.log` (script `ksplit.sh`), load 4.19 at the start |
+| issue probes, pinned / stock / lobo | `probe-base.txt`, `probe-base2.txt` (trunk lobo `lobo-debug-base`), `probe-head1.txt` (head lobo): every row's lobo exit equals the stock nginx's at the head; script `probe/probe.sh` |
+| #36, #37 red then green | `t-red1.log` at `b1b0baf` (0/6 lane-runs; lexer_quotes and limits_directives `trap(assert)`), `t-green1.log` at `fd2333c` (95/95) |
+| #38 red then green | `t-red2.log` at `7ca6203` (0/4; map_vars `got ok` on lupin), `t-green2.log` at `c8f9484` (91/93: corpus_ratchet's silent class and a test path — both fixed in `2ea2bfd`, `44d1464`); the gauntlet below |
+| #34 red then green | `run-dist-red.log` at `625fe40` (`FAILED — docs/ws37-prediction.md is a lane's working file`), `run-dist-green.log` at `a79cf46` (the archive's `docs/` lists no `ws*` file) |
+| #33 | scratchpad `ws47/stranger/anon-check.txt`: v0.1.1's linux archive and `.sha256` fetched with no token, `OK` |
+| #32 | `git show v0.1.0:src/config/table.lu`: `try_files` `planned(ws02)`; `probe-head1.txt` row z7 (a `try_files` config loads on all three) |
+| gauntlet GREEN at the fixes | `gauntlet-head1.log` at `32eed53`: exit 0, 254 s, 303/303 lane-runs, differential 22/22, proxy 8/8, control 9/9, logdiff 4/4, signal 21/21, membudget 17/17, confcheck 0 red with 0 lenient, `lobo-stamp: ok`; mask SigBlk 0x10000 |
+| gauntlet GREEN at the docs head | `gauntlet-head2.log` at `f1d347d` (everything but this index): exit 0, 262 s under load ~6 (s199), 303/303, differential 22/22, proxy 8/8, control 9/9, logdiff 4/4, signal 21/21, confcheck 0 red / 0 lenient, `lobo-stamp: ok`; mask SigBlk 0x10000, SigIgn 0x6 |
+| CI at the fixes | PR #45, run 37058805833 at `32eed53`: success |
 
 ## 5. Done-when
 
-- [ ] Branch `ws47` on origin; PR open against `trunk`, **unmerged**,
-  five sections, commit-hash bullets, a test checklist.
+- [x] Branch `ws47` on origin; PR #45 open against `trunk`,
+  **unmerged**, five sections, commit-hash bullets, a test checklist.
 - [ ] CI green at the head sha, read with `gh run view`, on a run
   that built the toolchain and ran the gauntlet.
-- [ ] PARITY's ledger gains dated rows for kasumi, the CI runner and
+- [x] PARITY's ledger gains dated rows for kasumi, the CI runner and
   macOS (or a refused set named for each host that would not quiet);
   README's table carries the new rows and keeps the old ones as
   history; nginx's version, cpu count and load on each.
-- [ ] If linux is outside 1.10: a `docs/PROFILE.md` addendum naming
+- [x] If linux is outside 1.10: a `docs/PROFILE.md` addendum naming
   where the time goes, by run id.
-- [ ] #32, #33, #34, #36, #37, #38 each fixed with a test seen red
+- [x] #32, #33, #34, #36, #37, #38 each fixed with a test seen red
   first (log path at the test's commit), or closed with the reason;
   closures run only after the PR's evidence exists, and never claim a
   merge.
-- [ ] The gauntlet green at the head on kasumi, by log path, mask
+- [x] The gauntlet green at the head on kasumi, by log path, mask
   recorded; confcheck's ratchet moved with its annotations.
-- [ ] §2 drift and §3's verdicts reported; a CHANGELOG lane entry.
+- [x] §2 drift and §3's verdicts reported; a CHANGELOG lane entry.
 - [ ] The worktree gone, kasumi build dirs pruned (logs kept), no
   orphans.
