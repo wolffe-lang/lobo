@@ -71,6 +71,30 @@ fn main() -> !int {
         "valid client_header_buffer_size passes (parse-clean, planned ws15)",
     )
 
+    // ---- lobo#37 (ws47): client_max_body_size is an OFFSET in nginx
+    // (ngx_conf_set_off_slot -> ngx_parse_offset: k, m AND g), the
+    // header buffers are SIZES (ngx_parse_size: k, m only). Probed on
+    // kasumi 2026-10-02 against the pinned and stock 1.30.4: `4G` and
+    // `4g` load; `1t`, `client_header_buffer_size 1g` and
+    // `large_client_header_buffers 4 1g` are "invalid value" on both.
+    let g1 = conf_of("  client_max_body_size 4G;")
+    assert(config.limits_check(g1).is_empty(), "4G passes -t (gunicorn's examples/nginx.conf)")
+    assert(config.body_max(g1) == 4294967296, "4G -> bytes")
+    assert(config.body_max(conf_of("  client_max_body_size 4g;")) == 4294967296, "4g -> bytes")
+    let g2 = config.limits_check(conf_of("  client_max_body_size 1t;"))
+    assert(
+        g2 == "\"client_max_body_size\" directive invalid value in t.conf:2",
+        "t is not a unit: {g2}",
+    )
+    assert(
+        !config.limits_check(conf_of("  client_header_buffer_size 1g;")).is_empty(),
+        "a size directive still refuses g",
+    )
+    assert(
+        !config.limits_check(conf_of("  large_client_header_buffers 4 1g;")).is_empty(),
+        "large_client_header_buffers still refuses g",
+    )
+
     // ---- memory_budget 0 = off, valid
     let c4 = conf_of("  memory_budget 0;")
     assert(config.mem_budget(c4) == 0, "0 budget = off")
