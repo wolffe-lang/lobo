@@ -207,6 +207,44 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws47 — 2026-10-02 — the parity ledger at wolf 0.2.20; six issues (lobo#32–#34, #36–#38)
+
+- **The bar re-taken at the pin** (`docs/PARITY.md`, three entries).
+  The CI runner (4 cpus, slow class, run 37056568350): **NOT MET**,
+  close **1.151x**, keepalive **1.240x** (ws31 at 0.2.11: 1.139x /
+  1.282x). This Mac (18 cpus, load 2.80, shared): **MET**, close
+  **1.031x**, keepalive **1.037x** (ws26 at 0.2.8: 1.033x / 1.072x).
+  kasumi (16 cpus, new to the ledger): three sets **refused** on
+  nginx's own spread at N=16; indicative ~1.84x / ~2.04x there and
+  ~1.17x / ~1.20x at one hand. README's table carries the new rows and
+  keeps the old ones as history.
+- **Where the time goes** (`docs/PROFILE.md`, ws47's addendum): on the
+  runner the one-hand keepalive gap is still 5.2 µs a request of lobo's
+  user space (dso split 75.1 / 17.7 / 6.8, unchanged since 0.2.9;
+  syscalls a request 6.30 vs 6.14), and four hands pay what one does
+  not. On kasumi, at sixteen hands, close costs 66 µs of cpu a
+  connection against nginx's 17 (the herd, lobo#5), and keepalive
+  hands sit idle three quarters of the time with connections spread
+  4.1x unevenly.
+- **lobo#36**: a `)` right after a closing quote starts a new word, as
+  nginx's lexer does, so `if ($x ~ "re")` loads. The issue's `\(` was
+  incidental: `if ($x ~ "abc")` refused the same way.
+- **lobo#37**: `client_max_body_size` reads an nginx offset (k, m, g);
+  the size directives still refuse `g`, as nginx does.
+- **lobo#38**: a `map` source or value naming a variable no nginx
+  module defines is refused at load (`unknown "arg" variable`, located
+  at the row); an `ssl_dhparam` that cannot be read or holds no DH
+  PARAMETERS block refuses a server with a certificate. Both corpus
+  configs move to "both refuse"; `LOBO_LENIENT` 2 → 0; the ratchet is
+  15 / 6 / 19. certbot-vhost's `--sni` dry-run probe now predicts
+  nothing (the config refuses), so no dry-run probe exercises `--sni`.
+- **lobo#34**: the five lane predictions move from `docs/` to
+  `notes/`; `tools/lobo-dist` refuses a lane's working file in `docs/`
+  by name.
+- **lobo#33**: the release smoke downloads the published archive with
+  plain `curl` and no token; the header says lobo is public.
+- **lobo#32**: an erratum under 0.1.0: `try_files` was never served.
+
 ## ws46 — 2026-10-02 — the pin at 0.2.20 (nothing refused, nothing to revert; `kill -QUIT` under a blocked mask arrives)
 
 - **The pin**, from the release archives by digest on kasumi: wolf
