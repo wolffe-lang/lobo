@@ -960,14 +960,16 @@ pub fn load(prefix: str, conf_rel: str) -> Conf {
 /// lobo#38 (ws47): after the whole config is read — nginx initialises
 /// variables last, so a map may read one declared further down — a
 /// map source or value naming a variable nginx would not know is the
-/// load's error, with no file or line, as nginx prints it
+/// load's error, nginx's sentence at the reading row's file and line
 /// (`config/mapvars`). Only a config that parsed clean is asked.
 fn map_vars_gate(mut c: Conf) {
     if !c.err.is_empty() {
         return
     }
     let e = map_var_err(c)
-    if !e.is_empty() {
-        set_err(mut c, e, "", 0)
+    if e.0 >= 0 {
+        let f = c.files[e.0]
+        let l = c.lines[e.0]
+        set_err(mut c, e.1, f, l)
     }
 }

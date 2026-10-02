@@ -5,7 +5,8 @@
 //!
 //! lobo#38 (ws47), the map half: a `map` whose source or value names a
 //! variable no nginx module defines and the config never declares is
-//! refused at load, in nginx's own words and with no location — nginx
+//! refused at load, in nginx's own words, located at the row that reads
+//! it (nginx prints no location; lobo's refusals always name one) — nginx
 //! resolves every variable a map's complex values index when the
 //! variables are initialised, after the whole config is read. Probed
 //! on kasumi 2026-10-02 against the pinned and the stock 1.30.4
@@ -29,9 +30,9 @@ fn verdict(body: str) -> str {
     config.render_conf(c)
 }
 
-fn refused(body: str, var_name: str, what: str) {
+fn refused(body: str, var_name: str, line: int, what: str) {
     let got = verdict(body)
-    assert(got.contains("err|:0|unknown \"{var_name}\" variable"), "{what}: got\n{got}")
+    assert(got.contains("err|t.conf:{line}|unknown \"{var_name}\" variable"), "{what}: got\n{got}")
 }
 
 fn loads(body: str, what: str) {
@@ -44,15 +45,22 @@ fn main() -> int {
     refused(
         "    map string $variable {{\n        '' $arg;\n        *.example.com '';\n    }}",
         "arg",
+        3,
         "crossplane-empty-value-map",
     )
     refused(
         "    map $nosuch $variable {{\n        default 1;\n    }}",
         "nosuch",
+        2,
         "an unknown source",
     )
-    refused("    map $uri $a {{\n        default \"$nosuch\";\n    }}", "nosuch", "quoted value")
-    refused("    map $uri $a {{\n        default ${{nosuch}}x;\n    }}", "nosuch", "braced value")
+    refused("    map $uri $a {{\n        default \"$nosuch\";\n    }}", "nosuch", 3, "quoted value")
+    refused(
+        "    map $uri $a {{\n        default ${{nosuch}}x;\n    }}",
+        "nosuch",
+        3,
+        "braced value",
+    )
 
     loads("    map string $variable {{\n        '' $host;\n    }}", "a core variable")
     loads(

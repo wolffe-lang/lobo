@@ -9,7 +9,10 @@
 //! with `[emerg] unknown "<name>" variable` and no file or line.
 //! lobo refuses the same thing at load (the parse half, so `-t`, a
 //! start and a reload all refuse it — the ws41 rule) with the same
-//! sentence.
+//! sentence, located at the row that reads the variable (the house
+//! rule: a refusal names what and where — the corpus ratchet's
+//! "silent" class is a refusal with no line; nginx prints none, a
+//! named output delta).
 //!
 //! The catalogue is nginx 1.30.4's own: every name in every http
 //! module's static variable table (`ngx_http_variables.c`,
@@ -195,10 +198,10 @@ fn var_known(name: str, known: str, declared: List[str]) -> bool {
     false
 }
 
-/// lobo#38: the first variable a `map` source or value reads that
-/// nginx would not know, as nginx's sentence; "" when there is none.
-/// Sources first, then values, in row order. Total.
-fn map_var_err(c: Conf) -> str {
+/// lobo#38: the row of the first variable a `map` source or value
+/// reads that nginx would not know, and nginx's sentence for it;
+/// (-1, "") when there is none. Rows in source order. Total.
+fn map_var_err(c: Conf) -> (int, str) {
     let total = c.names.len
     var has_map = false
     var i: int = 0
@@ -209,7 +212,7 @@ fn map_var_err(c: Conf) -> str {
         i = i + 1
     }
     if !has_map {
-        return ""
+        return (-1, "")
     }
     let known = ngx_var_names()
     let declared = declared_vars(c)
@@ -219,17 +222,17 @@ fn map_var_err(c: Conf) -> str {
         if c.names[i] == "map" && c.kinds[i] == "b" && c.args_n[i] >= 1 {
             for v in vars_in(c.argp[at]) {
                 if !var_known(v, known, declared) {
-                    return "unknown \"{v}\" variable"
+                    return (i, "unknown \"{v}\" variable")
                 }
             }
         } else if c.kinds[i] == "e" && c.ctx[i] == "map" && c.args_n[i] >= 1 {
             for v in vars_in(c.argp[at]) {
                 if !var_known(v, known, declared) {
-                    return "unknown \"{v}\" variable"
+                    return (i, "unknown \"{v}\" variable")
                 }
             }
         }
         i = i + 1
     }
-    ""
+    (-1, "")
 }
