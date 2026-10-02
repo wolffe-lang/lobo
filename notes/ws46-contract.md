@@ -157,20 +157,35 @@ All kasumi paths are under `~/lanes/ws46/`. Logs are kept; build trees are prune
 
 | claim | artifact |
 |---|---|
-| | |
+| archives by digest | `dl/digests.txt` and `dl/digest-check.txt` (each asserted non-empty, then equal to the release asset's digest). wolf 0.2.20 is `24855d5e…` (release 401498582) and lupin 0.1.43 `e957c8de…` (401010971). For the before: 0.2.19 `9f3873d8…` and 0.1.42 `9856335a…`. Members are hashed by name in `dl/toolchain-0220.txt` and `dl/toolchain-0219.txt`; the restaged ones are in `instr-*/toolchain.txt`. The launcher's mask for the setup job is `setup.mask` |
+| std pin holds at 0.2.20 (B151) | `probe/build-trunksrc-02{19,20}-{debug,release}.log`: `build-exit=0`, 0 errors, 0 warnings, `--error-limit=0`, on both compilers. `probe/summary.txt`; the binaries in `probe/binaries.sha256` (the 0.2.19 release build `46565129…` equals ws44's bump binary; the 0.2.20 one of trunk's source is `e468eb30…`). `dl/std.txt`: wolf-std `origin/trunk` is `14f0ab2` |
+| newly refused in `src/`: nothing, and the probe fires | `probe/build-trunksrc-0220-*.log` (0 diagnostics). `plant-summary.txt` and `plant/logs/plant-{recv,shorthand,fnval,nested}-02{19,20}.log`: each `build-exit=0` at 0.2.19; at 0.2.20 `recv` E1002 (exit 2), `shorthand` E1001 (exit 2), `nested` E1007 (exit 2), `fnval` exit 4 ("cannot compile this yet — a fn with `mut` or `take` parameters used as a value"). Script `plant.sh` |
+| newly accepted: nothing waiting, and the probe fires | `plant-summary.txt`: `twophase` and `eg3` are E1002 (exit 2) at 0.2.19 and exit 0 at 0.2.20. The portable-pattern counts are in §2, each seen to match a planted line in the lane's scratchpad fixture first. The nine two-phase read sites are in §2 by file and line |
+| newly refused in `tests/`: nothing | `gauntlet-bump.log` and `gauntlet-head.log`: `corpus: 299/299 lane-runs green` |
+| retention before (trunk `35f93a3`, 0.2.19) | `instr-trunk/`: 19/20 KB/req, round B 7952–7964 / 8216–8284, binary `46565129…`, `mask` SIGCHLD only. `instr-trunk-acc/`: 24 KB/req, round B 9680–9684, `run*.acclines` 900 each |
+| `.wolfi` stamps only, no hash moves | `wolfi-bump.diff` (14 files, 14 `toolchain` lines each way, 0 `export_hash`/`pkg_hash` lines: `wolfi-bump.counts`) and `interface-emit.log` (`emit-exit=0`) = commit `9a04fc8` |
+| gauntlet GREEN at the bump | `gauntlet-bump.log` at `9a04fc8` (`gauntlet-bump.head`, `gauntlet-bump.mask`: `SigBlk 0x10000`, `SigIgn 0x6`): exit 0, 414 s, 299/299 lane-runs, differential 22/22, proxy 8/8, control 9/9, logdiff 4/4, signal 21/21, membudget 17/17, TLS interop 8 cases 0 red, `lobo-stamp: ok` |
+| retention after (bump `9a04fc8`, 0.2.20) | `instr-bump/`: 19/20 KB/req, round B 7952–7956 / 8160–8244, binary `6d0fca17…`. `instr-bump-acc/`: 24 KB/req, round B 9680–9688, 900 lines per run |
+| #483 fixed for lobo, by build × mask | `sigctl/summary.txt`: `signal 0219 clean exit=0 … 21/21`, `signal 0219 blocked exit=124 quit=0`, `signal 0220 clean exit=0 … 21/21`, `signal 0220 blocked exit=0 quit=1 green=21/21`. Builds `sigctl/build-02{19,20}.log` (`46565129…`, `6d0fca17…`). Launcher mask per run in `sigctl/signal-*.mask` (`SigBlk 0x10000`, `SigIgn 0x6`); the server's per-thread masks in `sigctl/signal-*.threads`: the 0.2.19 blocked server has 18 threads at `0x6`, `wolf-signal` included; the 0.2.20 blocked server has 17 at `0x6` and `wolf-signal` at `0x2`; both clean servers are `0x0` throughout. Logs `sigctl/signal-*.log`. No server survived any run (`sigctl/*.pids`, nothing killed) |
+| gauntlet GREEN at the head | `gauntlet-head.log` at `488c38f` (`gauntlet-head.head`, `gauntlet-head.mask` SIGCHLD only): exit 0, 367 s, 299/299, differential 22/22, proxy 8/8, control 9/9, signal 21/21, `lobo-stamp: ok`; binary `6d0fca17…` (`gauntlet-head.binary`), the third build of the bump source to give those bytes |
+| CI at the head | PR #44, run 36965212091 at `488c38f`: success, 8 m 40 s, toolchain built from source at 0.2.20 / 0.1.43 (`wolf 0.2.20 (wolfgang, pin cdde128)`), 299/299 lane-runs, differential 22/22, proxy 8/8, signal 21/21, `lobo-stamp: ok`. The run at this index commit is cited in the PR body |
 
 ### §2 drift and corrections found by the lane
 
-- (filled in at the close)
+- The brief's inputs all held: `35f93a35`, release 401498582 and release 401010971, with lupin 0.1.43's pin at `c2401f0` = v0.2.19 as the CHANGELOG says. The lane gap stays one release.
+- The brief says ws44 found "seven prose claims beyond the toml". The sites the pin names outside the toml are the three `shell.lu` lines and the 14 `.wolfi` stamps, and that is all ws44's commits moved; no seventh prose site exists in the tree. The only other version prose is the 0.2.16 sample `-v` line in `README.md` and `docs/GETTING-STARTED.md`, named in §2 and left.
+- P7 named the trunk-source 0.2.20 binary `e468eb30…`; the bump's binary is `6d0fca17…` because the shell constants are in it. The prediction's substance (the binary moves, the served bytes do not) holds; the digit was the probe's, not the bump's.
+- `timeout`(1) runs its command in its own process group and signals the group, so the 0.2.19 blocked-mask run reaped its own hung server on the way out (`sigctl/*.pids` show no survivor). ws44's orphan came from a different launcher. A lane that runs `lobo-signal` under a mask without `timeout` must still expect the orphan.
+- Under `setsid bash … &` from a non-interactive `bash -lc`, SIGINT and SIGQUIT are *ignored* (`SigIgn 0x6`), not blocked. The clean-mask servers show `SigIgn 0x2`: lobo's handler replaced the inherited ignore on SIGQUIT, and SIGINT (never armed) stays ignored. That is why ws44's and this lane's ordinary gauntlets never saw #483; only an inherited *block* did.
 
 ## 5. Done-when
 
-- [ ] Branch `ws46` on origin; PR open against `trunk`, **unmerged**.
-- [ ] CI green at the head sha, read with `gh run view` (never `watch` without `--interval 60`), on a run that acquired the toolchain and ran the gauntlet (6 minutes or more).
-- [ ] The pin moves in its own commit; the shell constants in their own; `.wolfi` in its own `interface(…)` commit.
-- [ ] Anything 0.2.20 newly refuses or newly accepts is named by file, or shown to be zero by a search that was seen to fire and by a build at `--error-limit=0`.
-- [ ] `lobo-signal` 21/21 under SIGINT+SIGQUIT blocked on the 0.2.20 build, the 0.2.19 control red beside it, SigBlk recorded for every signal run.
-- [ ] Retention before and after, by path, on the unmodified instrument and on the access-log variant.
-- [ ] The gauntlet GREEN at the head on kasumi, by log path, with its mask recorded.
-- [ ] §2 drift and §3's verdicts reported; the CHANGELOG entry carries them.
-- [ ] The worktree is gone, the kasumi build dirs are pruned (logs kept), and no orphans remain.
+- [x] Branch `ws46` on origin; PR #44 open against `trunk`, **unmerged**.
+- [x] CI green at the head sha, read with `gh run view` (never `watch` without `--interval 60`), on a run that acquired the toolchain and ran the gauntlet (6 minutes or more): 36965212091 at `488c38f`, 8 m 40 s; the index commit's run is in the PR body.
+- [x] The pin moves in its own commit (`2a5f70e`); the shell constants in their own (`46382fc`); `.wolfi` in its own `interface(…)` commit (`9a04fc8`).
+- [x] Anything 0.2.20 newly refuses or newly accepts is named by file, or shown to be zero by a search that was seen to fire and by a build at `--error-limit=0`.
+- [x] `lobo-signal` 21/21 under SIGINT+SIGQUIT blocked on the 0.2.20 build, the 0.2.19 control red beside it, SigBlk recorded for every signal run.
+- [x] Retention before and after, by path, on the unmodified instrument and on the access-log variant.
+- [x] The gauntlet GREEN at the head on kasumi, by log path, with its mask recorded.
+- [x] §2 drift and §3's verdicts reported; the CHANGELOG entry carries them.
+- [x] The worktree is gone, the kasumi build dirs are pruned (logs kept), and no orphans remain (done after this commit; the lane report says so).
