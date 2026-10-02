@@ -29,8 +29,12 @@
 # the constant moves with it.
 # ws41: 2 -> 4 — `user` warns and loads when unprivileged (as nginx
 # does), so flask-docs and nginx-pkg-oss load identically.
+# ws47 (lobo#38): LOBO_LENIENT 2 -> 0 — crossplane-empty-value-map
+# (a map value reading `$arg`, which no nginx defines) and
+# certbot-vhost (an absent `ssl_dhparam` for a server with a
+# certificate) now refuse in lobo as they do in every nginx build.
 IDENTICAL_LOADS=4
-LOBO_LENIENT=2
+LOBO_LENIENT=0
 set -u
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-rigproc.sh

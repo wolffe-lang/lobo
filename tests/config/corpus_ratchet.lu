@@ -1,4 +1,4 @@
-//! check: run(exit=0, stdout="corpus ratchet: 40 configs — 16 parse-clean / 6 named-delta / 18 refused-by-name / 0 silent")
+//! check: run(exit=0, stdout="corpus ratchet: 40 configs — 15 parse-clean / 6 named-delta / 19 refused-by-name / 0 silent")
 //! phase: run
 //! lanes: native
 //! stage-src: config
@@ -52,13 +52,19 @@ use config
 /// thirteen named_error rows for ws40's next blockers (`deny`, `allow`,
 /// uwsgi, `charset_types`, http2, proxy buffers, two ssl rows,
 /// `auth_request`) move five refused configs to named-delta, refused at
-/// -t BY NAME instead of as unknown — 16 / 6 / 18.
+/// -t BY NAME instead of as unknown — 16 / 6 / 18. ws47 (lobo#38):
+/// `crossplane-empty-value-map` reads `$arg`, which no nginx defines,
+/// and now refuses at load as every nginx does (`unknown "arg"
+/// variable`, located) — parse-clean 16 → 15, refused 18 → 19. The
+/// count that LOWERED is the right direction: it was a lobo-lenient
+/// config. (`certbot-vhost`'s dhparam refusal is the ssl half of -t,
+/// not load(), so it stays parse-clean here.)
 fn ratchet_configs() -> int {
     40
 }
 
 fn ratchet_parse_clean() -> int {
-    16
+    15
 }
 
 fn ratchet_named_delta() -> int {
@@ -70,7 +76,7 @@ fn ratchet_named_delta() -> int {
 /// is the good direction (a directive landed); it still needs the
 /// reason in the commit message, like every count here.
 fn ratchet_refused() -> int {
-    18
+    19
 }
 
 fn main() -> int {

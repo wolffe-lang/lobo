@@ -70,17 +70,17 @@ licensed public repositories.
 |---|---|---|
 | **identical load**: pinned `-t` 0 and lobo `-t` 0 | **4** (distro-default, reverse-proxy; flask-docs and nginx-pkg-oss since ws41's `user`) | `IDENTICAL_LOADS=4`, `tools/lobo-confcheck` |
 | loads on lobo and on stock nginx; the pinned build lacks rewrite, gzip, PCRE or HTTP/2 | 10 (crossplane-messy, netbox and synapse-docs joined at ws41) | the per-config annotation, `oracle-build` |
-| **lobo-lenient**: lobo loads, and every nginx build refuses | **2** (certbot-vhost, crossplane-empty-value-map; lobo#38) | `LOBO_LENIENT=2`, `tools/lobo-confcheck` |
+| **lobo-lenient**: lobo loads, and every nginx build refuses | **0** (ws47 fixed lobo#38: certbot-vhost and crossplane-empty-value-map now refuse as nginx does) | `LOBO_LENIENT=0`, `tools/lobo-confcheck` |
 | lobo refuses, stock nginx loads | 16 | per-config annotation + the blocked table below |
-| both refuse | 8 | per-config annotation |
-| **total** | **40** | `tests/config/corpus_ratchet.lu`: 16 parse-clean / 6 named-delta / 18 refused-by-name / **0 silent** (ws41: `user` gated, then 13 `named_error` rows) |
+| both refuse | 10 (certbot-vhost and crossplane-empty-value-map joined at ws47) | per-config annotation |
+| **total** | **40** | `tests/config/corpus_ratchet.lu`: 15 parse-clean / 6 named-delta / 19 refused-by-name / **0 silent** (ws41: `user` gated, then 13 `named_error` rows; ws47: crossplane-empty-value-map refuses at load) |
 
 Every config's exits are pinned in its own `# lobo-corpus: oracle-exit=N
 lobo-exit=M delta=…` line. `tools/lobo-confcheck` runs both binaries on
 every entry and reds on any exit that differs from its annotation. So a
 lobo change that flips one config reds by name, and a hand edit that
 lowers the count reds on the constant. Against the stock build, lobo
-loads 16 of 40 (11 before ws41's `user`) and nginx loads 30 of 40.
+loads 14 of 40 (11 before ws41's `user`, 16 before ws47 refused the two lobo-lenient configs) and nginx loads 30 of 40.
 
 **Identical routing.** Every entry carries a `lobo -t --request`
 dry-run probe under `tests/dryrun/probes/` (41 probes, gated by
@@ -100,7 +100,7 @@ a named gap for the lane that implements `return` and `server_name`.
 
 | config | source | licence | pinned `-t` | stock `-t` | lobo `-t` | verdict | what lobo refuses (peeled, in order; `*` = not a missing directive) |
 |---|---|---|---|---|---|---|---|
-| `certbot-vhost` | synthetic | n/a-synthetic | 1 | 1 | 0 | **lobo-lenient** | — |
+| `certbot-vhost` | synthetic | n/a-synthetic | 1 | 1 | 1 | both refuse (lobo-lenient until ws47) | `ssl_dhparam` (an absent file; lobo#38) |
 | `distro-default` | nginx-1.30.4 | BSD-2-Clause | 0 | 0 | 0 | **identical load** | — |
 | `lua-openresty` | synthetic | n/a-synthetic | 1 | 1 | 1 | both refuse | `lua_shared_dict`, `content_by_lua_block` |
 | `map-and-if` | synthetic | n/a-synthetic | 1 | 0 | 0 | loads on both (pinned build lacks a module) | — |
@@ -109,7 +109,7 @@ a named gap for the lane that implements `return` and `server_name`.
 | `reverse-proxy` | synthetic | n/a-synthetic | 0 | 0 | 0 | **identical load** | — |
 | `static-site` | synthetic | n/a-synthetic | 1 | 0 | 0 | loads on both (pinned build lacks a module) | — |
 | `certbot-nginx-fixture` | [certbot/certbot](https://github.com/certbot/certbot/blob/485649333422392901e7ef891630f0129985df8e/certbot/src/certbot/_internal/tests/plugins/nginx/testdata/etc_nginx/nginx.conf) | Apache-2.0 | 1 | 1 | 1 | both refuse | `empty`, `ssl`, `deny`, `user`, `listen*`, `ssl_certificate*` |
-| `crossplane-empty-value-map` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/empty-value-map/nginx.conf) | Apache-2.0 | 1 | 1 | 0 | **lobo-lenient** | — |
+| `crossplane-empty-value-map` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/empty-value-map/nginx.conf) | Apache-2.0 | 1 | 1 | 1 | both refuse (lobo-lenient until ws47) | `$arg` (unknown variable; lobo#38) |
 | `crossplane-includes-globbed` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/includes-globbed/nginx.conf) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks a module) | — |
 | `crossplane-includes-regular` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/includes-regular/nginx.conf) | Apache-2.0 | 1 | 1 | 1 | both refuse | `include*` |
 | `crossplane-messy` | [nginxinc/crossplane](https://github.com/nginxinc/crossplane/blob/16de93a158661719f002c5f53711926176cedbc7/tests/configs/messy/nginx.conf) | Apache-2.0 | 1 | 0 | 0 | loads on both (pinned build lacks a module; `user` resolved at ws41) | — |
@@ -229,7 +229,7 @@ many of those configs a stock nginx loads.
 | 28 | `break` | no row | 1 | 1 | — | puma-docs |
 | 29 | `chunked_transfer_encoding` | no row | 1 | 1 | — | gunicorn-asgi-compliance |
 | 30 | `client_body_temp_path` | no row | 1 | 1 | — | nginx-proxy-manager |
-| 31 | `client_max_body_size 4G` (the g suffix, lobo#37) | not a directive | 1 | 1 | — | gunicorn-example |
+| 31 | `client_max_body_size 4G` (the g suffix, lobo#37 — **fixed at ws47**) | not a directive | 1 | 1 | — | gunicorn-example |
 | 32 | `daemon` | `named_error` row | 1 | 1 | — | nginx-proxy-manager |
 | 33 | `early_hints` | no row | 1 | 1 | — | gunicorn-http2 |
 | 34 | `env` | no row | 1 | 1 | `crossplane-russian-text` | crossplane-russian-text |
@@ -238,7 +238,7 @@ many of those configs a stock nginx loads.
 | 37 | `fastcgi_busy_buffers_size` | no row | 1 | 1 | — | laravel-docs |
 | 38 | `fastcgi_hide_header` | no row | 1 | 1 | — | laravel-docs |
 | 39 | `gzip_static` | no row | 1 | 1 | — | h5bp-test-vhosts |
-| 40 | `if ($x ~ "…\(")` lexed wrong (lobo#36) | not a directive | 1 | 1 | — | nginx-proxy-manager |
+| 40 | `if ($x ~ "…\(")` lexed wrong (lobo#36 — **fixed at ws47**: the `)` after the quote, not the `\(`) | not a directive | 1 | 1 | — | nginx-proxy-manager |
 | 41 | `if_modified_since` | no row | 1 | 1 | — | nginx-proxy-manager |
 | 42 | `log_not_found` | no row | 1 | 1 | — | laravel-docs |
 | 43 | `output_buffers` | no row | 1 | 1 | — | superset |
