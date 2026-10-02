@@ -198,6 +198,15 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+### Erratum (2026-10-02, ws47, lobo#32)
+
+"What is in it" above names nginx's `try_files` resolution. 0.1.0 did
+not serve `try_files`: its table row was `planned(ws02)` at v0.1.0 and
+still is (`src/config/table.lu`), a config naming it loads without it,
+and `docs/directives.md` has always said so. The static resolution
+0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
+release's text as published and is left as it was.
+
 ## ws46 — 2026-10-02 — the pin at 0.2.20 (nothing refused, nothing to revert; `kill -QUIT` under a blocked mask arrives)
 
 - **The pin**, from the release archives by digest on kasumi: wolf
