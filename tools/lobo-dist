@@ -142,8 +142,19 @@ cp conf/lobo.conf "$stage/conf/"
 cp html/index.html "$stage/html/"
 # GETTING-STARTED.md rides at the TOP of the archive (it is the first
 # thing a learner opens); docs/ carries the contracts, not a copy of it.
+# lobo#34 (ws47): a lane's own working files — its contract, its
+# prediction, anything named for the lane (`wsNN-*.md`) — are not user
+# documentation and never ship; they live under notes/, which the
+# archive does not carry. One in docs/ is a packaging error, refused
+# by name here, because the tap (`doc.install Dir["docs/*"]`) and the
+# AUR package (`install -m644 docs/*.md`) install whatever docs/ holds.
 for d in docs/*.md; do
     [ "$d" = "docs/GETTING-STARTED.md" ] && continue
+    case "$(basename "$d")" in
+        ws[0-9]*-*.md | *-prediction.md | *-contract.md)
+            fail "$d is a lane's working file, not user documentation — it belongs under notes/ (lobo#34)"
+            ;;
+    esac
     cp "$d" "$stage/docs/"
 done
 {
