@@ -94,7 +94,7 @@ the same way); a set with one unsatisfiable member; four 416 shapes;
 an unknown unit and an oversized set (both a full 200); `If-Range` by
 ETag, by a stale ETag and by date; `HEAD`; a 304 that outranks the
 range; and `max_ranges 1` / `max_ranges 0`. At trunk `d65cce0` lobo
-matched 4 of them and 15 were red (`docs/ws41-prediction.md`).
+matched 4 of them and 15 were red (`notes/ws41-prediction.md`).
 
 ## Determinism
 

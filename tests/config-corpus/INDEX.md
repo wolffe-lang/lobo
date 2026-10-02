@@ -295,7 +295,7 @@ refuses them by name with a reason instead of as unknown; five
 configs moved from refused to named-delta in the classification
 ratchet.
 
-## §3 against the measurement (`docs/ws40-prediction.md`)
+## §3 against the measurement (`notes/ws40-prediction.md`)
 
 | prediction | measured | verdict |
 |---|---|---|
