@@ -168,6 +168,117 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+**The rows at wolf 0.2.20 (ws47, 2026-10-02).** README's table carried
+one row per host, both taken before 0.2.16 (macOS with wolf 0.2.8 at
+ws26, linux with 0.2.11 at ws33). The three entries below re-take the
+bar exactly as written, on the runner, on this Mac, and — new — on
+kasumi, whose three sets were refused and are entered as refused (the
+ws27/ws28 precedent for indicative macOS sets), because a host that
+will not give a valid set is itself the finding.
+
+### 2026-10-02 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws47: trunk's source at wolf 0.2.20, ONE tree · **VALID** · **NOT MET on both shapes** (close 1.151x, keepalive 1.240x on the slow class)
+
+The bar re-taken at the 0.2.20 pin (both README rows predated 0.2.16).
+Run 37056568350 (`parity=true profile=true profile_shape=keepalive
+profile_n=1 syscalls=true this_name=ws47`) at `f6195bc` — trunk
+`f49f014`'s source plus the lane's contract, so the serving path is
+trunk's byte for byte. Load 1.88 after the settle loop, nginx close
+**24.9k**, keepalive 84.8k: the runner's SLOW class (ws31's and ws32's
+rows were on it too, so these ratios compare with theirs). nginx
+1.30.4, 5 pairs × `ab -t 5`, c=32 over 4 generators, no failed
+request:
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo / nginx cores | µs cpu a request, lobo / nginx |
+|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 21,761 | 24,947 | **1.151x** [1.107, 1.153] | 1.78 / 1.57 | 81.8 / 62.9 (**+18.9**) |
+| **N=4 c=32** | keepalive | 68,460 | 84,832 | **1.240x** [1.198, 1.258] | 2.63 / 2.46 | 38.4 / 29.0 (**+9.4**) |
+| N=1 c=32 | close | 14,891 | 15,109 | 1.013x [1.002, 1.031] | 1.00 / 0.99 | 67.2 / 65.5 (+1.7) |
+| N=1 c=32 | keepalive | 29,731 | 35,146 | 1.172x [1.153, 1.183] | 1.00 / 1.00 | 33.6 / 28.5 (+5.2) |
+
+PREDICTED (`notes/ws47-contract.md` §3 P1, before the set): close
+1.10–1.25x, keepalive 1.20–1.35x, NOT MET. **Measured inside both
+bands.** Against ws31's slow-class row at 0.2.11 (1.139x / 1.282x) the
+close cell is 0.012 worse and the keepalive cell 0.042 better, both
+inside a pair spread; nine releases of wolf moved neither shape. The
+count leg in the same job reads the syscalls per request unchanged
+(keepalive **6.30 vs nginx 6.14**, close **10.24 vs 10.13**; ws31:
+6.27 and 10.20), so the gap is not more calls. Where the time goes is
+`docs/PROFILE.md`'s ws47 addendum: at one hand the keepalive gap is
+lobo's user space (lobo + libc 24.5 % of the hand's samples), and four
+hands pay what one does not (+14.6 µs a connection and +4.8 µs a
+request from N=1 to N=4, where nginx's cost falls or holds).
+
+### 2026-10-02 · macOS arm64 · nomad-1 (18 cpus) · ws47: trunk's source at wolf 0.2.20 · **VALID (3 of 4)** · **MET on both shapes** (close 1.031x, keepalive 1.037x)
+
+The bar re-taken at the 0.2.20 pin on the development box, which
+other lanes and the maintainer's own processes share (bun, qemu, a
+Rust build, the window server); it was not quiet in any absolute
+sense, and the tool's rule is the measure: load(1m) **2.80** at the
+start (under 3.0; 6.98 by the end, the set's own generators
+included). lobo is the darwin release build of `f6195bc`'s `src/`
+(trunk's source) compiled with the published wolf 0.2.20 archive
+(`c8a3f1a3…`) and lupin 0.1.43 (`24d3e8f1…`), binary `5c7818e3…`;
+nginx 1.30.4 (the pin's configure line, `09e61975…`); `ab` 2.3
+(macOS's); 5 pairs × `ab -t 5`, c=32 over 4 generators, no failed
+request, 19:47–19:51Z:
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo / nginx cores | ab cores max |
+|---|---|---|---|---|---|---|
+| **N=18 c=32** | close | 21,231 | 22,060 | **1.031x** [0.994, 1.048] | 5.92 / 4.13 | 0.37 |
+| **N=18 c=32** | keepalive | 118,422 | 123,238 | **1.037x** [1.020, 1.063] | 10.39 / 12.70 | 0.37 |
+| N=1 c=32 (REFUSED) | close | 33,608 | 33,626 | 0.994x [0.961, 1.028] | 0.68 / 0.58 | 0.28 |
+| N=1 c=32 (REFUSED) | keepalive | 83,302 | 88,107 | 1.062x [0.966, 1.126] | 0.97 / 0.96 | 0.28 |
+
+The N=1 cell is refused on nginx's keepalive spread (1.173 > 1.15),
+the P/E-core swing this box puts on every one-process row; under the
+ws23 refusal scope the gating verdict stands. PREDICTED (§3 P3): close
+0.95–1.10x, keepalive 0.98–1.15x. **Measured inside both bands.**
+Against ws26's quiet set at 0.2.8 (1.033x / 1.072x) the close cell
+holds and keepalive is 0.035 nearer. lobo's close cell costs more cpu
+than nginx's (5.92 against 4.13 cores for the same rate) — the herd
+that linux shows as time shows here as cores. W8's macOS standing:
+**MET on both shapes at 0.2.20.**
+
+### 2026-10-02 · linux x86-64 · kasumi (16 cpus) · ws47: trunk's source at wolf 0.2.20 · **REFUSED ×3** (nginx's N=16 cell would not hold still; indicative, not a result)
+
+A new host for this ledger: kasumi, Intel i9-11900K, 8 cores × 2
+threads = **16 cpus**, so N = 16; CachyOS, the org's pool box, shared
+this afternoon with two other lanes (s199, bu14). It is not the bar's
+linux host (that is the CI runner, above) and no ratio here compares
+with a runner row. `ab` is not installed on kasumi; the lane built
+ApacheBench 2.3 (`<$Revision: 1934973 $>`) from Apache's source
+tarballs (apr 1.7.6, apr-util 1.6.5, httpd 2.4.69, each digest-checked)
+into the lane's own directory, binary `05f2f6d5…`. lobo is the 0.2.20
+release build of `f6195bc` (trunk's source), `6d0fca17…` — the same
+bytes as ws46's head build; nginx 1.30.4, `65595ac2…`. Three sets,
+each refused by the tool on the oracle-stability rule (nginx's five
+runs on a shape spread more than 1.15) and on nothing else — load,
+generator and failure checks all held:
+
+| set (UTC) | load(1m) at start | N=16 close | N=16 keepalive | N=1 close | N=1 keepalive | refused on |
+|---|---|---|---|---|---|---|
+| k1 19:48 | 0.34 | 1.838x [1.403, 1.861] | 1.967x [1.925, 2.339] | 1.167x [1.151, 1.171] | 1.202x [1.191, 1.242] | nginx close 1.336, keepalive 1.259 |
+| k2 19:54 | 0.96 | 1.547x [1.437, 1.876] | 2.087x [1.790, 2.346] | 1.151x [1.061, 1.167] | 1.216x [1.128, 1.229] | nginx close 1.322, keepalive 1.256 |
+| k3 20:49 | 1.89 (5m 2.08; s199's lupin at one core) | 1.866x [1.706, 1.929] | 2.041x [1.564, 2.242] | 1.165x [1.120, 1.221] | 1.183x [1.141, 1.227] | nginx keepalive 1.221 |
+
+Medians of the medians, indicative only: N=16 close ~1.84x and
+keepalive ~2.04x (nginx 144–190k and 745–922k req/s; lobo 97–102k
+and 393–474k); N=1 close ~1.17x and keepalive ~1.20x, which is the
+runner's N=1 shape. nginx moved between two levels pair to pair (close
+~142k or ~190k, keepalive ~745k or ~925k) with lobo moving in the same
+pairs, so the refusals are the box, not one server; the third set
+waited 40 minutes for load under 2 and did not get it. PREDICTED (§3
+P2): close 1.00–1.20x, keepalive 1.10–1.40x. **Falsified on both
+shapes, by a factor that no refusal explains**: every pair of all
+three sets has N=16 close above 1.40 and keepalive above 1.56. The
+cells this box adds to the runner's are the sixteen-hand ones, and
+`docs/PROFILE.md`'s ws47 addendum reads why off `/proc`: at sixteen
+hands lobo's close shape spends **66 µs of cpu a connection against
+nginx's 17** (the herd, every hand awake for every accept), and its
+keepalive hands sit **idle three quarters of the time** with the
+connections spread 4x unevenly across them.
+
+
 ### 2026-09-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws33: the route index ÷ trunk, TWO TREES ON ONE VM · **VALID** · **NOT MET on both shapes** (close 1.197x, keepalive 1.263x — the FAST class); **the change is NOT VISIBLE: ws33 ÷ trunk 0.983–0.992x on all four cells**
 
 The ws25 two-tree instrument, run 34631705651 (`parity=true
