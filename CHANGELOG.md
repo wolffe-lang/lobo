@@ -198,6 +198,103 @@ config dry-run that answers *what would this config actually do*.
 `docs/directives.md` is the directive-by-directive table, and every
 place lobo differs from nginx is a named delta in it.
 
+## ws46 — 2026-10-02 — the pin at 0.2.20 (nothing refused, nothing to revert; `kill -QUIT` under a blocked mask arrives)
+
+- **The pin**, from the release archives by digest on kasumi: wolf
+  **0.2.20** (`cdde128`, release 401498582, linux x86-64
+  `24855d5e…`) and lupin **0.1.43** (`6d6cde5`, release 401010971,
+  `e957c8de…`). wolf-std stays at **`14f0ab2`**. Members by name:
+  `wolf` `3fb48c1d…`, `libwolf_rt.a` `c011f2ae…`,
+  `wolf-cimport-worker` `13a61554…`, `lupin` `3b0702c0…`; `_wolf` is
+  unchanged. The pairing gap is zero. lupin 0.1.43's conformance pin
+  is v0.2.19, so the lane gap stays one release.
+- **The std pin was re-derived at 0.2.20 before the bump (B151).**
+  `14f0ab2` is still wolf-std's trunk. Trunk's source built against it
+  at 0.2.20 exits 0 on both tiers with zero diagnostics at
+  `--error-limit=0`, and the same tree at 0.2.19 reproduces ws44's
+  release binary `46565129…` byte for byte.
+- **What 0.2.20 newly refuses, in lobo: nothing — 0 new diagnostics,
+  as s186, s190 and s192 measured upstream.** Trunk's `src/` compiles
+  with zero diagnostics on both tiers, and the gauntlet's 299 corpus
+  lane-runs are green, lupin 0.1.43's lane included. The release
+  refuses four shapes 0.2.19 compiled: a write, move, re-claim or lend
+  of a `mut`-claimed place or `mut` receiver inside a later argument
+  of the same call (E1002, wolf-lang#476/#487), a moded fn used as a
+  value (#484), a nested fn called without its parameter's mode
+  (E1007, #466), and a read after the struct field shorthand moved the
+  local (E1001, #486). Each shape planted into a copy of `main.lu`
+  compiles at 0.2.19 and is refused at 0.2.20, so the probe fires:
+  `recv` E1002 ("`xs` is the call's `mut` receiver here"), `shorthand`
+  E1001, `nested` E1007, `fnval` exit 4 ("cannot compile this yet — a
+  fn with `mut` or `take` parameters used as a value").
+- **What 0.2.20 newly accepts, for lobo: nothing waiting.** Ruling #17
+  makes a direct read of a claimed place in a later argument legal
+  (`grow(mut xs, xs.len)`, E1002 through 0.2.19) and EG3 proves an
+  offset pair distinct (`add2(mut xs[i], mut xs[i + 1])`). Both plants
+  are E1002 at 0.2.19 and compile at 0.2.20. lobo's nine two-phase
+  read sites (`src/main.lu:1013`, eight in `src/acme/flow.lu`) were
+  already in their natural spelling (ws45 stood down on the ruling),
+  so there is nothing to revert. Portable searches, each seen to fire
+  on a planted line: **0** element claims, **0** nested `fn`, **0**
+  struct-literal shorthands (the one match is a comment at
+  `src/acme/acme.lu:661`).
+- **The bump is stamps only.** It is the pin file, fourteen `.wolfi`
+  stamps (no hash moved) and two `shell.lu` constants (`std_rev`
+  holds). The gauntlet was GREEN at the bump commit `9a04fc8` on
+  kasumi in 414 s: 299/299 corpus lane-runs, the differential 22/22,
+  the proxy differential 8/8, the control differential 9/9, the log
+  differential 4/4, the signal witness 21/21, membudget 17/17, TLS
+  interop 8 cases with 0 red, `lobo-stamp: ok`.
+- **wolf-lang#483 is fixed for lobo, and the mask says why.** ws44
+  found that a lobo which inherited SIGQUIT blocked never answered
+  `kill -QUIT`; s188 has the runtime's `wolf-signal` thread unblock
+  exactly the signals the program arms. Measured as a 2×2 of build ×
+  mask on trunk's source, SigBlk recorded for every run
+  (`sigctl/summary.txt`, `sigctl/signal-*.threads`):
+
+  | build | clean mask | SIGINT+SIGQUIT blocked |
+  |---|---|---|
+  | 0.2.19 (`46565129…`) | 21/21, exit 0 | **timeout 124**, `kill -QUIT` never answered; every thread `SigBlk 0x6`, `wolf-signal` included |
+  | 0.2.20 (`6d0fca17…`) | 21/21, exit 0 | **21/21, exit 0**; `wolf-signal` at `SigBlk 0x2`, every other thread still `0x6` |
+
+  The fix is exactly as wide as its clause: lobo arms HUP, TERM, QUIT
+  and the USR2 probe, so `wolf-signal` drops SIGQUIT (0x4) from its
+  mask and keeps SIGINT (0x2), which lobo never arms, blocked. No
+  lobo change was needed and none was made. The head gauntlet,
+  launched under the ordinary `setsid` mask (`SigBlk 0x10000`,
+  SIGCHLD), is 21/21 as before.
+- **Retention on `tools/lobo-membudget`, five runs per cell, kasumi.**
+  The access-log column is ws42's scratch variant (one `access_log`
+  line, 900 log lines per run, never committed).
+
+  | tree | plain KB/req (round B) | cap KB/req (round B) | access-log variant KB/req (round B) |
+  |---|---|---|---|
+  | trunk `35f93a3`, 0.2.19 | 19 (7952–7964) | 20 (8216–8284) | 24 (9680–9684) |
+  | bump `9a04fc8`, 0.2.20 | 19 (7952–7956) | 20 (8160–8244) | 24 (9680–9688) |
+
+  Nothing moved. The release binary did (`46565129…` → `6d0fca17…`),
+  the bytes it serves did not, and two builds of the bump tree at
+  0.2.20 (`sigctl/build-0220.log`, `instr-bump/`) gave the same
+  `6d0fca17…` with the mid-end off.
+- **Named, not changed:** `README.md:25` and
+  `docs/GETTING-STARTED.md:41` quote a sample `-v` line at wolf
+  0.2.16; the pin does not name it and three pin lanes left it.
+  `replace_int`/`replace_str` (ws44's note) stand. The `WOLF_MIDEND`
+  flip-back is still owed (ws37) and wolf-lang#503 (release IR
+  nondeterministic with the mid-end on) is one more reason it waits.
+
+### The predictions (`notes/ws46-contract.md` §3)
+
+| # | predicted | measured | verdict |
+|---|---|---|---|
+| P1 | the pin, 14 stamps with no hash moving, 2 constants | exactly that; `lobo-stamp` ok | right |
+| P2 | gauntlet GREEN at the bump, 299/299 | GREEN, 299/299 lane-runs, 414 s | right |
+| P3 | zero new diagnostics; six plants move as stated | 0 and 0 on both tiers; all six moved | right |
+| P4 | nothing to revert | nothing | right |
+| P5 | 19/20/24 KB/req, round B within ±150 KB of 7956/8240/9682 | 19/20/24; within 80 KB | right |
+| P6 | 0.2.19 blocked times out, 0.2.20 blocked 21/21; SIGINT stays blocked | exactly that, per thread | right |
+| P7 | the binary moves, the served bytes do not | `6d0fca17…`; every differential green | right |
+
 ## ws44 — 2026-09-30 — the pin at 0.2.19 (nothing refused, nothing to revert)
 
 - **The pin**, from the release archives by digest on kasumi: wolf
