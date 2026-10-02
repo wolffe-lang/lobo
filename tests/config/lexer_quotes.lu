@@ -52,6 +52,21 @@ fn main() -> int {
     // p73/p74: `}` and `#` are not post-quote delimiters.
     check("\"txt\"}}", "d|txt\nerr|1|unexpected \"}}\"\n", "p73 rbrace after quote")
     check("\"nope\"#c", "d|nope\nerr|1|unexpected \"#\"\n", "p74 hash after quote")
+    // lobo#36 (ws47): `)` after a closing quote is legal and STARTS a
+    // word — nginx 1.30.4's ngx_conf_read_token (ngx_conf_file.c:647)
+    // clears need_space on `)` and falls into the new-word branch, so
+    // `if ($q ~ "re")` lexes as `($q` `~` `re` `)`. The backslash in the
+    // issue's regex is incidental: the backslash-free form refused the
+    // same way at trunk. Probed on kasumi 2026-10-02 (the pinned and
+    // stock 1.30.4): `include "x.conf");` and `include "x.conf")b;` are
+    // "invalid number of arguments in "include" directive" — two args.
+    check(
+        "if ($q ~ \"union.*select.*\\(\") {{\n}}",
+        "w|if\nw|($q\nw|~\nd|union.*select.*\\(\nw|)\n{{\n}}\n",
+        "lobo#36 paren after a double quote",
+    )
+    check("include \"x.conf\")b;", "w|include\nd|x.conf\nw|)b\n;\n", "lobo#36 paren starts a word")
+    check("include 'x.conf');", "w|include\ns|x.conf\nw|)\n;\n", "lobo#36 paren after a single quote")
     // p65: `{` is a legal post-quote delimiter.
     check("location \"/x\"{{\n}}", "w|location\nd|/x\n{{\n}}\n", "p65 brace after quote")
     // p08: quoted arg keeps its interior space; `;` after ws is fine.
