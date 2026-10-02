@@ -384,7 +384,87 @@ at 5 of 63 µs and a larger share now that the reactor trips are
 gone); and the remainder is the kernel serving a socket, which is the
 same on both sides of the bar.
 
-### What this does NOT say
+### ws47's addendum — where the time goes at wolf 0.2.20, the runner and kasumi (2026-10-02)
+
+The parity ledger was re-taken at the 0.2.20 pin (`docs/PARITY.md`,
+three entries dated 2026-10-02). linux is still outside 1.10 on the
+runner (close 1.151x, keepalive 1.240x) and far outside it on kasumi's
+sixteen-hand cell (indicative ~1.84x / ~2.04x, three sets refused). Two
+instruments, one per host, both the methods this page already uses.
+
+### The runner, one hand, keepalive — `perf` (run 37056568350, the same VM as the ledger row)
+
+`tools/lobo-profile` at N=1, keepalive, 4 × `ab -k -c 8`, an 8 s
+window at 29,983 req/s, load 2.31. By dso: **kernel 75.1 %, lobo-release
+17.7 %, libc 6.8 %** (ws28 measured 74.4 / 18.2 / 6.9 on the same
+instrument at 0.2.9: the split has not moved in nine releases). The
+user-space quarter (24.5 % of a 33.6 µs request ≈ 8.2 µs) is lobo's own
+frames and the string runtime spread thin — the largest leaves are
+`serve_main` 1.65 %, `http.parse_request` 0.88 %, `serve.serve_request`
+0.87 %, `str::ambient_alloc` 0.85 %, `serve.head_warm` 0.79 %,
+`str::str_find` 0.78 %, `http.split_lines_strict` 0.60 %; libc's are
+`writev`, `calloc`, `recv`, `open64`, `malloc`/`cfree`/`realloc`. No
+leaf is over 2 %: there is no single row to take. nginx at N=1 costs
+28.5 µs a request on the same VM (the ledger row's cores ÷ req/s), so
+the one-hand gap is **5.2 µs a request, the same 5.2 µs ws31 measured
+at 0.2.11**. The count leg in the same job: keepalive **6.30 calls a
+request against nginx's 6.14**, close **10.24 against 10.13** — lobo's
+extra rows are the ones ws31 named (`statx` + `read` where nginx does
+`fstat` + `pread64`; `poll` 0.16 and `futex` 0.11 a request, the
+reactor's wake), and at idle lobo's four hands still make **782
+`futex` calls a second** where nginx makes none (wolf-lang#302's
+shape). From one hand to four, lobo's cpu a request grows 33.6 → 38.4
+µs on keepalive and 67.2 → 81.8 µs a connection on close, while
+nginx's holds (28.5 → 29.0) or falls (65.5 → 62.9): the herd, lobo#5.
+
+### kasumi, sixteen hands — the split, off `/proc`, no tracer
+
+kasumi's `perf_event_paranoid` is 2 and the lane takes no `sudo`, so
+the instrument there is the no-tracer split ws32 added to
+`tools/lobo-profile` (cpu seconds and `syscw` per process from
+`/proc/<pid>/stat` and `/proc/<pid>/io`), run by hand on both servers
+at N=16 with the bar's generators (4 × `ab -c 8`, 8 s per shape),
+`kasumi:~/lanes/ws47/split-s1.log`, 20:53Z, load **4.19** at the start
+(s199's std-test held a core): shares and µs, not rates.
+
+| N=16 | req/s | busy cores (Σ cpu ÷ 8 s) | µs cpu a request | requests per hand, min–max share |
+|---|---|---|---|---|
+| lobo keepalive | 374,048 | 3.8 | **10.1** | **2.4 %–9.9 %** (4.1x) |
+| nginx keepalive | 799,684 | 5.8 | 7.3 | 6.1 %–6.4 % |
+| lobo close | 94,692 | 6.2 | **65.9** a connection | 6.2 %–6.3 % |
+| nginx close | 164,387 | 2.8 | 16.8 a connection | 6.2 %–6.3 % |
+
+(One `writev` a response on both servers, so `syscw` counts requests
+everywhere except lobo's close shape, where it reads 3.07 a connection;
+that row's µs is per connection from the generators' count.)
+
+**Where the time goes, by shape.** *Close:* every lobo hand is equally
+busy and each connection costs **66 µs of cpu against nginx's 17** —
+3.9x, where the runner's four hands pay 1.3x and one kasumi hand pays
+~1.17x. That is the herd scaled by sixteen: each accept wakes hands
+that lose the race, and their `poll`/`accept4`/`futex`/eventfd work
+(the runner's count: `poll` 1.28 and `accept4` 1.08 a connection at
+four hands) is paid by every one of them. `listen … reuseport`
+(ws32, lobo#5) is the measured candidate; it is a posture change and
+not this lane's. *Keepalive:* lobo's cpu a request is only 1.38x
+nginx's, yet it serves half the rate, because its hands are **idle
+three quarters of the time** — 3.8 busy cores across sixteen — and the
+32 connections land **4.1x unevenly** across them while nginx's sit
+within 0.3 points. A keepalive connection stays on the hand that
+accepted it, so the busiest lobo hand carries ~3 connections and the
+idlest well under one; and each request's round trip (≈ 85 µs per
+connection against nginx's ≈ 40) is mostly not lobo's cpu but the wake
+path between the reactor thread and the hand (the `poll` and `futex`
+rows above). At four hands on the runner both effects are small; at
+sixteen they are the gap.
+
+**What this does not say.** No `perf` profile was taken on kasumi; the
+split names the shape (herd on close, distribution and wake latency on
+keepalive), not the leaf. The load was 4.19, so the req/s columns are
+not the ledger's; the shares and per-request µs are what the split is
+for.
+
+## What this does NOT say
 
 - The count is the request's; the herd's cost per park is not a
   count but a wait, and this table only shows its syscalls.
