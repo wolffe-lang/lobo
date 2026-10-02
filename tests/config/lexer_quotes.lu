@@ -66,7 +66,11 @@ fn main() -> int {
         "lobo#36 paren after a double quote",
     )
     check("include \"x.conf\")b;", "w|include\nd|x.conf\nw|)b\n;\n", "lobo#36 paren starts a word")
-    check("include 'x.conf');", "w|include\ns|x.conf\nw|)\n;\n", "lobo#36 paren after a single quote")
+    check(
+        "include 'x.conf');",
+        "w|include\ns|x.conf\nw|)\n;\n",
+        "lobo#36 paren after a single quote",
+    )
     // p65: `{` is a legal post-quote delimiter.
     check("location \"/x\"{{\n}}", "w|location\nd|/x\n{{\n}}\n", "p65 brace after quote")
     // p08: quoted arg keeps its interior space; `;` after ws is fine.

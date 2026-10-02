@@ -86,7 +86,10 @@ fn main() -> !int {
         g2 == "\"client_max_body_size\" directive invalid value in t.conf:2",
         "t is not a unit: {g2}",
     )
-    assert(!config.limits_check(conf_of("  client_max_body_size 4mg;")).is_empty(), "4mg is not an offset")
+    assert(
+        !config.limits_check(conf_of("  client_max_body_size 4mg;")).is_empty(),
+        "4mg is not an offset",
+    )
     assert(config.body_max(conf_of("  client_max_body_size 0g;")) == 0, "0g is unlimited")
     assert(
         !config.limits_check(conf_of("  client_header_buffer_size 1g;")).is_empty(),

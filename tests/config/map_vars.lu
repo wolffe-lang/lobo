@@ -46,21 +46,40 @@ fn main() -> int {
         "arg",
         "crossplane-empty-value-map",
     )
-    refused("    map $nosuch $variable {{\n        default 1;\n    }}", "nosuch", "an unknown source")
+    refused(
+        "    map $nosuch $variable {{\n        default 1;\n    }}",
+        "nosuch",
+        "an unknown source",
+    )
     refused("    map $uri $a {{\n        default \"$nosuch\";\n    }}", "nosuch", "quoted value")
     refused("    map $uri $a {{\n        default ${{nosuch}}x;\n    }}", "nosuch", "braced value")
 
     loads("    map string $variable {{\n        '' $host;\n    }}", "a core variable")
-    loads("    map string $variable {{\n        '' $HOST;\n    }}", "names fold case, as nginx's do")
+    loads(
+        "    map string $variable {{\n        '' $HOST;\n    }}",
+        "names fold case, as nginx's do",
+    )
     loads("    map string $variable {{\n        '' $arg_x;\n    }}", "the arg_ prefix family")
-    loads("    map $http_user_agent $v {{\n        default $cookie_id$sent_http_x;\n    }}", "three prefix families")
+    loads(
+        "    map $http_user_agent $v {{\n        default $cookie_id$sent_http_x;\n    }}",
+        "three prefix families",
+    )
     loads(
         "    map $host $a {{\n        default $b;\n    }}\n    map $host $b {{\n        default 1;\n    }}",
         "a map declared after its reader",
     )
-    loads("    map $uri $a {{\n        ~^/(?<seg>[a-z]+) $seg;\n        default 0;\n    }}", "a named capture")
-    loads("    map $uri $a {{\n        ~^/(.*)$ $1;\n        default 0;\n    }}", "a numbered capture")
-    loads("    map $uri $a {{\n        default lit;\n        hostnames;\n    }}", "no variables at all")
+    loads(
+        "    map $uri $a {{\n        ~^/(?<seg>[a-z]+) $seg;\n        default 0;\n    }}",
+        "a named capture",
+    )
+    loads(
+        "    map $uri $a {{\n        ~^/(.*)$ $1;\n        default 0;\n    }}",
+        "a numbered capture",
+    )
+    loads(
+        "    map $uri $a {{\n        default lit;\n        hostnames;\n    }}",
+        "no variables at all",
+    )
     // `geo`, `split_clients`, `perl_set`, `js_set` and
     // `auth_request_set` also declare variables in nginx; lobo's table
     // has no row for any of them, so a config that uses one is refused
@@ -69,6 +88,9 @@ fn main() -> int {
         "    map $uri $a {{\n        default $s;\n    }}\n    server {{\n        listen 8080;\n        set $s 1;\n    }}",
         "a set-declared variable",
     )
-    loads("    map $uri $a {{\n        default $ssl_protocol$upstream_addr$realip_remote_addr;\n    }}", "module variables")
+    loads(
+        "    map $uri $a {{\n        default $ssl_protocol$upstream_addr$realip_remote_addr;\n    }}",
+        "module variables",
+    )
     0
 }

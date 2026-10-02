@@ -30,9 +30,15 @@ fn main() -> int {
     let fx = "tests/tls/fixtures"
 
     // an absent absolute file, in the server: nginx's own sentence head
-    let a = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam /nonexistent/dh.pem;\n")), ".")
+    let a = config.ssl_resolve(
+        conf_of(tls_srv("", "        ssl_dhparam /nonexistent/dh.pem;\n")),
+        ".",
+    )
     assert(!config.ssl_ok(a), "an absent dhparam refuses")
-    assert(a.err.starts_with("BIO_new_file(\"/nonexistent/dh.pem\") failed"), "named as nginx names it: {a.err}")
+    assert(
+        a.err.starts_with("BIO_new_file(\"/nonexistent/dh.pem\") failed"),
+        "named as nginx names it: {a.err}",
+    )
 
     // inherited from http
     let h = config.ssl_resolve(conf_of(tls_srv("    ssl_dhparam /nonexistent/dh.pem;\n", "")), ".")
@@ -41,10 +47,16 @@ fn main() -> int {
     // relative: against the prefix, like the certificate pair
     let r = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam nosuch.pem;\n")), ".")
     assert(!config.ssl_ok(r), "a relative absent dhparam refuses")
-    assert(r.err.starts_with("BIO_new_file(\"./nosuch.pem\") failed"), "joined to the prefix: {r.err}")
+    assert(
+        r.err.starts_with("BIO_new_file(\"./nosuch.pem\") failed"),
+        "joined to the prefix: {r.err}",
+    )
 
     // a file that is not DH parameters
-    let n = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam {fx}/fullchain.pem;\n")), ".")
+    let n = config.ssl_resolve(
+        conf_of(tls_srv("", "        ssl_dhparam {fx}/fullchain.pem;\n")),
+        ".",
+    )
     assert(!config.ssl_ok(n), "a certificate is not DH parameters")
     assert(
         n.err.starts_with("PEM_read_bio_DHparams(\"{fx}/fullchain.pem\") failed"),
@@ -52,7 +64,10 @@ fn main() -> int {
     )
 
     // the real thing loads
-    let ok = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam {fx}/dhparam.pem;\n")), ".")
+    let ok = config.ssl_resolve(
+        conf_of(tls_srv("", "        ssl_dhparam {fx}/dhparam.pem;\n")),
+        ".",
+    )
     assert(config.ssl_ok(ok), "an ffdhe2048 PEM loads: {ok.err}")
 
     // no certificate, no open: a plain server with an absent dhparam
@@ -71,6 +86,9 @@ fn main() -> int {
         ),
         ".",
     )
-    assert(both.err.contains("cannot load certificate"), "the pair is checked before the dhparam: {both.err}")
+    assert(
+        both.err.contains("cannot load certificate"),
+        "the pair is checked before the dhparam: {both.err}",
+    )
     0
 }
