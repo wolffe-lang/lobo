@@ -78,19 +78,32 @@ lobo is within ten percent of nginx on macOS and not yet on linux.
 [`docs/PARITY.md`](docs/PARITY.md) defines the comparison (it was
 written before the first measurement) as the ratio nginx ÷ lobo on one
 machine, with workers equal to cpus and 32 concurrent clients, over
-five interleaved runs; 1.10 or under is parity. The current ledger:
+five interleaved runs; 1.10 or under is parity. The current ledger,
+re-taken on 2026-10-02 with lobo built by wolf 0.2.20 against nginx
+1.30.4:
 
 | host | measured | connection-per-request | keepalive |
 |---|---|---|---|
-| macOS arm64, 18 cpus | 2026-09-09 | 1.033x | 1.072x |
-| linux x86-64, 4 cpus (GitHub Actions runner) | 2026-09-11 | 1.197x | 1.263x |
+| macOS arm64, 18 cpus (load 2.80, other work on the box) | 2026-10-02 | 1.031x | 1.037x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.88) | 2026-10-02 | 1.151x | 1.240x |
+| linux x86-64, 16 cpus (kasumi, load 0.34–1.89, shared) | 2026-10-02 | no valid set: ~1.84x | no valid set: ~2.04x |
 
-On linux, `listen … reuseport` takes the connection-per-request ratio
-to 1.089x against 1.138x without it on the same VM; the table keeps
-lobo's default. The runner's speed differs from VM to VM, so ratios
-compare only within one ledger entry. Both rows were taken before the
-move to wolf 0.2.16 (macOS with wolf 0.2.8, linux with 0.2.11) and
-have not been re-taken on the 0.1.1 build.
+The kasumi row is indicative: all three sets were refused because
+nginx's own five runs spread more than the definition allows. At one
+worker kasumi reads about 1.17x and 1.20x, close to the runner; on kasumi the
+gap is the sixteen-worker cell's, and
+[`docs/PROFILE.md`](docs/PROFILE.md) has why. The earlier rows are kept
+as history:
+
+| host | measured | wolf | connection-per-request | keepalive |
+|---|---|---|---|---|
+| macOS arm64, 18 cpus | 2026-09-09 | 0.2.8 | 1.033x | 1.072x |
+| linux x86-64, 4 cpus (GitHub Actions runner) | 2026-09-11 | 0.2.11 | 1.197x | 1.263x |
+
+On linux, `listen … reuseport` took the connection-per-request ratio
+to 1.089x against 1.138x without it on the same VM (2026-09-11); the
+tables keep lobo's default. The runner's speed differs from VM to VM,
+so ratios compare only within one ledger entry.
 
 The 110.9x linux keepalive figure this page gave for 0.1.0 was a
 delayed-ACK stall on lobo's two-write response, fixed in 0.1.1.
