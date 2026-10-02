@@ -1,0 +1,76 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native
+//! stage-src: config
+//!
+//! lobo#38 (ws47), the dhparam half: nginx opens `ssl_dhparam` for
+//! every server that has a certificate (`ngx_http_ssl_merge_srv_conf`
+//! -> `ngx_ssl_dhparam`: `BIO_new_file`, then `PEM_read_bio_DHparams`),
+//! inherited from `http` too, so an absent or non-DH file refuses the
+//! config; a server with no certificate never opens it. lobo serves
+//! TLS 1.3 only and never USES the parameters (the row stays
+//! planned), but it refuses what nginx refuses. Probed on kasumi
+//! 2026-10-02 against the pinned and the stock 1.30.4
+//! (`kasumi:~/lanes/ws47/probe-base.txt`, cases s–y). Lane: NATIVE only,
+//! as `ssl_resolve_errors.lu` (the fs half, and the checked tier's
+//! step budget ends inside the Ed25519 pair check).
+
+use config
+
+fn conf_of(body: str) -> config.Conf {
+    config.parse_str(body, "ssl_dhparam.test")
+}
+
+fn tls_srv(http_extra: str, srv_extra: str) -> str {
+    let fx = "tests/tls/fixtures"
+    "events {{\n}}\nhttp {{\n{http_extra}    server {{\n        listen 127.0.0.1:0 ssl;\n        server_name localhost;\n        ssl_certificate {fx}/fullchain.pem;\n        ssl_certificate_key {fx}/leaf.key;\n{srv_extra}    }}\n}}\n"
+}
+
+fn main() -> int {
+    let fx = "tests/tls/fixtures"
+
+    // an absent absolute file, in the server: nginx's own sentence head
+    let a = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam /nonexistent/dh.pem;\n")), ".")
+    assert(!config.ssl_ok(a), "an absent dhparam refuses")
+    assert(a.err.starts_with("BIO_new_file(\"/nonexistent/dh.pem\") failed"), "named as nginx names it: {a.err}")
+
+    // inherited from http
+    let h = config.ssl_resolve(conf_of(tls_srv("    ssl_dhparam /nonexistent/dh.pem;\n", "")), ".")
+    assert(!config.ssl_ok(h), "an http-level absent dhparam refuses the ssl server")
+
+    // relative: against the prefix, like the certificate pair
+    let r = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam nosuch.pem;\n")), ".")
+    assert(!config.ssl_ok(r), "a relative absent dhparam refuses")
+    assert(r.err.starts_with("BIO_new_file(\"./nosuch.pem\") failed"), "joined to the prefix: {r.err}")
+
+    // a file that is not DH parameters
+    let n = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam {fx}/fullchain.pem;\n")), ".")
+    assert(!config.ssl_ok(n), "a certificate is not DH parameters")
+    assert(
+        n.err.starts_with("PEM_read_bio_DHparams(\"{fx}/fullchain.pem\") failed"),
+        "named as nginx names it: {n.err}",
+    )
+
+    // the real thing loads
+    let ok = config.ssl_resolve(conf_of(tls_srv("", "        ssl_dhparam {fx}/dhparam.pem;\n")), ".")
+    assert(config.ssl_ok(ok), "an ffdhe2048 PEM loads: {ok.err}")
+
+    // no certificate, no open: a plain server with an absent dhparam
+    let plain = config.ssl_resolve(
+        conf_of(
+            "events {{\n}}\nhttp {{\n    ssl_dhparam /nonexistent/dh.pem;\n    server {{\n        listen 127.0.0.1:0;\n    }}\n}}\n",
+        ),
+        ".",
+    )
+    assert(config.ssl_ok(plain), "a server with no certificate never opens it: {plain.err}")
+
+    // the certificate's own error comes first, as in nginx's merge
+    let both = config.ssl_resolve(
+        conf_of(
+            "events {{\n}}\nhttp {{\n    server {{\n        listen 127.0.0.1:0 ssl;\n        ssl_certificate {fx}/nope.pem;\n        ssl_certificate_key {fx}/leaf.key;\n        ssl_dhparam /nonexistent/dh.pem;\n    }}\n}}\n",
+        ),
+        ".",
+    )
+    assert(both.err.contains("cannot load certificate"), "the pair is checked before the dhparam: {both.err}")
+    0
+}

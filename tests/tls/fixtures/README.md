@@ -11,3 +11,9 @@ test). The private keys are PUBLIC by construction — they are in a
 git tree. Nothing here is trusted by anything outside this
 repository's test harness: the interop harness injects the CA only
 into its own openssl invocations (env/flag), never a system store.
+
+`dhparam.pem` (ws47, lobo#38) is RFC 7919's ffdhe2048 group as
+`openssl genpkey -genparam -algorithm DH -pkeyopt dh_param:ffdhe2048`
+writes it (OpenSSL 3.6.4 on kasumi): public parameters, no key. It is
+the file `tests/config/ssl_dhparam.lu` loads to show a real
+`ssl_dhparam` passes `-t`.

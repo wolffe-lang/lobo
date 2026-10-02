@@ -1,0 +1,74 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! lobo#38 (ws47), the map half: a `map` whose source or value names a
+//! variable no nginx module defines and the config never declares is
+//! refused at load, in nginx's own words and with no location — nginx
+//! resolves every variable a map's complex values index when the
+//! variables are initialised, after the whole config is read. Probed
+//! on kasumi 2026-10-02 against the pinned and the stock 1.30.4
+//! (`kasumi:~/lanes/ws47/probe-base.txt`):
+//!   crossplane's `'' $arg;`         → unknown "arg" variable (both)
+//!   `map $nosuch $v { … }`          → unknown "nosuch" variable (both)
+//!   `default "$nosuch";`            → unknown "nosuch" variable (both)
+//!   `'' $host;`, `'' $arg_x;`       → ok (a core name; a prefix family)
+//!   `default $b;` before `map … $b` → ok (declared anywhere, read last)
+//!   `~^/(?<seg>[a-z]+) $seg;`       → ok on stock (a named capture);
+//!                                     the pinned build has no PCRE
+//! Pure (parse_str), so every lane runs it.
+
+use config
+
+fn verdict(body: str) -> str {
+    let c = config.parse_str("http {{\n{body}\n}}\n", "t.conf")
+    if config.ok(c) {
+        return "ok"
+    }
+    config.render_conf(c)
+}
+
+fn refused(body: str, var_name: str, what: str) {
+    let got = verdict(body)
+    assert(got.contains("err|:0|unknown \"{var_name}\" variable"), "{what}: got\n{got}")
+}
+
+fn loads(body: str, what: str) {
+    let got = verdict(body)
+    assert(got == "ok", "{what}: got\n{got}")
+}
+
+fn main() -> int {
+    // the corpus entry, verbatim (crossplane's empty-value-map)
+    refused(
+        "    map string $variable {{\n        '' $arg;\n        *.example.com '';\n    }}",
+        "arg",
+        "crossplane-empty-value-map",
+    )
+    refused("    map $nosuch $variable {{\n        default 1;\n    }}", "nosuch", "an unknown source")
+    refused("    map $uri $a {{\n        default \"$nosuch\";\n    }}", "nosuch", "quoted value")
+    refused("    map $uri $a {{\n        default ${{nosuch}}x;\n    }}", "nosuch", "braced value")
+
+    loads("    map string $variable {{\n        '' $host;\n    }}", "a core variable")
+    loads("    map string $variable {{\n        '' $HOST;\n    }}", "names fold case, as nginx's do")
+    loads("    map string $variable {{\n        '' $arg_x;\n    }}", "the arg_ prefix family")
+    loads("    map $http_user_agent $v {{\n        default $cookie_id$sent_http_x;\n    }}", "three prefix families")
+    loads(
+        "    map $host $a {{\n        default $b;\n    }}\n    map $host $b {{\n        default 1;\n    }}",
+        "a map declared after its reader",
+    )
+    loads("    map $uri $a {{\n        ~^/(?<seg>[a-z]+) $seg;\n        default 0;\n    }}", "a named capture")
+    loads("    map $uri $a {{\n        ~^/(.*)$ $1;\n        default 0;\n    }}", "a numbered capture")
+    loads("    map $uri $a {{\n        default lit;\n        hostnames;\n    }}", "no variables at all")
+    // `geo`, `split_clients`, `perl_set`, `js_set` and
+    // `auth_request_set` also declare variables in nginx; lobo's table
+    // has no row for any of them, so a config that uses one is refused
+    // by name before this check can read it.
+    loads(
+        "    map $uri $a {{\n        default $s;\n    }}\n    server {{\n        listen 8080;\n        set $s 1;\n    }}",
+        "a set-declared variable",
+    )
+    loads("    map $uri $a {{\n        default $ssl_protocol$upstream_addr$realip_remote_addr;\n    }}", "module variables")
+    0
+}
