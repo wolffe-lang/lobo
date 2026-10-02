@@ -25,16 +25,15 @@
 # (wolf's LLVM release tier does not serve them; tools/lobo-dist
 # refuses them by name), and the release notes say so — never silence.
 #
-# WHAT THIS WORKFLOW CANNOT PROVE YET. lobo is the ONE PRIVATE repo in
-# the org, so `gh release download` here works only because the runner
-# carries the workflow token. The learner smoke below is therefore a
-# clean-MACHINE test (no source tree, no wolf, nothing but the archive,
-# curl and tar) but not yet a clean-STRANGER test: an unauthenticated
-# download 404s while the repo is private. That half of W7's falsifiable
-# test — a person outside the org obtaining the artifact — is gated on
-# making the repo public, which is the human's decision and not a lane's
-# to take. Nothing in this file changes when it flips; the smoke simply
-# stops needing GH_TOKEN.
+# THE CLEAN-STRANGER TEST (ws47, lobo#33). lobo is public (it was the
+# org's one private repo when this file was written, and the smoke
+# below was then a clean-MACHINE test only, because an unauthenticated
+# download 404'd). On a tag run the smoke now downloads the published
+# archive and its digest with plain `curl`, carrying NO token — exactly
+# what a person outside the org can do — so the half of W7's
+# falsifiable test that waited on the repo going public is the smoke
+# itself. ws47 ran the same two requests anonymously against v0.1.1
+# (200, digest OK) before the change.
 #
 # REHEARSAL. A release workflow that has never run is the worst kind
 # of untested code, and the tag is the orchestrator's act, not a
@@ -347,15 +346,20 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
-      - name: download the published archive
+      # No GH_TOKEN, no gh: a stranger's download (lobo#33). The
+      # archive name is tools/lobo-dist's: lobo-<version>-<host>, the
+      # version the tag's, bare.
+      - name: download the published archive (anonymous — the clean-stranger test)
         if: github.event_name == 'push'
         env:
-          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         shell: bash
         run: |
           set -euo pipefail
-          gh release download "${GITHUB_REF_NAME}" --pattern "lobo-*-${{ matrix.host }}.tar.gz*"
+          a="lobo-${GITHUB_REF_NAME#v}-${{ matrix.host }}.tar.gz"
+          base="https://github.com/${GH_REPO}/releases/download/${GITHUB_REF_NAME}"
+          curl -fsSL --retry 3 -o "$a" "$base/$a"
+          curl -fsSL --retry 3 -o "$a.sha256" "$base/$a.sha256"
           ls -l
 
       - name: take the rehearsal archive
