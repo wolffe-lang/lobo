@@ -457,6 +457,55 @@ fn ssl_warn(mut s: SslConf, msg: str) {
     s.warns = "{s.warns}\n{msg}"
 }
 
+/// lobo#38 (ws47): `ssl_dhparam` opens as nginx opens it. nginx's
+/// `ngx_http_ssl_merge_srv_conf` calls `ngx_ssl_dhparam` for every
+/// server that has a certificate — the server's own row, else the
+/// http one — so an absent or unreadable file is `BIO_new_file("…")
+/// failed` and a file with no DH parameters is
+/// `PEM_read_bio_DHparams("…") failed`, both refusing the config;
+/// a server with no certificate never opens it (probed on the pinned
+/// and the stock 1.30.4, `docs/directives.md`'s row note). lobo
+/// serves TLS 1.3 only and never USES the parameters (the row stays
+/// planned); this reads the file, finds the PEM block, and refuses
+/// what nginx refuses. The block's DER is not decoded — a delta named
+/// here: a malformed block nginx's decoder would refuse loads in lobo.
+/// The path joins the -p prefix, as the certificate pair's does.
+/// Total.
+fn check_dhparam(c: Conf, srv: int, prefix: str, mut s: SslConf) {
+    let dh = nearest_arg(c, srv, "ssl_dhparam")
+    if dh.1 < 0 || dh.0.is_empty() {
+        return
+    }
+    let p = against_prefix(prefix, dh.0)
+    let raw = fs_read_bytes(p) else |_| {
+        ssl_err(
+            mut s,
+            "BIO_new_file(\"{p}\") failed (lobo: the file cannot be read)",
+            c.files[dh.1],
+            c.lines[dh.1],
+        )
+        return
+    }
+    let text = str_from_utf8(raw) else |_| {
+        ssl_err(
+            mut s,
+            "PEM_read_bio_DHparams(\"{p}\") failed (lobo: not a PEM file)",
+            c.files[dh.1],
+            c.lines[dh.1],
+        )
+        return
+    }
+    if !text.contains("-----BEGIN DH PARAMETERS-----") &&
+        !text.contains("-----BEGIN X9.42 DH PARAMETERS-----") {
+        ssl_err(
+            mut s,
+            "PEM_read_bio_DHparams(\"{p}\") failed (lobo: no DH PARAMETERS block)",
+            c.files[dh.1],
+            c.lines[dh.1],
+        )
+    }
+}
+
 /// The ssl_protocols honesty check (the v0 set: TLSv1.3 implemented;
 /// anything else listed is a named config-time delta citing the
 /// ladder, and a set WITHOUT TLSv1.3 is an error — nothing would be
@@ -933,6 +982,7 @@ pub fn ssl_resolve(c: Conf, prefix: str) -> SslConf {
                     if s.names.len > before && is_default {
                         s.default_at = before
                     }
+                    check_dhparam(c, srv, prefix, mut s)
                 }
                 check_protocols(c, srv, mut s)
                 check_ciphers(c, srv, mut s)
