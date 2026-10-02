@@ -59,7 +59,7 @@ fn main() -> int {
     )
     assert(!config.ssl_ok(n), "a certificate is not DH parameters")
     assert(
-        n.err.starts_with("PEM_read_bio_DHparams(\"{fx}/fullchain.pem\") failed"),
+        n.err.starts_with("PEM_read_bio_DHparams(\"./{fx}/fullchain.pem\") failed"),
         "named as nginx names it: {n.err}",
     )
 
