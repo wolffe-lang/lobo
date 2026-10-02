@@ -933,6 +933,7 @@ pub fn parse_str(src: str, file: str) -> Conf {
         return c
     }
     walk(mut c, mut w, t, src, file, "", -1, "main", 0, false)
+    map_vars_gate(mut c)
     build_index(mut c)
     c
 }
@@ -951,6 +952,22 @@ pub fn load(prefix: str, conf_rel: str) -> Conf {
     let cprefix = if cut < 0 { "." } else { conf[0..cut] }
     var w = Walker { resolve: true, conf_prefix: cprefix, open_chain: "", tbl: table() }
     parse_file(mut c, mut w, conf, "", -1, "main")
+    map_vars_gate(mut c)
     build_index(mut c)
     c
+}
+
+/// lobo#38 (ws47): after the whole config is read — nginx initialises
+/// variables last, so a map may read one declared further down — a
+/// map source or value naming a variable nginx would not know is the
+/// load's error, with no file or line, as nginx prints it
+/// (`config/mapvars`). Only a config that parsed clean is asked.
+fn map_vars_gate(mut c: Conf) {
+    if !c.err.is_empty() {
+        return
+    }
+    let e = map_var_err(c)
+    if !e.is_empty() {
+        set_err(mut c, e, "", 0)
+    }
 }

@@ -1,0 +1,235 @@
+//! member: true
+//! config/mapvars — lobo#38 (ws47), the map half of "lobo loads what
+//! every nginx refuses": a `map` whose source or value names a
+//! variable that no nginx module defines and the config never
+//! declares. nginx compiles a map's source and every value carrying a
+//! `$` as a complex value, indexes each variable, and refuses the
+//! whole config when the variables are initialised — after the last
+//! file is read, so a map may read a variable declared further down —
+//! with `[emerg] unknown "<name>" variable` and no file or line.
+//! lobo refuses the same thing at load (the parse half, so `-t`, a
+//! start and a reload all refuse it — the ws41 rule) with the same
+//! sentence.
+//!
+//! The catalogue is nginx 1.30.4's own: every name in every http
+//! module's static variable table (`ngx_http_variables.c`,
+//! `ngx_http_upstream.c`, the ssl, proxy, fastcgi, grpc, realip,
+//! browser, geoip, limit_*, ssi, stub_status, http2/3 modules, and
+//! the singletons gzip, referer, secure_link, slice and userid add),
+//! read off the source tarball pinned in
+//! `tests/differential/NGINX-PIN` — the union over every module, so a
+//! name an optional module defines is never refused here; plus the
+//! nine prefix families (`arg_`, `cookie_`, `http_`, …), a numbered
+//! capture (`$1`), and the names the config declares (`map` and `set`
+//! targets, regex named captures anywhere). The directives that also
+//! declare in nginx (`geo`, `split_clients`, `perl_set`, `js_set`,
+//! `auth_request_set`) have no row in lobo's table, so a config that
+//! uses one is refused by name before this check runs. Pure.
+
+/// nginx 1.30.4's http variable names, lowercase, space-separated.
+/// Total.
+fn ngx_var_names() -> str {
+    let p0 = "ancient_browser args binary_remote_addr body_bytes_sent"
+    let p1 = "bytes_sent connection connection_requests connection_time"
+    let p2 = "connections_active connections_reading connections_waiting"
+    let p3 = "connections_writing content_length content_type date_gmt"
+    let p4 = "date_local document_root document_uri fastcgi_path_info"
+    let p5 = "fastcgi_script_name geoip_area_code geoip_city"
+    let p6 = "geoip_city_continent_code geoip_city_country_code"
+    let p7 = "geoip_city_country_code3 geoip_city_country_name"
+    let p8 = "geoip_country_code geoip_country_code3 geoip_country_name"
+    let p9 = "geoip_dma_code geoip_latitude geoip_longitude geoip_org"
+    let p10 = "geoip_postal_code geoip_region geoip_region_name"
+    let p11 = "grpc_internal_trailers gzip_ratio host hostname http_cookie"
+    let p12 = "http_host http_referer http_user_agent http_via"
+    let p13 = "http_x_forwarded_for http2 http3 https invalid_referer is_args"
+    let p14 = "is_request_port limit_conn_status limit_rate limit_req_status"
+    let p15 = "modern_browser msec msie nginx_version pid pipe proxy_add_via"
+    let p16 = "proxy_add_x_forwarded_for proxy_host proxy_internal_body_length"
+    let p17 = "proxy_internal_chunked proxy_internal_host proxy_port"
+    let p18 = "proxy_protocol_addr proxy_protocol_port"
+    let p19 = "proxy_protocol_server_addr proxy_protocol_server_port"
+    let p20 = "query_string realip_remote_addr realip_remote_port realpath_root"
+    let p21 = "remote_addr remote_port remote_user request request_body"
+    let p22 = "request_body_file request_completion request_filename request_id"
+    let p23 = "request_length request_method request_port request_time"
+    let p24 = "request_uri scheme secure_link secure_link_expires"
+    let p25 = "sent_http_cache_control sent_http_connection"
+    let p26 = "sent_http_content_length sent_http_content_type"
+    let p27 = "sent_http_keep_alive sent_http_last_modified sent_http_link"
+    let p28 = "sent_http_location sent_http_transfer_encoding server_addr"
+    let p29 = "server_name server_port server_protocol slice_range"
+    let p30 = "ssl_alpn_protocol ssl_cipher ssl_ciphers ssl_client_cert"
+    let p31 = "ssl_client_escaped_cert ssl_client_fingerprint ssl_client_i_dn"
+    let p32 = "ssl_client_i_dn_legacy ssl_client_raw_cert ssl_client_s_dn"
+    let p33 = "ssl_client_s_dn_legacy ssl_client_serial ssl_client_sigalg"
+    let p34 = "ssl_client_v_end ssl_client_v_remain ssl_client_v_start"
+    let p35 = "ssl_client_verify ssl_curve ssl_curves ssl_early_data"
+    let p36 = "ssl_ech_outer_server_name ssl_ech_status ssl_protocol"
+    let p37 = "ssl_server_name ssl_session_id ssl_session_reused ssl_sigalg"
+    let p38 = "status tcpinfo_rcv_space tcpinfo_rtt tcpinfo_rttvar"
+    let p39 = "tcpinfo_snd_cwnd time_iso8601 time_local uid_got uid_reset"
+    let p40 = "uid_set upstream_addr upstream_bytes_received"
+    let p41 = "upstream_bytes_sent upstream_cache_etag"
+    let p42 = "upstream_cache_last_modified upstream_cache_status"
+    let p43 = "upstream_connect_time upstream_header_time"
+    let p44 = "upstream_response_length upstream_response_time upstream_status"
+    let p45 = "uri"
+    "{p0} {p1} {p2} {p3} {p4} {p5} {p6} {p7} {p8} {p9} {p10} {p11} {p12} {p13} {p14} {p15} {p16} {p17} {p18} {p19} {p20} {p21} {p22} {p23} {p24} {p25} {p26} {p27} {p28} {p29} {p30} {p31} {p32} {p33} {p34} {p35} {p36} {p37} {p38} {p39} {p40} {p41} {p42} {p43} {p44} {p45}"
+}
+
+/// The prefix families nginx resolves by name at run time
+/// (`NGX_HTTP_VAR_PREFIX`). Total.
+fn ngx_var_prefix(name: str) -> bool {
+    for p in "arg_ cookie_ http_ sent_http_ sent_trailer_ upstream_http_ upstream_trailer_ upstream_cookie_ proxy_protocol_tlv_".
+        words() {
+        if name.starts_with(p) && name.len > p.len {
+            return true
+        }
+    }
+    false
+}
+
+/// True when every byte is an ASCII digit (a numbered capture). Total.
+fn all_digits(s: str) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b < 48 || b > 57 {
+            return false
+        }
+    }
+    true
+}
+
+/// The names a `$name` (or `${name}`) segment of `text` reads, in
+/// order, lowercased — the lexer's own segmentation. Total.
+fn vars_in(text: str) -> List[str] {
+    var out = List[str]()
+    for line in word_segments(text).lines() {
+        if line.starts_with("var|") {
+            (mut out).push(line[4..line.len].lower())
+        }
+    }
+    out
+}
+
+/// Append every regex named capture in `s` — `(?<n>`, `(?P<n>`,
+/// `(?'n'` — lowercased. Total.
+fn push_captures(s: str, mut out: List[str]) {
+    let bs = s.bytes()
+    let n = bs.len
+    var i: int = 0
+    while i + 3 < n {
+        if bs[i] as int == 40 && bs[i + 1] as int == 63 {
+            var j: int = i + 2
+            if bs[j] as int == 80 {
+                j = j + 1
+            }
+            let open = bs[j] as int
+            if open == 60 || open == 39 {
+                let close = if open == 60 { 62 } else { 39 }
+                var k: int = j + 1
+                while k < n && bs[k] as int != close {
+                    k = k + 1
+                }
+                if k < n && k > j + 1 {
+                    (mut out).push(s[j + 1..k].lower())
+                }
+            }
+        }
+        i = i + 1
+    }
+}
+
+/// Every name the config itself declares: `map` targets (the block's
+/// second argument), `set` targets (the first), and every regex named
+/// capture in any name or argument. Total.
+fn declared_vars(c: Conf) -> List[str] {
+    var out = List[str]()
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        let nm = c.names[i]
+        let at = c.args_at[i]
+        let nn = c.args_n[i]
+        if nm == "map" && c.kinds[i] == "b" && nn >= 2 {
+            for v in vars_in(c.argp[at + 1]) {
+                (mut out).push(v)
+            }
+        } else if nm == "set" && c.kinds[i] == "d" && nn >= 1 {
+            for v in vars_in(c.argp[at]) {
+                (mut out).push(v)
+            }
+        }
+        push_captures(nm, mut out)
+        var j: int = 0
+        while j < nn {
+            push_captures(c.argp[at + j], mut out)
+            j = j + 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// True when `name` (lowercased) is a variable nginx would resolve:
+/// in the catalogue, a prefix family, a numbered capture, or declared
+/// by this config. Total.
+fn var_known(name: str, known: str, declared: List[str]) -> bool {
+    if all_digits(name) || ngx_var_prefix(name) {
+        return true
+    }
+    for k in known.words() {
+        if k == name {
+            return true
+        }
+    }
+    for d in declared {
+        if d == name {
+            return true
+        }
+    }
+    false
+}
+
+/// lobo#38: the first variable a `map` source or value reads that
+/// nginx would not know, as nginx's sentence; "" when there is none.
+/// Sources first, then values, in row order. Total.
+fn map_var_err(c: Conf) -> str {
+    let total = c.names.len
+    var has_map = false
+    var i: int = 0
+    while i < total {
+        if c.names[i] == "map" && c.kinds[i] == "b" {
+            has_map = true
+        }
+        i = i + 1
+    }
+    if !has_map {
+        return ""
+    }
+    let known = ngx_var_names()
+    let declared = declared_vars(c)
+    i = 0
+    while i < total {
+        let at = c.args_at[i]
+        if c.names[i] == "map" && c.kinds[i] == "b" && c.args_n[i] >= 1 {
+            for v in vars_in(c.argp[at]) {
+                if !var_known(v, known, declared) {
+                    return "unknown \"{v}\" variable"
+                }
+            }
+        } else if c.kinds[i] == "e" && c.ctx[i] == "map" && c.args_n[i] >= 1 {
+            for v in vars_in(c.argp[at]) {
+                if !var_known(v, known, declared) {
+                    return "unknown \"{v}\" variable"
+                }
+            }
+        }
+        i = i + 1
+    }
+    ""
+}
