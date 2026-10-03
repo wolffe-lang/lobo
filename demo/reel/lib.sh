@@ -17,11 +17,10 @@ if [ ! -f "$REEL/conf/nginx.conf" ]; then
     echo "reel: $REEL has no conf/nginx.conf; this is not a complete reel folder" >&2
     exit 2
 fi
-if [ ! -f ./conf/nginx.conf ] || [ "$(pwd -P)" != "$REEL" ]; then
-    echo "reel: run this from the reel's folder (it holds conf/nginx.conf):" >&2
-    echo "  cd $REEL" >&2
-    exit 2
-fi
+# Run from anywhere: every script moves into its own reel folder first, so a
+# full path (bash /path/to/scene2.sh) always uses that folder's config and
+# control socket, never whatever folder the shell happens to be in.
+cd "$REEL" || exit 2
 LOGS=$SITE/logs
 PORT=8088
 LOCAL=http://127.0.0.1:$PORT
