@@ -19,14 +19,18 @@ an outside machine fetching the page) right before filming.
 | wolf | 0.2.20 (`~/.local/bin` first on `PATH`) |
 | cloudflared | 2026.9.3 |
 | local address | `http://127.0.0.1:8088` (port 8080 is llama-swap: never used here) |
-| public address | `REEL_PUBLIC_URL`, default `https://wolf.espadonne.com` (named tunnel `wolf-demo`, config `REEL_TUNNEL_CONFIG`, default `~/scratch/wolf/lobo-demo/tunnel.yml`) |
+| public address | `REEL_PUBLIC_URL`, default `https://wolf.espadonne.com` (named tunnel `wolf-demo`, config `REEL_TUNNEL_CONFIG`, default `tunnel.yml` beside the scripts, else `~/scratch/wolf/lobo-demo/tunnel.yml`) |
 | fallback | `REEL_PUBLIC_URL=quick` runs a Cloudflare quick tunnel and reads its random URL from the tunnel log |
 | outside witness | `ssh almanta` (`REEL_OUTSIDE`) |
-| nginx contrast | scenes 2 and 3 run a real `nginx -t` / `-T` when one is found (`REEL_NGINX`, else `PATH`); without one they skip that beat |
+| nginx contrast | scenes 2 and 3 run a real `nginx -t` / `-T` when one is found (`REEL_NGINX`, else `PATH`, else the lobo checkout's pinned oracle in `tests/differential/bin/`); without one they skip that beat |
 
-Terminal: about 60 columns, large font, the shell in `demo/reel/`
-(every script `cd`s there itself, but the commands typed by hand in
-the shot list assume it). `SHOTLIST.md` is the maintainer's edit
+Terminal: about 60 columns, large font, the shell in the reel's
+folder. Every script refuses to run from any other folder (it prints
+the `cd` to type): lobo's control socket and config paths are
+relative, and the commands typed by hand in the shot list assume
+that folder. The maintainer films from a copy at
+`~/scratch/wolf/lobo-demo` (every file here, plus `tunnel.yml`);
+scripts use a `tunnel.yml` beside them when there is one. `SHOTLIST.md` is the maintainer's edit
 plan, shot by shot, built on these scripts; this file is the
 runbook behind it.
 
