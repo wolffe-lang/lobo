@@ -81,6 +81,8 @@ if [ -f "$LOGS/site.conf.v1" ]; then
     echo "  restored conf/site.conf from scene 4's backup"
 fi
 rm -rf "$SITE/html-v2" "$LOGS"/dl.* "$LOGS/old.gen"
+# a stopped tunnel's log must never read as a live one in scene 7.1
+[ -f "$LOGS/tunnel.out" ] && mv "$LOGS/tunnel.out" "$LOGS/tunnel.last.out"
 [ $fail -eq 0 ] && rm -f "$LOGS"/reel-*.pid "$LOGS"/reel-*.cmd
 if [ $fail -eq 0 ]; then
     echo "${G}teardown: DOWN (proven)${N}"
