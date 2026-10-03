@@ -4,7 +4,7 @@ A short film in eight scenes. Each scene is one idea, shown on this MacBook, end
 
 How to read a scene: **SHOW** means put this on screen and hold it; **RUN** means type this command and let the output land; the time is how long the shot holds. Times are targets for the edit, not limits.
 
-Every command and every output below was rehearsed on this MacBook (2026-10-03, two full runs, preflight to teardown, both green). `README.md` beside this file is the runbook behind it: each scene's script, the full expected output, and the source for every nginx line.
+Every command and every output below was rehearsed on this MacBook (2026-10-03: full runs preflight to teardown, both from the lobo repo and from `~/scratch/wolf/lobo-demo`, all green). `README.md` beside this file is the runbook behind it: each scene's script, the full expected output, and the source for every nginx line.
 
 ---
 
@@ -14,7 +14,7 @@ Every command and every output below was rehearsed on this MacBook (2026-10-03, 
 |---|---|---|
 | terminal | a large font (20 pt or more), a dark theme, the window about 60 columns wide | text readable on a phone |
 | narrow output | `export COLUMNS=60` | |
-| go to the demo | `cd ~/GithubOrgs/wolffe-lang/lobo/demo/reel` *(until the ws48 PR merges: `~/GithubOrgs/wolffe-lang/lobo-ws48/demo/reel`)* | |
+| go to the demo | `cd ~/scratch/wolf/lobo-demo` | the complete reel: `conf/nginx.conf`, the scripts, `tunnel.yml` *(the same files live in the lobo repo's `demo/reel/`; every script refuses, with the `cd` to type, if started from any other folder)* |
 | preflight | `bash preflight.sh` | ten `ok` lines, then `GO` on the last line |
 
 Do not film until the preflight prints **GO**. It proves the whole chain, including a machine outside your network (almanta) loading the live address, and it **leaves lobo and the tunnel running for the whole film**: nothing below starts or stops them, so nothing can fail to come up on camera. If it prints `NO GO`, it names the failing step and has already cleaned up after itself.
@@ -44,9 +44,9 @@ Every command below runs from this folder (lobo's control socket path is relativ
 | 0.1 | SHOW the size of the thing | `cd ~/GithubOrgs/wolffe-lang/lobo && find src -name '*.lu' \| xargs cat \| wc -l` | 3 s: `25496` (lines of wolf on trunk at this rehearsal; the number moves with trunk) |
 | 0.2 | SHOW one whole source file | `mat src/config/workerconf.lu` | 8 s, scroll slowly; it is 41 lines, nginx's `worker_processes` check, with nginx's own error message (`"worker_processes" directive invalid value`, probed against nginx 1.30.4) |
 | 0.3 | SHOW the binary | `lobo -v` | 4 s: `lobo version: lobo/0.1.1 (built with wolf 0.2.16, pin 93a5fe5)` |
-| 0.4 | back to the demo | `cd -` | 1 s |
+| 0.4 | back to the demo | `cd ~/scratch/wolf/lobo-demo` | 1 s |
 
-`bash scene0.sh` runs 0.1 to 0.3 against the lobo checkout the reel lives in.
+`bash scene0.sh` runs 0.1 to 0.3 against `~/GithubOrgs/wolffe-lang/lobo` (or the checkout the reel lives in, from the repo copy).
 
 **On-screen caption idea:** "25,000 lines of wolf. One binary." *(True of the source on screen. The 0.1.1 binary on screen was built from 24,220 lines, the `v0.1.1` tag; if the caption sits on 0.3, say "24,000".)*
 
@@ -211,13 +211,13 @@ The address then answers HTTP 530 (Cloudflare's error 1033, "tunnel offline"), w
 ## Manual preflight (if `preflight.sh` cannot run)
 
 ```
-cd ~/GithubOrgs/wolffe-lang/lobo/demo/reel
+cd ~/scratch/wolf/lobo-demo
 lsof -nP -iTCP:8088 -sTCP:LISTEN          # must print nothing (8080 is llama-swap's; never use it)
 wolf run build/main.lu                    # wrote html/index.html and html/files/big.bin
 lobo -t                                   # ... test is successful
 nohup lobo serve > logs/serve.out 2>&1 &  # start
 curl -s -o /dev/null -w '%{http_code}\n' http://127.0.0.1:8088/      # 200
-nohup cloudflared tunnel --no-autoupdate --config ~/scratch/wolf/lobo-demo/tunnel.yml run > logs/tunnel.out 2>&1 &   # wait for "Registered tunnel connection"
+nohup cloudflared tunnel --no-autoupdate --config tunnel.yml run > logs/tunnel.out 2>&1 &   # wait for "Registered tunnel connection"
 ssh almanta "curl -s -o /dev/null -w '%{http_code}\n' https://wolf.espadonne.com/"   # 200 = GO
 ```
 
