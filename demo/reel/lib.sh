@@ -70,18 +70,23 @@ public_url() {
     fi
 }
 
-# fetch_from <where> <url>: "<status> <h1-found:yes|no>".
+# fetch_from <where> <url>: "<status> <page:yes|no>".
+# "yes" needs the h1 AND a text/html Content-Type: a page sent
+# as text/plain shows its source in a browser, though curl and
+# grep see the same bytes (found on camera, scene 7).
 # <where> is "here" (this Mac's resolver: the browser's
 # path) or an ssh host. Nothing is written on the far side.
 fetch_from() {
-    _cmd="curl -s -m 15 -w '\\n%{http_code}' '$2'"
+    _cmd="curl -s -m 15 -w '\\n%{content_type}\\n%{http_code}' '$2'"
     if [ "$1" = here ]; then
         _out=$(eval "$_cmd")
     else
         _out=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$1" "$_cmd")
     fi
     _st=$(printf '%s\n' "$_out" | tail -n 1)
-    if printf '%s\n' "$_out" | grep -qF "$H1"; then
+    _ct=$(printf '%s\n' "$_out" | tail -n 2 | head -n 1)
+    if printf '%s\n' "$_out" | grep -qF "$H1" &&
+       case "$_ct" in text/html*) true ;; *) false ;; esac; then
         echo "$_st yes"
     else
         echo "$_st no"
