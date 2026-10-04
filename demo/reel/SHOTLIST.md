@@ -6,6 +6,8 @@ How to read a scene: **SHOW** means put this on screen and hold it; **RUN** mean
 
 Every command and every output below was rehearsed on this MacBook (2026-10-03: full runs preflight to teardown, both from the lobo repo and from `~/scratch/wolf/lobo-demo`, all green). `README.md` beside this file is the runbook behind it: each scene's script, the full expected output, and the source for every nginx line.
 
+**Which lobo.** Scenes 4 to 6 as written here need a lobo with ws49's three fixes: a slow download no longer holds the server (lobo#46), `lobo status` that gets no answer says so and exits 1 (lobo#47), and `-p` finds the control socket from any folder (lobo#54). That is lobo built from trunk at or after ws49's merge, or the first release after 0.1.1; its `lobo -v` reads `lobo/0.1.1+dev` until then, so run `export REEL_LOBO_VERSION=lobo/0.1.1+dev` before the preflight. With Homebrew's 0.1.1 every scene still runs: scene 4's script waits the stall out for you (the 0.1.1 notes in scene 4), and raw `lobo` commands must be typed in the reel folder.
+
 ---
 
 ## Before you press record
@@ -117,7 +119,7 @@ The unfiltered `lobo -p /Users/mfwolffe/scratch/wolf/lobo-demo -c /Users/mfwolff
 
 **Music:** In One Ear starts on 4.1.
 
-Two panes, both in this folder.
+Two panes, in any folder: every command below is a full path.
 
 | # | action | command | hold |
 |---|---|---|---|
@@ -141,7 +143,9 @@ generation-retired gen=1 drained=1 aborted=1 age-ms=25041
 
 **Off camera, after the take:** `bash /Users/mfwolffe/scratch/wolf/lobo-demo/scene4.sh restore` (v1 back, for a retake and for the finale). `bash /Users/mfwolffe/scratch/wolf/lobo-demo/scene4.sh` with no argument runs the whole scene in one pane.
 
-Rehearsal timing (two-pane run, clock from 4.1): 4.3 lands 5 to 8 s after 4.2 starts (it first waits out a lobo 0.1.1 stall as a slow download begins, filed), the download ends at about 20 s, and 4.6 prints at 31 to 34 s.
+Rehearsal timing (two-pane run, clock from 4.1): 4.3 can follow 4.2 at once. The download no longer holds lobo as it starts (lobo#46, fixed in ws49), so the reload and its status answer while the progress bar runs; the download ends at about 20 s, and 4.6 prints about 25 s after 4.3 (when the tunnel's idle connection is aborted) or as the download ends (when there is none). *With lobo 0.1.1:* 4.3 lands 5 to 8 s after 4.2 starts, because the script first waits out that stall.
+
+The same stanza as 4.4, typed by hand from any folder (a ws49 lobo): `lobo -p /Users/mfwolffe/scratch/wolf/lobo-demo -c /Users/mfwolffe/scratch/wolf/lobo-demo/conf/nginx.conf status`.
 
 **Honest contrast:** nginx drains old workers on reload without a count: its log says a worker is "gracefully shutting down" (at `notice` level only) and `ps` shows "worker process is shutting down"; lobo shows each configuration generation, its open connections, the time left, and the moment it retires.
 
@@ -221,4 +225,4 @@ nohup cloudflared tunnel --no-autoupdate --config tunnel.yml run > logs/tunnel.o
 ssh almanta "curl -s -o /dev/null -w '%{http_code}\n' https://wolf.espadonne.com/"   # 200 = GO
 ```
 
-Always run lobo commands from this folder: its control socket path is relative, so `-s stop` from another folder fails silently. A hand-started chain has no recorded process ids, so `teardown.sh` will not stop it: stop lobo with `lobo -s stop` and the tunnel by its own pid (`kill <pid>`), never by pattern.
+With a ws49 lobo the control socket's relative path resolves under `-p`, so `lobo -p /Users/mfwolffe/scratch/wolf/lobo-demo -c /Users/mfwolffe/scratch/wolf/lobo-demo/conf/nginx.conf -s stop` works from any folder. With lobo 0.1.1 run lobo commands from this folder: there the path is relative to the current folder, and `-s stop` from anywhere else answers "not responding". A hand-started chain has no recorded process ids, so `teardown.sh` will not stop it: stop lobo with `lobo -s stop` and the tunnel by its own pid (`kill <pid>`), never by pattern.

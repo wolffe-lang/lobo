@@ -15,20 +15,22 @@ an outside machine fetching the page) right before filming.
 
 | what | value |
 |---|---|
-| lobo | 0.1.1 (Homebrew) |
+| lobo | 0.1.1 (Homebrew), or a build with ws49's fixes (lobo#46, #47, #54), which scenes 4 to 6 assume: `REEL_LOBO_VERSION=lobo/0.1.1+dev` for a trunk build |
 | wolf | 0.2.20 (`~/.local/bin` first on `PATH`) |
 | cloudflared | 2026.9.3 |
-| local address | `http://127.0.0.1:8088` (port 8080 is llama-swap: never used here) |
+| local address | `http://127.0.0.1:8088` (port 8080 is llama-swap: never used here); `REEL_PORT` moves the scripts to another port, and `listen` in `conf/site.conf` must move with it (a rehearsal copy, never the filming folder) |
 | public address | `REEL_PUBLIC_URL`, default `https://wolf.espadonne.com` (named tunnel `wolf-demo`, config `REEL_TUNNEL_CONFIG`, default `tunnel.yml` beside the scripts, else `~/scratch/wolf/lobo-demo/tunnel.yml`) |
 | fallback | `REEL_PUBLIC_URL=quick` runs a Cloudflare quick tunnel and reads its random URL from the tunnel log |
 | outside witness | `ssh almanta` (`REEL_OUTSIDE`) |
 | nginx contrast | scenes 2 and 3 run a real `nginx -t` / `-T` when one is found (`REEL_NGINX`, else `PATH`, else the lobo checkout's pinned oracle in `tests/differential/bin/`); without one they skip that beat |
 
-Terminal: about 60 columns, large font, the shell in the reel's
-folder. Every script refuses to run from any other folder (it prints
-the `cd` to type): lobo's control socket and config paths are
-relative, and the commands typed by hand in the shot list assume
-that folder. The maintainer films from a copy at
+Terminal: about 60 columns, large font, any folder. Every script
+moves into its own folder first, so a full path (`bash
+/path/to/scene4.sh status`) runs it from anywhere; the scripts refuse
+only a folder with no `conf/nginx.conf`. A raw `lobo` command needs
+`-p <reel> -c <reel>/conf/nginx.conf` from another folder, which a
+ws49 lobo honours for the control socket too (lobo#54); with 0.1.1,
+type raw `lobo` commands in the reel folder. The maintainer films from a copy at
 `~/scratch/wolf/lobo-demo` (every file here, plus `tunnel.yml`);
 scripts use a `tunnel.yml` beside them when there is one. `SHOTLIST.md` is the maintainer's edit
 plan, shot by shot, built on these scripts; this file is the
@@ -226,9 +228,10 @@ The shot list films this scene in two panes with sub-steps:
 the checksums), `scene4.sh reload`, `scene4.sh retired` (waits for
 the old generation to retire, then prints its four log lines), and,
 off camera, `scene4.sh restore`. `reload` refuses if v2 is already
-live. Before reloading, `reload` waits out lobo#46 (a slow download's
-start holds the loop for up to 8 s) and never trusts an empty `lobo
-status` (lobo#47).
+live. With a ws49 lobo, `reload` runs the moment it is typed: the
+download beside it no longer holds the server (lobo#46). With 0.1.1,
+`reload` first waits out that stall (up to 8 s) and never trusts an
+empty `lobo status` (lobo#47); the same script serves both.
 
 **nginx (true as worded):** nginx's old workers drain with no
 connection count and nothing to ask: at its default log level the
@@ -338,14 +341,23 @@ certificates.)
 ## Known issues at lobo 0.1.1 that the reel works around
 
 All found while building this reel, filed with witnesses, and
-reproduced on trunk (866789c) as well as 0.1.1:
+reproduced on trunk (866789c) as well as 0.1.1. The first three are
+fixed by ws49 (in trunk from its merge; in the release after 0.1.1):
 
 - lobo#46: **a slow download stalls the server for 3 to 8 s as it
   starts.** Requests and control verbs that arrive in that window
-  wait. Scene 4 waits it out off camera before it reloads.
+  wait. With 0.1.1, scene 4 waits it out off camera before it
+  reloads; with ws49 the download streams beside the server's loop
+  and nothing waits.
 - lobo#47: **`lobo status` prints nothing and exits 0** when the
   control socket does not answer within 2 s. Scene 4 never reads an
-  empty status as an answer.
+  empty status as an answer; with ws49 such a status says the master
+  did not answer and exits 1.
+- lobo#54: **`-p` did not reach the control socket**: `control
+  unix:logs/control.sock;` was relative to the current folder, so
+  `lobo -p <reel> -c <reel>/conf/nginx.conf status` from another
+  folder answered "not responding". With ws49 it answers from any
+  folder.
 - lobo#51: **a generation's series leave `/metrics` when it
   retires**, so the final `drained` count of a finished drain is
   never scrapeable. Scene 4 scrapes during the drain.
