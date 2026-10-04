@@ -1,0 +1,182 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! THE CONTROL SOCKET LIVES UNDER `-p` (ws49, lobo#54). With
+//! `control unix:logs/c.sock;`, lobo bound and dialled that path
+//! against the CURRENT folder: a server started in its prefix put the
+//! socket there and wrote `unix:logs/c.sock` into its pid file, so
+//! `lobo -p P -c P/conf/nginx.conf status` from any other folder
+//! answered "the master … is not responding"; a server started
+//! elsewhere could not bind at all. nginx resolves every relative path
+//! against the prefix (tools/lobo-control-differential row 5 measures
+//! the pinned oracle's `pid` doing so); lobo already did for `pid` and
+//! the token file, and now does for the control socket too. The pid
+//! file records the address as configured, and every client resolves
+//! it under its own `-p`, as the server did to bind it.
+//!
+//!   A. the demo reel's shape: the server started IN its prefix, every
+//!      verb typed from another folder with `-p P -c P/conf/…`;
+//!   B. the server itself started from another folder with `-p P`:
+//!      the socket is P/logs/c.sock, never <cwd>/logs/c.sock.
+//!
+//! The binary is driven through `/bin/sh` (a folder to start in, the
+//! exit code and the output read back). Loopback only; scratch under
+//! target/, cleared at START; the socket path is short on purpose
+//! (sun_path is ~100 bytes on every unix).
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Run `lobo <args>` from folder `cwd` through /bin/sh; stdout and
+/// stderr land in `<d>/out` and `<d>/err`. Answers the exit code.
+fn lobo_in(lobo: str, cwd: str, d: str, args: str) -> int {
+    var argv = List[str]()
+    (mut argv).push("/bin/sh")
+    (mut argv).push("-c")
+    (mut argv).push("cd \"$2\" && \"$1\" $4 > \"$3/out\" 2> \"$3/err\"")
+    (mut argv).push("sh")
+    (mut argv).push(lobo)
+    (mut argv).push(cwd)
+    (mut argv).push(d)
+    (mut argv).push(args)
+    let h = os_spawn(argv) else |_| {
+        return -2
+    }
+    os_wait(h) else |_| {
+        -1
+    }
+}
+
+/// Start `lobo serve -p <p> -c conf/nginx.conf` from folder `cwd`
+/// (exec'd, so the handle IS the server). Answers the handle or -1.
+fn serve_in(lobo: str, cwd: str, p: str) -> int {
+    var argv = List[str]()
+    (mut argv).push("/bin/sh")
+    (mut argv).push("-c")
+    (mut argv).push(
+        "cd \"$2\" && exec \"$1\" serve -p \"$3\" -c conf/nginx.conf 2> \"$3/serve.err\"",
+    )
+    (mut argv).push("sh")
+    (mut argv).push(lobo)
+    (mut argv).push(cwd)
+    (mut argv).push(p)
+    os_spawn(argv) else |_| {
+        -1
+    }
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 100 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// One case: start the server from `scwd`, then every client verb from
+/// `ccwd`. Answers the count of wrong answers (0 is green).
+fn one_case(name: str, lobo: str, p: str, scwd: str, ccwd: str, d: str) -> int {
+    var bad: int = 0
+    let child = serve_in(lobo, scwd, p)
+    if child < 0 {
+        print("{name}: could not spawn the server")
+        return 1
+    }
+    let sock = "{p}/logs/c.sock"
+    if !wait_alive("unix:{sock}") {
+        let se = fs_read_text("{p}/serve.err") else |_| ""
+        print("{name}: the server never answered at unix:{sock}; its stderr: {se.trim()}")
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| 0
+        return 1
+    }
+    if fs_exists("{scwd}/logs/c.sock") && scwd != p {
+        print("{name}: a socket was bound under the server's cwd {scwd}")
+        bad = bad + 1
+    }
+    let pidf = fs_read_text("{p}/logs/lobo.pid") else |_| ""
+    if pidf.trim() != "unix:logs/c.sock" {
+        print(
+            "{name}: the pid file records [{pidf.trim()}], want the configured [unix:logs/c.sock]",
+        )
+        bad = bad + 1
+    }
+    let cfg = "-p {p} -c {p}/conf/nginx.conf"
+    let rs = lobo_in(lobo, ccwd, d, "{cfg} status")
+    let so = fs_read_text("{d}/out") else |_| ""
+    let se = fs_read_text("{d}/err") else |_| ""
+    print("{name}: status from {ccwd}: exit {rs}")
+    if rs != 0 || !so.contains("current generation: 1") {
+        print("  stdout: {so.trim()}")
+        print("  stderr: {se.trim()}")
+        bad = bad + 1
+    }
+    let rr = lobo_in(lobo, ccwd, d, "{cfg} -s reload")
+    let ro = fs_read_text("{d}/out") else |_| ""
+    print("{name}: -s reload from {ccwd}: exit {rr}")
+    if rr != 0 || !ro.contains("generation 2") {
+        print("  stdout: {ro.trim()}")
+        bad = bad + 1
+    }
+    let rq = lobo_in(lobo, ccwd, d, "{cfg} -s stop")
+    print("{name}: -s stop from {ccwd}: exit {rq}")
+    if rq != 0 {
+        bad = bad + 1
+        os_kill(child) else |_| {}
+    }
+    let _w = os_wait(child) else |_| 0
+    if fs_exists(sock) {
+        print("{name}: the socket outlived the stop")
+        bad = bad + 1
+    }
+    bad
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let lobo = "{root}/target/lobo-debug"
+    let p = "{root}/target/ws49_pfx"
+    let away = "{root}/target/ws49_away"
+    let d = "{root}/target/ws49_pfx_io"
+    fs_remove_dir_all(p) else |_| {}
+    fs_remove_dir_all(away) else |_| {}
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{p}/conf")?
+    fs_create_dir_all("{p}/logs")?
+    fs_create_dir_all("{p}/www")?
+    fs_create_dir_all(away)?
+    fs_create_dir_all(d)?
+    fs_write_text("{p}/www/index.html", "prefix-body\n")?
+    let hp = free_port()?
+    fs_write_text(
+        "{p}/conf/nginx.conf",
+        "pid logs/lobo.pid;\ncontrol unix:logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {p}/www; }}\n}}\n",
+    )?
+    let a = one_case("A (server in its prefix)", lobo, p, p, away, d)
+    let b = one_case("B (server started elsewhere)", lobo, p, away, "/", d)
+    assert(
+        a == 0 && b == 0,
+        "the control socket lives under -p for every verb from every folder (A {a}, B {b} wrong)",
+    )
+    fs_remove_dir_all(p) else |_| {}
+    fs_remove_dir_all(away) else |_| {}
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

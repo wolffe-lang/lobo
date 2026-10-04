@@ -34,6 +34,24 @@ The pid file records the endpoint (the #126 residue leaves no os pid
 to record), so `lobo -s`, `lobo status`, `lobo control` and the next
 start's stale-pid check all find it without being told.
 
+**A relative `unix:` path lives under the prefix** (ws49, lobo#54), as
+every relative path nginx reads does (`pid`, the logs, `-c`; the
+pinned oracle's `pid` is measured doing so in the differential's row
+5) and as lobo's `pid` and token file always did. `control
+unix:logs/control.sock;` under `-p /srv/site` binds
+`/srv/site/logs/control.sock`, whatever folder lobo was started from.
+The pid file records the address as CONFIGURED (`unix:logs/control.sock`)
+and every client resolves it under its own `-p`, exactly as the server
+did to bind it, so `lobo -p /srv/site -c /srv/site/conf/nginx.conf
+status` answers from any folder — including against a server started
+in its prefix with the default `-p .`. Until ws49 the path was bound
+and dialled against the current folder: from anywhere but the prefix
+every verb answered "not responding", and a server started elsewhere
+could not bind at all. The socket path is the prefix's spelling plus
+the configured one, never longer; mind sun_path (about a hundred
+bytes: 104 on macOS, 108 on linux) under a deep absolute `-p` —
+startup names the length when it does not fit.
+
 ## The listener, per host — measured, not assumed
 
 Two transports since ws17, and the `unix:` one is the recommended
@@ -325,3 +343,11 @@ s60c's work) and is a ws16-class decision.
 - `tools/lobo-shell`: `-s` keeps four words; the no-`control`
   refusal names the directive; an invented `control` verb is refused
   before any socket is touched.
+- `tests/shell/control_silent_e2e.lu` (ws49, lobo#47): a desk that
+  takes the line and never answers — `status`, `control ping` and
+  `-s reload` each exit 1 after the 2000 ms deadline and name it.
+- `tests/shell/control_prefix_e2e.lu` (ws49, lobo#54): `control
+  unix:logs/c.sock;` under an absolute `-p`, the server started in its
+  prefix and then from another folder; the socket lives under the
+  prefix, the pid file records the configured address, and `status`,
+  `-s reload` and `-s stop` answer from other folders.

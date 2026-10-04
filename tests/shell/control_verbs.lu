@@ -43,6 +43,44 @@ fn main() -> !int {
     )
     assert(!shell.is_unix_addr("127.0.0.1:9001"), "a loopback address is not the unix family")
     assert(shell.unix_path_of("127.0.0.1:9001").is_empty(), "…and has no path")
+
+    // ---- ws49 (lobo#54): a relative unix path lives under the PREFIX,
+    // as `pid` and the token file always did — never the current folder
+    let urel = config.parse_str("control unix:logs/control.sock;\nhttp {{ }}\n", "x")
+    let under = shell.control_endpoint(urel, "/srv/site")
+    assert(
+        under == "unix:/srv/site/logs/control.sock",
+        "a relative unix control resolves under the prefix: {under}",
+    )
+    assert(
+        shell.control_endpoint(ux, "/srv/site") == "unix:/run/lobo/control.sock",
+        "an absolute unix control is used as written",
+    )
+    assert(
+        shell.control_endpoint(bare, "/srv/site") == "127.0.0.1:9001",
+        "a loopback control has no path to resolve",
+    )
+    assert(
+        shell.endpoint_under("unix:./c.sock", "/srv/site") == "unix:/srv/site/c.sock",
+        "a ./ path joins without the dot",
+    )
+    assert(
+        shell.endpoint_under("unix:logs/c.sock", ".") == "unix:logs/c.sock",
+        "under the prefix `.` the path stays as written",
+    )
+    assert(shell.endpoint_under("", "/srv/site").is_empty(), "no endpoint stays none")
+    assert(
+        shell.endpoint_under("unix:logs/c.sock", "site") == "unix:site/logs/c.sock",
+        "a relative prefix joins too (relative to the folder, as nginx's -p is)",
+    )
+    assert(
+        shell.pid_endpoint("unix:/srv/site/logs/control.sock", urel) == "unix:logs/control.sock",
+        "the pid file records a unix control as configured",
+    )
+    assert(
+        shell.pid_endpoint("127.0.0.1:41234", bare) == "127.0.0.1:41234",
+        "…and a TCP one as bound",
+    )
     // a hand's endpoint under a unix master is a SIBLING of it, so it
     // inherits the operator's directory and is a uid boundary too
     assert(

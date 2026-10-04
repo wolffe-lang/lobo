@@ -23,6 +23,13 @@
 #   4. a BAD config is refused, the running server keeps serving the
 #      old one, and `-s reload` exits NON-ZERO on both — the reason
 #      `-t` exists, and the exit code an operator's `&&` depends on.
+#   5. (ws49, lobo#54) a RELATIVE path resolves against `-p`, never the
+#      folder the server was started from: both servers are started
+#      from a folder that is not the prefix and driven from `/`. The
+#      oracle's `pid logs/rel.pid` is the measurement; lobo's `pid` and
+#      its `control unix:logs/c.sock` must land under the prefix too.
+#      lobo's `root`, which still resolves against the start folder, is
+#      measured beside it and printed as a named delta (D5).
 #
 # Three rows are NAMED DELTAS, printed with their reason (a
 # differential that hides a delta is a differential that lies —
@@ -221,6 +228,58 @@ lb_after_bad=$(get "$lport")
 kill "$lbpid" 2>/dev/null
 wait "$lbpid" 2>/dev/null
 
+# ======================= row 5 (ws49, lobo#54) ======================
+p5=$root/p5
+away5=$root/away5
+ngbin5=$(pwd)/$BIN   # absolute: both servers start from another folder
+mkdir -p "$p5/conf" "$p5/logs" "$p5/www" "$away5"
+printf 'P5\n' > "$p5/www/index.html"
+n5=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+printf 'daemon off;\npid logs/rel.pid;\nerror_log logs/error.log;\nevents { }\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root www; }\n}\n' \
+    "$n5" > "$p5/conf/nginx.conf"
+(cd "$away5" && exec "$ngbin5" -p "$p5/" -c conf/nginx.conf -e logs/error.log) > "$scratch/ng5.out" 2>&1 &
+ng5pid=$!
+if poll_body "$n5" P5; then ng5_up=1; else ng5_up=0; fi
+ng5_in_p=0
+[ -s "$p5/logs/rel.pid" ] && ng5_in_p=1
+ng5_in_cwd=0
+[ -e "$away5/logs/rel.pid" ] && ng5_in_cwd=1
+(cd / && "$ngbin5" -p "$p5/" -c conf/nginx.conf -s reload) > "$scratch/ng5-reload.out" 2>&1
+ng5_reload=$?
+kill "$ng5pid" 2>/dev/null
+wait "$ng5pid" 2>/dev/null
+
+l5=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+printf 'pid logs/rel.pid;\ncontrol unix:logs/c.sock;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+    "$l5" "$p5/www" > "$p5/conf/lobo.conf"
+(cd "$away5" && exec "$LOBO" serve -p "$p5" -c conf/lobo.conf) > "$scratch/lb5.out" 2>&1 &
+lb5pid=$!
+if poll_body "$l5" P5; then lb5_up=1; else lb5_up=0; fi
+lb5_pid_in_p=0
+[ -s "$p5/logs/rel.pid" ] && lb5_pid_in_p=1
+lb5_sock_in_p=0
+[ -S "$p5/logs/c.sock" ] && lb5_sock_in_p=1
+lb5_in_cwd=0
+[ -e "$away5/logs" ] && lb5_in_cwd=1
+(cd / && "$LOBO" -p "$p5" -c conf/lobo.conf -s reload) > "$scratch/lb5-reload.out" 2>&1
+lb5_reload=$?
+(cd / && "$LOBO" -p "$p5" -c conf/lobo.conf -s stop) > "$scratch/lb5-stop.out" 2>&1
+lb5_stop=$?
+[ "$lb5_stop" = 0 ] || kill "$lb5pid" 2>/dev/null
+wait "$lb5pid" 2>/dev/null
+
+# D5, measured beside it: the same lobo with `root www` (relative)
+printf 'pid logs/rel.pid;\ncontrol unix:logs/c.sock;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root www; }\n}\n' \
+    "$l5" > "$p5/conf/lobo.conf"
+(cd "$away5" && exec "$LOBO" serve -p "$p5" -c conf/lobo.conf) > "$scratch/lb5-root.out" 2>&1 &
+lb5rpid=$!
+lb5_root=""
+i=0
+while [ $i -lt 50 ] && ! [ -S "$p5/logs/c.sock" ]; do sleep 0.1; i=$((i + 1)); done
+lb5_root=$(get "$l5")
+(cd / && "$LOBO" -p "$p5" -c conf/lobo.conf -s stop) > /dev/null 2>&1 || kill "$lb5rpid" 2>/dev/null
+wait "$lb5rpid" 2>/dev/null
+
 # ============================ the rows ==============================
 echo ""
 note "ROWS THAT CARRY (same measurement, both servers)"
@@ -263,6 +322,14 @@ else
     row "4b. a -s reload of a bad config: nginx exited $ng_bad_exit, lobo exited $lb_bad_exit (both must be non-zero)" 1
 fi
 
+if [ "$ng5_up" = 1 ] && [ "$ng5_in_p" = 1 ] && [ "$ng5_in_cwd" = 0 ] && [ "$ng5_reload" = 0 ] &&
+    [ "$lb5_up" = 1 ] && [ "$lb5_pid_in_p" = 1 ] && [ "$lb5_sock_in_p" = 1 ] && [ "$lb5_in_cwd" = 0 ] &&
+    [ "$lb5_reload" = 0 ] && [ "$lb5_stop" = 0 ]; then
+    row "5. a relative path resolves against -p, never the start folder (lobo#54): nginx started elsewhere writes \`pid logs/rel.pid\` under -p and its -s reload from / exits 0; lobo started elsewhere puts its pid AND \`control unix:logs/c.sock\` under -p, and its -s reload and -s stop from / exit 0" 0
+else
+    row "5. relative paths under -p: nginx up=$ng5_up pid-under-p=$ng5_in_p pid-in-cwd=$ng5_in_cwd reload=$ng5_reload; lobo up=$lb5_up pid-under-p=$lb5_pid_in_p sock-under-p=$lb5_sock_in_p logs-in-cwd=$lb5_in_cwd reload=$lb5_reload stop=$lb5_stop (artifacts: $scratch/lb5*.out, $scratch/ng5*.out)" 1
+fi
+
 echo ""
 note "NAMED DELTAS (measured, not hidden)"
 note "  D1 transport — nginx: kill(pid, SIGHUP), the kernel authorizes (same uid); lobo: a loopback TCP endpoint, because wolf has no unix-domain socket at this pin (wolf-lang#227), so the optional \`token <file>\` arm is the authorization instead. Loopback is not a uid boundary and lobo says so."
@@ -283,6 +350,11 @@ else
     row "D3 narration: nginx=$ng_narr lobo=$lb_narr drain events (expected 0 and >0)" 1
 fi
 note "  (nginx's reload exit was $ng_reload_exit and lobo's $lb_reload_exit on the GOOD config — parity, both 0)"
+if [ "$lb5_root" = P5 ]; then
+    note "  D5 a relative \`root\` — lobo now resolves it under -p, as nginx did in row 5 (answered '$lb5_root'): this delta has closed, retire the note"
+else
+    note "  D5 a relative \`root\` — nginx resolves \`root www\` under -p (row 5 served P5 from a server started elsewhere); lobo resolves it against the folder it was started from, so the same config started elsewhere answered '${lb5_root:-nothing}' for /index.html. Run lobo from its prefix, or write \`root\` absolute (lobo#55)"
+fi
 
 if [ "$red" != 0 ]; then
     echo "control-differential: RED — $red of $total rows failed (artifacts under $scratch/)" >&2

@@ -1098,13 +1098,19 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // ws16: a HAND takes its control endpoint from the master's argv
     // (the config's `control` is the master's) and never touches the
     // pid file (the master's rendezvous)
-    let ctrl = if worker > 0 { wctrl } else { shell.control_addr(c0) }
+    // ws49 (lobo#54): a relative `unix:` control path lives under the
+    // prefix, as `pid` does — never the folder lobo was started from
+    let ctrl = if worker > 0 { wctrl } else { shell.control_endpoint(c0, prefix) }
     let pidp = shell.pid_path(c0, prefix)
 
     // stale-pid detection: an existing pid file whose endpoint is
     // alive means a master is already running (refuse, nginx-shaped);
     // a dead endpoint is a stale file (replace with a warning).
-    let existing = if worker > 0 { "" } else { shell.pid_read(pidp) else |_| "" }
+    let existing = if worker > 0 {
+        ""
+    } else {
+        shell.endpoint_under(shell.pid_read(pidp) else |_| "", prefix)
+    }
     if !existing.is_empty() {
         if shell.control_alive(existing) {
             eprint("lobo: [emerg] a lobo master is already running (control {existing})")
@@ -1330,7 +1336,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     }
 
     if worker == 0 {
-        shell.pid_write(pidp, ctrl_ep) else |_| {
+        shell.pid_write(pidp, shell.pid_endpoint(ctrl_ep, c0)) else |_| {
             eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
             return 1
         }
@@ -3013,9 +3019,11 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         )
         return 1
     }
-    let ctrl = shell.control_addr(c0)
+    // ws49 (lobo#54): the master's endpoint under the prefix, as
+    // serve_main's; each hand's `.wN` sibling then lives there too
+    let ctrl = shell.control_endpoint(c0, prefix)
     let pidp = shell.pid_path(c0, prefix)
-    let existing = shell.pid_read(pidp) else |_| ""
+    let existing = shell.endpoint_under(shell.pid_read(pidp) else |_| "", prefix)
     if !existing.is_empty() {
         if shell.control_alive(existing) {
             eprint("lobo: [emerg] a lobo master is already running (control {existing})")
@@ -3062,7 +3070,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         ctrl_ep = cb.1
         have_ctrl = true
     }
-    shell.pid_write(pidp, ctrl_ep) else |_| {
+    shell.pid_write(pidp, shell.pid_endpoint(ctrl_ep, c0)) else |_| {
         eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
         return 1
     }
@@ -3490,7 +3498,7 @@ fn control_target(cli: shell.Cli) -> (str, str) {
         return ("", "")
     }
     let pidp = shell.pid_path(c, cli.prefix)
-    let ep = shell.pid_read(pidp) else |e| match e {
+    let ep0 = shell.pid_read(pidp) else |e| match e {
         none => {
             eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
             return ("", "")
@@ -3500,6 +3508,10 @@ fn control_target(cli: shell.Cli) -> (str, str) {
             return ("", "")
         },
     }
+    // ws49 (lobo#54): the pid file records a `unix:` control as
+    // configured; a relative path is the prefix's, so this client
+    // resolves it under its own `-p`, as the server did to bind it
+    let ep = shell.endpoint_under(ep0, cli.prefix)
     var tok = ""
     let tokp = shell.control_token_path(c, cli.prefix)
     if !tokp.is_empty() {
