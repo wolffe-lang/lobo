@@ -207,6 +207,83 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws49 — 2026-10-04 — the pin at 0.2.22; the three bugs the demo reel worked around (lobo#46, #47, #54)
+
+- **The pin**, from the release archives by digest on kasumi: wolf
+  **0.2.22** (`8e36bc1`, release 402696856, linux x86-64 `df0f2fea…`)
+  and lupin **0.1.45** (`9f4e4a1`, release 402670966, `907cfb1a…`).
+  Members by name: `wolf` `56f90a92…`, `libwolf_rt.a` `dbf8ccb5…`,
+  `wolf-cimport-worker` `2437fe56…`, `lupin` `6b88de73…`. lobo skips
+  0.2.21, so the bump carries two releases. **Nothing in lobo moved**:
+  trunk's `src/` built at 0.2.22 on both tiers with zero diagnostics
+  at `--error-limit=0`, and the gauntlet at the bump (`cf03734`) was
+  green, 303/303 corpus lane-runs. wolf-std stays at **`14f0ab2`**:
+  its trunk has moved to `6a0df5e` (sc53), and lobo built against
+  each tree gives byte-identical binaries (debug `a2d77fed…`, release
+  `28d8f68b…`). The bump is stamps only: the pin file, fourteen
+  `.wolfi` stamps, three `shell.lu` lines.
+- **lobo#46: a slow download no longer holds the server.** A
+  plaintext body over 64 KiB was written inside the poll loop's step,
+  so the loop waited until the rest of the file fitted the kernel's
+  socket buffers or the write budget fired. It now streams beside the
+  loop (`budget.start_stream`: a body proc writes the chunks, a watch
+  proc reports one line down a second self-pipe in the loop's wait
+  set), budgeted or not; TLS keeps the inline write. Measured on
+  kasumi (`lobo-release`, 5 runs each, GET / issued 0.5 s after a
+  64 KB/s `curl` starts): a 24 MiB file, **more than 30,008 ms** at
+  trunk (curl's 30 s cap; `lobo status` empty, exit 0, at 2003 ms)
+  against **3 to 5 ms** at head (status 1 to 2 ms). A 1.3 MB file
+  answers in 4 ms on both, because linux's loopback buffers hold it
+  whole; the 3 to 8 s the reel measured is macOS's, and no lane can
+  build a macOS lobo to re-measure it. Witness:
+  `tests/serve/slow_stream_e2e.lu` (a client that stops reading a
+  24 MiB download; GET / and `status` within 1000 ms, then the whole
+  body and a keep-alive request), red at trunk at 3003 ms and 2002 ms
+  (the probes' own deadlines), green at head at 0 and 1 ms.
+- **lobo#47: a master that does not answer is exit 1, by name.**
+  `lobo status`, `lobo control <verb>` and `lobo -s <verb>` read an
+  endpoint that took the line and answered nothing in 2000 ms as an
+  empty reply: a blank line, exit 0. They now print `the master at …
+  did not answer within 2000 ms` and exit 1. Witness:
+  `tests/shell/control_silent_e2e.lu`, red at trunk (all three exit 0
+  after 2003 ms), green at head.
+- **lobo#54: the control socket lives under `-p`.** `control
+  unix:logs/control.sock;` was bound and dialled against the current
+  folder. It now resolves under the prefix for the server and every
+  client; the pid file records the address as configured, so the
+  socket path is never longer than before. Witness:
+  `tests/shell/control_prefix_e2e.lu` (the server started in its prefix
+  and from elsewhere, every verb from other folders), red at trunk
+  ("not responding"; and "the directory holding logs/c.sock does not
+  exist" for a server started elsewhere). `tools/lobo-control-differential`
+  gains row 5: the pinned nginx, started elsewhere, writes `pid
+  logs/rel.pid` under `-p` and reloads from `/`; lobo must do the same
+  with its pid and control socket (red against trunk's binary, green
+  at head; 10/10). Found beside it and filed as **lobo#55**: a relative
+  `root` still resolves against the start folder; the differential
+  prints it as named delta D5.
+- **The reel** (`demo/reel/`): scene 4 needs no wait and scenes 4 to 6
+  no `cd` with a ws49 lobo; the 0.1.1 workarounds stay, named, and
+  `REEL_PORT` moves a rehearsal copy off 8088. Rehearsed on kasumi on
+  port 18088 (scenes 0 to 6, every command from another folder): 4.3
+  ran 502 ms after 4.2 began and took 21 ms; the download arrived
+  whole. Preflight, scene 7 and teardown need the Mac's tunnel.
+
+### The predictions (the contract commit `05d6897`, §3)
+
+- Held: zero diagnostics at 0.2.22; no E0817, no E1010; ruling #34
+  absent from 0.2.22; stamps only; gauntlet green at the pin; the 1.3 MB
+  file does not stall on linux; the 24 MiB stall at trunk past every
+  probe's bound and under 50 ms at head; #47 and #54 red at trunk as
+  predicted.
+- Wrong, and caught before a commit: the first #54 design made the
+  socket path ABSOLUTE (the prefix joined to the start folder) and
+  recorded that in the pid file; the gauntlet's dist smoke went red on
+  it (a 108-byte path under the unpacked archive, past sun_path). The
+  path is now the prefix's spelling plus the configured one, the pid
+  file keeps the configured address, and every reader resolves it
+  under its own `-p`, nginx's model.
+
 ## ws47 — 2026-10-02 — the parity ledger at wolf 0.2.20; six issues (lobo#32–#34, #36–#38)
 
 - **The bar re-taken at the pin** (`docs/PARITY.md`, three entries).
