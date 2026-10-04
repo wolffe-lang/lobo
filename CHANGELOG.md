@@ -1,5 +1,150 @@
 # Changelog
 
+## 0.1.2 — 2026-10-04 — a slow download no longer holds the server; byte ranges; built with wolf 0.2.23
+
+The third release. A slow client downloading a large file no longer
+holds up every other request, the control verbs say so when the
+master does not answer, and `-p` reaches the control socket. Byte
+ranges are served as nginx serves them, `user` loads, and thirteen
+more nginx directives are refused by name, now at start and reload
+as well as at `-t`. The binary is built with wolf 0.2.23. The command
+line is 0.1.1's.
+
+### Install
+
+```sh
+brew install wolffe-lang/wolf/lobo     # macOS arm64
+yay -S lobo-bin                        # Arch x86-64
+```
+
+or download the archive for your host, unpack it, and run it in place:
+
+```sh
+tar -xzf lobo-0.1.2-x86_64-unknown-linux-gnu.tar.gz   # macOS: lobo-0.1.2-aarch64-apple-darwin
+cd lobo-0.1.2-x86_64-unknown-linux-gnu
+./lobo -v
+./lobo -t -c conf/lobo.conf
+./lobo -c conf/lobo.conf serve      # then: curl -i http://127.0.0.1:8080/
+```
+
+`GETTING-STARTED.md` in the archive is the learner path. The
+release workflow's last job downloads the published archive with no
+credentials on a clean runner, checks its digest, runs `lobo -v`,
+serves the stock page and compares the bytes.
+
+### `lobo -v`
+
+```
+lobo version: lobo/0.1.2 (built with wolf 0.2.23, pin 8edac3e)
+```
+
+`wolf-toolchain.toml` pins wolf 0.2.23 (`8edac3e`), lupin 0.1.46
+(`f9269e3`) and wolf-std `14f0ab2`; the release workflow builds that
+toolchain from source on each host, and the archive's `BUILD` file
+records it.
+
+### What changed since 0.1.1
+
+- **A slow download no longer holds the server** (ws49, lobo#46). In
+  0.1.1 a plaintext body over 64 KiB was written inside the event
+  loop, so one slow client held every other request and control verb
+  until the rest of the file fitted the kernel's socket buffers: on
+  kasumi, a GET issued beside a 64 KB/s download of a 24 MiB file
+  waited more than 30 s. The body now streams beside the loop, and the
+  same GET answers in 8 to 10 ms. TLS bodies are still written inline.
+  The limit this carries is under "still refused or limited" below.
+- **A master that does not answer is an error** (ws49, lobo#47).
+  `lobo status`, `lobo control <verb>` and `lobo -s <verb>` printed a
+  blank line and exited 0 when the control socket took the request
+  and answered nothing in 2000 ms. They print `the master at … did not
+  answer within 2000 ms` and exit 1.
+- **`-p` reaches the control socket** (ws49, lobo#54). A relative
+  `control unix:logs/control.sock;` was bound and dialled against the
+  current folder. It resolves under the prefix now, for the server
+  and for every client, as nginx resolves a relative `pid`.
+- **Byte ranges** (ws41). A static GET or HEAD with `Range` is
+  answered as nginx 1.30.4 answers it: 206 with `Content-Range`,
+  `multipart/byteranges` for several parts, 416 for an unsatisfiable
+  range, `If-Range` by ETag or Last-Modified, and `max_ranges`
+  (0 turns ranges off). The differential carries nineteen range cases.
+- **`user` loads** (ws41). Unprivileged, lobo prints nginx's own
+  warning and loads the config. As root, or on a host with no
+  `/proc/self/status` (macOS), it refuses by name, because lobo cannot
+  drop privileges and would keep running as root.
+- **Thirteen more directives are refused by name, and a refusal now
+  stops the start and the reload too** (ws41): `deny`, `allow`,
+  `uwsgi_pass`, `uwsgi_param`, `uwsgi_read_timeout`, `charset_types`,
+  `http2`, `http2_max_concurrent_streams`, `proxy_buffer_size`,
+  `proxy_buffers`, `ssl_ecdh_curve`, `ssl_session_tickets` and
+  `auth_request`. In 0.1.1 a refused row stopped `-t` only, and a
+  running server ignored it; with `deny` that would have served a
+  file under `deny all` with a 200, so the server refuses those rows
+  at start and reload as well. `docs/directives.md` now has 122 rows:
+  48 implemented, 49 planned and 25 refused by name.
+- **Three config fixes** (ws47): a `)` right after a closing quote
+  starts a new word, so `if ($x ~ "re")` loads (lobo#36);
+  `client_max_body_size` takes nginx's `k`, `m` and `g` (lobo#37); a
+  `map` naming a variable no module defines, and an unreadable or
+  empty `ssl_dhparam`, are refused at load as nginx refuses them
+  (lobo#38).
+- **`kill -QUIT` reaches a lobo started with SIGQUIT blocked** (ws46,
+  wolf-lang#483, fixed in wolf 0.2.20's runtime). A lobo launched from
+  a shell that blocked SIGQUIT never answered it.
+- **Memory retained per request: 19 KB, unchanged** on
+  `tools/lobo-membudget`. With an access log configured it is 0.6
+  KB/req less than in 0.1.1: the logged record is no longer copied
+  twice (ws42).
+- **Built with wolf 0.2.23** (ws42, ws43, ws44, ws46, ws49, ws50; 0.1.1
+  was built with 0.2.16). The wolf-lang#449 workarounds 0.1.1 carried
+  are gone (ten shapes back in their natural spelling, ws42), and no
+  later pin needed a source change: ws43, ws44, ws46, ws49 and ws50
+  each built trunk's source at the new wolf with zero diagnostics.
+
+### Against nginx
+
+`docs/PARITY.md` defines the comparison: nginx ÷ lobo, workers equal
+to cpus, c = 32, the median of five interleaved pairs; within 1.10 is
+parity. The current ledger, re-taken by ws47 on 2026-10-02 with lobo
+built by wolf 0.2.20:
+
+| host | close | keepalive |
+|---|---|---|
+| macOS arm64, 18 cpus | 1.031x | 1.037x |
+| linux x86-64, the CI runner, 4 cpus (run 37056568350) | 1.151x | 1.240x |
+| linux x86-64, kasumi, 16 cpus | no valid set (~1.84x) | no valid set (~2.04x) |
+
+Parity is met on macOS and not on linux. kasumi's three sets were
+refused because nginx's own runs spread more than the definition
+allows; `docs/PROFILE.md` has where the time goes.
+
+### The hosts, and what is still refused or limited
+
+| host | archive |
+|---|---|
+| `x86_64-unknown-linux-gnu` | yes |
+| `aarch64-apple-darwin` | yes |
+| `x86_64-pc-windows-msvc` | no: wolf's release tier refuses it by name (upstream s60c) |
+| `aarch64-unknown-linux-gnu` | no: wolf's native tier does not serve it |
+
+- **Streaming is bounded by the runtime's pool** (wolf-lang#570, open).
+  At wolf 0.2.23 a stream parked in a write holds its pool worker, so
+  lobo streams at most `cpus / 2 - 2` bodies beside the loop. Past
+  that room a download still leaves the loop and gets its head while
+  its body waits for a worker, and under `memory_budget` a small body
+  is written without its capped proc.
+- A range starting at byte N reads and drops N bytes first: lobo does
+  not use the seek wolf gained in 0.2.22 yet. Under `memory_budget` a
+  `Range` is ignored. An `If-Range` date in RFC 850 or asctime form is
+  not parsed.
+- Known issues: a relative `root` or `alias` resolves against the
+  start folder, not `-p` (lobo#55); an exact location aliased to a file
+  answers 404 (lobo#48); `-t -q` still prints (lobo#49); a reload
+  ignores a changed `worker_shutdown_timeout` (lobo#50); a finished
+  drain's count leaves `/metrics` with its generation (lobo#51); on
+  macOS, as root or without `/proc`, `user` is refused (lobo#52).
+- The 25 directives refused by name are listed in
+  `docs/directives.md`.
+
 ## 0.1.1 — 2026-09-24 — the linux keepalive stall gone, built with wolf 0.2.16
 
 The second release. The linux keepalive stall that shipped in 0.1.0
