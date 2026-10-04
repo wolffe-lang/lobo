@@ -32,7 +32,7 @@ if [ -f "$REEL/tunnel.yml" ]; then
 else
     REEL_TUNNEL_CONFIG=${REEL_TUNNEL_CONFIG:-$HOME/scratch/wolf/lobo-demo/tunnel.yml}
 fi
-WANT_LOBO=${REEL_LOBO_VERSION:-lobo/0.1.1}
+WANT_LOBO=${REEL_LOBO_VERSION:-lobo/0.1.2}
 WANT_WOLF=${REEL_WOLF_VERSION:-wolf 0.2.20}
 COLUMNS=${COLUMNS:-60}
 export COLUMNS
