@@ -1,0 +1,235 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! A SLOW DOWNLOAD HOLDS ITS OWN ROW, NOTHING ELSE (ws49, lobo#46).
+//! Until ws49 a large plaintext body streamed to completion INSIDE the
+//! poll loop's step, so while the rest of the file did not fit the
+//! kernel's socket buffers the whole loop waited on one client: the
+//! demo reel measured 3 to 8 s on a 64 KB/s client of a 1.3 MB file
+//! (`lobo status` and `lobo -s reload` printed nothing meanwhile). Now
+//! the body leaves in a stream beside the loop (budget.start_stream).
+//!
+//! The slow client here is the slowest there is: it reads the head and
+//! the first piece of a 24 MiB file (more than linux's or macOS's
+//! loopback buffers hold) and then reads NOTHING. While it stalls, a
+//! second client's GET and the control endpoint's `status` must each
+//! answer within a bound (1000 ms, generous for a loaded runner; the
+//! measured numbers are printed). Then the slow client reads the rest:
+//! every byte arrives (the stream is whole), and a SECOND request on
+//! the same connection is answered (the row came back to the loop for
+//! keep-alive). Twice: unbudgeted (the inline arm before ws49) and
+//! under `memory_budget 128k` (the capped proc arm, the reel's config).
+//! Loopback only; OS-chosen ports; scratch under target/, cleared at
+//! START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// One whole short exchange on a fresh connection: the reply, or "" if
+/// none arrived inside `ms`. Total.
+fn ask(port: int, req: str, ms: int) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return ""
+    }
+    net_deadline(c, ms) else |_| {}
+    net_write(c, req) else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// Read `want` bytes off `c` (a deadline already armed). Answers how
+/// many arrived. Total.
+fn drain(c: int, want: int) -> int {
+    var got: int = 0
+    var reading = true
+    while reading && got < want {
+        let ask_n = if want - got < 65536 { want - got } else { 65536 }
+        let b = net_read_bytes(c, ask_n) else |_| {
+            reading = false
+            List[byte]()
+        }
+        if b.len == 0 {
+            reading = false
+        }
+        got = got + b.len
+    }
+    got
+}
+
+/// One server under `extra` (a server-level directive line, or ""):
+/// the stall probe, the whole-body check and the keep-alive check.
+/// Answers the count of wrong answers. Total.
+fn one(name: str, root: str, d: str, size: int, extra: str) -> int {
+    var bad: int = 0
+    let hp = free_port() else |_| 0
+    let cp = free_port() else |_| 0
+    let ep = "127.0.0.1:{cp}"
+    fs_write_text(
+        "{d}/lobo.conf",
+        "pid {d}/lobo.pid;\ncontrol {ep};\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; {extra} }}\n}}\n",
+    ) else |_| {
+        return 1
+    }
+    var argv = List[str]()
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        print("{name}: could not spawn target/lobo-debug")
+        return 1
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| 0
+        print("{name}: the server never answered on {ep}")
+        return 1
+    }
+
+    // the slow client: the head and one piece, then nothing
+    let a = net_connect("127.0.0.1:{hp}") else |_| {
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| 0
+        return 1
+    }
+    net_deadline(a, 20000) else |_| {}
+    net_write(a, "GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n") else |_| {}
+    let first = net_read_bytes(a, 4096) else |_| { List[byte]() }
+    var head_len: int = -1
+    var i: int = 0
+    while i + 3 < first.len && head_len < 0 {
+        if first[i] as int == 13 &&
+            first[i + 1] as int == 10 &&
+            first[i + 2] as int == 13 &&
+            first[i + 3] as int == 10 {
+            head_len = i + 4
+        }
+        i = i + 1
+    }
+    if head_len < 0 {
+        print("{name}: the slow client got no head in its first piece ({first.len} bytes)")
+        bad = bad + 1
+        head_len = first.len
+    }
+    time_sleep_ms(300)
+
+    // while it stalls: a second client, and the order desk
+    let t0 = time_unix_ms()
+    let r = ask(hp, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 3000)
+    let get_ms = time_unix_ms() - t0
+    let t1 = time_unix_ms()
+    let st = shell.control_fetch(ep, "status") else |_| { "" }
+    let st_ms = time_unix_ms() - t1
+    print(
+        "{name}: during the stalled download, GET / answered in {get_ms} ms, status in {st_ms} ms",
+    )
+    if !r.contains("200 OK") || !r.contains("small-page") || get_ms > 1000 {
+        print("  GET /: [{r.len} bytes] {get_ms} ms")
+        bad = bad + 1
+    }
+    if !st.contains("current generation: 1") || st_ms > 1000 {
+        print("  status: [{st.len} bytes] {st_ms} ms")
+        bad = bad + 1
+    }
+
+    // the stream is whole, and the row comes back for keep-alive
+    let rest = drain(a, size - (first.len - head_len))
+    let whole = first.len - head_len + rest
+    if whole != size {
+        print("{name}: the slow client got {whole} of {size} body bytes")
+        bad = bad + 1
+    }
+    net_write(a, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+    var again = ""
+    var reading = true
+    while reading {
+        let piece = net_read(a, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            again = "{again}{piece}"
+        }
+    }
+    net_close(a) else |_| {}
+    if !again.contains("200 OK") || !again.contains("small-page") {
+        print("{name}: the keep-alive request after the stream got [{again.len} bytes]")
+        bad = bad + 1
+    }
+
+    shell.control_fetch(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        ""
+    }
+    let _w = os_wait(child) else |_| 0
+    bad
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws49_slow"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let size = 25165824
+    var argv = List[str]()
+    (mut argv).push("/bin/sh")
+    (mut argv).push("-c")
+    (mut argv).push("head -c \"$1\" /dev/zero | tr '\\000' w > \"$2\"")
+    (mut argv).push("sh")
+    (mut argv).push("{size}")
+    (mut argv).push("{d}/www/big.bin")
+    let h = os_spawn(argv)?
+    let mk = os_wait(h)?
+    assert(mk == 0, "the 24 MiB file is written")
+    let a = one("unbudgeted", root, d, size, "")
+    let b = one("memory_budget 128k", root, d, size, "memory_budget 128k;")
+    assert(a == 0 && b == 0, "a stalled download holds nothing but its own row ({a}, {b} wrong)")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

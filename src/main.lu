@@ -38,7 +38,14 @@
 //! connection blocks the loop. Since ws29 there is exactly ONE proc
 //! beside it — `sig_forwarder`, parked in `os_signal_wait` for the
 //! process's life, holding two ints and a socket and touching no
-//! server state — which is the whole of D7's amendment. ws16 (D73): with `worker_processes N` (N >= 2)
+//! server state — which is the whole of D7's amendment. ws49
+//! (lobo#46) adds the second: a large plaintext body leaves in a
+//! STREAM beside the loop (`budget.start_stream`, a watch and a body
+//! proc per download), because a body written inside the step held
+//! the whole loop while a slow client's download started, and wolf
+//! has no write readiness to step it with; the outcome comes back as
+//! one line down a second self-pipe in the same wait set, and the row
+//! is the stream's until then. ws16 (D73): with `worker_processes N` (N >= 2)
 //! that loop runs N times over, one os process each — a MASTER
 //! starts the hands through `os_spawn` and supervises them over
 //! per-worker control endpoints (`master_main` below); a hand is
@@ -74,6 +81,7 @@
 //! directly above a dotted call.
 
 use acme
+use budget
 use config
 use conn
 use dryrun
@@ -1366,6 +1374,23 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     }
     pipe_w = sp.0
     pipe_r = sp.1
+    // ws49 (lobo#46): the STREAM pipe. A large plaintext body leaves in
+    // a proc beside this loop (budget.start_stream), and its one-line
+    // outcome comes back down this pipe, whose read end joins the wait
+    // set — the forwarder's shape. A host that refuses the pair keeps
+    // the inline write (the loop then holds for a slow download, as
+    // every lobo before ws49 did), said out loud.
+    let stp = serve.open_self_pipe() else |_| {
+        eprint(
+            "lobo: [warn] no loopback stream pipe: large bodies are written inside the serving loop, so a slow client's download holds every other connection while it starts (lobo#46)",
+        )
+        (-1, -1)
+    }
+    let stream_w = stp.0
+    let stream_r = stp.1
+    if stream_r >= 0 {
+        net_deadline(stream_r, 50) else |_| {}
+    }
     var opts = serve.ServerOpts {
         token: d0.token,
         keepalive_timeout_ms: d0.keepalive_timeout_ms,
@@ -1375,6 +1400,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         metrics_on: config.metrics_on(c0),
         pipe_w: pipe_w,
         pipe_r: pipe_r,
+        stream_w: stream_w,
     }
     // ws10: the effective Limits (fence + budget) freeze PER
     // GENERATION beside the model — resolved here for gen 1, by
@@ -1416,6 +1442,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             metrics_on: opts.metrics_on,
             pipe_w: opts.pipe_w,
             pipe_r: opts.pipe_r,
+            stream_w: opts.stream_w,
         }
     }
     let auto_primary = config.auto_primary(c0)
@@ -1537,6 +1564,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // ws13: the name a connection is PARKED on ("" = not parked): the
     // loop skips its step until the resolver settles that name
     var cwait = List[str]()
+    // ws49 (lobo#46): a connection whose body is STREAMING beside the
+    // loop: 0 not streaming; 1 streaming, keep-alive after; 2
+    // streaming, close after; +10 once its draining generation's
+    // worker_shutdown_timeout asked for an abort. The row is out of
+    // the wait set and never stepped until its stream reports.
+    var cstream = List[int]()
+    // the stream pipe's partial line, and this pass's finished streams
+    var sbuf = ""
 
     // ws13: the resolver — the cache and the pending query table the
     // loop ticks once per pass like every other socket it owns
@@ -1629,13 +1664,18 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         if have_tls && running && !quitting {
             (mut wfds).push(tls_l)
         }
+        // ws49 (lobo#46): the stream pipe's read end — a finished
+        // stream's line wakes the loop the way a signal's byte does
+        if stream_r >= 0 {
+            (mut wfds).push(stream_r)
+        }
         var wi: int = 0
         var parked = false
         while wi < cfds.len {
-            if cwait[wi].is_empty() {
-                (mut wfds).push(cfds[wi])
-            } else {
+            if !cwait[wi].is_empty() {
                 parked = true
+            } else if cstream[wi] == 0 {
+                (mut wfds).push(cfds[wi])
             }
             wi = wi + 1
         }
@@ -1671,6 +1711,35 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 ev_event(mut elog, "error", body)
             }
             ri = ri + 1
+        }
+
+        // 0b. ws49 (lobo#46): the streams that finished. Each watch
+        // wrote one `<sock> <cls> <wcode> <rt> <cap>` line; read what
+        // is there (the pipe is ready, so the read answers at once),
+        // keep a partial line for the next pass, and fold each
+        // stream's measured region high water into its generation NOW,
+        // before this pass's control dispatch can report it. The rows
+        // themselves close or resume in step 3.
+        var sdone = List[int]()
+        var sline = List[str]()
+        if stream_r >= 0 && ready_has(ready, stream_r) {
+            let piece = net_read(stream_r, 4096) else |_| { "" }
+            sbuf = "{sbuf}{piece}"
+            var more = true
+            while more {
+                let nl = sbuf.find("\n") else -1
+                if nl < 0 {
+                    more = false
+                } else {
+                    let ln = sbuf[0..nl]
+                    sbuf = sbuf[nl + 1..sbuf.len]
+                    let sr = budget.stream_line(ln)
+                    if sr.0 >= 0 {
+                        (mut sdone).push(sr.0)
+                        (mut sline).push(ln)
+                    }
+                }
+            }
         }
 
         // 1. collect ONE trigger for the verb dispatch: a control-
@@ -1900,6 +1969,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 (mut cidle).push(now)
                 (mut cstart).push(now)
                 (mut cwait).push("")
+                (mut cstream).push(0)
                 burst = burst + 1
             }
         }
@@ -1975,6 +2045,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         var nidle = List[int]()
         var ncstart = List[int]()
         var nwait = List[str]()
+        var nstream = List[int]()
         var pass_accs = List[AccRow]()
         var k: int = 0
         let ktot = cfds.len
@@ -1998,6 +2069,82 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 (mut nidle).push(now)
                 (mut ncstart).push(cs0)
                 (mut nwait).push(waiting)
+                (mut nstream).push(0)
+                k = k + 1
+                continue
+            }
+            // ws49 (lobo#46): a STREAMING row belongs to its stream until
+            // the stream's line arrives (step 0b). Until then the loop
+            // neither reads, writes nor closes the socket: the runtime
+            // hands a closed handle out again, and the stream's next
+            // chunk would go to whoever got it.
+            let sst = cstream[k]
+            if sst != 0 {
+                let di = index_in(sdone, fd)
+                if di < 0 {
+                    var nst = sst
+                    if sst < 10 && shutdown_ms > 0 {
+                        let sgi = index_of(gens, cg)
+                        if sgi >= 0 &&
+                            gens[sgi].state == "draining" &&
+                            now - gens[sgi].since_ms >= shutdown_ms {
+                            // worker_shutdown_timeout: the loop cannot
+                            // close the socket under the stream, so it
+                            // arms a 1 ms budget on it — the stream's
+                            // next write fails at once and reports, and
+                            // the row closes as aborted then. A write
+                            // already parked keeps the budget it began
+                            // with ([os.net.io]); docs/DRAIN.md says so.
+                            net_deadline(fd, 1) else |_| {}
+                            nst = sst + 10
+                        }
+                    }
+                    (mut nfds).push(fd)
+                    (mut ngens).push(cg)
+                    (mut ncarry).push(car)
+                    (mut nserved).push(sv)
+                    (mut nidle).push(now)
+                    (mut ncstart).push(cs0)
+                    (mut nwait).push("")
+                    (mut nstream).push(nst)
+                    k = k + 1
+                    continue
+                }
+                let sr = budget.stream_line(sline[di])
+                let scls = sr.1
+                let swc = sr.2
+                let srt = sr.3
+                let shit = scls == 2
+                if shit {
+                    // the cap refused a chunk the meter had admitted:
+                    // the head is on the wire, so the row can only
+                    // close — ws13's `site=region` event, named late
+                    let blim = lim_for(gens, cg).memory_budget
+                    ev_event(
+                        mut elog,
+                        "error",
+                        shell.ev_budget_exceeded_cap(cg, "region", blim, blim + 1, sr.4),
+                    )
+                }
+                // ws12: the stream's measured region high water joins
+                // its generation's, as the inline write's always did
+                if note_needed(gens, cg, 0, srt, shit) {
+                    gens = note_request(take gens, cg, 0, srt, shit)
+                }
+                let sabort = sst >= 10
+                if scls != 0 || swc != 0 || sst % 10 == 2 || sabort {
+                    net_close(fd) else |_| {}
+                    gens = on_conn_close(take gens, cg, sabort, mut elog)
+                } else {
+                    (mut nfds).push(fd)
+                    (mut ngens).push(cg)
+                    (mut ncarry).push(car)
+                    (mut nserved).push(sv)
+                    (mut nidle).push(now)
+                    (mut ncstart).push(now)
+                    (mut nwait).push("")
+                    (mut nstream).push(0)
+                }
                 k = k + 1
                 continue
             }
@@ -2206,7 +2353,25 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     aborted_flag = true
                 }
             }
-            if close_it {
+            if st.streaming {
+                // ws49 (lobo#46): the body is streaming beside the loop;
+                // the request is logged, and the close decision waits
+                // for the stream's report (an abort, if the generation
+                // is already past its timeout, rides as +10)
+                var cst = if close_it { 2 } else { 1 }
+                if aborted_flag {
+                    net_deadline(fd, 1) else |_| {}
+                    cst = cst + 10
+                }
+                (mut nfds).push(fd)
+                (mut ngens).push(cg)
+                (mut ncarry).push(st.carry)
+                (mut nserved).push(st.served)
+                (mut nidle).push(new_idle)
+                (mut ncstart).push(new_start)
+                (mut nwait).push("")
+                (mut nstream).push(cst)
+            } else if close_it {
                 net_close(fd) else |_| {}
                 gens = on_conn_close(take gens, cg, aborted_flag, mut elog)
             } else {
@@ -2217,6 +2382,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 (mut nidle).push(new_idle)
                 (mut ncstart).push(new_start)
                 (mut nwait).push(new_wait)
+                (mut nstream).push(0)
             }
             k = k + 1
         }
@@ -2227,6 +2393,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         cidle = nidle
         cstart = ncstart
         cwait = nwait
+        cstream = nstream
 
         // ws09: pump the pass's records through every access output
         // (ONE bounded append per sink per pass — emit never blocked
@@ -2294,6 +2461,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     elog = reopen_elog(elog)
     for fd in cfds {
         net_close(fd) else |_| {}
+    }
+    // ws49: the stream pipe last — a stream still running when `stop`
+    // lands finds its socket closed above and its report goes nowhere
+    if stream_r >= 0 {
+        net_close(stream_r) else |_| {}
+        net_close(stream_w) else |_| {}
     }
     if have_http {
         net_close(hl) else |_| {}
@@ -2478,6 +2651,19 @@ fn bind_control(addr: str) -> (int, str) {
         return (-1, "could not read the control port")
     }
     (l, "127.0.0.1:{port}")
+}
+
+/// ws49: where `fd` sits in `xs`, or -1 — the finished-stream lookup
+/// (a handful of streams end in one pass). Pure and total.
+fn index_in(xs: List[int], fd: int) -> int {
+    var i: int = 0
+    while i < xs.len {
+        if xs[i] == fd {
+            return i
+        }
+        i = i + 1
+    }
+    -1
 }
 
 /// Was `fd` in the readiness answer? `net_wait` answers the SUBSET in

@@ -408,6 +408,16 @@ is no longer gated on anything upstream).
 - `tests/serve/budget_cap_e2e.lu`: the real server under
   `memory_budget 4k`: 200 through the capped proc, `mem-rt-hw`
   non-zero in the status stanza.
+- `tests/serve/slow_stream_e2e.lu` (ws49, lobo#46): the real server
+  under `memory_budget 128k` (and without one) streams a 24 MiB file
+  to a client that stops reading, and a second client and `status` are
+  answered meanwhile. Since ws49 the serving loop does not JOIN the
+  streamed body's proc: `budget.start_stream` runs the same capped
+  chunks beside the loop, and a watch proc reports the join's class,
+  the write outcome and the measured high water down the loop's stream
+  pipe; the loop folds `mem_rt` into the generation when the line
+  arrives, so `mem-rt-hw` moves when the stream ENDS, not when its head
+  is written. `run_stream` stays for callers outside the loop.
 - `tests/serve/cap_shape.lu`: the one-module shape on native AND
   lupin (200 rounds, a breach, the next round clean); the checked
   lane's named refusal asserted.

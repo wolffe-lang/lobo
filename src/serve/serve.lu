@@ -460,7 +460,11 @@ pub fn mime_for(c: config.Conf, path: str) -> str {
 /// `http.Limits` and the config model itself freeze per generation),
 /// so a reload that flips the endpoint takes effect at the next
 /// restart. Said out loud rather than implied; the per-generation
-/// ServerOpts freeze is routed residue.
+/// ServerOpts freeze is routed residue. ws49 adds `stream_w`: the
+/// write end of the loop's STREAM pipe (lobo#46) — when it is set
+/// (>= 0) a large plaintext body is handed to a stream beside the
+/// loop (`budget.start_stream`) instead of written inside the step;
+/// -1, every caller but the poll loop, keeps the inline write.
 pub struct ServerOpts {
     token: str,
     keepalive_timeout_ms: int,
@@ -470,6 +474,7 @@ pub struct ServerOpts {
     metrics_on: bool,
     pipe_w: int,
     pipe_r: int,
+    stream_w: int,
 }
 
 /// The lobo-flavoured defaults (nginx analogues: keepalive_timeout 75s,
@@ -487,6 +492,7 @@ pub fn default_opts() -> ServerOpts {
         metrics_on: false,
         pipe_w: -1,
         pipe_r: -1,
+        stream_w: -1,
     }
 }
 
@@ -561,6 +567,8 @@ struct Charge {
     cap: int,
     pipe_w: int,
     pipe_r: int,
+    stream_w: int,
+    handed: bool,
 }
 
 fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
@@ -573,6 +581,8 @@ fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
         cap: if budget > 0 { ledger_cap(budget) } else { 0 },
         pipe_w: pipe_w,
         pipe_r: pipe_r,
+        stream_w: -1,
+        handed: false,
     }
 }
 
@@ -1264,6 +1274,22 @@ fn serve_file(
             fs_close(fd) else |_| {}
             return io
         },
+    }
+    // ws49 (lobo#46): in the poll loop the body leaves BESIDE the loop
+    // — a stream proc owns the socket until it reports down the loop's
+    // stream pipe — so a slow client's download holds its own row and
+    // nothing else. Budgeted or not, the chunk shapes are the ones
+    // below (budget.lu says how); TLS keeps the inline write (its
+    // session cannot cross a proc boundary, the D24 residue).
+    if chg.stream_w >= 0 && !conn.is_tls(cn) {
+        if chg.limit > 0 {
+            fs_close(fd) else |_| {}
+            budget.start_stream(conn.fd(cn), -1, path, chg.cap, chg.stream_w)
+        } else {
+            budget.start_stream(conn.fd(cn), fd, "", 0, chg.stream_w)
+        }
+        chg.handed = true
+        return !keep
     }
     if chg.limit > 0 {
         // ws13: BUDGETED — the chunks stream inside a proc, each in a
@@ -2588,6 +2614,7 @@ pub struct ReqOut {
     resolve_addr: str,
     resolve_timeout_ms: int,
     resolve_valid_ms: int,
+    streaming: bool,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -2610,6 +2637,7 @@ fn req_out(close: bool, carry: str, take acc: obs.Access, chg: Charge) -> ReqOut
         resolve_addr: "",
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
+        streaming: chg.handed,
     }
 }
 
@@ -2635,6 +2663,7 @@ fn req_out_wait(take acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
         resolve_addr: need.addr,
         resolve_timeout_ms: need.timeout_ms,
         resolve_valid_ms: need.valid_ms,
+        streaming: false,
     }
 }
 
@@ -2659,6 +2688,7 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
         resolve_addr: "",
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
+        streaming: false,
     }
 }
 
@@ -2688,6 +2718,7 @@ pub fn serve_request(
     var acc = obs.access_new()
     acc.request = raw_line(head)
     var chg = charge_new(limits.memory_budget, opts.pipe_w, opts.pipe_r)
+    chg.stream_w = opts.stream_w
     let req = http.parse_request(head, limits) else |e| match e {
         malformed => {
             acc.status = 400
@@ -2943,6 +2974,11 @@ fn head_cut(buf: str) -> HeadCut {
 /// finished (peer close, error, a written terminal response, or the
 /// keepalive budget spent): the caller closes the socket and decrements
 /// the owning generation. `carry`/`served` thread the connection state.
+/// ws49 (lobo#46): `streaming` means the response's body was handed to
+/// a stream beside the loop — the step has logged the request and its
+/// `close` is the decision to apply AFTER the stream reports; until
+/// then the socket is the stream's, and the loop must not read, write
+/// or close it.
 pub struct ConnStep {
     active: bool,
     close: bool,
@@ -2961,6 +2997,7 @@ pub struct ConnStep {
     resolve_addr: str,
     resolve_timeout_ms: int,
     resolve_valid_ms: int,
+    streaming: bool,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -2992,6 +3029,7 @@ fn step_out(
         resolve_addr: "",
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
+        streaming: false,
     }
 }
 
@@ -3065,6 +3103,7 @@ fn step_serve(
         resolve_addr: "",
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
+        streaming: ro.streaming,
     }
 }
 

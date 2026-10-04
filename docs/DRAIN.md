@@ -33,6 +33,14 @@ close.
 - retire → a draining generation whose counter reaches zero (or
   whose worker_shutdown_timeout expires) leaves the table.
 
+A connection whose response body is STREAMING (a plaintext file over
+64 KiB, since ws49, lobo#46) is written by a stream beside the loop,
+not by the loop's step, so a slow download no longer holds the loop:
+`lobo status`, `-s reload` and every other connection are answered
+while it runs. The connection still counts on its generation until the
+stream ends and the loop closes it (or, under keep-alive, takes it
+back for the next request).
+
 A debug assertion that a counter never goes negative stays in EVERY
 profile (the checked-arithmetic spirit), so a leak that made a
 generation immortal trips it.
@@ -43,7 +51,14 @@ A draining generation retires when its live count hits zero or its
 `worker_shutdown_timeout` expires. Connections still open when the
 timeout bites are ABORTED (force-closed) and counted as such, so the
 retirement event reads `drained=N aborted=M` and the operator sees that
-the timeout ended it. With no `worker_shutdown_timeout`
+the timeout ended it. A STREAMING connection is aborted through its
+socket's write budget, not closed under the stream: at the timeout the
+loop arms a 1 ms budget on the socket, the stream's next write fails,
+and the connection closes as aborted when the stream reports. A write
+already parked keeps the budget it began with ([os.net.io]), so a
+stream to a client that is still reading stops within one 64 KiB chunk,
+and one to a client that stopped reading within its send budget (60 s).
+With no `worker_shutdown_timeout`
 (the directive absent, or `0`, the nginx default) a generation drains
 FULLY, however long that takes.
 
