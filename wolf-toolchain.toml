@@ -14,6 +14,44 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
+# wolf-lang at the **v0.2.22 RELEASE TAG** (8e36bc1, r27), the release
+# stamp `wolf 0.2.22 (wolfgang, pin 8e36bc1)`. Staged from the RELEASE
+# ARCHIVE by digest, the whole archive pair, as below:
+#   gh release download v0.2.22 -R wolffe-lang/wolf-lang \
+#       --pattern 'wolf-0.2.22-<host>.tar.gz'
+#   sha256 df0f2fea26d9d26de5e577ee5d2cbabeaafe6d93ecfa447cb6be97ae442d8dba
+#       (x86_64-unknown-linux-gnu, measured at ws49 on kasumi; the
+#        release asset's own digest, release 402696856)
+#   sha256 19606e1e955680f33b9d73ec0666b71a51a05e7d8bd349f3ea46353b2b931e91
+#       (aarch64-apple-darwin, the release asset's digest)
+# Members BY NAME (linux x86-64): `wolf` 3fb48c1d… -> 56f90a92…,
+# `libwolf_rt.a` c011f2ae… -> dbf8ccb5…, `wolf-cimport-worker`
+# 13a61554… -> 2437fe56…; `wolf.1` and `README.md` move too. `_wolf`
+# (2d1e4801…), `wolf.bash`, `wolf.fish` and the licences are the
+# same bytes as at 0.2.20. Highest glibc symbol: GLIBC_2.34.
+#
+# WHAT THE BUMP CHANGES HERE (ws49; the CHANGELOG entry has the
+# numbers). lobo skips 0.2.21, so this bump carries two releases.
+# 0.2.21: `match` over a fallible value (ruling #21), `?` under a
+# defer refused (E0611), an unannotated literal past i32 refused
+# (E0415, #458), a block's `errdefer` runs on an error value, and
+# release builds reproducible with the mid-end on (#503 fixed).
+# 0.2.22: the freestanding target and `asm:` in wolf.pkg, a closed
+# attribute set (E0817, E0818), `#[repr(c)]` through a raw pointer,
+# narrowing casts that keep their value or trap, a `for` piece that
+# cannot outlive its region (E1010, #540), the checked machine
+# discarding a row nobody consumes (#541 part 1), seek/tell/positional
+# reads, and descriptors 0/1/2 as the standard streams (the first
+# handle an open answers is 3). NONE of it reaches lobo's source:
+# trunk's `src/` built at this pin on both tiers with zero diagnostics
+# (--error-limit=0); lobo's only attribute is `#[allow]`. Ruling #34
+# (#541 part 2) is NOT in 0.2.22 — s208's compiler half is unmerged at
+# the tag — so `tests/shell/overlap_reloads.lu:142` moves nothing here.
+# The #146 WOLF_MIDEND flip-back is STILL owed (ws37's note below
+# stands) and is not taken here; #503, ws46's other reason to wait, is
+# fixed in 0.2.21, so the flip is now #146's question alone.
+#
+# (ws46, the previous bump:)
 # wolf-lang at the **v0.2.20 RELEASE TAG** (cdde128, r25), the release
 # stamp `wolf 0.2.20 (wolfgang, pin cdde128)`. Staged from the RELEASE
 # ARCHIVE by digest, the whole archive pair, as below:
@@ -289,10 +327,28 @@
 # both ways and docs/BUDGET.md and docs/PARITY.md following. The
 # shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "cdde128a30999652c9d70189664226b766a206f0"
-version_line = "wolf 0.2.20 (wolfgang, pin cdde128)"
+rev = "8e36bc1a0f92bbbbc6861b10d5b2638f76412d6a"
+version_line = "wolf 0.2.22 (wolfgang, pin 8e36bc1)"
 
 [lupin]
+# lupin at the **v0.1.45 RELEASE TAG** (9f4e4a1, r27), staged from the
+# release archive by digest as [wolf] is:
+#   gh release download v0.1.45 -R wolffe-lang/wolf-interp \
+#       --pattern 'lupin-0.1.45-<host>.tar.gz'
+#   sha256 907cfb1ac473c82a36013064ae3cee7b03d879b44a6ce6ad775e2e26353424c7
+#       (x86_64-unknown-linux-gnu, measured at ws49; the release
+#        asset's digest, release 402670966)
+#   sha256 08b1de122d73a26609ca1e2cf7a5febf81d57920d459b2a28bbb3ea5bd2261ad
+#       (aarch64-apple-darwin, the release asset's digest)
+# `lupin` 3b0702c0… -> 6b88de73… (linux x86-64). Pairing gap ZERO
+# (wolf@v0.2.22 declares 0.1.45). Lane gap ONE release: 0.1.45's
+# conformance pin is dfcc2f1 = v0.2.21, so 0.2.22's freestanding
+# target, attribute set and casts are wolf-side at lupin's pin. lupin
+# 0.1.45 carries is68/is69 (wolf-interp#126, #103, #176) and the
+# mirror of s199's seek/tell/read_at; lobo calls none of them, so none
+# moves this corpus's lupin lane.
+#
+# (ws46, the previous bump:)
 # lupin at the **v0.1.43 RELEASE TAG** (6d6cde5, r25), staged from the
 # release archive by digest as [wolf] is:
 #   gh release download v0.1.43 -R wolffe-lang/wolf-interp \
@@ -383,10 +439,22 @@ version_line = "wolf 0.2.20 (wolfgang, pin cdde128)"
 # not a calendar. Its conformance pin (2e4ca76) is information, not
 # this file's rev. Bumped together with [wolf] as always.
 repo = "wolffe-lang/wolf-interp"
-rev = "6d6cde553ba980527dcbebd4dbe81d63f898d658"
-version_line = "lupin 0.1.43 (wolf-interp, reference interpreter at pin c2401f0)"
+rev = "9f4e4a175da109bc4dc0acec3e8a4bc54358b941"
+version_line = "lupin 0.1.45 (wolf-interp, reference interpreter at pin dfcc2f1)"
 
 [std]
+# wolf-std, STILL at **14f0ab2** (ws49, 2026-10-04), re-derived against
+# 0.2.22 BEFORE the bump (B151). wolf-std's trunk has MOVED, to 6a0df5e
+# (sc53: std at 0.2.22 / 0.1.45, s199's seek/tell surface, #48/#49), so
+# this is the first bump since ws42 where a newer tree exists. Measured,
+# not assumed: trunk's lobo source (f79418d) built at 0.2.22 against
+# each tree, both tiers, exits 0 with zero diagnostics at
+# --error-limit=0, and the two trees give BYTE-IDENTICAL binaries
+# (debug a2d77fed…, release 28d8f68b…): nothing lobo imports moved. The
+# pin holds rather than ride a std move that changes no byte here; the
+# next lane that needs s199's surface takes 6a0df5e.
+#
+# (ws46, the previous bump:)
 # wolf-std, STILL at trunk **14f0ab2** (ws46, 2026-10-02), re-derived
 # against 0.2.20 BEFORE the bump (B151). 14f0ab2 is still wolf-std's
 # trunk, and trunk's lobo source built at 0.2.20 against it exits 0
