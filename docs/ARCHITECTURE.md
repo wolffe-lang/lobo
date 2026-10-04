@@ -53,17 +53,21 @@ touches no server state.
 
 ws49 (lobo#46) adds the second sentence: a large plaintext body
 (over 64 KiB) leaves in a STREAM beside the loop — `budget.start_stream`
-spawns a watch and a body proc, the body writes the chunks, and the
-watch reports one line down a second loopback self-pipe whose read end
-is in the same wait set. Until ws49 the body was written inside the
+spawns one proc that writes the chunks and then reports one line down a
+second loopback self-pipe whose read end is in the same wait set. Until ws49 the body was written inside the
 step, so a slow client held the whole loop while its download started
 (3 to 8 s on a 64 KB/s client of a 1.3 MB file; until the write budget
 on a client that stopped reading). wolf leaves no spawn-free way to
 step a slow writer — readiness is READ readiness only, and a write
 drains whole or fails with the bytes it sent unknown — so the proc is
-the honest shape. The stream holds ints, a path and two sockets; the
-loop owns the row's bookkeeping and never touches the socket while the
-stream does. TLS keeps the inline write (the D24 residue).
+the honest shape. The stream is ONE proc holding ints and two
+sockets; the loop owns the row's bookkeeping and never touches the
+socket while the stream does. TLS keeps the inline write (the D24
+residue). At the 0.2.22 pin a parked proc holds its pool worker
+(wolf-lang#570), so the loop counts its streams against `cpus / 2 - 2`
+(`stream_room`, measured) and past it writes a budgeted small body
+without its capped proc rather than wait in that proc's join; a
+stream past it still leaves the loop, and waits for a worker.
 
 ## Who calls whom
 

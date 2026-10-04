@@ -263,22 +263,23 @@ pub fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> O
 // whole buffer or fails with the bytes it sent unknown ([os.net.io]).
 // So the body leaves in a proc beside the loop, and the loop learns
 // the outcome the way it learns of a signal: a line down a loopback
-// self-pipe whose read end is in its wait set. Two procs per stream:
-// the BODY writes the chunks (each in its own region; under a budget,
-// a capped one, exactly `body_stream`'s shape), and the WATCH joins
-// it and reports `<sock> <cls> <wcode> <rt> <cap>` — the watch is
-// what lets a FAULTED body (a cap breach, a contained trap) still
-// report, since a killed proc writes nothing. The loop never touches
-// the socket while the row streams; the body closes the file.
+// self-pipe whose read end is in its wait set. One proc per stream
+// writes the chunks (each in its own region) and reports `<sock> <cls>
+// <wcode> <rt>`. The loop never touches the socket while the row
+// streams; the stream closes the file. `start_stream` says why it is
+// one proc, uncapped, and why the loop bounds how many run at once.
 // ------------------------------------------------------------------
 
-/// The body of an UNBUDGETED stream: the rest of `fd` to `sock`, in
-/// 64 KiB chunks, each in its own region (the serve path's ws10
-/// shape), then close `fd`. Answers `rt * 4 + wcode`: `rt` the
-/// per-chunk region HIGH WATER (ws12's number), `wcode` 0 clean, 1 the
-/// peer closed, 2 io (a fired write budget included), 3 the file read
-/// failed. Total.
-fn body_stream_fd(sock: int, fd: int) -> int {
+/// The stream: the rest of `fd` to `sock`, in 64 KiB chunks, each in
+/// its own region (the serve path's ws10 shape), then close `fd` and
+/// report ONE line down the loop's stream pipe `out`: `<sock> <cls>
+/// <wcode> <rt>` — `cls` 0 (the proc ran to its end; the loop reads
+/// any other value as a broken stream), `wcode` 0 clean, 1 the peer
+/// closed, 2 io (a fired write budget included), 3 the file read
+/// failed, `rt` the per-chunk region HIGH WATER (ws12's number). The
+/// line is one short write, so lines from concurrent streams never
+/// interleave. Total.
+fn stream_body(sock: int, fd: int, out: int) -> int {
     var rt = 0
     var wcode = 0
     var streaming = true
@@ -315,112 +316,34 @@ fn body_stream_fd(sock: int, fd: int) -> int {
         }
     }
     fs_close(fd) else |_| {}
-    rt * 4 + wcode
-}
-
-/// The body of a BUDGETED stream: `body_stream`'s capped chunks, by
-/// PATH under the cap (the proc opens the file itself, ws25), answering
-/// `rt * 4 + wcode` as `body_stream_fd` does. A cap breach traps at
-/// the chunk read and is contained at this proc's boundary; the watch
-/// reads it off the exit reason. Total.
-fn body_stream_cap(sock: int, path: str, cap: int) -> int {
-    var rt = 0
-    var wcode = 0
-    let fd = fs_open(path) else |_| {
-        return 3
-    }
-    var streaming = true
-    while streaming && wcode == 0 {
-        region chunkr(cap: cap) {
-            let chunk = fs_read_chunk(fd, 65536) else |e| match e {
-                eof => {
-                    streaming = false
-                    List[byte]()
-                },
-                io => {
-                    wcode = 3
-                    List[byte]()
-                },
-            }
-            if wcode == 0 && chunk.len > 0 {
-                net_write_bytes(sock, chunk) else |e| match e {
-                    closed => {
-                        wcode = 1
-                    },
-                    invalid => {
-                        wcode = 2
-                    },
-                    io => {
-                        wcode = 2
-                    },
-                }
-            }
-            let crt = region_bytes(chunkr)
-            if crt > rt {
-                rt = crt
-            }
-            wcode = wcode
-        }
-    }
-    fs_close(fd) else |_| {}
-    rt * 4 + wcode
-}
-
-/// The watch: start the body, wait for its exit, and report ONE line
-/// down the loop's stream pipe `out`: `<sock> <cls> <wcode> <rt>
-/// <cap>`. `cls` is the join's class (0 normal, 1 error, 2
-/// fault(alloc-contract) — the cap refused, 3 another contained fault,
-/// 4 the 600 s ceiling), `run_stream`'s vocabulary. The line is one
-/// short write, so lines from concurrent watches never interleave.
-/// Total.
-fn stream_watch(sock: int, fd: int, path: str, cap: int, out: int) -> int {
-    let w = if cap > 0 {
-        spawn proc body_stream_cap(sock, path, cap)
-    } else {
-        spawn proc body_stream_fd(sock, fd)
-    }
-    let m = w.monitor()
-    var cls = 3
-    select {
-        exit(reason) from m => {
-            if reason.is_normal() {
-                cls = 0
-            } else if reason.is_error() {
-                cls = 1
-            } else if reason.is_alloc_contract() {
-                cls = 2
-            } else {
-                cls = 3
-            }
-        },
-        timeout(600.s) => {
-            cls = 4
-        },
-    }
-    var wcode = 2
-    var rt = 0
-    if cls == 0 {
-        let v = w.join() else |_| 2
-        wcode = v % 4
-        rt = v / 4
-    }
-    net_write(out, "{sock} {cls} {wcode} {rt} {cap}\n") else |_| {}
+    net_write(out, "{sock} 0 {wcode} {rt}\n") else |_| {}
     0
 }
 
 /// Hand a large plaintext body to a stream beside the loop (ws49,
-/// lobo#46): the head is already on the wire; `fd` is the open file
-/// for an unbudgeted body (the body closes it), or -1 with `path` and
-/// the region `cap` for a budgeted one. Returns at once; the outcome
-/// arrives as one line on the pipe whose write end is `out`. Total.
-pub fn start_stream(sock: int, fd: int, path: str, cap: int, out: int) {
-    let _w = spawn proc stream_watch(sock, fd, path, cap, out)
+/// lobo#46): the head is already on the wire and `fd` is the open
+/// file (the stream closes it). Returns at once; the outcome arrives
+/// as one line on the pipe whose write end is `out`.
+///
+/// ONE proc per stream, uncapped, budget or not, because at the 0.2.22
+/// pin a proc parked in a runtime wait holds its pool worker with no
+/// compensation, so parked streams starve the procs spawned after
+/// them (wolf-lang#570, with a 50-line repro). A watch proc (which
+/// would report a FAULTED stream — a killed proc writes nothing, so
+/// such a row would wait for its generation's drain) would double
+/// that cost; the loop bounds what the rest costs (`stream_room` in
+/// main.lu). The region cap ws13 built for the budgeted body is not
+/// used here: the meter rules the body at the `file` site before a
+/// byte is written, and since D40 the cap could not fire on this path
+/// from any config (docs/BUDGET.md). Total.
+pub fn start_stream(sock: int, fd: int, out: int) {
+    let _w = spawn proc stream_body(sock, fd, out)
 }
 
-/// One line off the stream pipe, read back: (sock, cls, wcode, rt,
-/// cap), or sock -1 when the line is not one `stream_watch` wrote.
-/// Pure and total.
-pub fn stream_line(line: str) -> (int, int, int, int, int) {
+/// One line off the stream pipe, read back: (sock, cls, wcode, rt),
+/// or sock -1 when the line is not one `stream_body` wrote. Pure and
+/// total.
+pub fn stream_line(line: str) -> (int, int, int, int) {
     var vals = List[int]()
     for w in line.words() {
         var n: int = 0
@@ -434,12 +357,12 @@ pub fn stream_line(line: str) -> (int, int, int, int, int) {
             }
         }
         if !ok {
-            return (-1, 0, 0, 0, 0)
+            return (-1, 0, 0, 0)
         }
         (mut vals).push(n)
     }
-    if vals.len != 5 {
-        return (-1, 0, 0, 0, 0)
+    if vals.len != 4 {
+        return (-1, 0, 0, 0)
     }
-    (vals[0], vals[1], vals[2], vals[3], vals[4])
+    (vals[0], vals[1], vals[2], vals[3])
 }

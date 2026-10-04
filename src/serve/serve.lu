@@ -464,7 +464,13 @@ pub fn mime_for(c: config.Conf, path: str) -> str {
 /// write end of the loop's STREAM pipe (lobo#46) — when it is set
 /// (>= 0) a large plaintext body is handed to a stream beside the
 /// loop (`budget.start_stream`) instead of written inside the step;
-/// -1, every caller but the poll loop, keeps the inline write.
+/// -1, every caller but the poll loop, keeps the inline write. And
+/// `proc_room`: false while the loop's streams fill the room the
+/// runtime's pool leaves for one more proc (main.lu's `stream_room`),
+/// and then a budgeted small body is written without its capped proc
+/// (the meter still rules it), because at the 0.2.22 pin that proc
+/// would wait for a worker the parked streams hold and the loop would
+/// wait in its join.
 pub struct ServerOpts {
     token: str,
     keepalive_timeout_ms: int,
@@ -475,6 +481,7 @@ pub struct ServerOpts {
     pipe_w: int,
     pipe_r: int,
     stream_w: int,
+    proc_room: bool,
 }
 
 /// The lobo-flavoured defaults (nginx analogues: keepalive_timeout 75s,
@@ -493,6 +500,7 @@ pub fn default_opts() -> ServerOpts {
         pipe_w: -1,
         pipe_r: -1,
         stream_w: -1,
+        proc_room: true,
     }
 }
 
@@ -569,6 +577,7 @@ struct Charge {
     pipe_r: int,
     stream_w: int,
     handed: bool,
+    procs_ok: bool,
 }
 
 fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
@@ -583,6 +592,7 @@ fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
         pipe_r: pipe_r,
         stream_w: -1,
         handed: false,
+        procs_ok: true,
     }
 }
 
@@ -1137,7 +1147,11 @@ fn serve_file(
         // (a `mut cn` write inside the region is E1010 — the TLS arm
         // above is the retaining case it guards against).
         let sock = conn.fd(cn)
-        if chg.limit > 0 {
+        // ws49: `procs_ok` false — the loop's streams hold the workers a
+        // proc would need — falls through to the plain regioned write
+        // below: the meter has ruled this body, only the cap's
+        // backstop is skipped (budget.start_stream says why)
+        if chg.limit > 0 && chg.procs_ok {
             // ws13: BUDGETED — the body work runs in a proc under the
             // region cap; the join maps the reason (see the cap block
             // above). The meter already admitted this body; the cap is
@@ -1278,16 +1292,14 @@ fn serve_file(
     // ws49 (lobo#46): in the poll loop the body leaves BESIDE the loop
     // — a stream proc owns the socket until it reports down the loop's
     // stream pipe — so a slow client's download holds its own row and
-    // nothing else. Budgeted or not, the chunk shapes are the ones
-    // below (budget.lu says how); TLS keeps the inline write (its
+    // nothing else. The chunks are the inline arm's, per-chunk regions
+    // off this handle, budget or not: the meter has already ruled the
+    // `file` site above, and the stream is one uncapped proc while a
+    // parked proc holds its pool worker (wolf-lang#570;
+    // budget.start_stream says so). TLS keeps the inline write (its
     // session cannot cross a proc boundary, the D24 residue).
     if chg.stream_w >= 0 && !conn.is_tls(cn) {
-        if chg.limit > 0 {
-            fs_close(fd) else |_| {}
-            budget.start_stream(conn.fd(cn), -1, path, chg.cap, chg.stream_w)
-        } else {
-            budget.start_stream(conn.fd(cn), fd, "", 0, chg.stream_w)
-        }
+        budget.start_stream(conn.fd(cn), fd, chg.stream_w)
         chg.handed = true
         return !keep
     }
@@ -2719,6 +2731,7 @@ pub fn serve_request(
     acc.request = raw_line(head)
     var chg = charge_new(limits.memory_budget, opts.pipe_w, opts.pipe_r)
     chg.stream_w = opts.stream_w
+    chg.procs_ok = opts.proc_room
     let req = http.parse_request(head, limits) else |e| match e {
         malformed => {
             acc.status = 400

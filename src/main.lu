@@ -40,8 +40,8 @@
 //! process's life, holding two ints and a socket and touching no
 //! server state — which is the whole of D7's amendment. ws49
 //! (lobo#46) adds the second: a large plaintext body leaves in a
-//! STREAM beside the loop (`budget.start_stream`, a watch and a body
-//! proc per download), because a body written inside the step held
+//! STREAM beside the loop (`budget.start_stream`, one proc per
+//! download), because a body written inside the step held
 //! the whole loop while a slow client's download started, and wolf
 //! has no write readiness to step it with; the outcome comes back as
 //! one line down a second self-pipe in the same wait set, and the row
@@ -1401,6 +1401,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         pipe_w: pipe_w,
         pipe_r: pipe_r,
         stream_w: stream_w,
+        proc_room: true,
     }
     // ws10: the effective Limits (fence + budget) freeze PER
     // GENERATION beside the model — resolved here for gen 1, by
@@ -1443,6 +1444,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             pipe_w: opts.pipe_w,
             pipe_r: opts.pipe_r,
             stream_w: opts.stream_w,
+            proc_room: true,
         }
     }
     let auto_primary = config.auto_primary(c0)
@@ -1582,6 +1584,33 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // step the same way
     var ft = serve.file_kinds_new()
 
+    // ws49 (lobo#46): the room the runtime's pool leaves beside the
+    // streams. At the 0.2.22 pin a proc parked in a runtime wait holds
+    // its worker uncompensated, so streams parked on slow clients
+    // starve the next proc spawned — a budgeted small body's capped
+    // proc, whose join the loop waits in. Measured on kasumi with this
+    // binary under `taskset` (a budgeted GET / beside N non-reading
+    // 24 MiB downloads): it answers up to 0 streams on 2 and 4 cpus, 2
+    // on 8, 4 on 12, 6 on 16 — `cpus / 2 - 2`. Past it the loop hands
+    // serve `crowded`, which writes a budgeted small body without its
+    // proc (the meter still rules it); a stream past it still leaves
+    // the loop, and its proc waits for a worker instead of the loop
+    // waiting for its client.
+    let cpus = os_cpus() else |_| { 1 }
+    let room = stream_room(cpus)
+    let crowded = serve.ServerOpts {
+        token: opts.token,
+        keepalive_timeout_ms: opts.keepalive_timeout_ms,
+        keepalive_requests: opts.keepalive_requests,
+        read_timeout_ms: opts.read_timeout_ms,
+        challenge_dir: opts.challenge_dir,
+        metrics_on: opts.metrics_on,
+        pipe_w: opts.pipe_w,
+        pipe_r: opts.pipe_r,
+        stream_w: opts.stream_w,
+        proc_room: false,
+    }
+
     var running = true
     var quitting = false
     while running {
@@ -1714,7 +1743,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         }
 
         // 0b. ws49 (lobo#46): the streams that finished. Each watch
-        // wrote one `<sock> <cls> <wcode> <rt> <cap>` line; read what
+        // wrote one `<sock> <cls> <wcode> <rt>` line; read what
         // is there (the pipe is ready, so the read answers at once),
         // keep a partial line for the next pass, and fold each
         // stream's measured region high water into its generation NOW,
@@ -2047,6 +2076,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         var nwait = List[str]()
         var nstream = List[int]()
         var pass_accs = List[AccRow]()
+        // ws49: the streams in flight as this pass begins; a hand-off
+        // below adds one
+        var inflight: int = 0
+        for sx in cstream {
+            if sx != 0 {
+                inflight = inflight + 1
+            }
+        }
         var k: int = 0
         let ktot = cfds.len
         while k < ktot {
@@ -2114,22 +2151,10 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 let scls = sr.1
                 let swc = sr.2
                 let srt = sr.3
-                let shit = scls == 2
-                if shit {
-                    // the cap refused a chunk the meter had admitted:
-                    // the head is on the wire, so the row can only
-                    // close — ws13's `site=region` event, named late
-                    let blim = lim_for(gens, cg).memory_budget
-                    ev_event(
-                        mut elog,
-                        "error",
-                        shell.ev_budget_exceeded_cap(cg, "region", blim, blim + 1, sr.4),
-                    )
-                }
                 // ws12: the stream's measured region high water joins
                 // its generation's, as the inline write's always did
-                if note_needed(gens, cg, 0, srt, shit) {
-                    gens = note_request(take gens, cg, 0, srt, shit)
+                if note_needed(gens, cg, 0, srt, false) {
+                    gens = note_request(take gens, cg, 0, srt, false)
                 }
                 let sabort = sst >= 10
                 if scls != 0 || swc != 0 || sst % 10 == 2 || sabort {
@@ -2174,7 +2199,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             // connection every pass and paid 12 ms each for the
             // privilege.
             let must_step = !waiting.is_empty() || serve.carry_has_head(car)
-            let st = if must_step || ready_has(ready, fd) {
+            let st = if !(must_step || ready_has(ready, fd)) {
+                serve.conn_idle(car, sv)
+            } else if inflight < room {
                 serve.conn_step(
                     fd,
                     gens[cci].conf,
@@ -2188,7 +2215,21 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     mut ft,
                 )
             } else {
-                serve.conn_idle(car, sv)
+                serve.conn_step(
+                    fd,
+                    gens[cci].conf,
+                    crowded,
+                    lim_for(gens, cg),
+                    hport,
+                    car,
+                    sv,
+                    12,
+                    mut rs,
+                    mut ft,
+                )
+            }
+            if st.streaming {
+                inflight = inflight + 1
             }
             var close_it = st.close
             var new_idle = idle0
@@ -2651,6 +2692,18 @@ fn bind_control(addr: str) -> (int, str) {
         return (-1, "could not read the control port")
     }
     (l, "127.0.0.1:{port}")
+}
+
+/// ws49 (lobo#46): how many streams may be parked beside the loop
+/// before the next proc spawned waits for a pool worker: `cpus / 2 -
+/// 2`, never below 0 — measured at the 0.2.22 pin (serve_main's note
+/// has the table). Pure and total.
+fn stream_room(cpus: int) -> int {
+    let r = cpus / 2 - 2
+    if r < 0 {
+        return 0
+    }
+    r
 }
 
 /// ws49: where `fd` sits in `xs`, or -1 — the finished-stream lookup

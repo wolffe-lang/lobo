@@ -412,12 +412,25 @@ is no longer gated on anything upstream).
   under `memory_budget 128k` (and without one) streams a 24 MiB file
   to a client that stops reading, and a second client and `status` are
   answered meanwhile. Since ws49 the serving loop does not JOIN the
-  streamed body's proc: `budget.start_stream` runs the same capped
-  chunks beside the loop, and a watch proc reports the join's class,
-  the write outcome and the measured high water down the loop's stream
-  pipe; the loop folds `mem_rt` into the generation when the line
-  arrives, so `mem-rt-hw` moves when the stream ENDS, not when its head
-  is written. `run_stream` stays for callers outside the loop.
+  streamed body's proc: `budget.start_stream` writes the chunks beside
+  the loop and reports the write outcome and the measured high water
+  down the loop's stream pipe; the
+  loop folds `mem_rt` into the generation when the line arrives, so
+  `mem-rt-hw` moves when the stream ENDS, not when its head is written.
+  **The stream's chunks are not under the region cap** (budget or
+  not), and **past the pool's room a budgeted small body skips its
+  proc too**. At the 0.2.22 pin a proc parked in a runtime wait holds
+  its pool worker (wolf-lang#570): with streams parked on slow
+  clients, the next budgeted request's `run_small` proc never ran and
+  the loop waited in its join (kasumi under `taskset -c 0-3`, and the
+  4-vcpu CI runner, run 37173076304). The loop counts its streams
+  against `cpus / 2 - 2` (measured: a budgeted GET / beside N parked
+  streams answers up to N = 0 on 2 and 4 cpus, 2 on 8, 4 on 12, 6 on
+  16) and past it writes the small body in a plain region, as an
+  unbudgeted one is. The meter still rules every site before a byte is
+  written, and since D40 the cap could not fire from a config; what is
+  skipped is the backstop, and only while the pool is crowded.
+  `run_stream` (capped) stays for callers outside the loop.
 - `tests/serve/cap_shape.lu`: the one-module shape on native AND
   lupin (200 rounds, a breach, the next round clean); the checked
   lane's named refusal asserted.
