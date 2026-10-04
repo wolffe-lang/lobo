@@ -798,22 +798,26 @@ pub fn control_verb_ok(verb: str) -> bool {
 /// reply. Dials, arms a short deadline, writes "`line`\n", reads the
 /// reply to a newline, closes. Rows: `refused` (nobody listening — a
 /// dead/absent master, which `-s` and stale-detection read as "not
-/// alive"), `io` for every other net trouble. The reply is trimmed
-/// (allow w0602: deliberate API — refused and other failures differ).
+/// alive"), `timeout` (ws49, lobo#47: the endpoint took the line and
+/// answered no whole line within the deadline — a stalled or busy
+/// master, never an empty answer), `io` for every other net trouble,
+/// including a peer that closed without answering. The reply is
+/// trimmed (allow w0602: deliberate API — each row is a different
+/// thing for the operator to do).
 #[allow(w0602)]
-pub fn control_send(addr: str, line: str) -> str ! {refused, io} {
+pub fn control_send(addr: str, line: str) -> str ! {refused, timeout, io} {
     let c = control_dial(addr) else |e| match e {
         refused => {
             return refused
         },
         timeout => {
-            return io
+            return timeout
         },
         io => {
             return io
         },
     }
-    net_deadline(c, 2000) else |_| {
+    net_deadline(c, control_deadline_ms()) else |_| {
         net_close(c) else |_| {}
         return io
     }
@@ -823,14 +827,28 @@ pub fn control_send(addr: str, line: str) -> str ! {refused, io} {
     }
     var buf = ""
     var reading = true
+    var whole = false
+    var timed = false
     while reading {
         let nl = buf.find("\n") else -1
         if nl >= 0 {
+            whole = true
             reading = false
         } else {
-            let piece = net_read(c, 4096) else |_| {
-                reading = false
-                ""
+            let piece = net_read(c, 4096) else |e| match e {
+                timeout => {
+                    timed = true
+                    ""
+                },
+                closed => {
+                    ""
+                },
+                utf8 => {
+                    ""
+                },
+                io => {
+                    ""
+                },
             }
             if piece.is_empty() {
                 reading = false
@@ -840,7 +858,24 @@ pub fn control_send(addr: str, line: str) -> str ! {refused, io} {
         }
     }
     net_close(c) else |_| {}
-    buf.trim()
+    // a reply the peer finished by closing (no newline) is still a
+    // reply; nothing at all is not one
+    if !whole && timed {
+        return timeout
+    }
+    let out = buf.trim()
+    if out.is_empty() {
+        return io
+    }
+    out
+}
+
+/// The control client's deadline, in milliseconds: how long `-s`,
+/// `status` and `control` wait for the endpoint's answer before they
+/// say it did not answer (lobo#47). One number, so the message that
+/// names it and the deadline that enforces it cannot drift. Total.
+pub fn control_deadline_ms() -> int {
+    2000
 }
 
 /// True when the endpoint answers a `ping` — the liveness probe the
@@ -1396,22 +1431,25 @@ fn bool_word(b: bool) -> str {
 
 /// Send one command line and read the reply until the peer closes
 /// (ignoring interior newlines — the status stanza is multi-line). Rows
-/// mirror control_send: `refused` (no master), `io` otherwise. The
-/// reply keeps its interior newlines; the trailing newline is trimmed.
+/// mirror control_send: `refused` (no master), `timeout` (ws49,
+/// lobo#47: the peer did not finish its reply — close the connection —
+/// within the deadline; a stanza cut short is not a stanza), `io`
+/// otherwise, a peer that closed without a byte included. The reply
+/// keeps its interior newlines; the trailing newline is trimmed.
 #[allow(w0602)]
-pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
+pub fn control_fetch(addr: str, line: str) -> str ! {refused, timeout, io} {
     let c = control_dial(addr) else |e| match e {
         refused => {
             return refused
         },
         timeout => {
-            return io
+            return timeout
         },
         io => {
             return io
         },
     }
-    net_deadline(c, 2000) else |_| {
+    net_deadline(c, control_deadline_ms()) else |_| {
         net_close(c) else |_| {}
         return io
     }
@@ -1421,10 +1459,22 @@ pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
     }
     var buf = ""
     var reading = true
+    var timed = false
     while reading {
-        let piece = net_read(c, 4096) else |_| {
-            reading = false
-            ""
+        let piece = net_read(c, 4096) else |e| match e {
+            timeout => {
+                timed = true
+                ""
+            },
+            closed => {
+                ""
+            },
+            utf8 => {
+                ""
+            },
+            io => {
+                ""
+            },
         }
         if piece.is_empty() {
             reading = false
@@ -1433,7 +1483,14 @@ pub fn control_fetch(addr: str, line: str) -> str ! {refused, io} {
         }
     }
     net_close(c) else |_| {}
-    buf.trim()
+    if timed {
+        return timeout
+    }
+    let out = buf.trim()
+    if out.is_empty() {
+        return io
+    }
+    out
 }
 
 // ------------------------------------------------------------------

@@ -1,0 +1,77 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! A DESK THAT NEVER ANSWERS (ws49, lobo#47). Until ws49, `lobo
+//! status`, `lobo control <verb>` and `lobo -s <verb>` read an endpoint
+//! that took the line and answered nothing within the client's 2 s
+//! deadline as an EMPTY REPLY: they printed a blank line (or nothing)
+//! and exited 0, so `lobo status | grep …` could not tell "no answer"
+//! from "an answer with no match", and `lobo -s reload && deploy`
+//! deployed on a reload nobody confirmed. The demo reel met it while a
+//! slow download held the loop (lobo#46). Now each verb exits 1 and
+//! says, by name, that the master did not answer within the deadline.
+//!
+//! The silent desk is a loopback LISTENER nobody accepts on: the
+//! kernel completes the handshake from the backlog, the client's
+//! write lands, and no byte ever comes back — exactly a master whose
+//! loop is held. The pid file names it, as a running master's would.
+//! The real binary is driven through `/bin/sh` so its exit code and
+//! its stderr are both read back (the driver lane is the checked
+//! machine's too; the binary under test is the native debug tier).
+//! Loopback only; scratch under target/, cleared at START.
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws49_silent"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/logs")?
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let ep = "127.0.0.1:{port}"
+    fs_write_text(
+        "{d}/lobo.conf",
+        "pid logs/lobo.pid;\ncontrol {ep};\nhttp {{\n  server {{ listen 127.0.0.1:1; }}\n}}\n",
+    )?
+    fs_write_text("{d}/logs/lobo.pid", "{ep}\n")?
+
+    var verbs = List[str]()
+    (mut verbs).push("status")
+    (mut verbs).push("control ping")
+    (mut verbs).push("-s reload")
+    var bad: int = 0
+    for verb in verbs {
+        var argv = List[str]()
+        (mut argv).push("/bin/sh")
+        (mut argv).push("-c")
+        (mut argv).push("\"$1\" -p \"$2\" -c \"$2/lobo.conf\" $3 > \"$2/out\" 2> \"$2/err\"")
+        (mut argv).push("sh")
+        (mut argv).push("{root}/target/lobo-debug")
+        (mut argv).push(d)
+        (mut argv).push(verb)
+        let t0 = time_unix_ms()
+        let h = os_spawn(argv) else |_| {
+            assert(false, "could not spawn /bin/sh")
+            0
+        }
+        let code = os_wait(h) else |_| -1
+        let took = time_unix_ms() - t0
+        let err = fs_read_text("{d}/err") else |_| ""
+        let out = fs_read_text("{d}/out") else |_| ""
+        let named = err.contains("did not answer within 2000 ms") && err.contains(ep)
+        print("lobo {verb}: exit {code} after {took} ms, stdout {out.len} bytes, named={named}")
+        if code != 1 || !named {
+            print("  stderr: {err.trim()}")
+            bad = bad + 1
+        }
+        // the deadline, not a refusal: the client WAITED for the answer
+        if took < 1500 {
+            print("  answered in {took} ms — the silent desk was not reached")
+            bad = bad + 1
+        }
+    }
+    net_close(l) else |_| {}
+    assert(bad == 0, "every verb names the silence and exits 1 ({bad} wrong)")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

@@ -83,6 +83,9 @@ fn main() -> !int {
             got_refused = true
             ""
         },
+        timeout => {
+            ""
+        },
         io => {
             ""
         },

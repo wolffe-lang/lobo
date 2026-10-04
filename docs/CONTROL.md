@@ -126,6 +126,20 @@ A rejected reload, an unknown verb, an `unauthorized` answer and
 `upgrade`'s named refusal are all exit 1, so an operator's `lobo -s
 reload && deploy` never runs on a reload that did not happen.
 
+**A master that does not answer is exit 1 too** (ws49, lobo#47). The
+client waits 2000 ms for the reply; an endpoint that takes the line
+and answers nothing in that time gets
+
+```
+lobo: [error] the master at unix:/srv/site/logs/control.sock did not answer within 2000 ms (it is running but busy or stalled; the command was sent and may still take effect)
+```
+
+on stderr, nothing on stdout, and exit 1, for `lobo status`, `lobo
+control <verb>` and `lobo -s <verb>` alike. Until ws49 that silence
+read as an empty reply: a blank line and exit 0, so `lobo status |
+grep …` could not tell "no answer" from "no match". A peer that closes
+without a byte is `control channel error`, exit 1.
+
 Why `upgrade` exists before it works: it is the one verb the
 endpoint reaches that no signal does. On unix, UPGRADE's bit is lobo's
 own probe — through ws28 the poll the serve loop self-raised to bound

@@ -3552,6 +3552,21 @@ fn control_dead(ep: str) {
     )
 }
 
+/// ws49 (lobo#47): the diagnostic for an endpoint that took the verb
+/// and gave no answer inside the client's deadline. Until ws49 the
+/// three client paths read that silence as an empty reply, printed a
+/// blank line and exited 0, so `lobo status | grep …` could not tell
+/// "no answer" from "an answer with no match" and `lobo -s reload &&
+/// deploy` deployed on a reload nobody confirmed. The verb DID reach
+/// the master, so a reload or stop may still happen: the message says
+/// so rather than claim it failed. Exit 1, as every other client
+/// failure. Total.
+fn control_silent(ep: str) {
+    eprint(
+        "lobo: [error] the master at {ep} did not answer within {shell.control_deadline_ms()} ms (it is running but busy or stalled; the command was sent and may still take effect)",
+    )
+}
+
 /// `-s <verb>`: read the pid file for the running master's control
 /// endpoint (nginx reads it for the pid), connect, send the verb, and
 /// print the reply. nginx exit codes: a missing pid file is exit 1
@@ -3567,6 +3582,10 @@ fn signal_main(cli: shell.Cli) -> int {
     let reply = shell.control_send(ep, shell.control_line(t.1, cli.signal)) else |e| match e {
         refused => {
             control_dead(ep)
+            return 1
+        },
+        timeout => {
+            control_silent(ep)
             return 1
         },
         io => {
@@ -3596,6 +3615,10 @@ fn control_main(cli: shell.Cli) -> int {
     let reply = shell.control_fetch(ep, line) else |e| match e {
         refused => {
             control_dead(ep)
+            return 1
+        },
+        timeout => {
+            control_silent(ep)
             return 1
         },
         io => {
@@ -3632,6 +3655,10 @@ fn status_main(cli: shell.Cli) -> int {
     let reply = shell.control_fetch(ep, shell.control_line(t.1, verb)) else |e| match e {
         refused => {
             control_dead(ep)
+            return 1
+        },
+        timeout => {
+            control_silent(ep)
             return 1
         },
         io => {
