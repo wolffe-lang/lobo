@@ -1534,8 +1534,6 @@ pub fn control_fetch(addr: str, line: str) -> str ! {refused, timeout, io} {
         }
     }
     net_close(c) else |_| {}
-    // PLANT (ws49): a fetch that timed out falls through as no reply
-    timed = false
     if timed {
         return timeout
     }
