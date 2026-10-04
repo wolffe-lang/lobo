@@ -141,7 +141,8 @@ allows; `docs/PROFILE.md` has where the time goes.
   answers 404 (lobo#48); `-t -q` still prints (lobo#49); a reload
   ignores a changed `worker_shutdown_timeout` (lobo#50); a finished
   drain's count leaves `/metrics` with its generation (lobo#51); on
-  macOS, as root or without `/proc`, `user` is refused (lobo#52).
+  macOS, which has no `/proc`, `user` is refused where nginx warns and
+  loads (lobo#52).
 - The 25 directives refused by name are listed in
   `docs/directives.md`.
 
