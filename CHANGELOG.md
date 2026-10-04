@@ -352,6 +352,49 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws50 — 2026-10-04 — lobo 0.1.2: the pin at 0.2.23, the release stamp, the reel at 0.1.2
+
+- **The pin**, from the release archives by digest on kasumi: wolf
+  **0.2.23** (`8edac3e`, release 403069562, linux x86-64 `6f505eb5…`)
+  and lupin **0.1.46** (`f9269e3`, release 403040421, `d13a0379…`).
+  Members by name: `wolf` `97b5404b…`, `libwolf_rt.a` `5af08d0e…`,
+  `wolf-cimport-worker` `23599021…`, `lupin` `fa4e6c35…`; `_wolf` is
+  unchanged. Pairing gap zero; lupin 0.1.46's conformance pin is
+  v0.2.22, so the lane gap stays one release.
+- **Nothing in lobo moved.** Trunk's `src/` (`e814513`) built at 0.2.23
+  on both tiers with zero diagnostics at `--error-limit=0`, and the
+  probe was seen to fire: ruling #34's shape (an else-less `if` whose
+  then-block raises by a call, at a fallible fn's tail) planted into
+  `main.lu` is silent at 0.2.22 and `W0601` at 0.2.23
+  (`kasumi:~/lanes/ws50/plant-tc-0222.log`, `plant-tc-0223.log`).
+  wolf-std holds at **`14f0ab2`** (B151): against trunk `6a0df5e` the
+  same source gives byte-identical binaries at 0.2.23 (debug
+  `2cb64daa…`, release `0726de4a…`). The bump is stamps only: the pin
+  file, fourteen `.wolfi` stamps (re-emitted by `tools/lobo-interface
+  --emit`; no hash moved) and two `shell.lu` constants.
+- **The gauntlet at the bump** (`d7900b3`, kasumi, 278 s): GREEN,
+  309/309 corpus lane-runs, the differential 22/22, the proxy
+  differential 8/8, the control differential 10/10, the log
+  differential 4/4, the signal witness 21/21, prefork 38/38,
+  membudget 17/17 (round B 7964 KB over 400 requests: 19 KB/req, as
+  before), resolver 9/9, TLS interop, renewal and ACME green. The one
+  skip line in the whole log is the standing named gate
+  (`lobo-membudget`'s O(1) line, wolf-lang#191).
+- **wolf-lang#570 is still in 0.2.23.** Its repro (`p6.lu`, the issue
+  body verbatim) under `taskset -c 0-3`: one or two parked procs and the
+  next proc runs; three or four and it never runs in 5 s, at 0.2.22
+  and at 0.2.23 alike (`kasumi:~/lanes/ws50/p570/result.txt`). The
+  `cpus / 2 - 2` room ws49 measured stands, and the "at the 0.2.22
+  pin" notes in `src/` and `docs/` stay true.
+- **The release stamp**: `wolf.pkg`, `release_version`, the wire token
+  and the four `version_text.lu` literals to 0.1.2 in one commit, the
+  channel `""`; the CHANGELOG's `## 0.1.2`; the version lines in the
+  README, GETTING-STARTED and the `version_report` doc example.
+- **The reel** (`demo/reel/`): SHOTLIST and README say lobo 0.1.2 needs
+  no wait and no `cd`; 0.1.1's workarounds stay, named; `lib.sh`'s
+  preflight default is `lobo/0.1.2` (`REEL_LOBO_VERSION` still
+  overrides it).
+
 ## ws49 — 2026-10-04 — the pin at 0.2.22; the three bugs the demo reel worked around (lobo#46, #47, #54)
 
 - **The pin**, from the release archives by digest on kasumi: wolf
