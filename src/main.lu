@@ -1386,8 +1386,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         )
         (-1, -1)
     }
-    // PLANT (ws49): no hand-off — every large body back inside the step
-    let stream_w = -1 + 0 * stp.0
+    let stream_w = stp.0
     let stream_r = stp.1
     if stream_r >= 0 {
         net_deadline(stream_r, 50) else |_| {}

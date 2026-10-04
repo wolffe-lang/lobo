@@ -641,8 +641,7 @@ pub fn endpoint_under(ep: str, prefix: str) -> str {
     if p.is_empty() || p.starts_with("/") {
         return ep
     }
-    // PLANT (ws49): a relative path never joins the prefix
-    if prefix != "#" {
+    if prefix == "." || prefix.is_empty() {
         return ep
     }
     var rel = p
