@@ -22,7 +22,7 @@ fi
 # control socket, never whatever folder the shell happens to be in.
 cd "$REEL" || exit 2
 LOGS=$SITE/logs
-PORT=8088
+PORT=${REEL_PORT:-8088}   # must match `listen` in conf/site.conf
 LOCAL=http://127.0.0.1:$PORT
 OUTSIDE=${REEL_OUTSIDE:-almanta}
 H1="hello from wolf</h1>"   # v1 and scene 4's v2 both match

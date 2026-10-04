@@ -56,7 +56,7 @@ nohup lobo serve > "$LOGS/serve.out" 2>&1 &
 echo $! > "$LOGS/reel-lobo.pid"
 echo "lobo serve" > "$LOGS/reel-lobo.cmd"
 i=0
-until grep -q 'serving on 127.0.0.1:8088' "$LOGS/serve.out"; do
+until grep -q "serving on 127.0.0.1:$PORT" "$LOGS/serve.out"; do
     i=$((i + 1)); [ $i -ge 50 ] && nogo "no 'serving on' line in 10 s: $(tail -n 2 "$LOGS/serve.out")"
     sleep 0.2
 done

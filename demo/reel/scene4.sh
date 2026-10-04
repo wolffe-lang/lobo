@@ -19,9 +19,12 @@ status_line() {
 }
 
 # lobo 0.1.1 stalls its loop for up to ~8 s as a slow stream
-# starts, and `lobo status` then prints NOTHING and exits 0
-# (both filed, see README). Never read an empty status as an
-# answer: retry until it names the current generation.
+# starts (lobo#46), and `lobo status` then prints NOTHING and
+# exits 0 (lobo#47). A lobo with ws49 has neither: the stream
+# runs beside the loop, so the first status answers at once, and
+# a status that cannot answer exits 1 by name. The retry stays so
+# the scene still works on 0.1.1: never read an empty status as
+# an answer, retry until it names the current generation.
 current_gen() {
     _i=0
     until _g=$(lobo status | sed -n 's/^current generation: //p') &&
@@ -36,12 +39,12 @@ do_download() {
     rm -f "$LOGS"/dl.*
     say "a slow client downloads 1.3 MB at 64 KB/s"
     if [ "${1:-}" = bg ]; then
-        run "curl -s --limit-rate 64k -o logs/dl.bin localhost:8088/files/big.bin &"
+        run "curl -s --limit-rate 64k -o logs/dl.bin localhost:$PORT/files/big.bin &"
         DL=$!
         return 0
     fi
     current_gen > "$LOGS/dl.gen" || exit 1
-    run "curl -# --limit-rate 64k -o logs/dl.bin localhost:8088/files/big.bin"
+    run "curl -# --limit-rate 64k -o logs/dl.bin localhost:$PORT/files/big.bin"
     run "shasum html/files/big.bin logs/dl.bin | cut -c1-16"
     cmp -s html/files/big.bin logs/dl.bin ||
         RUN_FAILED="the download differs from the file"
@@ -102,8 +105,8 @@ case ${1:-all} in
         sleep 2
         do_reload
         beat
-        run "curl -s localhost:8088/ | grep -o '<h1>.*</h1>'"
-        run "curl -s localhost:8088/metrics | grep -E '^lobo_(config_generations|connections_active)'"
+        run "curl -s localhost:$PORT/ | grep -o '<h1>.*</h1>'"
+        run "curl -s localhost:$PORT/metrics | grep -E '^lobo_(config_generations|connections_active)'"
         say "the old generation still holds the download"
         show "wait  # for the download"
         wait $DL

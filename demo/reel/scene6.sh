@@ -5,7 +5,7 @@
 . "$(dirname "$0")/lib.sh"
 scene "6. live metrics"
 say "one line in the config: metrics on;"
-run "curl -s localhost:8088/metrics | grep -c '^lobo_'"
+run "curl -s localhost:$PORT/metrics | grep -c '^lobo_'"
 beat
-run "curl -s localhost:8088/metrics | grep -E '^lobo_(config_generation_current|config_generations|budget|requests_total)'"
+run "curl -s localhost:$PORT/metrics | grep -E '^lobo_(config_generation_current|config_generations|budget|requests_total)'"
 finish
