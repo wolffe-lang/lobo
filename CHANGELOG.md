@@ -226,20 +226,36 @@ release's text as published and is left as it was.
   plaintext body over 64 KiB was written inside the poll loop's step,
   so the loop waited until the rest of the file fitted the kernel's
   socket buffers or the write budget fired. It now streams beside the
-  loop (`budget.start_stream`: a body proc writes the chunks, a watch
-  proc reports one line down a second self-pipe in the loop's wait
-  set), budgeted or not; TLS keeps the inline write. Measured on
-  kasumi (`lobo-release`, 5 runs each, GET / issued 0.5 s after a
-  64 KB/s `curl` starts): a 24 MiB file, **more than 30,008 ms** at
-  trunk (curl's 30 s cap; `lobo status` empty, exit 0, at 2003 ms)
-  against **3 to 5 ms** at head (status 1 to 2 ms). A 1.3 MB file
-  answers in 4 ms on both, because linux's loopback buffers hold it
-  whole; the 3 to 8 s the reel measured is macOS's, and no lane can
-  build a macOS lobo to re-measure it. Witness:
+  loop (`budget.start_stream`: one proc writes the chunks and reports
+  one line down a second self-pipe in the loop's wait set), budgeted
+  or not; TLS keeps the inline write. Measured on kasumi (`lobo-release`,
+  5 runs each, GET / issued 0.5 s after a 64 KB/s `curl` starts): a
+  24 MiB file, **more than 30,008 ms** at trunk (curl's 30 s cap;
+  `lobo status` empty, exit 0, at 2003 ms) against **8 to 10 ms** at head (status 1 to 7 ms). A
+  1.3 MB file answers in 4 ms on both, because linux's loopback buffers
+  hold it whole; the 3 to 8 s the reel measured is macOS's, and no
+  lane can build a macOS lobo to re-measure it. Witness:
   `tests/serve/slow_stream_e2e.lu` (a client that stops reading a
   24 MiB download; GET / and `status` within 1000 ms, then the whole
-  body and a keep-alive request), red at trunk at 3003 ms and 2002 ms
-  (the probes' own deadlines), green at head at 0 and 1 ms.
+  body and a keep-alive request; unbudgeted and under `memory_budget
+  128k`), red at trunk at 3003 ms and 2002 ms (the probes' own
+  deadlines), green at head at 0 and 1 ms, on 1, 2, 4, 8 and 16 cpus.
+- **The runtime's pool limits it, filed as wolf-lang#570.** At 0.2.22 a
+  proc parked in `net_write` holds its pool worker: on 4 cpus, after
+  two or three parked procs the next proc spawned never runs (a
+  50-line repro in the issue). CI's 4-vcpu runner found it (run
+  37173076304): the stream's watch proc and its body parked, the next
+  budgeted request's small-body proc never ran, and the loop waited in
+  its join. So a stream is ONE proc (no watch, so a stream that traps
+  leaves its row to its generation's drain), its chunks are not under
+  the region cap, and the loop counts its streams against `cpus / 2 -
+  2` (measured with this binary: a budgeted GET / beside N parked
+  streams answers up to N = 0 on 2 and 4 cpus, 2 on 8, 4 on 12, 6 on
+  16); past it a budgeted small body is written without its capped
+  proc, as an unbudgeted one is. The meter still rules every site;
+  only the cap's backstop is skipped, and only then. A download past
+  the room still leaves the loop and gets its head, and its body waits
+  for a worker.
 - **lobo#47: a master that does not answer is exit 1, by name.**
   `lobo status`, `lobo control <verb>` and `lobo -s <verb>` read an
   endpoint that took the line and answered nothing in 2000 ms as an
@@ -276,6 +292,11 @@ release's text as published and is left as it was.
   file does not stall on linux; the 24 MiB stall at trunk past every
   probe's bound and under 50 ms at head; #47 and #54 red at trunk as
   predicted.
+- Wrong, and caught by CI: the first #46 design (a watch proc and a
+  body proc per stream, the body under the region cap) passed every
+  run on kasumi's 16 cpus and stalled the budgeted server on the
+  runner's 4 (wolf-lang#570, above). The contract did not predict the
+  pool at all.
 - Wrong, and caught before a commit: the first #54 design made the
   socket path ABSOLUTE (the prefix joined to the start folder) and
   recorded that in the pid file; the gauntlet's dist smoke went red on
