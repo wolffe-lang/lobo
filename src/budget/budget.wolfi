@@ -1,11 +1,15 @@
 module pkg :: budget
   wolfi v0 · toolchain 0.2.22 · edition v1
-  export_hash 9299e00a4af3ebec20e314be715603c6490f169af63de01461fb714934914390
-  pkg_hash    9299e00a4af3ebec20e314be715603c6490f169af63de01461fb714934914390
-  deps: (none)
+  export_hash c1188b90d0c57b571366659adcc6bd04dd99e29b3767a9cca8f13628963e0fd5
+  pkg_hash    c1188b90d0c57b571366659adcc6bd04dd99e29b3767a9cca8f13628963e0fd5
+  deps:
+    std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
+    std.str  dc7ce11212aa0aefa04bfb36ce9514e82a7e3a81f51bfa61d26b0c931032be35
   items:
     [0] pub run_small — fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -, -) -> ρ_caller
     [1] pub run_stream — fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -) -> ρ_caller
-    [2] pub version — fn version() -> str
-    [3] pub Outcome — struct Outcome { cls: int, wcode: int, rt: int }
+    [2] pub start_stream — fn start_stream(sock: int, fd: int, path: str, cap: int, out: int)
+    [3] pub stream_line — fn stream_line(line: str) -> (int, int, int, int, int) · regions (-) -> ρ_caller
+    [4] pub version — fn version() -> str
+    [5] pub Outcome — struct Outcome { cls: int, wcode: int, rt: int }
 
