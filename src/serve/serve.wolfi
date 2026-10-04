@@ -1,9 +1,9 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.22 · edition v1
-  export_hash ca93ac379c67f35c05980d9f5559a7c76ff7b1a1d68e035ddaa888856b579149
-  pkg_hash    ca93ac379c67f35c05980d9f5559a7c76ff7b1a1d68e035ddaa888856b579149
+  export_hash 53dcb76dee1d8904bfa72aa410b2aba8fb7500237bcf3316697384b1e240c49f
+  pkg_hash    53dcb76dee1d8904bfa72aa410b2aba8fb7500237bcf3316697384b1e240c49f
   deps:
-    budget  c1188b90d0c57b571366659adcc6bd04dd99e29b3767a9cca8f13628963e0fd5
+    budget  b55483cdb4fa980b9c9e538caa1a72bafd8c2469140bbfc2dedbbfac38a2632d
     config  9ed939f614ce6af74036fc5df0e4e12bc6ffb495d284a298c24151b91af1b69d
     conn  19d104d333af9d3379c1133c85b4da87fe9940218314179796e23ea724872638
     http  c4ae23a48d83a4eb91660743c9297b43ff41762f954bcf4da45d99304c06fbb0
@@ -52,5 +52,5 @@ module pkg :: serve
     [36] pub FileKinds — struct FileKinds { hpath: prelude.List[str], hsize: prelude.List[int], hmtime: prelude.List[int], hsecs: prelude.List[int], hkeep: prelude.List[int], htoken: prelude.List[str], hhead: prelude.List[str], date_secs: int, date_str: str, boundary: int }
     [37] pub RangePlan — struct RangePlan { kind: int, starts: prelude.List[int], ends: prelude.List[int] }
     [38] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool }
-    [39] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int, stream_w: int }
+    [39] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int, stream_w: int, proc_room: bool }
 
