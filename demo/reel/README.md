@@ -15,7 +15,7 @@ an outside machine fetching the page) right before filming.
 
 | what | value |
 |---|---|
-| lobo | 0.1.1 (Homebrew), or a build with ws49's fixes (lobo#46, #47, #54), which scenes 4 to 6 assume: `REEL_LOBO_VERSION=lobo/0.1.1+dev` for a trunk build |
+| lobo | 0.1.2 (Homebrew), which carries ws49's fixes (lobo#46, #47, #54) that scenes 4 to 6 assume; `REEL_LOBO_VERSION=lobo/0.1.2+dev` for a trunk build, `lobo/0.1.1` for the older release |
 | wolf | 0.2.20 (`~/.local/bin` first on `PATH`) |
 | cloudflared | 2026.9.3 |
 | local address | `http://127.0.0.1:8088` (port 8080 is llama-swap: never used here); `REEL_PORT` moves the scripts to another port, and `listen` in `conf/site.conf` must move with it (a rehearsal copy, never the filming folder) |
@@ -29,7 +29,7 @@ moves into its own folder first, so a full path (`bash
 /path/to/scene4.sh status`) runs it from anywhere; the scripts refuse
 only a folder with no `conf/nginx.conf`. A raw `lobo` command needs
 `-p <reel> -c <reel>/conf/nginx.conf` from another folder, which a
-ws49 lobo honours for the control socket too (lobo#54); with 0.1.1,
+lobo 0.1.2 honours for the control socket too (lobo#54); with 0.1.1,
 type raw `lobo` commands in the reel folder. The maintainer films from a copy at
 `~/scratch/wolf/lobo-demo` (every file here, plus `tunnel.yml`);
 scripts use a `tunnel.yml` beside them when there is one. `SHOTLIST.md` is the maintainer's edit
@@ -48,7 +48,7 @@ cd demo/reel
 
 ### What preflight proves, in order
 
-1. lobo is `lobo/0.1.1`, wolf is `wolf 0.2.20`, cloudflared runs
+1. lobo is `lobo/0.1.2`, wolf is `wolf 0.2.20`, cloudflared runs
 2. port 8088 is free and no reel lobo or tunnel is running
 3. `wolf run build/main.lu` writes the page (with its `<h1>`) and the 1,310,720-byte `big.bin`
 4. `lobo -t` passes
@@ -87,14 +87,15 @@ $ find src -name '*.lu' | xargs cat | wc -l
    25496
 $ mat src/config/workerconf.lu      # 41 lines; cat if mat is absent
 $ lobo -v
-lobo version: lobo/0.1.1 (built with wolf 0.2.16, pin 93a5fe5)
+lobo version: lobo/0.1.2 (built with wolf 0.2.23, pin 8edac3e)
 ```
 
 The count is the source of the lobo checkout the reel lives in
-(trunk at this branch's base: 25,496 lines). The 0.1.1 binary on
-screen was built from 24,220 lines (the `v0.1.1` tag), so "about
-25,000 lines of wolf" is true of the source shown, and "about
-24,000" of the binary.
+(trunk at this branch's base: 25,496 lines; the count moves with
+trunk). The 0.1.2 binary on screen was built from 26,053 lines (the
+`v0.1.2` tree), so "about 26,000 lines of wolf" is true of the binary
+and of the source from 0.1.2 on. A 0.1.1 binary was built from
+24,220.
 
 **nginx:** no contrast here.
 
@@ -228,7 +229,7 @@ The shot list films this scene in two panes with sub-steps:
 the checksums), `scene4.sh reload`, `scene4.sh retired` (waits for
 the old generation to retire, then prints its four log lines), and,
 off camera, `scene4.sh restore`. `reload` refuses if v2 is already
-live. With a ws49 lobo, `reload` runs the moment it is typed: the
+live. With lobo 0.1.2, `reload` runs the moment it is typed: the
 download beside it no longer holds the server (lobo#46). With 0.1.1,
 `reload` first waits out that stall (up to 8 s) and never trusts an
 empty `lobo status` (lobo#47); the same script serves both.
@@ -342,21 +343,21 @@ certificates.)
 
 All found while building this reel, filed with witnesses, and
 reproduced on trunk (866789c) as well as 0.1.1. The first three are
-fixed by ws49 (in trunk from its merge; in the release after 0.1.1):
+fixed by ws49 and released in 0.1.2:
 
 - lobo#46: **a slow download stalls the server for 3 to 8 s as it
   starts.** Requests and control verbs that arrive in that window
   wait. With 0.1.1, scene 4 waits it out off camera before it
-  reloads; with ws49 the download streams beside the server's loop
+  reloads; with 0.1.2 the download streams beside the server's loop
   and nothing waits.
 - lobo#47: **`lobo status` prints nothing and exits 0** when the
   control socket does not answer within 2 s. Scene 4 never reads an
-  empty status as an answer; with ws49 such a status says the master
+  empty status as an answer; with 0.1.2 such a status says the master
   did not answer and exits 1.
 - lobo#54: **`-p` did not reach the control socket**: `control
   unix:logs/control.sock;` was relative to the current folder, so
   `lobo -p <reel> -c <reel>/conf/nginx.conf status` from another
-  folder answered "not responding". With ws49 it answers from any
+  folder answered "not responding". With 0.1.2 it answers from any
   folder.
 - lobo#51: **a generation's series leave `/metrics` when it
   retires**, so the final `drained` count of a finished drain is

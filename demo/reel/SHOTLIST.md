@@ -6,7 +6,7 @@ How to read a scene: **SHOW** means put this on screen and hold it; **RUN** mean
 
 Every command and every output below was rehearsed on this MacBook (2026-10-03: full runs preflight to teardown, both from the lobo repo and from `~/scratch/wolf/lobo-demo`, all green). `README.md` beside this file is the runbook behind it: each scene's script, the full expected output, and the source for every nginx line.
 
-**Which lobo.** Scenes 4 to 6 as written here need a lobo with ws49's three fixes: a slow download no longer holds the server (lobo#46), `lobo status` that gets no answer says so and exits 1 (lobo#47), and `-p` finds the control socket from any folder (lobo#54). That is lobo built from trunk at or after ws49's merge, or the first release after 0.1.1; its `lobo -v` reads `lobo/0.1.1+dev` until then, so run `export REEL_LOBO_VERSION=lobo/0.1.1+dev` before the preflight. With Homebrew's 0.1.1 every scene still runs: scene 4's script waits the stall out for you (the 0.1.1 notes in scene 4), and raw `lobo` commands must be typed in the reel folder.
+**Which lobo.** Scenes 4 to 6 as written here need lobo 0.1.2 or later (`brew upgrade lobo`), which carries ws49's three fixes: a slow download no longer holds the server (lobo#46), `lobo status` that gets no answer says so and exits 1 (lobo#47), and `-p` finds the control socket from any folder (lobo#54). The preflight expects `lobo/0.1.2`; a trunk build reads `lobo/0.1.2+dev`, so for one run `export REEL_LOBO_VERSION=lobo/0.1.2+dev` first. With Homebrew's older 0.1.1 every scene still runs: scene 4's script waits the stall out for you (the 0.1.1 notes in scene 4), raw `lobo` commands must be typed in the reel folder, and the preflight needs `export REEL_LOBO_VERSION=lobo/0.1.1`.
 
 ---
 
@@ -45,12 +45,12 @@ Every path below is a full path, so commands work from any folder: the scripts m
 |---|---|---|---|
 | 0.1 | SHOW the size of the thing | `find /Users/mfwolffe/GithubOrgs/wolffe-lang/lobo/src -name '*.lu' \| xargs cat \| wc -l` | 3 s: `25496` (lines of wolf on trunk at this rehearsal; the number moves with trunk) |
 | 0.2 | SHOW one whole source file | `mat /Users/mfwolffe/GithubOrgs/wolffe-lang/lobo/src/config/workerconf.lu` | 8 s, scroll slowly; it is 41 lines, nginx's `worker_processes` check, with nginx's own error message (`"worker_processes" directive invalid value`, probed against nginx 1.30.4) |
-| 0.3 | SHOW the binary | `lobo -v` | 4 s: `lobo version: lobo/0.1.1 (built with wolf 0.2.16, pin 93a5fe5)` |
+| 0.3 | SHOW the binary | `lobo -v` | 4 s: `lobo version: lobo/0.1.2 (built with wolf 0.2.23, pin 8edac3e)` |
 | 0.4 | back to the demo | `cd /Users/mfwolffe/scratch/wolf/lobo-demo` | 1 s |
 
 `bash /Users/mfwolffe/scratch/wolf/lobo-demo/scene0.sh` runs 0.1 to 0.3 against `~/GithubOrgs/wolffe-lang/lobo` (or the checkout the reel lives in, from the repo copy).
 
-**On-screen caption idea:** "25,000 lines of wolf. One binary." *(True of the source on screen. The 0.1.1 binary on screen was built from 24,220 lines, the `v0.1.1` tag; if the caption sits on 0.3, say "24,000".)*
+**On-screen caption idea:** "25,000 lines of wolf. One binary." *(True of the source on screen, whose count moves with trunk. The 0.1.2 binary on screen was built from 26,053 lines, the `v0.1.2` tree; if the caption sits on 0.3, "26,000" is the closer number. A 0.1.1 binary was built from 24,220.)*
 
 ---
 
@@ -143,9 +143,9 @@ generation-retired gen=1 drained=1 aborted=1 age-ms=25041
 
 **Off camera, after the take:** `bash /Users/mfwolffe/scratch/wolf/lobo-demo/scene4.sh restore` (v1 back, for a retake and for the finale). `bash /Users/mfwolffe/scratch/wolf/lobo-demo/scene4.sh` with no argument runs the whole scene in one pane.
 
-Rehearsal timing (two-pane run, clock from 4.1): 4.3 can follow 4.2 at once. The download no longer holds lobo as it starts (lobo#46, fixed in ws49), so the reload and its status answer while the progress bar runs; the download ends at about 20 s, and 4.6 prints about 25 s after 4.3 (when the tunnel's idle connection is aborted) or as the download ends (when there is none). *With lobo 0.1.1:* 4.3 lands 5 to 8 s after 4.2 starts, because the script first waits out that stall.
+Rehearsal timing (two-pane run, clock from 4.1): 4.3 can follow 4.2 at once. The download no longer holds lobo as it starts (lobo#46, fixed in 0.1.2), so the reload and its status answer while the progress bar runs; the download ends at about 20 s, and 4.6 prints about 25 s after 4.3 (when the tunnel's idle connection is aborted) or as the download ends (when there is none). *With lobo 0.1.1:* 4.3 lands 5 to 8 s after 4.2 starts, because the script first waits out that stall.
 
-The same stanza as 4.4, typed by hand from any folder (a ws49 lobo): `lobo -p /Users/mfwolffe/scratch/wolf/lobo-demo -c /Users/mfwolffe/scratch/wolf/lobo-demo/conf/nginx.conf status`.
+The same stanza as 4.4, typed by hand from any folder (lobo 0.1.2 or later): `lobo -p /Users/mfwolffe/scratch/wolf/lobo-demo -c /Users/mfwolffe/scratch/wolf/lobo-demo/conf/nginx.conf status`.
 
 **Honest contrast:** nginx drains old workers on reload without a count: its log says a worker is "gracefully shutting down" (at `notice` level only) and `ps` shows "worker process is shutting down"; lobo shows each configuration generation, its open connections, the time left, and the moment it retires.
 
@@ -225,4 +225,4 @@ nohup cloudflared tunnel --no-autoupdate --config tunnel.yml run > logs/tunnel.o
 ssh almanta "curl -s -o /dev/null -w '%{http_code}\n' https://wolf.espadonne.com/"   # 200 = GO
 ```
 
-With a ws49 lobo the control socket's relative path resolves under `-p`, so `lobo -p /Users/mfwolffe/scratch/wolf/lobo-demo -c /Users/mfwolffe/scratch/wolf/lobo-demo/conf/nginx.conf -s stop` works from any folder. With lobo 0.1.1 run lobo commands from this folder: there the path is relative to the current folder, and `-s stop` from anywhere else answers "not responding". A hand-started chain has no recorded process ids, so `teardown.sh` will not stop it: stop lobo with `lobo -s stop` and the tunnel by its own pid (`kill <pid>`), never by pattern.
+With lobo 0.1.2 or later the control socket's relative path resolves under `-p`, so `lobo -p /Users/mfwolffe/scratch/wolf/lobo-demo -c /Users/mfwolffe/scratch/wolf/lobo-demo/conf/nginx.conf -s stop` works from any folder. With lobo 0.1.1 run lobo commands from this folder: there the path is relative to the current folder, and `-s stop` from anywhere else answers "not responding". A hand-started chain has no recorded process ids, so `teardown.sh` will not stop it: stop lobo with `lobo -s stop` and the tunnel by its own pid (`kill <pid>`), never by pattern.
