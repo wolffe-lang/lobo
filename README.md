@@ -125,6 +125,31 @@ Windows and linux-aarch64 builds do not exist yet. wolf's release
 tier refuses windows by name, and its native code generator does not
 serve linux aarch64.
 
+## Limits
+
+- **Downloads beside the loop.** A large plaintext body is written by
+  its own proc beside the loop, and a download parked on a slow client
+  holds workers in wolf's runtime pool. Under `memory_budget` a small
+  body runs in a capped proc while fewer than `3·max(cpus, 2) - 2`
+  downloads are parked: 4 on 1 cpu, 10 on 4, 46 on 16. Past that it
+  is written without the proc, and the budget still rules it. Built
+  with wolf 0.2.24 that proc was measured to run beside up to
+  `4·max(cpus, 2) - 2` downloads (6, 14 and 62), so the room leaves a
+  quarter in hand. Past `4·max(cpus, 2) - 1` parked downloads a new
+  one gets its head and its body waits for a worker. lobo 0.1.2, built
+  with wolf 0.2.23, wrote the small body without its proc from
+  `cpus / 2 - 2` downloads on (wolf-lang#570, fixed in 0.2.24).
+- A range starting at byte N reads and drops N bytes first. Under
+  `memory_budget` a `Range` is ignored. An `If-Range` date in RFC 850
+  or asctime form is not parsed.
+- Known issues: a relative `root` or `alias` resolves against the
+  start folder, not `-p` (lobo#55); an exact location aliased to a
+  file answers 404 (lobo#48); `-t -q` still prints (lobo#49); a reload
+  ignores a changed `worker_shutdown_timeout` (lobo#50); a finished
+  drain's count leaves `/metrics` with its generation (lobo#51); on
+  macOS, which has no `/proc`, `user` is refused where nginx warns and
+  loads (lobo#52).
+
 ## Documentation
 
 | | |
