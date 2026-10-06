@@ -63,11 +63,14 @@ drains whole or fails with the bytes it sent unknown — so the proc is
 the honest shape. The stream is ONE proc holding ints and two
 sockets; the loop owns the row's bookkeeping and never touches the
 socket while the stream does. TLS keeps the inline write (the D24
-residue). At the 0.2.22 pin a parked proc holds its pool worker
-(wolf-lang#570), so the loop counts its streams against `cpus / 2 - 2`
-(`stream_room`, measured) and past it writes a budgeted small body
-without its capped proc rather than wait in that proc's join; a
-stream past it still leaves the loop, and waits for a worker.
+residue). A parked proc holds pool workers, so the loop counts its
+streams against `stream_room` and past it writes a budgeted small body
+without its capped proc rather than wait in that proc's join; a stream
+past it still leaves the loop, and past the pool it waits for a
+worker. The room was `cpus / 2 - 2` at the 0.2.22 pin (ws49,
+wolf-lang#570); at 0.2.24, which fixed the pool's retire rule, it is
+`3·max(cpus, 2) - 2` against a measured `4·max(cpus, 2) - 2` (ws51,
+`tests/serve/stream_cap_e2e.lu`).
 
 ## Who calls whom
 
