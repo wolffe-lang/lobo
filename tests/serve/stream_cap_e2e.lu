@@ -1,0 +1,339 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! THE STREAM ROOM HOLDS AT ITS CAP, AND PAST IT (ws51, after
+//! wolf-lang#570). slow_stream_e2e.lu's shape with N slow clients: each
+//! downloads a 24 MiB file and reads 64 KB a second, so each stream's
+//! proc parks in a write most of the time. A parked proc holds a pool
+//! worker; at wolf 0.2.23 the pool retired its idle extras while the
+//! parked ones counted toward its target, so after two or three parked
+//! streams the next proc never ran (ws49 sized lobo's room to that,
+//! `cpus / 2 - 2`). 0.2.24 retires only surplus unblocked workers
+//! (s210), and lobo's room is sized to what that pool was MEASURED to
+//! allow (main.lu's `stream_room`, restated below).
+//!
+//! Two phases, under `memory_budget 128k` (a budgeted small body runs
+//! in a capped proc while the loop's streams are inside the room):
+//!   A. N = the room - 1, the most streams beside which a budgeted
+//!      small body still gets its capped proc: every download's BODY
+//!      starts, and a probe GET / (its body in that proc) and `lobo
+//!      status` each answer within 1000 ms. Red with this room at the
+//!      0.2.23 pin: there the probe's proc stopped running beside 2
+//!      streams on 4 cpus and 15 on 16, and on 1 cpu it never ran, so
+//!      the loop waited in its join.
+//!   B. N = 4·max(cpus, 2) + 4, past what the pool holds: the probe and
+//!      `status` still answer within 1000 ms (past the room the small
+//!      body is written in a plain region, without the proc), and at
+//!      least N(A) bodies start. Red with the room opened at 0.2.24:
+//!      the probe's proc never runs from 4·max(cpus, 2) - 1 streams on.
+//! Which path the probe took is not visible from outside (both paths
+//! measure their region, so `mem-rt-hw` moves either way); the two
+//! reds are what tie the room to the pool.
+//! The cpu count is `os_cpus()`, affinity-aware like the runtime's own
+//! pool, so the file means the same thing under `taskset`.
+//!
+//! The measurement knob (the ws51 sweep, never set by the corpus):
+//! `LOBO_STREAMS=N` runs ONE probe at N, prints its line and exits 0;
+//! `LOBO_BIN` names the lobo binary (default target/lobo-debug).
+//! Loopback only; OS-chosen ports; scratch under target/, cleared at
+//! START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// One whole short exchange on a fresh connection: the reply, or "" if
+/// none arrived inside `ms`. Total.
+fn ask(port: int, req: str, ms: int) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return ""
+    }
+    net_deadline(c, ms) else |_| {}
+    net_write(c, req) else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// main.lu's `stream_room`, restated (a test cannot call main.lu): the
+/// streams the loop lets park beside it before a budgeted small body
+/// stops getting its proc. Pure and total.
+fn room_of(cpus: int) -> int {
+    let t = if cpus < 2 { 2 } else { cpus }
+    3 * t - 2
+}
+
+/// Where the head ends in `b` (the index past its blank line), or -1.
+/// Pure and total.
+fn head_end(b: List[byte]) -> int {
+    var i: int = 0
+    while i + 3 < b.len {
+        if b[i] as int == 13 &&
+            b[i + 1] as int == 10 &&
+            b[i + 2] as int == 13 &&
+            b[i + 3] as int == 10 {
+            return i + 4
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// What one probe saw.
+struct Seen {
+    get_ms: int,
+    get_ok: bool,
+    st_ms: int,
+    st_ok: bool,
+    started: int,
+    spawned: bool,
+}
+
+/// One tick of the slow clients: every readable one reads at most 6554
+/// bytes (64 KB a second at ten ticks a second). `got` counts bytes
+/// past each head, `hend` is -1 until a client's head has arrived,
+/// `pre` holds the bytes read before it did. Total.
+fn tick(
+    cs: List[int],
+    mut got: List[int],
+    mut hend: List[int],
+    mut pre: List[int],
+) {
+    let ready = net_wait(cs, 0) else |_| {
+        List[int]()
+    }
+    var i: int = 0
+    while i < cs.len {
+        var is_ready = false
+        for r in ready {
+            if r == cs[i] {
+                is_ready = true
+            }
+        }
+        if is_ready {
+            let b = net_read_bytes(cs[i], 6554) else |_| {
+                List[byte]()
+            }
+            if hend[i] < 0 {
+                let e = head_end(b)
+                if e >= 0 {
+                    hend[i] = 0
+                    got[i] = b.len - e
+                } else {
+                    pre[i] = pre[i] + b.len
+                }
+            } else {
+                got[i] = got[i] + b.len
+            }
+        }
+        i = i + 1
+    }
+}
+
+/// Drip the clients for `ms`. Total.
+fn drip(
+    cs: List[int],
+    ms: int,
+    mut got: List[int],
+    mut hend: List[int],
+    mut pre: List[int],
+) {
+    let end = time_unix_ms() + ms
+    while time_unix_ms() < end {
+        tick(cs, mut got, mut hend, mut pre)
+        time_sleep_ms(100)
+    }
+}
+
+/// One server under `memory_budget 128k`, `n` slow clients, then the
+/// probe and the order desk. Total.
+fn measure(bin: str, d: str, n: int) -> Seen {
+    var seen = Seen {
+        get_ms: -1,
+        get_ok: false,
+        st_ms: -1,
+        st_ok: false,
+        started: 0,
+        spawned: false,
+    }
+    let hp = free_port() else |_| 0
+    let cp = free_port() else |_| 0
+    let ep = "127.0.0.1:{cp}"
+    fs_write_text(
+        "{d}/lobo.conf",
+        "pid {d}/lobo.pid;\ncontrol {ep};\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; memory_budget 128k; }}\n}}\n",
+    ) else |_| {
+        return seen
+    }
+    var argv = List[str]()
+    (mut argv).push(bin)
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        print("could not spawn {bin}")
+        return seen
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| 0
+        print("the server never answered on {ep}")
+        return seen
+    }
+    seen.spawned = true
+
+    // the slow clients, each asking for the big file
+    var cs = List[int]()
+    var got = List[int]()
+    var hend = List[int]()
+    var pre = List[int]()
+    var k: int = 0
+    while k < n {
+        let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+        if c >= 0 {
+            net_deadline(c, 20000) else |_| {}
+            net_write(c, "GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+            (mut cs).push(c)
+            (mut got).push(0)
+            (mut hend).push(-1)
+            (mut pre).push(0)
+        }
+        k = k + 1
+    }
+    drip(cs, 1500, mut got, mut hend, mut pre)
+
+    // while they crawl: a second client, and the order desk
+    let t0 = time_unix_ms()
+    let r = ask(hp, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 3000)
+    seen.get_ms = time_unix_ms() - t0
+    seen.get_ok = r.contains("200 OK") && r.contains("small-page") && seen.get_ms <= 1000
+    let t1 = time_unix_ms()
+    let st = shell.control_fetch(ep, "status") else |_| { "" }
+    seen.st_ms = time_unix_ms() - t1
+    seen.st_ok = st.contains("current generation: 1") && seen.st_ms <= 1000
+
+    drip(cs, 1000, mut got, mut hend, mut pre)
+    for g in got {
+        if g > 0 {
+            seen.started = seen.started + 1
+        }
+    }
+    for c in cs {
+        net_close(c) else |_| {}
+    }
+    shell.control_fetch(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        ""
+    }
+    let _w = os_wait(child) else |_| 0
+    seen
+}
+
+/// "ok" or "LATE". Pure and total.
+fn word(ok: bool) -> str {
+    if ok {
+        return "ok"
+    }
+    "LATE"
+}
+
+/// The line one probe prints. Pure and total.
+fn line(n: int, cpus: int, s: Seen) -> str {
+    let g = word(s.get_ok)
+    let w = word(s.st_ok)
+    "streams n={n} cpus={cpus} room={room_of(cpus)}: GET / {g} in {s.get_ms} ms, status {w} in {s.st_ms} ms, bodies started {s.started}/{n}"
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws51_cap"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let size = 25165824
+    var argv = List[str]()
+    (mut argv).push("/bin/sh")
+    (mut argv).push("-c")
+    (mut argv).push("head -c \"$1\" /dev/zero | tr '\\000' w > \"$2\"")
+    (mut argv).push("sh")
+    (mut argv).push("{size}")
+    (mut argv).push("{d}/www/big.bin")
+    let h = os_spawn(argv)?
+    let mk = os_wait(h)?
+    assert(mk == 0, "the 24 MiB file is written")
+    let cpus = os_cpus() else |_| { 1 }
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+
+    let sweep = env_get("LOBO_STREAMS") else |_| { "" }
+    if !sweep.is_empty() {
+        var n: int = 0
+        for b in sweep.bytes() {
+            n = n * 10 + (b as int) - 48
+        }
+        let s = measure(bin, d, n)
+        print(line(n, cpus, s))
+        fs_remove_dir_all(d) else |_| {}
+        return 0
+    }
+
+    let room = room_of(cpus)
+    let inside = room - 1
+    let a = measure(bin, d, inside)
+    print("A {line(inside, cpus, a)}")
+    let t = if cpus < 2 { 2 } else { cpus }
+    let past = 4 * t + 4
+    let b = measure(bin, d, past)
+    print("B {line(past, cpus, b)}")
+    fs_remove_dir_all(d) else |_| {}
+    assert(a.spawned && b.spawned, "the server came up twice")
+    assert(
+        a.get_ok && a.st_ok && a.started == inside,
+        "inside the room ({inside} streams) every body starts, and the probe (in its capped proc) and status answer",
+    )
+    assert(
+        b.get_ok && b.st_ok && b.started >= inside,
+        "past the pool ({past} streams) the probe (without its proc) and status still answer",
+    )
+    0
+}

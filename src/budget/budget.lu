@@ -325,10 +325,12 @@ fn stream_body(sock: int, fd: int, out: int) -> int {
 /// file (the stream closes it). Returns at once; the outcome arrives
 /// as one line on the pipe whose write end is `out`.
 ///
-/// ONE proc per stream, uncapped, budget or not, because at the 0.2.22
-/// pin a proc parked in a runtime wait holds its pool worker with no
-/// compensation, so parked streams starve the procs spawned after
-/// them (wolf-lang#570, with a 50-line repro). A watch proc (which
+/// ONE proc per stream, uncapped, budget or not, because a proc parked
+/// in a runtime wait holds pool workers, so enough parked streams
+/// starve the procs spawned after them (wolf-lang#570, with a 50-line
+/// repro: at 0.2.22 after two or three; at 0.2.24, which fixed the
+/// pool's retire rule, lobo's next proc no longer runs beside
+/// 4·max(cpus, 2) - 1 streams, ws51's measurement). A watch proc (which
 /// would report a FAULTED stream — a killed proc writes nothing, so
 /// such a row would wait for its generation's drain) would double
 /// that cost; the loop bounds what the rest costs (`stream_room` in

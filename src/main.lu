@@ -1584,18 +1584,23 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // step the same way
     var ft = serve.file_kinds_new()
 
-    // ws49 (lobo#46): the room the runtime's pool leaves beside the
-    // streams. At the 0.2.22 pin a proc parked in a runtime wait holds
-    // its worker uncompensated, so streams parked on slow clients
-    // starve the next proc spawned — a budgeted small body's capped
-    // proc, whose join the loop waits in. Measured on kasumi with this
-    // binary under `taskset` (a budgeted GET / beside N non-reading
-    // 24 MiB downloads): it answers up to 0 streams on 2 and 4 cpus, 2
-    // on 8, 4 on 12, 6 on 16 — `cpus / 2 - 2`. Past it the loop hands
-    // serve `crowded`, which writes a budgeted small body without its
-    // proc (the meter still rules it); a stream past it still leaves
-    // the loop, and its proc waits for a worker instead of the loop
-    // waiting for its client.
+    // ws49 (lobo#46), re-measured at ws51: the room the runtime's pool
+    // leaves beside the streams. A stream parked on a slow client holds
+    // pool workers, so enough of them starve the next proc spawned — a
+    // budgeted small body's capped proc, whose join the loop waits in.
+    // ws49 sized the room at 0.2.22 (`cpus / 2 - 2`). wolf 0.2.24 fixed
+    // the pool's retire rule (wolf-lang#570), and the room is re-sized
+    // to it. Measured on kasumi with this binary, the room opened, under
+    // `taskset` (tests/serve/stream_cap_e2e.lu's sweep: a budgeted GET /
+    // beside N downloads read at 64 KB/s): the probe's proc runs beside
+    // up to 6 streams on 1 cpu, 14 on 4, 62 on 16 — 4·max(cpus, 2) - 2
+    // — and never beside one more. At 0.2.23 it was none on 1 cpu, 1 on
+    // 4, 14 on 16. The room is `3·max(cpus, 2) - 2` (stream_room), a
+    // quarter under that. Past it the loop hands serve `crowded`, which
+    // writes a budgeted small body without its proc (the meter still
+    // rules it); a stream past it still leaves the loop, and past the
+    // pool its proc waits for a worker instead of the loop waiting for
+    // its client.
     let cpus = os_cpus() else |_| { 1 }
     let room = stream_room(cpus)
     let crowded = serve.ServerOpts {
@@ -2694,16 +2699,14 @@ fn bind_control(addr: str) -> (int, str) {
     (l, "127.0.0.1:{port}")
 }
 
-/// ws49 (lobo#46): how many streams may be parked beside the loop
-/// before the next proc spawned waits for a pool worker: `cpus / 2 -
-/// 2`, never below 0 — measured at the 0.2.22 pin (serve_main's note
-/// has the table). Pure and total.
+/// ws49 (lobo#46), ws51: how many streams may be parked beside the
+/// loop while a budgeted small body still gets its capped proc:
+/// `3·max(cpus, 2) - 2` — 4, 10 and 46 on 1, 4 and 16 cpus, against a
+/// measured 6, 14 and 62 at wolf 0.2.24 (serve_main's note has the
+/// table; ws49's `cpus / 2 - 2` was the 0.2.22 pool's). Pure and total.
 fn stream_room(cpus: int) -> int {
-    let r = cpus / 2 - 2
-    if r < 0 {
-        return 0
-    }
-    r
+    let t = if cpus < 2 { 2 } else { cpus }
+    3 * t - 2
 }
 
 /// ws49: where `fd` sits in `xs`, or -1 — the finished-stream lookup
