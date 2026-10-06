@@ -419,15 +419,20 @@ is no longer gated on anything upstream).
   `mem-rt-hw` moves when the stream ENDS, not when its head is written.
   **The stream's chunks are not under the region cap** (budget or
   not), and **past the pool's room a budgeted small body skips its
-  proc too**. At the 0.2.22 pin a proc parked in a runtime wait holds
-  its pool worker (wolf-lang#570): with streams parked on slow
+  proc too**. A proc parked in a runtime wait holds pool workers
+  (wolf-lang#570): at the 0.2.22 pin, with streams parked on slow
   clients, the next budgeted request's `run_small` proc never ran and
   the loop waited in its join (kasumi under `taskset -c 0-3`, and the
   4-vcpu CI runner, run 37173076304). The loop counts its streams
-  against `cpus / 2 - 2` (measured: a budgeted GET / beside N parked
-  streams answers up to N = 0 on 2 and 4 cpus, 2 on 8, 4 on 12, 6 on
-  16) and past it writes the small body in a plain region, as an
-  unbudgeted one is. The meter still rules every site before a byte is
+  against `stream_room` and past it writes the small body in a plain
+  region, as an unbudgeted one is. ws49 measured the room at 0.2.22
+  (a budgeted GET / beside N parked streams answers up to N = 0 on 2
+  and 4 cpus, 2 on 8, 4 on 12, 6 on 16: `cpus / 2 - 2`). wolf 0.2.24
+  fixed the pool's retire rule, and ws51 re-measured with the room
+  opened (`tests/serve/stream_cap_e2e.lu`'s sweep, downloads read at
+  64 KB/s): the proc runs beside up to 6 streams on 1 cpu, 14 on 4,
+  62 on 16 (`4·max(cpus, 2) - 2`), and the room is now
+  `3·max(cpus, 2) - 2` (4, 10, 46). The meter still rules every site before a byte is
   written, and since D40 the cap could not fire from a config; what is
   skipped is the backstop, and only while the pool is crowded.
   `run_stream` (capped) stays for callers outside the loop.
