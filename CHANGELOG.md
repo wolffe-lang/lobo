@@ -132,6 +132,11 @@ allows; `docs/PROFILE.md` has where the time goes.
   that room a download still leaves the loop and gets its head while
   its body waits for a worker, and under `memory_budget` a small body
   is written without its capped proc.
+  *Restated by ws51 (2026-10-06):* the room bounds when a budgeted
+  small body stops getting its capped proc, not how many downloads
+  stream; at 0.2.23 the bodies of the first `4·max(cpus, 2) - 1`
+  downloads start. wolf-lang#570 is fixed in wolf 0.2.24, and trunk at
+  0.2.24 raises the room to `3·max(cpus, 2) - 2`, for the next release.
 - A range starting at byte N reads and drops N bytes first: lobo does
   not use the seek wolf gained in 0.2.22 yet. Under `memory_budget` a
   `Range` is ignored. An `If-Range` date in RFC 850 or asctime form is
@@ -352,6 +357,72 @@ still is (`src/config/table.lu`), a config naming it loads without it,
 and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
+
+## ws51 — 2026-10-06 — the pin at 0.2.24; the stream room re-measured after wolf-lang#570
+
+- **The pin**: wolf 0.2.24 (294d626, release 404332628) and lupin
+  0.1.47 (b3228cb, release 404283632), from the release archives by
+  digest; std holds at 14f0ab2 (trunk's source built at 0.2.24 against
+  14f0ab2 and wolf-std trunk 2f389a7 gives byte-identical binaries on
+  both tiers, zero diagnostics). The stamp constants and every `.wolfi`
+  header follow; no export hash moves.
+- **The stream room rises.** 0.2.24 fixes wolf-lang#570 in the
+  runtime's pool (s210: an idle extra worker retires only out of
+  surplus unblocked workers). `stream_room` goes from `cpus / 2 - 2` to
+  `3·max(cpus, 2) - 2`. Measured on kasumi with
+  `tests/serve/stream_cap_e2e.lu`'s sweep (`LOBO_STREAMS=N`): N
+  downloads of a 24 MiB file read at 64 KB/s under `memory_budget
+  128k`, then a GET / (its small body in a capped proc while the loop's
+  streams are inside the room) and `lobo status`, each within 1000 ms,
+  and a count of the downloads whose body has started. Test and server
+  under the same `taskset`; release builds; N from 0 to 4·t + 8 where
+  t = max(cpus, 2).
+
+  | cpus | t | room opened, 0.2.23: GET / answers beside | room opened, 0.2.24 | bodies that start, both pins | room at trunk | room now |
+  |---|---|---|---|---|---|---|
+  | 1 (`-c 0`) | 2 | none (late at N = 0) | up to 6 (late from 7) | 7 | 0 | 4 |
+  | 4 (`-c 0-3`) | 4 | up to 1 (late from 2) | up to 14 (late from 15) | 15 | 0 | 10 |
+  | 16 (all) | 16 | up to 14 (late from 15; one green at 31) | up to 62 (late from 63) | 63 | 6 | 46 |
+
+  "Opened" is the build with `stream_room` answering 100000, so every
+  budgeted small body gets its proc and the pool alone decides. At
+  0.2.24 the probe's proc runs beside exactly `4·t - 2` streams, which
+  is s210's derived figure, and a download's body starts for the first
+  `4·t - 1` at either pin. The room leaves a quarter of that in hand
+  (it counts streams strictly below it, so the probe's proc runs beside
+  at most `3·t - 3`). The shipped builds (trunk at 0.2.23 with its
+  room, and this head at 0.2.24 with the new one) answer GET / and
+  `status` within 1000 ms at every N swept on all three cpu counts.
+  Logs (kasumi:~/lanes/ws51/): `sweep-trunk-open.log` 7c0c2d25…,
+  `sweep-bump-open.log` d8c1bdcf…, `sweep-trunk.log` f54365bc…,
+  `sweep-head.log` 89790824….
+- **The witness** (`tests/serve/stream_cap_e2e.lu`, native and
+  checked): phase A parks `room - 1` downloads and needs every body
+  started and GET / and `status` inside 1000 ms; phase B parks
+  `4·t + 4` and needs the same answers (past the room, without the
+  proc). Green at head under `taskset -c 0`, `-c 0-3` and all 16 cpus
+  (`wit-head.log` 0a01fe0f…); RED with this room at the 0.2.23 pin,
+  phase A late by its 3000 ms and 2000 ms deadlines on all three
+  (`wit-room0223.log` 0c727894…); green at trunk with trunk's room
+  (`wit-trunk.log` a4aa81b1…), which was safe for the pool it was
+  measured on. Which path the probe took is not visible from outside
+  (both write paths measure their region, so `mem-rt-hw` moves either
+  way), so the two reds, this one and the planted one in CI, are what
+  tie the room to the pool.
+- **The prediction** (5ae4473): right that the 0.2.24 limit is
+  `4·t - 1` (7, 15, 63) and that the shipped builds always answer;
+  wrong about 0.2.23 (predicted late from 1, 1 and 7; measured none, 2
+  and 15) and about bodies (predicted at most 2 started on 4 cpus at
+  0.2.23; 15 start at both pins: the proc that starves is the budgeted
+  small body's, whose join the loop waits in, not the streams'). The predicted room `3·t` failed
+  its own margin rule on 1 cpu (6 against a measured 6), so the room
+  is `3·t - 2`.
+- **Corrected here**: the 0.1.2 limit said lobo "streams at most
+  `cpus / 2 - 2` bodies"; the room never bounded streams, only when a
+  budgeted small body stops getting its proc (restated in place below).
+  `wolf-toolchain.toml`'s [std] note said wolf-lang#146 is open; it has
+  been closed since 2026-09-15, and the WOLF_MIDEND flip-back it gates
+  is still owed and not taken here.
 
 ## ws50 — 2026-10-04 — lobo 0.1.2: the pin at 0.2.23, the release stamp, the reel at 0.1.2
 
