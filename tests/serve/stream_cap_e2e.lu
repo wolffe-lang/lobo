@@ -132,12 +132,7 @@ struct Seen {
 /// bytes (64 KB a second at ten ticks a second). `got` counts bytes
 /// past each head, `hend` is -1 until a client's head has arrived,
 /// `pre` holds the bytes read before it did. Total.
-fn tick(
-    cs: List[int],
-    mut got: List[int],
-    mut hend: List[int],
-    mut pre: List[int],
-) {
+fn tick(cs: List[int], mut got: List[int], mut hend: List[int], mut pre: List[int]) {
     let ready = net_wait(cs, 0) else |_| {
         List[int]()
     }
@@ -170,13 +165,7 @@ fn tick(
 }
 
 /// Drip the clients for `ms`. Total.
-fn drip(
-    cs: List[int],
-    ms: int,
-    mut got: List[int],
-    mut hend: List[int],
-    mut pre: List[int],
-) {
+fn drip(cs: List[int], ms: int, mut got: List[int], mut hend: List[int], mut pre: List[int]) {
     let end = time_unix_ms() + ms
     while time_unix_ms() < end {
         tick(cs, mut got, mut hend, mut pre)
@@ -233,7 +222,10 @@ fn measure(bin: str, d: str, n: int) -> Seen {
         let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
         if c >= 0 {
             net_deadline(c, 20000) else |_| {}
-            net_write(c, "GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+            net_write(
+                c,
+                "GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            ) else |_| {}
             (mut cs).push(c)
             (mut got).push(0)
             (mut hend).push(-1)
@@ -309,7 +301,7 @@ fn main() -> !int {
     if !sweep.is_empty() {
         var n: int = 0
         for b in sweep.bytes() {
-            n = n * 10 + (b as int) - 48
+            n = n * 10 + b as int - 48
         }
         let s = measure(bin, d, n)
         print(line(n, cpus, s))
