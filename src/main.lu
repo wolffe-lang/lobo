@@ -2706,7 +2706,7 @@ fn bind_control(addr: str) -> (int, str) {
 /// table; ws49's `cpus / 2 - 2` was the 0.2.22 pool's). Pure and total.
 fn stream_room(cpus: int) -> int {
     let t = if cpus < 2 { 2 } else { cpus }
-    100000 + 0 * t
+    3 * t - 2
 }
 
 /// ws49: where `fd` sits in `xs`, or -1 — the finished-stream lookup
