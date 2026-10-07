@@ -29,8 +29,9 @@ dated, host-named, load-quoted.
   `events` block empty (the platform default: kqueue here, epoll on
   linux), every other directive nginx's default.
 - lobo is the release-tier binary the gauntlet builds
-  (`target/lobo-release`; `WOLF_MIDEND=0` until wolf-lang#146 closes,
-  the shipped build, flag for flag), `worker_processes N`, every
+  (`target/lobo-release`, the shipped build, flag for flag: wolf's
+  mid-end on since ws52; every ledger row before ws52 was taken with
+  `WOLF_MIDEND=0`, while wolf-lang#146 stood), `worker_processes N`, every
   other directive lobo's default.
 
 ### The shapes — both gate
@@ -167,6 +168,35 @@ in the closeout and in the entry below it, never the row that gates.
 
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
+
+### 2026-10-07 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws52: wolf's mid-end ON against OFF, TWO trees on one VM, wolf 0.2.24 · **VALID** · **NOT MET on both shapes** (close 1.151x, keepalive 1.255x); the mid-end moves the rate by **1.004x / 1.025x**
+
+The #146 flip-back (ws52) turned wolf's mid-end on in the release
+tier, so every row below this one was taken with `WOLF_MIDEND=0`. This
+set measures the flip as a two-tree delta (ws25's `LOBO_REF`) on ONE
+VM against ONE nginx: this side is ws52's head (`9acf0d6`, mid-end on),
+the reference is trunk `9167cb5` built as its own gauntlet built it
+(`WOLF_MIDEND=0`), both at wolf 0.2.24. Between the two trees only the
+build flag reaches the request path (ws52's other change, lobo#55,
+resolves `root`/`alias` once at load). Run **37683057126**
+(workflow_dispatch, `parity=true`, `ref_tree=9167cb5`), load 1.92:
+
+| cell | shape | on req/s | off req/s | nginx req/s | nginx ÷ on | nginx ÷ off | **on ÷ off** median [min, max] |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 22,142 | 22,075 | 25,436 | **1.151x** [1.122, 1.160] | 1.154x | **1.004x** [0.994, 1.007] |
+| N=4 c=32 | keepalive | 69,681 | 68,082 | 87,345 | **1.255x** [1.236, 1.286] | 1.282x | **1.025x** [1.010, 1.034] |
+| N=1 c=32 | close | 15,128 | 15,041 | 15,034 | 0.992x | 1.000x | 1.011x [0.999, 1.017] |
+| N=1 c=32 | keepalive | 30,232 | 29,780 | 34,969 | 1.164x | 1.164x | 0.998x [0.975, 1.043] |
+
+The mid-end buys at most 2.5 % on the gating cell and nothing outside
+the noise at one hand: the request path is the kernel's, as ws31 and
+ws47 found. ws52's prediction (on ÷ off between 1.00x and 1.10x on
+both shapes at N = 4) **held**. The bar's verdict does not move
+(ws47 on this host: 1.151x / 1.240x). Two kasumi sets of the same pair
+(`taskset -c 0-3`, N = 4) were REFUSED by the tool, load 6.45 and 3.16
+from other lanes and nginx's spread up to 2.2x; their indicative deltas
+were 0.997x / 1.006x and 0.990x / 1.020x
+(kasumi:~/lanes/ws52/p-n4.log 20481546…, p-n4b.log e278787c…).
 
 **The rows at wolf 0.2.20 (ws47, 2026-10-02).** README's table carried
 one row per host, both taken before 0.2.16 (macOS with wolf 0.2.8 at
