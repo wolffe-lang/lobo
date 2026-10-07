@@ -57,9 +57,51 @@ for the flip is lobo's own gauntlet and ws47's parity rig.
 | who sees a resolved root | the dry-run (`-t --request`) prints `decision: would serve: <fs_path>` (`src/dryrun/dryrun.lu:728, 734`) and probes it. `tests/dryrun/probes/distro-default.probe` runs `-p tests/config-corpus/distro-default` with `root html`, so its pinned stanza moves with a fix. The reel (`demo/reel/`) runs without `-p`, so under the default prefix `.` its printed paths must not move |
 | the named delta | `tools/lobo-control-differential` row 5 measures `root www` beside the oracle and prints **D5**, non-gating |
 
-## 3. Prediction
+## 3. Prediction, committed before the first build
 
-Committed next, in its own commit, before the first build.
+**F1, binaries.** With `WOLF_MIDEND` unset, `target/lobo-release`
+CHANGES (a different digest from the `WOLF_MIDEND=0` build of the same
+tree) and is **smaller by 5–25 %** (whole-program dedup outweighs
+cross-module inlining in a 30-module program). `target/lobo-debug` is
+**byte-identical** both ways (the variable reaches only `--release`).
+Two mid-end-on release builds of one tree are **byte-identical** to
+each other (#503 fixed in 0.2.21). Falsified by an unchanged release
+digest, a release binary larger than the `=0` one or more than 25 %
+smaller, a moved debug digest, or two on-builds that differ.
+
+**F2, tests.** The gauntlet is green both ways at one tree with the
+**same counts**: corpus lane-runs, differential 22/22, proxy 8/8,
+control 9/9 (10/10 or more after #55's rows), signal 21/21, membudget
+17/17, `lobo-stamp: ok`. No row changes verdict. Falsified by any red,
+or any count that moves with the flag alone.
+
+**F3, bench.** On kasumi, the two-tree parity set (this tree mid-end
+on, `LOBO_REF` = the same tree `=0`, one nginx) reads the delta
+**lobo(on) ÷ lobo(off) between 1.00x and 1.10x** on both shapes at
+N = 4 (`taskset -c 0-3`): the request path is syscall-bound (ws47:
+lobo + libc 24.5 % of samples at one hand), so the mid-end can move at
+most the user-space quarter. `lobo-membudget`'s figures move by no
+more than ±5 %. Falsified by a delta under 0.98x (the mid-end made it
+slower) or above 1.10x, or a membudget figure outside ±5 %. If the box
+will not quiet, the set is refused by the tool and reported refused.
+
+**F4, #55 against the oracle.** Both servers started from a folder
+that is not the prefix:
+
+| row | config | nginx 1.30.4 | lobo at `9167cb5` | lobo after |
+|---|---|---|---|---|
+| a | `root www;`, `-p P/` | serves `P/www` | 404 (red) | serves `P/www` |
+| b | `root www;`, `-p P` (no slash) | serves `P/www` | 404 (red) | serves `P/www` |
+| c | `location /al/ { alias alt/; }`, `-p P/` | serves `P/alt` | 404 (red) | serves `P/alt` |
+| d | `root /abs/www;` (absolute), both `-p` forms | serves `/abs/www` | serves (green) | unchanged |
+
+Falsified by the oracle answering otherwise on any row (then lobo
+follows the oracle and this table was wrong), or by row d moving.
+Beside it: with no `-p` (the prefix `.`), every printed path stays as
+written, so the reel's `would serve: html/files/big.bin` and every
+probe without `-p` do not move; `distro-default.probe` (relative
+`-p`, `root html`) moves to `tests/config-corpus/distro-default/html/`
+and no other probe stanza moves.
 
 ## 4. Evidence index
 
