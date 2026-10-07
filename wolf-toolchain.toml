@@ -47,6 +47,19 @@
 # with zero diagnostics (--error-limit=0;
 # kasumi:~/lanes/ws51/b151-tc-0224-*.log).
 #
+# THE #146 FLIP-BACK (ws52, at this pin, no bump). The gauntlet,
+# tools/lobo-dist and ci.yml build the release tier with wolf's
+# mid-end ON (`WOLF_MIDEND` unset and cleared), as wolf ships it:
+# wolf-lang#146 closed 2026-09-15 (s162), and the driver at 294d626
+# calls `WOLF_MIDEND=0` a measurement mode, never a supported build
+# mode. Measured on kasumi at one tree (07ad3d6, trunk's source):
+# release `=0` 3330959c… (12,472,648 bytes, text 1,610,434) ->
+# mid-end on e8d2ff85… (12,444,936 bytes, text 1,625,358), two on
+# builds byte-identical (#503 holds); the debug tier is the same
+# bytes both ways. The gauntlet is GREEN both ways with identical
+# counts and per-test verdicts (kasumi:~/lanes/ws52/g-base.log,
+# g-flip.log; the CHANGELOG entry has the bench).
+#
 # (ws50, the previous bump:)
 # wolf-lang at the **v0.2.23 RELEASE TAG** (8edac3e, r28), the release
 # stamp `wolf 0.2.23 (wolfgang, pin 8edac3e)`. Staged from the RELEASE
@@ -79,7 +92,7 @@
 # plant-tc-0223.log). `tests/shell/overlap_reloads.lu:142` (ws49's
 # note) tails `return io`, not a raising call, so it moves nothing.
 # The #146 WOLF_MIDEND flip-back is STILL owed (ws37's note below
-# stands) and is not taken here.
+# stands) and is not taken here. [ws52: taken, see above.]
 #
 # (ws49, the previous bump:)
 # wolf-lang at the **v0.2.22 RELEASE TAG** (8e36bc1, r27), the release
@@ -556,7 +569,7 @@ version_line = "lupin 0.1.47 (wolf-interp, reference interpreter at pin 8e36bc1)
 # to the caveat below: wolf-lang#146 has been CLOSED since 2026-09-15
 # (s162, PR #388), so "the issue is OPEN" is stale; the WOLF_MIDEND
 # flip-back it gates is owed and is NOT taken here (a release-tier
-# change is not this lane's).
+# change is not this lane's). [ws52 took it, at this std.]
 #
 # (ws50, the previous bump:)
 # wolf-std, STILL at **14f0ab2** (ws50, 2026-10-04), re-derived against
@@ -686,10 +699,9 @@ version_line = "lupin 0.1.47 (wolf-interp, reference interpreter at pin 8e36bc1)
 #   git -C <wolf-std-checkout> rev-parse <rev> > .wolf-bin/std/STD-REV
 # lib-toolchain.sh REFUSES when the tree is missing or STD-REV drifts
 # from `rev` (a tree has no --version; the marker is its identity).
-# KNOWN CAVEAT at this pin trio: wolf-lang#146 (the loop-versioning
-# noalias guard built from a non-dominating len load, sc_muladd) —
-# re-probed at THIS bump (the TWENTIETH measurement, see [wolf]): the
-# issue is OPEN and the gauntlet's release step keeps WOLF_MIDEND=0
-# until the fix enters the [wolf] pin; the flip-back rides that bump.
+# (History, superseded: "KNOWN CAVEAT at this pin trio: wolf-lang#146
+# … the issue is OPEN and the gauntlet's release step keeps
+# WOLF_MIDEND=0" was written at the twentieth measurement. #146 closed
+# 2026-09-15; ws52 took the flip-back at 0.2.24 — see [wolf].)
 repo = "wolffe-lang/wolf-std"
 rev = "14f0ab2c6a64e86240113e21c4da9f746380eb29"
