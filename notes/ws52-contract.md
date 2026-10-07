@@ -103,9 +103,51 @@ probe without `-p` do not move; `distro-default.probe` (relative
 `-p`, `root html`) moves to `tests/config-corpus/distro-default/html/`
 and no other probe stanza moves.
 
+### §3 against the measurement (written at the close)
+
+- **F1: falsified on size, held on the rest.** The release binary
+  changed (`3330959c…` -> `e8d2ff85…`) but is only **0.22 % smaller**
+  (12,472,648 -> 12,444,936 bytes), and its text section **grew
+  0.93 %** (1,610,434 -> 1,625,358): cross-module inlining outweighs the
+  dedup here, not the other way round. The debug binary is the same
+  bytes both ways (`9054863d…`) and two on-builds are byte-identical.
+- **F2: held**, with one stale number of mine: trunk's control
+  differential was already 10/10 (ws49's row 5), not 9/9. Both ways at
+  one tree: corpus 311/311 with the same verdict on every lane-run,
+  differential 22/22, proxy 8/8, control 10/10, logdiff 4/4, signal
+  21/21, membudget 17/17, resolver 9/9.
+- **F3: held on the bar's host.** The runner's two-tree set (run
+  37683057126, VALID): on ÷ off 1.004x close, 1.025x keepalive at
+  N = 4. kasumi refused both sets (load and nginx's spread); indicative
+  0.997x / 1.006x and 0.990x / 1.020x. membudget: every growth figure
+  within ±2.3 % (the capped round B 8104 -> 8288 KB), retention 19 / 20
+  KB a request both ways.
+- **F4: held on every row.** The oracle served `P/www`, `P/alt/` and
+  the absolute root under both `-p P/` and `-p P`; trunk's lobo
+  answered 404 on 6a-6d and served 6e-6f; the fix serves all six. With
+  no `-p` nothing printed moved; `distro-default.probe` moved as
+  predicted and no other probe did. **Not predicted:**
+  `tests/shell/reload_swap.lu` encoded the bug (`root ws04_reload/A`
+  under `-p ws04_reload`, a path relative to the cwd) and went red with
+  the fix; its roots are now written under the prefix.
+
 ## 4. Evidence index
 
-Filled in at the close (below and in the PR body).
+kasumi paths are under `~/lanes/ws52/`.
+
+| claim | artifact |
+|---|---|
+| the pin by digest | `dl/digest-check.txt` 24e90317… (wolf `501d6d3f…`, lupin `0ddc4ff3…`), `toolchain-tc-0224.txt` f978b939…; nginx `65595ac2…` (`nginx.sha256` bdddc316…, copied from ws47's tree) |
+| binaries both ways, one tree | `builds-base.log` 7d5ea79d… at `07ad3d6` |
+| gauntlet GREEN with `WOLF_MIDEND=0` | `g-base.log` e2c8b82b… at `07ad3d6`: exit 0, 297 s; mask SigBlk 0x10000, SigIgn 0x7; 2 SKIP lines, both named (signal's linux-only header, membudget's wolf-lang#191 gate) |
+| gauntlet GREEN with the mid-end on | `g-flip.log` b593e1c3… at `e03574a`: exit 0, 351 s, release `e8d2ff85…`; same mask, same 2 SKIP lines |
+| the oracle on #55 | `oprobe.log` a95856c1… (nginx 1.30.4 under `-p P/` and `-p P`, conf relative and absolute) |
+| #55 red at trunk's code | `g-red.log` d4158f98… at `605e185` (root_prefix `trap(assert)` native and checked, 311/313); `cd-red.log` 8b947a26… (row 6: 6a-6d FAILED, 6e-6f ok, 4 of 16) |
+| #55 green, the head | `g-fix.log` eae20c10… at `cc5db03`: GREEN, 377 s, 313/313, control 16/16, dryrun green; mask SigBlk 0x10000 |
+| planted break red in CI | run **37682188234** at `59d1891` (root_prefix and reload_swap, both lanes, 309/313) |
+| the revert green in CI | run **37683057126**'s sibling PR run **37683050295** at `9acf0d6` |
+| the bench | run **37683057126** (VALID, runner); `p-n4.log` 20481546…, `p-n4b.log` e278787c… (kasumi, refused) |
+| CI green at the fixes | run **37680730118** at `cc5db03` |
 
 ## 5. Done-when
 
