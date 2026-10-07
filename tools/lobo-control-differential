@@ -28,8 +28,12 @@
 #      from a folder that is not the prefix and driven from `/`. The
 #      oracle's `pid logs/rel.pid` is the measurement; lobo's `pid` and
 #      its `control unix:logs/c.sock` must land under the prefix too.
-#      lobo's `root`, which still resolves against the start folder, is
-#      measured beside it and printed as a named delta (D5).
+#   6. (ws52, lobo#55) a RELATIVE `root` and `alias` resolve against
+#      `-p` too: both servers started from another folder, with `-p P/`
+#      (6a, 6c, 6e) and with `-p P` (no trailing slash; 6b, 6d, 6f),
+#      serve `root www` from P/www, `alias alt/` from P/alt/, and an
+#      absolute root as written. Until ws52 lobo resolved root/alias against the start
+#      folder; this was the named delta D5, now a row.
 #
 # Three rows are NAMED DELTAS, printed with their reason (a
 # differential that hides a delta is a differential that lies —
@@ -102,8 +106,8 @@ row() { # row <name> <0|1>
 }
 note() { echo "control-differential: $1"; }
 
-get() { # get <port> — the served body's first line, or "" on refusal
-    printf 'GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$scratch/req.txt"
+get() { # get <port> [uri] — the served body's first line, or "" on refusal
+    printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "${2:-/index.html}" > "$scratch/req.txt"
     "$WOLF" run "$rig_root"/tests/rig/diffsend.lu "$1" "$scratch/req.txt" 2>/dev/null |
         awk 'BEGIN { RS = "\r\n\r\n" } NR == 2 { print $1 }'
 }
@@ -268,17 +272,45 @@ lb5_stop=$?
 [ "$lb5_stop" = 0 ] || kill "$lb5pid" 2>/dev/null
 wait "$lb5pid" 2>/dev/null
 
-# D5, measured beside it: the same lobo with `root www` (relative)
-printf 'pid logs/rel.pid;\ncontrol unix:logs/c.sock;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root www; }\n}\n' \
-    "$l5" > "$p5/conf/lobo.conf"
-(cd "$away5" && exec "$LOBO" serve -p "$p5" -c conf/lobo.conf) > "$scratch/lb5-root.out" 2>&1 &
-lb5rpid=$!
-lb5_root=""
-i=0
-while [ $i -lt 50 ] && ! [ -S "$p5/logs/c.sock" ]; do sleep 0.1; i=$((i + 1)); done
-lb5_root=$(get "$l5")
-(cd / && "$LOBO" -p "$p5" -c conf/lobo.conf -s stop) > /dev/null 2>&1 || kill "$lb5rpid" 2>/dev/null
-wait "$lb5rpid" 2>/dev/null
+# ======================= row 6 (ws52, lobo#55) ======================
+# One prefix tree, served by each server twice — `-p P/` and `-p P` —
+# from a folder that is not the prefix. Three URIs per start: the
+# relative root, the relative alias, the absolute root.
+p6=$root/p6
+away6=$root/away6
+abs6=$root/abs6
+mkdir -p "$p6/conf" "$p6/logs" "$p6/www" "$p6/alt" "$abs6/abs" "$away6"
+printf 'P6\n' > "$p6/www/index.html"
+printf 'AL6\n' > "$p6/alt/a.html"
+printf 'ABS6\n' > "$abs6/abs/x.html"
+six() { # six <port> <out-prefix> — the three answers, one file each
+    get "$1" /index.html > "$2.root"
+    get "$1" /al/a.html > "$2.alias"
+    get "$1" /abs/x.html > "$2.abs"
+}
+for form in slash bare; do
+    if [ "$form" = slash ]; then pf="$p6/"; else pf="$p6"; fi
+    n6=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    printf 'daemon off;\npid logs/o6.pid;\nerror_log logs/error.log;\nevents { }\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root www;\n    location /al/ { alias alt/; }\n    location /abs/ { root %s; }\n  }\n}\n' \
+        "$n6" "$abs6" > "$p6/conf/nginx.conf"
+    (cd "$away6" && exec "$ngbin5" -p "$pf" -c conf/nginx.conf -e logs/error.log) > "$scratch/ng6-$form.out" 2>&1 &
+    ng6pid=$!
+    poll_body "$n6" P6 > /dev/null || true
+    six "$n6" "$scratch/ng6-$form"
+    kill "$ng6pid" 2>/dev/null
+    wait "$ng6pid" 2>/dev/null
+
+    l6=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    printf 'pid logs/l6.pid;\ncontrol unix:logs/c6.sock;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root www;\n    location /al/ { alias alt/; }\n    location /abs/ { root %s; }\n  }\n}\n' \
+        "$l6" "$abs6" > "$p6/conf/lobo.conf"
+    (cd "$away6" && exec "$LOBO" serve -p "$pf" -c conf/lobo.conf) > "$scratch/lb6-$form.out" 2>&1 &
+    lb6pid=$!
+    i=0
+    while [ $i -lt 80 ] && [ -z "$(get "$l6" /abs/x.html)" ]; do sleep 0.1; i=$((i + 1)); done
+    six "$l6" "$scratch/lb6-$form"
+    (cd / && "$LOBO" -p "$pf" -c conf/lobo.conf -s stop) > "$scratch/lb6-$form-stop.out" 2>&1 || kill "$lb6pid" 2>/dev/null
+    wait "$lb6pid" 2>/dev/null
+done
 
 # ============================ the rows ==============================
 echo ""
@@ -330,6 +362,22 @@ else
     row "5. relative paths under -p: nginx up=$ng5_up pid-under-p=$ng5_in_p pid-in-cwd=$ng5_in_cwd reload=$ng5_reload; lobo up=$lb5_up pid-under-p=$lb5_pid_in_p sock-under-p=$lb5_sock_in_p logs-in-cwd=$lb5_in_cwd reload=$lb5_reload stop=$lb5_stop (artifacts: $scratch/lb5*.out, $scratch/ng5*.out)" 1
 fi
 
+six_row() { # six_row <label> <what> <want> <file-suffix> <form> <-p as shown> — oracle non-empty, then lobo equal
+    ng=$(cat "$scratch/ng6-$5.$4" 2>/dev/null)
+    lb=$(cat "$scratch/lb6-$5.$4" 2>/dev/null)
+    if [ -n "$ng" ] && [ "$ng" = "$3" ] && [ "$lb" = "$ng" ]; then
+        row "$1 $2 (-p $6, started from another folder): nginx served '$ng', lobo served '$lb'" 0
+    else
+        row "$1 $2 (-p $6): nginx answered '${ng:-nothing}', lobo answered '${lb:-nothing}', want '$3' from both (lobo#55; artifacts: $scratch/ng6-$5.*, $scratch/lb6-$5.*)" 1
+    fi
+}
+six_row 6a "a relative \`root www\` serves <prefix>/www" P6 root slash "P/"
+six_row 6b "a relative \`root www\` serves <prefix>/www" P6 root bare "P"
+six_row 6c "a relative \`alias alt/\` serves <prefix>/alt/" AL6 alias slash "P/"
+six_row 6d "a relative \`alias alt/\` serves <prefix>/alt/" AL6 alias bare "P"
+six_row 6e "an absolute \`root\` is taken as written" ABS6 abs slash "P/"
+six_row 6f "an absolute \`root\` is taken as written" ABS6 abs bare "P"
+
 echo ""
 note "NAMED DELTAS (measured, not hidden)"
 note "  D1 transport — nginx: kill(pid, SIGHUP), the kernel authorizes (same uid); lobo: a loopback TCP endpoint, because wolf has no unix-domain socket at this pin (wolf-lang#227), so the optional \`token <file>\` arm is the authorization instead. Loopback is not a uid boundary and lobo says so."
@@ -350,12 +398,6 @@ else
     row "D3 narration: nginx=$ng_narr lobo=$lb_narr drain events (expected 0 and >0)" 1
 fi
 note "  (nginx's reload exit was $ng_reload_exit and lobo's $lb_reload_exit on the GOOD config — parity, both 0)"
-if [ "$lb5_root" = P5 ]; then
-    note "  D5 a relative \`root\` — lobo now resolves it under -p, as nginx did in row 5 (answered '$lb5_root'): this delta has closed, retire the note"
-else
-    note "  D5 a relative \`root\` — nginx resolves \`root www\` under -p (row 5 served P5 from a server started elsewhere); lobo resolves it against the folder it was started from, so the same config started elsewhere answered '${lb5_root:-nothing}' for /index.html. Run lobo from its prefix, or write \`root\` absolute (lobo#55)"
-fi
-
 if [ "$red" != 0 ]; then
     echo "control-differential: RED — $red of $total rows failed (artifacts under $scratch/)" >&2
     exit 1
