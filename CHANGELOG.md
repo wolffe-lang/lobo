@@ -358,6 +358,64 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws53 — 2026-10-07 — the pin at 0.2.25 (nothing refused, nothing to revert; both binaries change by reloads)
+
+- **The pin moves to wolf 0.2.25 (`6710f9e`) / lupin 0.1.48
+  (`531bf05`); std holds at `14f0ab2`.** Taken from the release
+  archives by digest (linux x86-64 `9d91f533…` and `81cfd77a…`; macOS
+  arm64 `202c8d6c…` and `27d86060…`), members by name in
+  `wolf-toolchain.toml`. 0.2.25 fixes three silent wrong answers on
+  the compiled tiers (wolf-lang#598, #601: a store or load of foreign
+  memory forwarded across a call that writes it; #600: release deleting
+  a branch on the top half of `u64 >> k`). lobo's source has none of
+  those shapes (no module `var`, no `extern "c"` item, no raw pointer,
+  no shift), so no lobo answer was wrong and none moves. std was
+  re-derived first (B151): trunk's source at 0.2.25 against `14f0ab2`
+  and wolf-std trunk `2f389a7` builds with zero diagnostics on both
+  tiers and gives byte-identical binaries, so the std pin holds.
+  Measured on kasumi at one tree (trunk's source, `21c6f8e`):
+
+  | | wolf 0.2.24 | wolf 0.2.25 |
+  |---|---|---|
+  | release binary | `fe2ee1cf…`, 12,449,832 bytes | `f1dbe21b…`, 12,450,040 bytes (+208) |
+  | release text / data / bss | 1,629,974 / 25,832 / 2,291 | 1,630,434 / 25,832 / 1,827 (text +460) |
+  | a second release build | — | `f1dbe21b…`, the same bytes |
+  | debug binary | `fcdf4f49…`, 14,120,424 bytes | `ef15e652…`, 14,120,632 bytes (+208) |
+  | the same at std `2f389a7` | — | `ef15e652…` / `f1dbe21b…`, the same bytes |
+  | diagnostics, both tiers, `--error-limit=0` | 0 | 0 |
+
+  The growth is reloads after calls (s214 counted lobo native 1/1 and
+  release 2/2 objects changed, by added loads only). At the head the
+  stamp strings change the bytes again (`b3507b98…` release).
+- **The gauntlet at the bump, both ways on kasumi** (strict env,
+  `WOLF_PAIRING_REQUIRE_SIBLING=1`, stdout and stderr together, mask
+  SigBlk 0x10000 / SigIgn 0x7): trunk at 0.2.24 and the pin commit
+  `0fc57e1` at 0.2.25 are both GREEN with the same counts: corpus
+  313/313 lane-runs (lupin's 70 included), differential 22/22, proxy
+  8/8, control 16/16, logdiff 4/4, signal 21/21, prefork 38/38,
+  membudget 17/17, resolver 9/9, dryrun, metrics, replay, TLS and ACME
+  green, the census clean, and the same two named SKIP lines (signal's
+  linux-only header, membudget's wolf-lang#191 gate).
+  `kasumi:~/lanes/ws53/g-before.log` 219e4aa7…, `g-pin.log` 1743edd6….
+- **membudget**: retention **19 / 20 KB a request** (plain / capped)
+  at both pins; growth plain 7904 / 7964 KB at both pins (the same
+  numbers), capped 8144 / 8160 KB -> 8016 / 8096 KB (−1.6 % / −0.8 %).
+- **The stream-cap witness** (`tests/serve/stream_cap_e2e.lu`, ws51)
+  run outside the corpus under `taskset -c 0`, `0-3` and `0-15`,
+  against the debug and the release binary, at both pins: green in all
+  twelve runs, rooms 4 / 10 / 46, every body inside the room started
+  (3/3, 9/9, 45/45) and past the pool the probe and `status` answered
+  in 0–1 ms with 7/12, 15/20 and 63/68 bodies started, the same numbers
+  at both pins. `kasumi:~/lanes/ws53/cap-before.log` e4857f31…,
+  `cap-pin.log` a270543e….
+- **Runner parity** (run 37701293832, two trees on one VM, VALID): 0.2.25
+  ÷ 0.2.24 is **0.999x** close and **1.000x** keepalive at N = 4; the bar
+  stays NOT MET (nginx ÷ lobo 1.208x / 1.239x on this VM, 1.205x /
+  1.244x for the 0.2.24 tree beside it). `docs/PARITY.md` has the row.
+- **CI**: the gauntlet green at the pin (run 37701296978); a planted
+  break (`781873a`, the stamp constants left at 0.2.24) red at
+  `lobo-stamp` in run 37702325002, reverted at `56b44c4`.
+
 ## ws52 — 2026-10-07 — the release tier with wolf's mid-end on; a relative root and alias resolve against -p (lobo#55)
 
 - **The release tier runs wolf's mid-end** (the #146 flip-back, owed
