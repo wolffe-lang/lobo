@@ -997,10 +997,7 @@ pub fn load(prefix: str, conf_rel: str) -> Conf {
     parse_file(mut c, mut w, conf, "", -1, "main")
     map_vars_gate(mut c)
     build_index(mut c)
-    // PLANT (ws52): the #55 resolution skipped; root_prefix must go red
-    if prefix == "/ws52-plant-never/" {
-        resolve_route_paths(mut c, prefix)
-    }
+    resolve_route_paths(mut c, prefix)
     c
 }
 
