@@ -169,6 +169,35 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-07 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws53: wolf 0.2.25 against 0.2.24, TWO trees on one VM · **VALID** · **NOT MET on both shapes** (close 1.208x, keepalive 1.239x); the pin moves the rate by **0.999x / 1.000x**
+
+The 0.2.25 bump (ws53) adds reloads after calls that may write foreign
+memory (wolf-lang#598, #601) and changes both lobo binaries. This set
+measures the bump as a two-tree delta (ws25's `LOBO_REF`) on ONE VM
+against ONE nginx: this side is ws53's pin commit (`0fc57e1`, wolf
+0.2.25 / lupin 0.1.48), the reference is trunk `21c6f8e` (wolf 0.2.24 /
+lupin 0.1.47), each built with the toolchain its own
+`wolf-toolchain.toml` pins, mid-end on both. Between the two trees only
+the compiler and the stamp strings differ. Run **37701293832**
+(workflow_dispatch, `parity=true`, `ref_tree=21c6f8e`), load 1.78:
+
+| cell | shape | 0.2.25 req/s | 0.2.24 req/s | nginx req/s | nginx ÷ 0.2.25 | nginx ÷ 0.2.24 | **0.2.25 ÷ 0.2.24** median [min, max] |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 51,284 | 51,323 | 61,821 | **1.208x** [1.200, 1.210] | 1.205x | **0.999x** [0.993, 1.007] |
+| N=4 c=32 | keepalive | 157,704 | 157,889 | 195,383 | **1.239x** [1.234, 1.261] | 1.244x | **1.000x** [0.986, 1.010] |
+| N=1 c=32 | close | 38,065 | 38,146 | 43,487 | 1.143x | 1.140x | 1.001x [0.996, 1.005] |
+| N=1 c=32 | keepalive | 66,691 | 66,270 | 82,286 | 1.186x | 1.245x | 1.054x [0.942, 1.072] |
+
+The reloads cost nothing measurable on the gating cell (0.999x and
+1.000x, both ranges spanning 1.00). ws53's prediction (0.97x to 1.03x
+on both shapes) **held at N = 4**; the one-hand keepalive cell read
+1.054x with a 13 % spread, the noisiest cell of the four, and is not a
+cell the bar gates on. This VM ran 2.3x faster than ws52's (51k against
+22k close), and nginx ÷ lobo on the reference tree reads 1.205x /
+1.244x here against 1.151x / 1.282x there, so the close cell's move from
+ws52's row is the VM, not the pin: the same tree reads the same verdict
+on both sides of this set. The bar's verdict does not move.
+
 ### 2026-10-07 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws52: wolf's mid-end ON against OFF, TWO trees on one VM, wolf 0.2.24 · **VALID** · **NOT MET on both shapes** (close 1.151x, keepalive 1.255x); the mid-end moves the rate by **1.004x / 1.025x**
 
 The #146 flip-back (ws52) turned wolf's mid-end on in the release
