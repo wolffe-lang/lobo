@@ -472,7 +472,7 @@ pub fn version_verbose() -> str {
     var s = "{version_report()}\n"
     s = "{s}built with {toolchain_line()}\n"
     s = "{s}std: wolf-std {std_rev()}\n"
-    s = "{s}tier: two-tier (owned debug + LLVM release; the archive is the release tier, WOLF_MIDEND=0 while wolf-lang#146 stands)\n"
+    s = "{s}tier: two-tier (owned debug + LLVM release with wolf's mid-end; the archive is the release tier)\n"
     s = "{s}modules: config {config.version()} · http · serve · proxy · obs · shell {version()}\n"
     s
 }
