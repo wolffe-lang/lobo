@@ -246,19 +246,20 @@ entry shim outside its object (`func.addr of
 (the LLVM emitter now declares an out-of-subset `func.addr` referee
 by its mangled symbol and lets the linker resolve it, under every
 partition, `WOLF_MIDEND=0` included, which is the mode lobo's
-gauntlet builds in while #146 is open), and the adoption merged at
+gauntlet built in while #146 was open), and the adoption merged at
 the 5f99b9f pin (ws14). The proof is the gauntlet's own
-release step: `WOLF_MIDEND=0 wolf build --release src/main.lu` links
+release step: `wolf build --release src/main.lu` links
 `src/budget`'s proc, and every release-binary witness (`lobo-
 membudget`, `lobo-signal`, `lobo-resolver`, the differentials) runs
-that binary.
+that binary. Since ws52 (wolf 0.2.24) that step runs wolf's mid-end
+and whole-program phase; from ws14 to ws51 it passed `WOLF_MIDEND=0`.
 
 Per lane:
 
 | lane | the cap adoption | how it is known |
 |---|---|---|
 | native (debug tier) | runs | `tests/serve/budget_cap.lu` (the four relations, the join driven directly), `budget_cap_e2e.lu` (the real server, 200 through the proc, `mem-rt-hw` back through the pipe), `cap_shape.lu` |
-| release (`WOLF_MIDEND=0`) | runs — #219's fix | the gauntlet's tiers step builds it; `tools/lobo-membudget`'s cap rounds drive the whole budgeted path through a real socket against `target/lobo-release` — since ws15 that includes D40's closure measurement (the ws14 breach serving 200, the meter's 503 beside it) |
+| release (the mid-end on since ws52; `WOLF_MIDEND=0` before) | runs — #219's fix | the gauntlet's tiers step builds it; `tools/lobo-membudget`'s cap rounds drive the whole budgeted path through a real socket against `target/lobo-release` — since ws15 that includes D40's closure measurement (the ws14 breach serving 200, the meter's 503 beside it) |
 | checked — `wolf conform-run --checked` (the s23 UB machine, the corpus runner's lane) | **refuses, by name**: `unsupported` at `mem`, `x-unsupported-construct: "structured concurrency in checked execution (C1 deferred)"` — the machine runs no `spawn`/scope/`select` at all; a proc is refused where every spawn is (the C1 sprint, not a fix) | `//! checked-refuses:` on `budget_cap.lu` and `cap_shape.lu` — the runner ASSERTS the named record, never skips the lane (at v0.2.2 the record was empty: #219's second observation, fixed by s134). Every witness that fires a refusal BEFORE the proc keeps its checked lane (`budget_refusals.lu`, `budget_e2e.lu`, `region_measured.lu`) |
 | checked — `wolf run --checked` | runs (it is the NATIVE build under the checked profile, a different machine) | not a corpus lane; stated so nobody bisects it again |
 | lupin | runs the shape (`cap_shape.lu`); the serve suite cannot run there (lupin has no fs) | the corpus lane |
