@@ -358,6 +358,72 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws52 — 2026-10-07 — the release tier with wolf's mid-end on; a relative root and alias resolve against -p (lobo#55)
+
+- **The release tier runs wolf's mid-end** (the #146 flip-back, owed
+  since wolf-lang#146 closed on 2026-09-15). `tools/lobo-gauntlet`,
+  `tools/lobo-dist` and `ci.yml` no longer pass `WOLF_MIDEND=0`, and
+  they clear an inherited one, so `--release` runs the s42 mid-end and
+  the s43 whole-program phase as wolf ships it (wolf's driver at 0.2.24
+  calls `WOLF_MIDEND=0` a measurement mode, never a supported build
+  mode). The pin does not move (wolf 0.2.24, lupin 0.1.47, std
+  14f0ab2). Measured on kasumi at one tree (`07ad3d6`, trunk's source):
+
+  | | `WOLF_MIDEND=0` (through ws51) | mid-end on (now) |
+  |---|---|---|
+  | release binary | `3330959c…`, 12,472,648 bytes | `e8d2ff85…`, 12,444,936 bytes (−0.22 %) |
+  | text / data / bss | 1,610,434 / 25,832 / 1,347 | 1,625,358 / 25,832 / 2,819 (text +0.93 %) |
+  | a second release build | — | `e8d2ff85…`, the same bytes (#503 holds) |
+  | debug binary | `9054863d…` | `9054863d…`, the same bytes |
+  | gauntlet | GREEN, 297 s | GREEN, 351 s |
+  | corpus, differential, proxy, control, logdiff, signal, membudget, resolver | 311/311, 22/22, 8/8, 10/10, 4/4, 21/21, 17/17, 9/9 | the same counts, and the same verdict on every corpus lane-run |
+  | membudget growth, plain (A / B) and capped (A / B) | 7904 / 7964 KB, 8152 / 8104 KB | 7904 / 7964 KB, 8016 / 8288 KB |
+  | retention, plain / capped | 19 / 20 KB a request | 19 / 20 KB a request |
+
+  Logs (kasumi:~/lanes/ws52/): `builds-base.log` 7d5ea79d…,
+  `g-base.log` e2c8b82b…, `g-flip.log` b593e1c3…. The bench, as
+  ws25's two-tree delta on the CI runner (run 37683057126, VALID,
+  `docs/PARITY.md`): mid-end on ÷ off is **1.004x** on close and
+  **1.025x** on keepalive at N = 4, 1.011x and 0.998x at N = 1; the bar
+  stays NOT MET (nginx ÷ lobo 1.151x / 1.255x). Two kasumi sets were
+  refused by the tool on load and on nginx's spread (indicative deltas
+  0.997x / 1.006x and 0.990x / 1.020x).
+  `lobo -V`'s tier line no longer says `WOLF_MIDEND=0`.
+- **A relative `root` or `alias` resolves against `-p`** (lobo#55).
+  lobo kept both as written and opened them against the folder it was
+  started from, so `lobo -p P` started anywhere but `P` answered 404
+  for `root www`. They now resolve under the prefix at load, as the
+  pinned nginx does, and as `pid`, the logs, the control socket and the
+  certificate paths already did. `-p P` and `-p P/` are the same
+  prefix. Under the default prefix (`.`, no `-p`) every path stays as
+  written, so a server started from its own folder prints what it
+  printed before. Measured beside nginx 1.30.4, both started from a
+  folder that is not the prefix (`tools/lobo-control-differential`
+  row 6, which replaces the named delta D5):
+
+  | row | config, `-p` | nginx | lobo at `605e185` (before) | lobo now |
+  |---|---|---|---|---|
+  | 6a | `root www;`, `-p P/` | `P/www` | 404 | `P/www` |
+  | 6b | `root www;`, `-p P` | `P/www` | 404 | `P/www` |
+  | 6c | `alias alt/;` in `location /al/`, `-p P/` | `P/alt/` | 404 | `P/alt/` |
+  | 6d | `alias alt/;` in `location /al/`, `-p P` | `P/alt/` | 404 | `P/alt/` |
+  | 6e | an absolute `root`, `-p P/` | as written | as written | as written |
+  | 6f | an absolute `root`, `-p P` | as written | as written | as written |
+
+  `tests/config/root_prefix.lu` holds the load-time half (red at
+  `605e185` on both lanes, `trap(assert)` at its first prefix
+  assertion). Two
+  fixtures followed: `tests/shell/reload_swap.lu` wrote its roots
+  relative to the folder it ran from under a prefix of the same name
+  (the shape #55 fixed), and now writes them under the prefix; the
+  `distro-default` dry-run probe (`-p tests/config-corpus/distro-default`,
+  `root html`) now names `tests/config-corpus/distro-default/html/`.
+  Logs: `g-red.log` d4158f98… and `cd-red.log` 8b947a26… (row 6 red,
+  4 of 16 rows) at `605e185`; `g-fix.log` eae20c10… (GREEN, 313/313,
+  control 16/16) at `cc5db03`; the oracle probe `oprobe.log` a95856c1….
+  A planted break (the resolution skipped) went red in CI, run
+  37682188234; its revert is green, run 37683050295.
+
 ## ws51 — 2026-10-06 — the pin at 0.2.24; the stream room re-measured after wolf-lang#570
 
 - **The pin**: wolf 0.2.24 (294d626, release 404332628) and lupin
