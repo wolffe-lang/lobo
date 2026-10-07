@@ -1,0 +1,105 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: config
+//!
+//! lobo#55 (ws52): a RELATIVE `root` or `alias` names a path under the
+//! `-p` prefix, as `pid`, the logs, the control socket and the
+//! certificate paths already do — never the folder lobo was started
+//! from. The oracle, nginx/1.30.4 started from a folder that is not
+//! the prefix (`tools/lobo-control-differential` rows 6a-6f): `root
+//! www` serves `<prefix>/www`, `alias alt/` serves `<prefix>/alt/`,
+//! an absolute root is taken as written, and `-p P` and `-p P/` are
+//! the same prefix. This file holds the load-time half on the real
+//! filesystem (fs is two-lane; `config.load` is the integration
+//! surface, `parse_str` keeps every value as written).
+//!
+//! Under the default prefix `.` the values stay as written, so a
+//! server started from its own folder prints the paths it printed
+//! before (the dry-run's `would serve: html/...`).
+
+use config
+
+fn wr(path: str, text: str) {
+    fs_write_text(path, text) else |_| {
+        assert(false, "scratch write failed: {path}")
+    }
+}
+
+/// The resolved route row of the location whose prefix is `key`, or
+/// the trailing server row when `key` is "". -1 when absent.
+fn row_of(c: config.Conf, key: str) -> int {
+    let n = config.route_count(c)
+    if key.is_empty() {
+        return n - 1
+    }
+    var t: int = 0
+    while t < n - 1 {
+        if c.loc_prefix[t] == key {
+            return t
+        }
+        t = t + 1
+    }
+    -1
+}
+
+fn main() -> int {
+    let p = "target/test-scratch/root-prefix"
+    fs_remove_dir_all(p) else |_| {}
+    fs_create_dir_all("{p}/conf") else |_| {
+        assert(false, "scratch mkdir failed")
+    }
+    wr(
+        "{p}/conf/lobo.conf",
+        "http {{\n  server {{\n    listen 127.0.0.1:18199;\n    root www;\n    location /al/ {{ alias alt/; }}\n    location /abs/ {{ root /srv/abs; }}\n    location /dot/ {{ root ./dotted; }}\n  }}\n}}\n",
+    )
+
+    // -p P (no trailing slash): a relative root and alias join the prefix
+    let c = config.load(p, "conf/lobo.conf")
+    assert(config.ok(c), "loads: {config.render_conf(c)}")
+    let srv = row_of(c, "")
+    let al = row_of(c, "/al/")
+    let ab = row_of(c, "/abs/")
+    let dt = row_of(c, "/dot/")
+    assert(srv >= 0 && al >= 0 && ab >= 0 && dt >= 0, "the four rows exist")
+    assert(
+        config.route_root(c, srv) == "{p}/www",
+        "6b root www under -p P: got {config.route_root(c, srv)}",
+    )
+    assert(
+        config.route_alias(c, al) == "{p}/alt/",
+        "6d alias alt/ under -p P: got {config.route_alias(c, al)}",
+    )
+    assert(
+        config.route_root(c, ab) == "/srv/abs",
+        "6f an absolute root is as written: got {config.route_root(c, ab)}",
+    )
+    assert(
+        config.route_root(c, dt) == "{p}/./dotted",
+        "a ./ root joins the prefix too: got {config.route_root(c, dt)}",
+    )
+
+    // -p P/: the same prefix, one slash between
+    let c2 = config.load("{p}/", "conf/lobo.conf")
+    assert(
+        config.route_root(c2, row_of(c2, "")) == "{p}/www",
+        "6a root www under -p P/: got {config.route_root(c2, row_of(c2, ""))}",
+    )
+    assert(config.route_alias(c2, row_of(c2, "/al/")) == "{p}/alt/", "6c alias alt/ under -p P/")
+
+    // the default prefix `.`: as written
+    let c3 = config.load(".", "{p}/conf/lobo.conf")
+    assert(
+        config.route_root(c3, row_of(c3, "")) == "www",
+        "-p . keeps a relative root as written: got {config.route_root(c3, row_of(c3, ""))}",
+    )
+    assert(
+        config.route_alias(c3, row_of(c3, "/al/")) == "alt/",
+        "-p . keeps a relative alias as written",
+    )
+
+    // the pure parse keeps every value as written (no prefix to join)
+    let c4 = config.parse_str("http {{ server {{ root www; }} }}", "inline")
+    assert(config.route_root(c4, config.route_count(c4) - 1) == "www", "parse_str is unresolved")
+    0
+}
