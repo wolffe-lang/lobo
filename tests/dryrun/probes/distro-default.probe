@@ -21,4 +21,4 @@ effective directives (the winning chain, with provenance):
   root   html;  # from tests/config-corpus/distro-default/nginx.conf:44
   index  index.html index.htm;  # from tests/config-corpus/distro-default/nginx.conf:45
   note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout`, `server_name`, `error_page` (statuses: docs/directives.md)
-decision: directory request — would map to html/ and try index files: index.html, index.htm (not checked; 403 if none exists)
+decision: directory request — would map to tests/config-corpus/distro-default/html/ and try index files: index.html, index.htm (not checked; 403 if none exists)

@@ -12,7 +12,10 @@
 //! not a race). On ANY parse error the OLD generation KEEPS serving
 //! (the nginx contract — the reason `-t` exists) and the generation
 //! does not move. The generation counter (ws08 surfaces old-gen
-//! connection counts against it) lands here.
+//! connection counts against it) lands here. The roots are written
+//! relative to the prefix (`root A` under `-p ws04_reload`), which is
+//! where nginx resolves them (lobo#55, ws52); before ws52 this file
+//! wrote them relative to the cwd, the shape #55 fixed.
 
 use config
 use http
@@ -27,10 +30,7 @@ fn main() -> !int {
     fs_write_text("{root}/B/index.html", "generation B\n")?
 
     // generation 1 routes into A
-    fs_write_text(
-        "{root}/lobo.conf",
-        "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
-    )?
+    fs_write_text("{root}/lobo.conf", "http {{\n  server {{ listen 8080; root A; }}\n}}\n")?
     let g1 = shell.gen_new(take config.load(root, "lobo.conf"))
     assert(g1.gen == 1, "first generation is 1")
     assert(g1.ok, "generation 1 loaded ok")
@@ -38,10 +38,7 @@ fn main() -> !int {
     assert(d1.fs_path == "ws04_reload/A/index.html", "gen1 routes into A: {d1.fs_path}")
 
     // rewrite the config to route into B, then reload → generation 2
-    fs_write_text(
-        "{root}/lobo.conf",
-        "http {{\n  server {{ listen 8080; root ws04_reload/B; }}\n}}\n",
-    )?
+    fs_write_text("{root}/lobo.conf", "http {{\n  server {{ listen 8080; root B; }}\n}}\n")?
     // ws37: `reload` TAKES the previous generation at the 0.2.16 pin
     // (wolf-lang#366 — it carries `prev.conf` into the rejected-reload
     // answer), and this test reads `g1.conf` again at line 54 to show
@@ -72,10 +69,7 @@ fn main() -> !int {
     )
 
     // a good reload after a bad one advances again (to 3)
-    fs_write_text(
-        "{root}/lobo.conf",
-        "http {{\n  server {{ listen 8080; root ws04_reload/A; }}\n}}\n",
-    )?
+    fs_write_text("{root}/lobo.conf", "http {{\n  server {{ listen 8080; root A; }}\n}}\n")?
     let g4 = shell.reload(root, "lobo.conf", take g3)
     assert(g4.ok && g4.gen == 3, "a good reload after a bad one advances to 3")
     assert(

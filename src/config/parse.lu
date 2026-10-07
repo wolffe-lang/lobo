@@ -938,10 +938,53 @@ pub fn parse_str(src: str, file: str) -> Conf {
     c
 }
 
+/// lobo#55 (ws52): a path from the config against the -p prefix — an
+/// absolute or empty value as written, a relative one joined with ONE
+/// `/` (`-p P` and `-p P/` are the same prefix, as the oracle has
+/// them). Under the default prefix `.` the value stays as written:
+/// the cwd IS the prefix, and printed paths keep the operator's
+/// spelling. Total.
+fn under_prefix(prefix: str, p: str) -> str {
+    if p.is_empty() || p.starts_with("/") {
+        return p
+    }
+    var base = prefix
+    while base.len > 1 && base.ends_with("/") {
+        base = base[0..base.len - 1]
+    }
+    if base.is_empty() || base == "." {
+        return p
+    }
+    if base == "/" {
+        return "/{p}"
+    }
+    "{base}/{p}"
+}
+
+/// lobo#55 (ws52): the resolved route rows' `root` and `alias` under
+/// the prefix. nginx resolves both against -p (the oracle, started
+/// from another folder: `tools/lobo-control-differential` row 6);
+/// lobo kept them as written, so the serve path stat'ed them against
+/// the folder it was started from. Resolved once here, at load, so
+/// `http.decide` stays pure and the dry-run prints the path the
+/// server will open. Total.
+fn resolve_route_paths(mut c: Conf, prefix: str) {
+    var t: int = 0
+    let n = c.rr_root.len
+    while t < n {
+        let r = under_prefix(prefix, copy c.rr_root[t])
+        c.rr_root[t] = r
+        let a = under_prefix(prefix, copy c.rr_alias[t])
+        c.rr_alias[t] = a
+        t = t + 1
+    }
+}
+
 /// Load a config through the include graph. `prefix` is the -p
 /// prefix; `conf_rel` the -c path (absolute, or resolved against the
 /// prefix). Relative INCLUDES resolve against the conf file's own
-/// directory — the conf prefix — per the oracle (p71).
+/// directory — the conf prefix — per the oracle (p71); a relative
+/// `root` or `alias` resolves against the -p prefix (lobo#55).
 pub fn load(prefix: str, conf_rel: str) -> Conf {
     var c = empty_conf()
     var conf = conf_rel
@@ -954,6 +997,7 @@ pub fn load(prefix: str, conf_rel: str) -> Conf {
     parse_file(mut c, mut w, conf, "", -1, "main")
     map_vars_gate(mut c)
     build_index(mut c)
+    resolve_route_paths(mut c, prefix)
     c
 }
 
