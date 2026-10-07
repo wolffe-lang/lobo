@@ -21,8 +21,8 @@
 # the failure this tool exists to prevent (the release workflow builds
 # that wolf from source on every dist host, and if it cannot, it FAILS
 # rather than reaching for a PATH wolf). The build is the gauntlet's
-# release-tier build flag for flag: `--release` with WOLF_MIDEND=0
-# while wolf-lang#146 stands (the pin file's caveat).
+# release-tier build flag for flag: `--release` with wolf's mid-end on
+# (ws52; WOLF_MIDEND=0 until wolf-lang#146's fix reached the pin).
 #
 # THE HOSTS are wolf's RELEASE tier — linux x86-64 and macOS aarch64.
 # Windows x86-64 and linux aarch64 are NAMED REFUSALS until s60c (the
@@ -126,8 +126,8 @@ dist="target/dist"
 stage="$dist/$name"
 rm -rf "$stage" "$dist/$name.tar.gz" "$dist/$name.tar.gz.sha256" "$dist/smoke"
 mkdir -p "$stage"
-echo "lobo-dist: building $name with $have_wolf (WOLF_MIDEND=0, wolf-lang#146)"
-if ! WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o "$stage/lobo"; then
+echo "lobo-dist: building $name with $have_wolf (--release, the mid-end on)"
+if ! env -u WOLF_MIDEND "$WOLF" build --release ./src/main.lu -o "$stage/lobo"; then
     fail "the release tier did not build"
 fi
 
@@ -166,7 +166,7 @@ done
     echo "host: $host"
     echo "source: $commit${tags:+ (tags: $tags)}${dirty:+ (DIRTY working tree)}"
     echo "source_date_epoch: $epoch"
-    echo "build: WOLF_MIDEND=0 wolf build --release ./src/main.lu"
+    echo "build: wolf build --release ./src/main.lu"
     echo "pins: wolf-toolchain.toml at the source commit above; tools/lobo-dist packed this"
 } > "$stage/BUILD"
 # every staged file gets the ONE timestamp; the tar flags restate it

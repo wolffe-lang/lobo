@@ -246,7 +246,10 @@ jobs:
           cd lobo-ref
           echo "ref tree: $(git rev-parse --short HEAD) $(git log -1 --format=%s | cut -c1-90)"
           mkdir -p target
-          sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          # the ref tree builds as its OWN gauntlet did, flag for flag: a
+          # tree from before ws52 passed WOLF_MIDEND=0 (wolf-lang#146)
+          if grep -q 'WOLF_MIDEND=0 "$WOLF" build --release' tools/lobo-gauntlet; then export WOLF_MIDEND=0; else unset WOLF_MIDEND; fi
+          sh -c '. tools/lib-toolchain.sh; "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           ./target/lobo-release -v
 
       - name: lobo-parity (the W8 bar — a number, never a gate)
@@ -263,7 +266,7 @@ jobs:
           set -euo pipefail
           sudo apt-get install -y -qq apache2-utils
           mkdir -p target
-          sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          env -u WOLF_MIDEND sh -c '. tools/lib-toolchain.sh; "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           # the bar's quiet-rig rule (load(1m) under 3.0) — the build
           # that just finished is the runner's own load; let it decay,
           # bounded, and let the tool refuse if it does not
@@ -297,7 +300,7 @@ jobs:
           perf --version || true
           sudo sysctl -w kernel.perf_event_paranoid=-1 kernel.kptr_restrict=0 > /dev/null || true
           mkdir -p target
-          [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          [ -x target/lobo-release ] || env -u WOLF_MIDEND sh -c '. tools/lib-toolchain.sh; "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           nproc; uptime
           LOBO_LISTEN_ARGS="${{ inputs.listen_args }}" tools/lobo-profile target/lobo-release "${{ inputs.this_name }}" 8 "${{ inputs.profile_shape }}" "${{ inputs.profile_n }}" "${{ inputs.profile_hands }}"
           if [ -n "${{ inputs.ref_tree }}" ]; then
@@ -320,7 +323,7 @@ jobs:
           set -uo pipefail
           sudo apt-get install -y -qq apache2-utils strace > /dev/null
           mkdir -p target
-          [ -x target/lobo-release ] || sh -c '. tools/lib-toolchain.sh; WOLF_MIDEND=0 "$WOLF" build --release ./src/main.lu -o target/lobo-release'
+          [ -x target/lobo-release ] || env -u WOLF_MIDEND sh -c '. tools/lib-toolchain.sh; "$WOLF" build --release ./src/main.lu -o target/lobo-release'
           nproc; uptime
           export LOBO_LISTEN_ARGS="${{ inputs.listen_args }}"
           tools/lobo-syscalls keepalive
