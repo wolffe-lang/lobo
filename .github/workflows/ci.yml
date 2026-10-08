@@ -329,3 +329,109 @@ jobs:
           tools/lobo-syscalls keepalive
           tools/lobo-syscalls close
           tools/lobo-syscalls idle
+
+  # ws54 (lobo#52): the gauntlet on macOS arm64, the second host W8 and
+  # the drop-in claim name. Until this job no CI ran the gauntlet off
+  # linux, so the macOS red ws48 found by hand at confcheck (the `user`
+  # refusal on a host with no /proc, since ws41) had never been a CI
+  # red. Same pins, same build as the linux job (from source, the D57
+  # stamp), the oracle built with Homebrew's openssl@3 per
+  # docs/DIFFERENTIAL.md's macOS note; $OPENSSL_BIN names a real
+  # OpenSSL 3 (macOS ships LibreSSL as `openssl`).
+  gauntlet-macos:
+    if: inputs.parity != true && inputs.profile != true && inputs.syscalls != true
+    runs-on: macos-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: lobo
+          fetch-depth: 0
+
+      - name: read toolchain pins
+        id: pins
+        shell: bash
+        working-directory: lobo
+        run: |
+          rev() { awk -v s="[$1]" '$0==s{f=1} f&&/^rev = /{gsub(/"/,"",$3); print $3; exit}' wolf-toolchain.toml; }
+          echo "wolf=$(rev wolf)" >> "$GITHUB_OUTPUT"
+          echo "lupin=$(rev lupin)" >> "$GITHUB_OUTPUT"
+          echo "std=$(rev std)" >> "$GITHUB_OUTPUT"
+
+      - name: acquire the pinned toolchain
+        uses: ./lobo/.github/actions/acquire-toolchain
+        with:
+          token: ${{ secrets.WOLF_CI_TOKEN }}
+          path: lobo
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            wolf-lang
+            wolf-interp
+
+      - name: build pinned wolf (release) + runtime staticlib
+        shell: bash
+        working-directory: wolf-lang
+        run: |
+          set -euo pipefail
+          TAG="$(git tag --points-at HEAD | grep '^v[0-9]' | head -1 || true)"
+          if [ -n "$TAG" ]; then export WOLF_RELEASE="$TAG"; fi
+          WOLF_COMMIT="$(echo "${{ steps.pins.outputs.wolf }}" | cut -c1-7)" \
+            cargo build --release -p wolf_driver -p wolf_rt
+
+      - name: build pinned lupin (release)
+        shell: bash
+        working-directory: wolf-interp
+        run: cargo build --release --bin lupin
+
+      - name: stage .wolf-bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p lobo/.wolf-bin
+          cp wolf-lang/target/release/wolf wolf-lang/target/release/libwolf_rt.a lobo/.wolf-bin/
+          [ -f wolf-lang/target/release/wolf-cimport-worker ] && cp wolf-lang/target/release/wolf-cimport-worker lobo/.wolf-bin/ || true
+          cp wolf-interp/target/release/lupin lobo/.wolf-bin/
+          git -C wolf-std archive "${{ steps.pins.outputs.std }}" std | tar -x -C lobo/.wolf-bin/
+          git -C wolf-std rev-parse "${{ steps.pins.outputs.std }}" > lobo/.wolf-bin/std/STD-REV
+
+      - name: cache pinned nginx
+        id: nginx-cache
+        uses: actions/cache@v4
+        with:
+          path: lobo/tests/differential/bin
+          key: nginx-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('lobo/tests/differential/NGINX-PIN') }}
+
+      - name: build pinned nginx (cache miss only)
+        if: steps.nginx-cache.outputs.cache-hit != 'true'
+        shell: bash
+        working-directory: lobo
+        run: |
+          set -euo pipefail
+          PIN="$PWD/tests/differential/NGINX-PIN"
+          pin() { sed -n "s/^$1 = //p" "$PIN"; }
+          OSSL="$(brew --prefix openssl@3)"
+          mkdir -p "$RUNNER_TEMP/nginx-build" && cd "$RUNNER_TEMP/nginx-build"
+          curl -sSLO "$(pin source)"
+          echo "$(pin sha256)  $(pin tarball)" | shasum -a 256 -c -
+          tar xzf "$(pin tarball)"
+          cd "nginx-$(pin version)"
+          $(pin configure) --with-cc-opt="-I$OSSL/include" --with-ld-opt="-L$OSSL/lib"
+          make -j"$(sysctl -n hw.ncpu)"
+          mkdir -p "$GITHUB_WORKSPACE/lobo/tests/differential/bin"
+          cp objs/nginx "$GITHUB_WORKSPACE/lobo/tests/differential/bin/nginx"
+
+      - name: host tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v gtar > /dev/null || brew install gnu-tar
+          echo "OPENSSL_BIN=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
+          "$(brew --prefix openssl@3)/bin/openssl" version
+          gtar --version | head -1; jq --version; command -v nc
+
+      - name: lobo-gauntlet
+        shell: bash
+        working-directory: lobo
+        run: tools/lobo-gauntlet
