@@ -56,3 +56,75 @@ contract is `sprints/wws/23-the-open-five/ws54-the-open-five.md` in
 | `BUDGET.md` | `docs/BUDGET.md` (the per-request memory budget; `tools/lobo-membudget` gates retention, ws53: 19/20 KB a request). Any parity fix re-runs it |
 | README's parity table | **stale as stated**: it still carries ws47's 2026-10-02 rows (1.151x / 1.240x on the runner) and nothing from ws52 or ws53 |
 | CI hosts | `ci.yml` runs ONE gauntlet job, ubuntu-latest. **No CI job runs the gauntlet on macOS**, so #52's red has never been a CI red; ws48 found it on nomad-1 |
+
+## 3. Prediction, committed before the first change
+
+### 3a. The five issues (written 13:00Z, before any edit to `src/`, `tools/` or `tests/`)
+
+Each issue gets a row that is RED at trunk `a728fab` and GREEN at its
+fix, in a harness the gauntlet already runs; where nginx defines the
+behaviour the row is differential against the pinned oracle.
+
+- **#48 — alias to a file.** Fix in `http.decide`: an EMPTY remainder
+  maps to the alias itself, not `join_path(alias, "")` = `alias/`.
+  Row: `tests/differential/cases/alias_exact_file.case`
+  (`location = /hello { alias www/index.html; }`, `GET /hello` → 200,
+  the file's bytes, `Content-Type` nginx's default type because the URI
+  has no extension) plus `alias_exact_file_slash.case` (`/hello/` →
+  404 on both). Predicted: the first case RED at trunk on lobo only
+  (lobo 404, nginx 200), the second green at trunk and after; both
+  green at the fix. Falsified if lobo's 200 differs from nginx's in any
+  header the NORMALIZE list does not cover (the default type is the
+  likeliest).
+- **#49 — `-t -q`.** Fix in `shell.lu`/`main.lu`: `-t` with `quiet`
+  prints neither success line; errors and warnings still print, exit
+  codes unchanged. Row: `tools/lobo-shell` gains three output-gated
+  probes (good config → both print NOTHING, exit 0; bad config → both
+  print a `test failed` line, exit 1; a `user` config unprivileged →
+  both print the `[warn]` and no `successful` line, exit 0). Predicted:
+  the first probe RED at trunk (lobo prints 2 lines), the other two
+  green at trunk; all three green at the fix.
+- **#50 — `worker_shutdown_timeout` across reloads.** Fix in
+  `main.lu`: the deadline a DRAINING generation is held to is read from
+  THAT generation's own frozen config (nginx's measured behaviour: the
+  old worker keeps the value it was started with), never `c0`'s. Row:
+  `tools/lobo-control-differential` row 7: one slow download held
+  across each of three reloads, on both servers — (7a) a generation
+  started WITHOUT the directive and drained by a reload that ADDS 2 s
+  is still alive 4 s later; (7b) a generation started WITH 2 s and
+  drained by a reload that REMOVES it is gone (nginx: the worker
+  exited; lobo: `generation-retired … aborted=1`) within 4 s; (7c) a
+  generation started without, after that, is alive 4 s later.
+  Predicted at trunk (lobo started without the directive, so its one
+  `shutdown_ms` is 0): 7a green, **7b RED** (lobo never aborts), 7c
+  green; all green at the fix. Also under `taskset -c 0-3` on kasumi,
+  SigBlk/SigIgn recorded.
+- **#51 — a finished drain is scrapeable.** Fix: two process-wide
+  counters that outlive a generation —
+  `lobo_drained_connections_total{outcome}` (drained / aborted, summed
+  over every generation that ever drained) and
+  `lobo_generations_retired_total`; the per-generation
+  `lobo_connections_retired_total{gen,outcome}` keeps its meaning and
+  docs/metrics.md says it leaves with its generation. Row:
+  `tools/lobo-metrics` gains an exact-count clause: a one-connection
+  drain, scraped after `generation-retired`, reads
+  `lobo_drained_connections_total{outcome="drained"} 1` and
+  `lobo_generations_retired_total 1`. Predicted RED at trunk (the
+  series do not exist), green at the fix; the cardinality fence holds
+  (two fixed label values and one unlabelled series).
+- **#52 — `user` without /proc.** wolf 0.2.25 has no uid surface
+  (§2), so the fix cannot read the uid on macOS; it ASKS the host:
+  where `/proc/self/status` is absent lobo runs `/bin/sh -c` with a
+  test of `id -u` and reads the answer off the EXIT CODE (the only
+  thing `process.run` returns at this pin): unprivileged → nginx's
+  `[warn]` and the config loads; root → the existing `[emerg]` (lobo
+  cannot drop privileges); no answer → the existing `[emerg]`. The gap
+  is filed upstream (wolf-lang: no getuid/geteuid) with a witness.
+  Rows: (i) a NEW `gauntlet-macos` CI job (macos-latest, the pinned
+  toolchain built from source as the linux job builds it, the pinned
+  nginx with Homebrew's openssl@3) — predicted **RED at confcheck** on
+  trunk's source with ws48's five configs (`identical loads moved`),
+  and GREEN at the fix; (ii) `tests/config/user_directive.lu` keeps the
+  pure verdict rows. Falsified if the macOS job reds at a step BEFORE
+  confcheck (then the job's first red is a different defect and is
+  reported as found, not hidden).
