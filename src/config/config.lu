@@ -38,7 +38,12 @@ pub fn delta_refusal(c: Conf) -> str {
 /// finally-list #4). Lints render as `[warn]` lines after any error,
 /// before the verdict; they never change the exit code. Returns the
 /// process exit code (0 ok / 1 failed, the oracle's contract).
-pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
+/// ws54 (lobo#49): `quiet` is `-q` — nginx's "suppress non-error
+/// messages during configuration testing", measured on the oracle: the
+/// two success lines go and NOTHING else does (an `[emerg]`, the
+/// `test failed` line and every `[warn]` still print; exit codes do
+/// not move).
+pub fn check(prefix: str, conf_rel: str, dump: bool, quiet: bool) -> int {
     var conf = conf_rel
     if !conf.starts_with("/") {
         conf = "{prefix}/{conf_rel}"
@@ -194,7 +199,9 @@ pub fn check(prefix: str, conf_rel: str, dump: bool) -> int {
     if dump {
         print_raw(render_t(c))
     }
-    eprint("lobo: the configuration file {conf} syntax is ok")
-    eprint("lobo: configuration file {conf} test is successful")
+    if !quiet {
+        eprint("lobo: the configuration file {conf} syntax is ok")
+        eprint("lobo: configuration file {conf} test is successful")
+    }
     0
 }

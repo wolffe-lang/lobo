@@ -140,6 +140,54 @@ else
     red=$((red + 1))
 fi
 
+# ws54 (lobo#49): `-t -q`, gated on OUTPUT as well as the exit code —
+# the one flag in this table whose whole meaning is what it does not
+# print. Measured on the oracle (notes/ws54-contract.md §2): a good
+# config under `-t -q` prints NOTHING and exits 0; a bad one still
+# prints its `[emerg]` and `test failed` and exits 1; a `[warn]` still
+# prints. Both servers are driven with the same -p/-c; their stderr
+# and stdout are compared after the identity prefix ("nginx: " /
+# "lobo: ") is taken off. The configs listen on a loopback port that
+# `-t` may bind (nginx's -t is not a pure parse, ws40).
+qgood="$scratch/q-good.conf"; qbad="$scratch/q-bad.conf"; quser="$scratch/q-user.conf"
+printf 'events {\n}\nhttp {\n  server { listen 127.0.0.1:18557; }\n}\n' > "$qgood"
+printf 'events {\n}\nhttp {\n  server { listen 127.0.0.1:18557; bogus_directive on; }\n}\n' > "$qbad"
+printf 'user nobody;\nevents {\n}\nhttp {\n  server { listen 127.0.0.1:18557; }\n}\n' > "$quser"
+# qprobe <desc> <conf> <want_exit> <want: silent|failed|warn>
+qprobe() {
+    total=$((total + 1))
+    "$LOBO" -t -q -p "$scratch" -c "$(basename "$2")" > "$scratch/q-lobo.out" 2>&1
+    ql=$?
+    "$NGINX" -t -q -p "$scratch" -c "$(basename "$2")" > "$scratch/q-oracle.out" 2>&1
+    qo=$?
+    lo=$(sed 's/^lobo: //' "$scratch/q-lobo.out"); oo=$(sed 's/^nginx: //' "$scratch/q-oracle.out")
+    ok=1
+    [ "$ql" = "$3" ] && [ "$qo" = "$3" ] || ok=0
+    case "$4" in
+    silent) [ -z "$lo" ] && [ -z "$oo" ] || ok=0 ;;
+    failed) echo "$lo" | grep -q 'test failed$' && echo "$oo" | grep -q 'test failed$' || ok=0
+            echo "$lo$oo" | grep -q 'successful' && ok=0 ;;
+    warn)   echo "$lo" | grep -q '^\[warn\] the "user" directive makes sense only if' && echo "$oo" | grep -q '^\[warn\] the "user" directive makes sense only if' || ok=0
+            echo "$lo$oo" | grep -q 'syntax is ok\|successful' && ok=0 ;;
+    esac
+    if [ "$ok" = 1 ]; then
+        parity=$((parity + 1))
+        echo "lobo-shell: ok — [$1] exit $ql on both, output: $4 on both (lobo $(wc -l < "$scratch/q-lobo.out" | tr -d ' ') lines, oracle $(wc -l < "$scratch/q-oracle.out" | tr -d ' '))"
+    else
+        echo "lobo-shell: FAILED — [$1] want exit $3 and $4 output on both; lobo exited $ql, oracle $qo:" >&2
+        sed 's/^/lobo-shell:   lobo: /' "$scratch/q-lobo.out" >&2
+        sed 's/^/lobo-shell:   oracle: /' "$scratch/q-oracle.out" >&2
+        red=$((red + 1))
+    fi
+}
+qprobe "-t -q good config prints nothing (lobo#49)" "$qgood" 0 silent
+qprobe "-t -q bad config still prints its failure" "$qbad" 1 failed
+if [ "$(id -u)" != 0 ]; then
+    qprobe "-t -q unprivileged \`user\` still prints the [warn]" "$quser" 0 warn
+else
+    echo "lobo-shell: SKIP — [-t -q user warn] runs only unprivileged (root: nginx drops privileges and lobo refuses by name, a different row); named skip" >&2
+fi
+
 # assert the error diagnostics land on STDERR (nginx's stream), not stdout
 "$LOBO" -Z >/tmp/lobo-shell-stdout 2>/dev/null
 if [ -s /tmp/lobo-shell-stdout ]; then

@@ -4015,7 +4015,7 @@ fn check_globals(globals: str) -> int {
 /// the schema-versioned JSON twin).
 fn dryrun_main(cli: shell.Cli) -> int {
     // the -t half first, verbatim (stderr verdict lines included)
-    let verdict = config.check(cli.prefix, cli.conf, false)
+    let verdict = config.check(cli.prefix, cli.conf, false, cli.quiet)
     if verdict != 0 {
         return verdict
     }
@@ -4109,10 +4109,10 @@ fn main() -> int {
         if cli.requests.len > 0 {
             return dryrun_main(cli)
         }
-        return config.check(cli.prefix, cli.conf, false)
+        return config.check(cli.prefix, cli.conf, false, cli.quiet)
     }
     if cli.mode == "dump" {
-        return config.check(cli.prefix, cli.conf, true)
+        return config.check(cli.prefix, cli.conf, true, cli.quiet)
     }
     if cli.mode == "docs" {
         print_raw(config.directives_markdown())
