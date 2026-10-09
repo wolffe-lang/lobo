@@ -6,6 +6,8 @@
 # named on failure:
 #   0. toolchain — pin identity (lib-toolchain.sh refuses on drift)
 #   1. manifest  — src/wolf.pkg parses (`wolf fmt --check` validates it)
+#                  and declares every capability the code reaches
+#                  (`wolf audit --ci --dir src`, s217)
 #   2. fmt       — canonical formatting over src/ and tests/
 #   3. tiers     — the entry builds on BOTH tiers (debug owned + release)
 #   4. wolfi     — every module surface matches its checked-in .wolfi
@@ -41,6 +43,16 @@ if ! "$WOLF" fmt --check src/wolf.pkg; then
     exit 1
 fi
 echo "src/wolf.pkg ok"
+# s217 (wolf 0.2.26): the capabilities are DERIVED from the code — the
+# host builtins lobo calls and the std modules it imports — and the
+# audit refuses one the manifest does not declare, or a manifest it
+# cannot read code beside. The build's E1504 refuses the same, but only
+# at the tiers step; this names the capability first, with its reason
+# line (docs/CAPABILITIES.md argues each call by call).
+if ! "$WOLF" audit --ci --dir src; then
+    echo "lobo-gauntlet: FAILED at manifest — \`wolf audit --ci --dir src\` refused: the code reaches a capability src/wolf.pkg does not declare (docs/CAPABILITIES.md)" >&2
+    exit 1
+fi
 
 step "stamp (ws19: every version site equal, the channel honest against the tags, the toolchain the pin's)"
 if ! tools/lobo-stamp --check; then
