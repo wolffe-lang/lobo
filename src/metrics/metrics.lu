@@ -115,7 +115,19 @@ pub fn registry() -> List[Spec] {
         name: "lobo_connections_retired_total",
         kind: "counter",
         labels: "gen outcome",
-        help: "Connections retired from a draining generation: outcome drained (finished) or aborted (worker_shutdown_timeout forced the close).",
+        help: "Connections retired from a draining generation: outcome drained (finished) or aborted (worker_shutdown_timeout forced the close). A generation's series leave with it once its last connection retires; lobo_drained_connections_total keeps the sum.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_drained_connections_total",
+        kind: "counter",
+        labels: "outcome",
+        help: "Connections retired from draining generations since start, every generation together (outcome drained or aborted): unlike lobo_connections_retired_total it survives the generation, so a finished drain stays counted.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_generations_retired_total",
+        kind: "counter",
+        labels: "",
+        help: "Configuration generations that finished draining (or were aborted out) and left the table since start.",
     })
 
     // --- requests (ws02/ws09) ---

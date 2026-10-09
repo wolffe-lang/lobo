@@ -414,13 +414,19 @@ fn on_conn_close(take gens: List[GenRow], gen: int, aborted: bool, mut el: ELog)
 }
 
 /// Retire every DRAINING generation that has reached zero connections:
-/// emit `generation-retired` with its accounting and drop it from the
-/// table. Runs at the end of every poll pass, so it takes the list and
-/// moves the rows it keeps (ws38). Total.
-fn retire_zero(take gens: List[GenRow], now: int, mut el: ELog) -> List[GenRow] {
+/// emit `generation-retired` with its accounting, fold that accounting
+/// into the process-wide totals that outlive it (ws54, lobo#51: a
+/// finished drain's count stays scrapeable after its `gen` series
+/// leave) and drop it from the table. Runs at the end of every poll
+/// pass, so it takes the list and moves the rows it keeps (ws38).
+/// Total.
+fn retire_zero(take gens: List[GenRow], now: int, mut el: ELog, mut ct: Counters) -> List[GenRow] {
     var out = List[GenRow]()
     for g in gens {
         if g.state == "draining" && g.live == 0 {
+            ct.ret_drained = ct.ret_drained + g.drained
+            ct.ret_aborted = ct.ret_aborted + g.aborted
+            ct.gens_retired = ct.gens_retired + 1
             let age = now - g.since_ms
             ev_event(
                 mut el,
@@ -568,6 +574,9 @@ struct Counters {
     dropped: int,
     res_ok: int,
     res_failed: int,
+    ret_drained: int,
+    ret_aborted: int,
+    gens_retired: int,
     rdur: metrics.Hist,
     udur: metrics.Hist,
 }
@@ -595,6 +604,9 @@ fn counters_new() -> Counters {
         dropped: 0,
         res_ok: 0,
         res_failed: 0,
+        ret_drained: 0,
+        ret_aborted: 0,
+        gens_retired: 0,
         rdur: metrics.hist_new(),
         udur: metrics.hist_new(),
     }
@@ -715,10 +727,23 @@ fn render_metrics(ct: Counters, gens: List[GenRow], events: int, worker: int) ->
         out = "{out}{metrics.sample1("lobo_connections_active", "gen", "{g.gen}", g.live)}"
     }
     out = "{out}{metrics.header("lobo_connections_retired_total")}"
+    var live_drained: int = 0
+    var live_aborted: int = 0
     for g in gens {
         out = "{out}{retired_row(g, "drained", g.drained)}"
         out = "{out}{retired_row(g, "aborted", g.aborted)}"
+        live_drained = live_drained + g.drained
+        live_aborted = live_aborted + g.aborted
     }
+    // ws54 (lobo#51): the same accounting summed over EVERY generation
+    // that ever drained — the retired ones' totals plus the live rows
+    // above — so the count a drain finished with is still here after
+    // its generation (and its `gen` series) left the table
+    out = "{out}{metrics.header("lobo_drained_connections_total")}"
+    out = "{out}{metrics.sample1("lobo_drained_connections_total", "outcome", "drained", ct.ret_drained + live_drained)}"
+    out = "{out}{metrics.sample1("lobo_drained_connections_total", "outcome", "aborted", ct.ret_aborted + live_aborted)}"
+    out = "{out}{metrics.header("lobo_generations_retired_total")}"
+    out = "{out}{metrics.sample0("lobo_generations_retired_total", ct.gens_retired)}"
 
     out = "{out}{metrics.header("lobo_requests_total")}"
     out = "{out}{metrics.sample1("lobo_requests_total", "class", "2xx", ct.req_2xx)}"
@@ -1879,7 +1904,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 let held = held_of(gens, curgen)
                 gens = mark_draining(take gens, curgen, now)
                 ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
-                gens = retire_zero(take gens, now, mut elog)
+                gens = retire_zero(take gens, now, mut elog, mut counters)
             } else if verb == "reopen" {
                 asinks = reopen_sinks(asinks)
                 elog = reopen_elog(elog)
@@ -1915,7 +1940,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
                     ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
                     ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
-                    gens = retire_zero(take gens, now, mut elog)
+                    gens = retire_zero(take gens, now, mut elog, mut counters)
                     // ws09: the log outputs follow the CURRENT
                     // generation (named delta — nginx's old workers
                     // keep old-config logs; lobo's one process logs
@@ -2486,7 +2511,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         }
 
         // 4. retire drained generations, 5. finish a quit once empty
-        gens = retire_zero(take gens, now, mut elog)
+        gens = retire_zero(take gens, now, mut elog, mut counters)
         if quitting && cfds.len == 0 {
             running = false
         }

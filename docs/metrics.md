@@ -17,7 +17,9 @@ itself is below.
 | `lobo_config_generations` | gauge | `state` | Live configuration generations by state (current or draining). |
 | `lobo_connections_accepted_total` | counter | — | Connections accepted since start. |
 | `lobo_connections_active` | gauge | `gen` | Connections currently held, by the generation that accepted them. |
-| `lobo_connections_retired_total` | counter | `gen outcome` | Connections retired from a draining generation: outcome drained (finished) or aborted (worker_shutdown_timeout forced the close). |
+| `lobo_connections_retired_total` | counter | `gen outcome` | Connections retired from a draining generation: outcome drained (finished) or aborted (worker_shutdown_timeout forced the close). A generation's series leave with it once its last connection retires; lobo_drained_connections_total keeps the sum. |
+| `lobo_drained_connections_total` | counter | `outcome` | Connections retired from draining generations since start, every generation together (outcome drained or aborted): unlike lobo_connections_retired_total it survives the generation, so a finished drain stays counted. |
+| `lobo_generations_retired_total` | counter | — | Configuration generations that finished draining (or were aborted out) and left the table since start. |
 | `lobo_requests_total` | counter | `class` | Requests served, by response status class (2xx/3xx/4xx/5xx). Deliberately NOT by URI or by client: see the cardinality fence. |
 | `lobo_request_duration_seconds` | histogram | — | Request service time in seconds, over a fixed 5ms..10s ladder. |
 | `lobo_request_bytes_total` | counter | — | Request header and body bytes admitted. |

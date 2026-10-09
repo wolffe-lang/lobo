@@ -50,6 +50,7 @@
 # Loopback only; OS-chosen ports; scratch cleared at START.
 set -u
 cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
 . tools/lib-rigproc.sh
 rig_arm
 
@@ -303,6 +304,33 @@ got=$(v 'lobo_requests_total{class="4xx"}')
 if [ "$got" = "1" ]; then ok "exact: one 404"; else bad "exact: 4xx is $got, want 1"; fi
 got=$(v 'lobo_request_duration_seconds_count')
 if [ "$got" = "6" ]; then ok "exact: six duration observations"; else bad "exact: duration count is $got, want 6"; fi
+
+# ---- ws54 (lobo#51): a FINISHED drain stays counted. One keep-alive
+# connection is held across a reload (the control differential's
+# driver: a request, a 700 ms hold, a second request, close), so
+# generation 1 drains exactly one connection and retires. Its `gen="1"`
+# series leave with it; the process-wide sums must read the drain.
+"$WOLF" run "$rig_root"/tests/rig/reloadhold.lu "$HP" 700 > "$D/hold.out" 2>&1 &
+holdpid=$!
+i=0
+while [ $i -lt 100 ] && ! grep -q '^pre=..*' "$D/hold.out" 2>/dev/null; do sleep 0.1; i=$((i + 1)); done
+"$BIN" -s reload -p . -c "$D/lobo.conf" > "$D/reload.out" 2>&1
+wait $holdpid 2>/dev/null
+i=0
+while [ $i -lt 50 ] && ! grep -q 'generation-retired gen=1 ' "$D/serve.log"; do sleep 0.1; i=$((i + 1)); done
+fetch /metrics > "$D/scrape3.raw"
+sed -n '/^\r$/,$p' "$D/scrape3.raw" | sed '1d' > "$D/scrape3.body"
+v3() { grep "^$1 " "$D/scrape3.body" | awk '{print $NF}'; }
+if ! grep -q 'generation-retired gen=1 drained=1 aborted=0' "$D/serve.log"; then
+    bad "drain: generation 1 did not retire with drained=1 aborted=0 (the harness's premise; see $D/serve.log, $D/hold.out)"
+fi
+got=$(v3 'lobo_drained_connections_total{outcome="drained"}')
+if [ "$got" = "1" ]; then ok "exact: the finished drain reads lobo_drained_connections_total{outcome=\"drained\"} 1 after its generation left (lobo#51)"; else bad "exact: lobo_drained_connections_total{outcome=\"drained\"} is '$got' after generation 1 retired, want 1 (lobo#51)"; fi
+got=$(v3 'lobo_drained_connections_total{outcome="aborted"}')
+if [ "$got" = "0" ]; then ok "exact: no aborted drain"; else bad "exact: lobo_drained_connections_total{outcome=\"aborted\"} is '$got', want 0"; fi
+got=$(v3 'lobo_generations_retired_total')
+if [ "$got" = "1" ]; then ok "exact: lobo_generations_retired_total 1"; else bad "exact: lobo_generations_retired_total is '$got', want 1 (lobo#51)"; fi
+if grep -q 'gen="1"' "$D/scrape3.body"; then bad "drain: a gen=\"1\" series is still exposed after generation 1 retired"; else ok "drain: generation 1's own series left with it, as documented"; fi
 
 "$BIN" -s quit -p . -c "$D/lobo.conf" > /dev/null 2>&1
 wait $child 2>/dev/null
