@@ -145,3 +145,119 @@ the tool refuses is reported refused.
 planted break — `exec` dropped from `src/wolf.pkg`'s capabilities —
 is **red** in CI at the manifest step (`wolf audit --ci`) on both
 jobs, then reverted.
+
+### §3 against the measurement (written at the close, 2026-10-09)
+
+- **P1: held.** All four linux x86-64 archives digest-ok
+  (`kasumi:~/lanes/ws55/dl/digest-check.txt` 1c4970dd…). Members by
+  name: `wolf` 8373b0cd… -> 272e0888…, `libwolf_rt.a` 6ac563e7… ->
+  679d77e1…, `wolf-cimport-worker` 9c423c74… -> f05db3d1…,
+  `libwolf_rt_none.a` 110f062a… -> 11708550…, `wolf.1` and `README.md`
+  move; `_wolf`, `wolf.bash`, `wolf.fish` and the licences hold.
+  `lupin` 734caee6… -> 6d057eb1…. Version lines as predicted, lupin's
+  conformance pin still `294d626` (`toolchain-tc-0226.txt` 62927161…).
+  14 `.wolfi` stamp lines moved, no hash: the gauntlet's freshness step
+  agrees at `468ffac`.
+- **P2: held.** Zero diagnostics, both tiers, both std trees, and the
+  two trees byte-identical (`builds-trunk.log` 57a3ccdc…). std holds
+  at `14f0ab2`.
+- **P3: held.** Stripped (`objcopy --strip-debug --remove-section
+  .note.gnu.build-id`) both binaries still differ; stripped release
+  `.text` 1,634,846 -> 1,640,810 (+0.36 %); two release builds
+  identical. Not predicted, and harmless: the unstripped release grows
+  329,232 bytes (+2.6 %), almost all of it debug info; the runtime
+  crate's hash changed, so every runtime symbol's mangled name did.
+- **P4: (a), (b), (d) held; (c) half falsified.** (a) `wolf audit` at
+  the root exits 0 with "cannot derive capabilities from the code", and
+  `--ci` exits 1 ("nothing is vouched for"). (b) Moved with no
+  capabilities, both tiers refuse with four E1504 (one per capability)
+  and the audit's `effective` is `[net, fs, exec, env]`; with the four
+  declared both tiers build clean and the audit exits 0; dropping any
+  one refuses both tiers naming it (`mf.log` 46ea177b…). std imports
+  reach only `net` (`stdreach.log` 46464afd…). (c) The release binary
+  is byte-identical with and without the manifest (`3085ddcf…`) and no
+  `.wolfi` moves (`wolf interface ./src` diff 0 lines); **the debug
+  binary's bytes move** (same size, 255,794 bytes differ stripped):
+  the build interns the manifest into the source map before the entry,
+  every file index shifts by one, and the debug tier names its per-file
+  path symbols `_W.site.<file index>` (`mfd.log` 1cee4cad…; two builds
+  each way, each pair identical).
+- **P5: held, with one count moved by this lane.** GREEN on kasumi at
+  trunk (0.2.25), the pin `468ffac`, the manifest head `17ade8e` and
+  the fix head `389de6f`, with the same counts and the same 2 named
+  SKIP lines; at `389de6f` the corpus is 314/314, the one new lane-run
+  being this lane's witness `tests/acme/tick_clock.lu`.
+- **P6: held.** Retention 20 / 20 KB a request at both pins (the
+  prediction said 19–20); round B 8052 KB at both.
+- **P7: held.** 12 of 12 green, rooms 4 / 10 / 46, identical numbers.
+- **P8: held on the gating cells.** 1.001x close, 0.999x keepalive at
+  N = 4 (run 37979191081, VALID). N = 1 keepalive read 1.040x
+  [0.978, 1.080], the noisy cell, not gated. The bar NOT MET
+  (1.153x / 1.254x).
+- **P9: the plant held; "both jobs green at the head" was falsified
+  until this lane fixed lobo.** The plant (`1c36f9f`) went red at the
+  manifest step on both jobs (run 37979239121). But macOS went red at
+  the acme rig's coexistence case at 0.2.26 on every head from the pin
+  on (runs 37976767680, 37978554212, 37981049172), never on linux
+  (kasumi under five cpusets at both pins, `acmets.log` 633e111b…).
+  Diagnosed with timestamped traces on a throwaway branch (`ws55-diag`,
+  runs 37985235837 and 37993340947 at 0.2.26; `ws55-diag25`, run
+  37993343981, the same tree at 0.2.25): lobo's ACME `tick` scheduled
+  from the pass's `now_ms`, read before the pass's wait and before the
+  step, so the authz poll ran early into the CA's single-threaded
+  validation (both sides waiting until lobo's 5 s deadline) and the
+  retry after it fired at once into a CA still busy. At 0.2.25 the same
+  first-attempt overlap appears but resolves inside the deadline; at
+  0.2.26 on macOS it did not (5 of 6 samples red, against 0 of 6 at
+  0.2.25). Why the timing moved at 0.2.26 is measured, not explained;
+  the defect is lobo's. Fixed at `389de6f` (schedule from the clock
+  after the step), witness `tests/acme/tick_clock.lu` RED before
+  (`tickw.log`, the second tick retried at once, 10 s) and GREEN after;
+  macOS green in CI (run 37995891208) and 3 of 3 diagnostic repeats
+  (run 37995901836). The rest (each transaction blocks the loop; the
+  rig's race) filed as lobo#65.
+
+Corrections to §2: none of the inputs drifted. To §1: the stray
+`/tmp/ws55-acmeca.lu` (one `scp` target, this lane's own file) was
+moved into `~/lanes/ws55/k/`, not left behind.
+
+## 4. Evidence index
+
+kasumi paths are under `~/lanes/ws55/`.
+
+| claim | artifact |
+|---|---|
+| the archives by digest | `dl/digest-check.txt` 1c4970dd… (wolf 0.2.26 `05acdc5e…`, lupin 0.1.49 `84911a35…`, wolf 0.2.25 `9d91f533…`, lupin 0.1.48 `81cfd77a…`); members `toolchain-tc-0226.txt` 62927161…, `toolchain-tc-0225.txt` 984afe4f…, `toolchain-tc-0226-std0f.txt` d412d6e8…; nginx `65595ac2…` (`nginx.sha256` 15e6c86a…) |
+| the prediction before unpacking | commit `749e5fc` (pushed 18:50:22Z; `stage.sh` started 18:50:47Z) |
+| B151 and the binaries | `builds-trunk.log` 57a3ccdc… at `92d860f` |
+| the manifest: refusals, audit, binaries, interface | `mf.log` 46ea177b…, `mf/*.out`; `mfd.log` 1cee4cad…; `stdreach.log` 46464afd… |
+| gauntlet GREEN at 0.2.25 (trunk) | `g-before.log` e7a4bbf2… at `92d860f`: exit 0; SigBlk 0x10000 / SigIgn 0x7; 2 SKIP lines, named |
+| gauntlet GREEN at 0.2.26 (the pin) | `g-pin.log` adae4323… at `468ffac` |
+| gauntlet GREEN with the manifest | `g-head.log` ca698bc6… at `17ade8e` |
+| gauntlet GREEN with the ACME fix | `g-head2.log` d480a151… at `389de6f` (corpus 314/314) |
+| the stream-cap witness, 3 cpusets × 2 tiers × 2 pins | `cap-before.log` a26f0079…, `cap-pin.log` b269677f… |
+| the acme rig on linux under five cpusets, both pins | `acmets.log` 633e111b… |
+| the ACME witness red before, green after | `tickw.log` (unfixed: assert at `tick_clock.lu:52`, 10 s; fixed: exit 0, 5 s) |
+| runner parity | run **37979191081** (VALID) |
+| CI at the pin | run 37976767680 (linux green; macOS red at acme coexistence) |
+| planted break red in CI | run **37979239121** at `1c36f9f` (manifest step, both jobs), reverted at `e109715` |
+| the macOS red and its traces | runs 37978554212, 37981049172 (red); 37993340947 (0.2.26 traces), 37993343981 (0.2.25 traces), 37995901836 (the fix, 3 of 3 green); branches `ws55-diag`, `ws55-diag25` (throwaway, never merged) |
+| CI green with the fix | run **37995891208** at `389de6f` |
+| CI at the head | in the PR body (the head is this commit's child) |
+
+## 5. Done-when
+
+- [x] Branch `ws55` on origin; PR #64 open against `trunk`, unmerged.
+- [x] The pin as its own commit (`5df7bea`), the stamps after it
+  (`8e269fb`, `468ffac`).
+- [x] The manifest governs the build (`d853bc1`), the audit gates it
+  (`b36adb4`), each capability argued (`17ade8e`).
+- [x] Binaries stripped-compared, gauntlet on kasumi at four heads,
+  membudget, the stream-cap witness under three cpusets, runner parity.
+- [x] Planted break red in CI by run id, reverted.
+- [x] Every move against the prediction explained; the macOS red fixed
+  here (`389de6f`), the rest filed (lobo#65).
+- [ ] CI green at the head sha on linux and macOS; the throwaway
+  branches `ws55-diag` and `ws55-diag25` deleted from origin; kasumi
+  worktrees removed and `target/` pruned (logs kept); no orphan pids.
+  Nothing closed by this lane.
