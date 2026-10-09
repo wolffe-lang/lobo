@@ -5,7 +5,7 @@
 # reasoning are recorded in .docs/STYLE.md). Steps, in order, each
 # named on failure:
 #   0. toolchain — pin identity (lib-toolchain.sh refuses on drift)
-#   1. manifest  — wolf.pkg parses (`wolf fmt --check` validates it)
+#   1. manifest  — src/wolf.pkg parses (`wolf fmt --check` validates it)
 #   2. fmt       — canonical formatting over src/ and tests/
 #   3. tiers     — the entry builds on BOTH tiers (debug owned + release)
 #   4. wolfi     — every module surface matches its checked-in .wolfi
@@ -36,11 +36,11 @@ echo "wolf:  $have_wolf ($($WOLF --version | sed -n 2p))"
 echo "lupin: $have_lupin"
 
 step "manifest"
-if ! "$WOLF" fmt --check wolf.pkg; then
-    echo "lobo-gauntlet: FAILED at manifest — wolf.pkg does not parse/round-trip" >&2
+if ! "$WOLF" fmt --check src/wolf.pkg; then
+    echo "lobo-gauntlet: FAILED at manifest — src/wolf.pkg does not parse/round-trip" >&2
     exit 1
 fi
-echo "wolf.pkg ok"
+echo "src/wolf.pkg ok"
 
 step "stamp (ws19: every version site equal, the channel honest against the tags, the toolchain the pin's)"
 if ! tools/lobo-stamp --check; then

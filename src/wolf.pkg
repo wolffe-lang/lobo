@@ -1,0 +1,39 @@
+// wolf.pkg — the lobo manifest. Named Lobo (D64, 2026-08-29): Seton's
+// wolf no trap could take, for the server whose charter is nginx
+// without its owned bugs. The scope stays local/ until ws16 opens the
+// public door (wolffe-lang/lobo). Zero dependencies, by charter: lobo
+// is a from-parts wolf program. The pinned nginx under
+// tests/differential/ is TEST INFRASTRUCTURE, not a dependency
+// (D15-spirit, the ws00 contract's reading).
+//
+// WHY THIS FILE IS IN src/ (ws55, wolf 0.2.26). `wolf build` reads the
+// manifest beside the ENTRY it is given, and lobo builds
+// `./src/main.lu`; until ws55 this file sat at the repository root,
+// where it governed no build: no capability was ever checked (E1504)
+// and s217's `wolf audit --ci` refuses it as codeless ("the package
+// root has no wolf source files"). Here it governs the real build on
+// both tiers, and the gauntlet's manifest step runs
+// `wolf audit --ci --dir src`.
+//
+// THE CAPABILITIES are what lobo's own code reaches (s217 derives them
+// from the host builtins the package calls and the std modules it
+// imports; dropping any one word refuses both tiers with E1504). Each
+// is argued call by call in docs/CAPABILITIES.md:
+//   env  — argv (`env_args`), the executable a master re-spawns as its
+//          hands (`os_exe`), `worker_processes auto` (`os_cpus`);
+//   exec — the prefork master's hands (`os_spawn`, `os_spawn_with`,
+//          `os_wait`, `os_kill`), signal reception and the drain's
+//          self-signals (`os_signal_listen`/`_wait`/`_raise`), and the
+//          `user` directive's host probe where /proc is absent;
+//   fs   — the files it serves, its config and include graph, the
+//          certificates and keys, the logs, the pid file and the ACME
+//          store;
+//   net  — every listener, connection, upstream, resolver query,
+//          control socket and ACME transaction (`std.net` too).
+// Stdio, the clock and randomness carry no capability (ruling #53).
+pkg {
+    name:    "local/lobo",
+    version: "0.1.2",
+    edition: "1",
+    capabilities: [env, exec, fs, net],
+}

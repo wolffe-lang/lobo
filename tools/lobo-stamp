@@ -25,7 +25,7 @@
 #
 # THE SITES (each is a line this tool parses; a site it cannot find
 # is a red, never a skip):
-#   wolf.pkg               version: "X"
+#   src/wolf.pkg           version: "X"
 #   src/shell/shell.lu     release_version / release_channel /
 #                          toolchain_version / toolchain_pin / std_rev
 #   src/serve/serve.lu     default_opts' token "lobo/X" — the WIRE
@@ -87,7 +87,7 @@ chan=$(lu_const release_channel)
 tv=$(lu_const toolchain_version)
 pin=$(lu_const toolchain_pin)
 std=$(lu_const std_rev)
-pkg=$(sed -n 's/^[ \t]*version:[ \t]*"\([^"]*\)".*$/\1/p' wolf.pkg | head -1)
+pkg=$(sed -n 's/^[ \t]*version:[ \t]*"\([^"]*\)".*$/\1/p' src/wolf.pkg | head -1)
 wire=$(awk '/^pub fn default_opts\(\)/ { f = 1 }
             f && /token:/ { if (match($0, /"lobo\/[^"]*"/)) print substr($0, RSTART + 6, RLENGTH - 7); exit }' src/serve/serve.lu)
 version_line="lobo version: lobo/$ver$chan (built with wolf $tv, pin $pin)"
@@ -105,7 +105,7 @@ echo "$ver" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+$' || fail "shell.release_version
 echo "$pin" | grep -Eq '^[0-9a-f]{7}$' || fail "shell.toolchain_pin() is \"$pin\", not a 7-hex short sha"
 [ -n "$tv" ] || fail "shell.toolchain_version() is empty"
 [ -n "$std" ] || fail "shell.std_rev() is empty"
-[ "$pkg" = "$ver" ] || fail "wolf.pkg says version \"$pkg\", shell.release_version() says \"$ver\" — every version site moves in ONE commit"
+[ "$pkg" = "$ver" ] || fail "src/wolf.pkg says version \"$pkg\", shell.release_version() says \"$ver\" — every version site moves in ONE commit"
 [ "$wire" = "$ver" ] || fail "serve.default_opts() token is \"lobo/$wire\", shell.release_version() says \"$ver\" — the wire identity is a version site"
 want_line="wolf $tv (wolfgang, pin $pin)"
 have_line=$(toml_value wolf version_line)
@@ -155,5 +155,5 @@ fi
 if [ "$red" = 1 ]; then
     exit 1
 fi
-echo "lobo-stamp: ok — lobo $ver$chan, built with $want_line, std $std (wolf.pkg, shell, serve, wolf-toolchain.toml and CHANGELOG agree)"
+echo "lobo-stamp: ok — lobo $ver$chan, built with $want_line, std $std (src/wolf.pkg, shell, serve, wolf-toolchain.toml and CHANGELOG agree)"
 echo "lobo-stamp: -v prints: $version_line"
