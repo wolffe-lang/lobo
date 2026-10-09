@@ -79,18 +79,20 @@ lobo is within ten percent of nginx on macOS and not yet on linux.
 written before the first measurement) as the ratio nginx ÷ lobo on one
 machine, with workers equal to cpus and 32 concurrent clients, over
 five interleaved runs; 1.10 or under is parity. The current ledger
-(nginx 1.30.4; the macOS row re-taken with wolf 0.2.20, the linux rows
-with wolf 0.2.25):
+(nginx 1.30.4; the macOS row re-taken with wolf 0.2.20, the first linux
+row with wolf 0.2.26, the two below it with 0.2.25):
 
 | host | measured | connection-per-request | keepalive |
 |---|---|---|---|
 | macOS arm64, 18 cpus (load 2.80, other work on the box) | 2026-10-02 | 1.031x | 1.037x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.72, a slow VM) | 2026-10-09 | 1.153x | 1.254x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.85, a slow VM) | 2026-10-09 | 1.140x | 1.260x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.87, a fast VM) | 2026-10-08 | 1.166x | 1.185x |
 | linux x86-64, 16 cpus (kasumi, load 0.34–1.89, shared) | 2026-10-02 | no valid set: ~1.84x | no valid set: ~2.04x |
 
-The two runner rows are two VMs a day apart (the first is ws54's head,
-the second trunk's source before it); the runner's speed differs from
+The three runner rows are three VMs (the first is ws55's pin at wolf
+0.2.26, which measured 1.001x / 0.999x against the 0.2.25 tree beside
+it; the second ws54's head; the third trunk's source before it); the runner's speed differs from
 VM to VM by up to 2.3x, so ratios compare only within one row. At one
 worker the runner reads 1.00–1.05x on connection-per-request and
 1.09–1.18x on keepalive. Where the remaining linux gap goes — lobo's
