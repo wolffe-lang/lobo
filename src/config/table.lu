@@ -801,7 +801,7 @@ pub fn table() -> Table {
         1,
         2,
         "implemented",
-        "ws41: parsed and gated, never applied — lobo has no privilege drop at this pin (wolf has no setuid). Unprivileged (effective uid off /proc/self/status, not 0): nginx's own [warn] (\"makes sense only if the master process runs with super-user privileges, ignored\") and the config loads, as nginx does. Root, or a host with no /proc/self/status (macOS, windows): refused BY NAME at -t and at start — staying root while the config names another user would be silently inert",
+        "ws41: parsed and gated, never applied — lobo has no privilege drop at this pin (wolf has no setuid). Unprivileged (effective uid off /proc/self/status, not 0): nginx's own [warn] (\"makes sense only if the master process runs with super-user privileges, ignored\") and the config loads, as nginx does. With no /proc/self/status (macOS) the host is asked instead (ws54, lobo#52: `id -u` through /bin/sh, read off the exit code; wolf has no uid surface, wolf-lang#633), so an unprivileged macOS lobo warns and loads too. Root, or a host that cannot answer: refused BY NAME at -t and at start — staying root while the config names another user would be silently inert",
     )
     row(
         mut t,
