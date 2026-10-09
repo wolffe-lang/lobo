@@ -1,7 +1,7 @@
 module pkg :: config
   wolfi v0 · toolchain 0.2.25 · edition v1
-  export_hash 9ed939f614ce6af74036fc5df0e4e12bc6ffb495d284a298c24151b91af1b69d
-  pkg_hash    9ed939f614ce6af74036fc5df0e4e12bc6ffb495d284a298c24151b91af1b69d
+  export_hash 073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
+  pkg_hash    073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
   deps:
     std.list  b867c3c66c3aa0dbae1cef22897684da1333874100bc1412d65681a5c310cfc9
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
@@ -30,7 +30,7 @@ module pkg :: config
     [18] pub auto_store — fn auto_store(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
     [19] pub auto_store_probe — fn auto_store_probe(c: self.Conf, prefix: str) -> str · regions (ρ1, -) -> -
     [20] pub body_max — fn body_max(c: self.Conf) -> int · regions (ρ1) -> -
-    [21] pub check — fn check(prefix: str, conf_rel: str, dump: bool) -> int
+    [21] pub check — fn check(prefix: str, conf_rel: str, dump: bool, quiet: bool) -> int
     [22] pub child_arg1 — fn child_arg1(c: self.Conf, blk: int, name: str) -> str ! {none} · regions (ρ1, -, -) -> -
     [23] pub child_row — fn child_row(c: self.Conf, blk: int, name: str) -> int · regions (ρ1, -, -) -> -
     [24] pub combined_text — fn combined_text() -> str
