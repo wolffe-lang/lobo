@@ -371,7 +371,19 @@ for _ in $(seq 1 60); do [ -f "$d/certs/auto.example/fullchain.pem" ] && break; 
 subj2=$(served_subject "$tp" "$d/ca.crt" auto.example)
 case "$subj2" in
 *auto.example*) pass "coexistence: the cert-auto block acquires and serves beside it" ;;
-*) fail "coexistence: cert-auto block subject was \"$subj2\"" ;;
+*)
+    fail "coexistence: cert-auto block subject was \"$subj2\""
+    # ws55: the evidence a red needs, printed rather than left in the
+    # scratch tree a CI runner throws away — the dial-back target the
+    # CA read, the store, and both servers' own words
+    {
+        echo "acme: coexistence — challport: \"$(cat "$d/challport" 2>&1)\" (hp=$hp tp=$tp)"
+        echo "acme: coexistence — store:"; find "$d/certs" 2>&1 | sed 's/^/    /'
+        echo "acme: coexistence — lobo.err (last 40):"; tail -40 "$d/lobo.err" | sed 's/^/    /'
+        echo "acme: coexistence — lobo.out (last 10):"; tail -10 "$d/lobo.out" | sed 's/^/    /'
+        echo "acme: coexistence — ca.err (last 40):"; tail -40 "$d/ca.err" | sed 's/^/    /'
+    } >&2
+    ;;
 esac
 kill "$lobo_pid" "$ca_pid" 2>/dev/null; wait "$lobo_pid" 2>/dev/null; wait "$ca_pid" 2>/dev/null
 
