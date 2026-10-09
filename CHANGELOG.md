@@ -395,7 +395,7 @@ release's text as published and is left as it was.
   files"). Beside the entry it governs both tiers: with no
   capabilities both are refused with one E1504 per capability, with
   any one of the four dropped both are refused naming it, with all
-  four the build is clean (`kasumi:~/lanes/ws55/mf.log` b9a724a8…).
+  four the build is clean (`kasumi:~/lanes/ws55/mf.log` 46ea177b…, the release refusals appended).
   The gauntlet's manifest step now runs `wolf audit --ci --dir src`.
   `docs/CAPABILITIES.md` argues each capability call by call (fs 87
   calls, net 156 and six import reaches, exec 11, env 4; of the std
