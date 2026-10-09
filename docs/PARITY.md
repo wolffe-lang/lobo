@@ -169,6 +169,32 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws55: wolf 0.2.26 against 0.2.25, TWO trees on one VM · **VALID** · **NOT MET on both shapes** (close 1.153x, keepalive 1.254x); the pin moves the rate by **1.001x / 0.999x**
+
+The 0.2.26 bump (ws55) rebuilds the runtime lobo links (descriptors
+0–2 through the host's streams, s200; new spawn and pipe symbols,
+s215) and moves the manifest beside the entry (`src/wolf.pkg`), which
+changes no release byte. This set measures the bump as a two-tree
+delta on ONE VM against ONE nginx: this side is ws55's head
+(`17ade8e`, wolf 0.2.26 / lupin 0.1.49), the reference is trunk
+`92d860f` (wolf 0.2.25 / lupin 0.1.48), each built with the toolchain
+its own `wolf-toolchain.toml` pins, mid-end on both. Run
+**37979191081** (workflow_dispatch, `parity=true`,
+`ref_tree=92d860f`), load 1.72, the slow VM class:
+
+| cell | shape | 0.2.26 req/s | 0.2.25 req/s | nginx req/s | nginx ÷ 0.2.26 | nginx ÷ 0.2.25 | **0.2.26 ÷ 0.2.25** median [min, max] |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 22,071 | 22,054 | 25,509 | **1.153x** [1.131, 1.173] | 1.156x | **1.001x** [0.986, 1.011] |
+| N=4 c=32 | keepalive | 68,726 | 68,275 | 86,411 | **1.254x** [1.238, 1.274] | 1.259x | **0.999x** [0.997, 1.012] |
+| N=1 c=32 | close | 15,121 | 15,063 | 14,895 | 0.986x | 0.992x | 1.004x [0.987, 1.032] |
+| N=1 c=32 | keepalive | 30,770 | 29,787 | 34,540 | 1.133x | 1.149x | 1.040x [0.978, 1.080] |
+
+The runtime rebuild costs nothing measurable on the gating cell
+(1.001x and 0.999x, both ranges spanning 1.00); ws55's prediction
+(0.97x to 1.03x) **held at N = 4**. The one-hand keepalive cell read
+1.040x with a 10 % spread, the same noisy cell that read 1.054x at
+ws53. The bar's verdict does not move.
+
 ### 2026-10-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws54: the head against trunk, TWO trees on one VM · **VALID** · **NOT MET on both shapes** (close 1.140x, keepalive 1.260x on the slow class); the head moves the rate by **1.009x / 0.997x**
 
 ws54's head (`94a2ca4`: lobo#48–#52 fixed, the #48 memo spelled
