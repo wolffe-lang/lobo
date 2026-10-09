@@ -35,5 +35,5 @@ pkg {
     name:    "local/lobo",
     version: "0.1.2",
     edition: "1",
-    capabilities: [env, fs, net],
+    capabilities: [env, exec, fs, net],
 }
