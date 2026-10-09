@@ -358,6 +358,104 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws55 — 2026-10-09 — the pin at 0.2.26 (nothing refused; the runtime moves the binaries); the manifest governs src/ with its capabilities; the ACME daemon schedules from the clock after its step
+
+- **The pin moves to wolf 0.2.26 (`89dc139`) / lupin 0.1.49
+  (`f516a5f`); std holds at `14f0ab2`.** Taken from the release
+  archives by digest (linux x86-64 `05acdc5e…` and `84911a35…`; macOS
+  arm64 `8ea7ef3b…` and `ad188d58…`), members by name in
+  `wolf-toolchain.toml`. 0.2.26 carries five compiler lanes (s200's
+  byte surface, s213's papercuts, s215's descriptor map and pipe,
+  s216's `copy region` and P0 #618, s217's derived capabilities) and
+  ten new prelude names, none of which lobo declares. std was
+  re-derived first (B151): trunk's source at 0.2.26 against `14f0ab2`
+  and wolf-std trunk `0f74ec5` builds with zero diagnostics on both
+  tiers and gives byte-identical binaries, so the std pin holds.
+  Measured on kasumi at one tree (trunk's source, `92d860f`):
+
+  | | wolf 0.2.25 | wolf 0.2.26 |
+  |---|---|---|
+  | release binary | `95efcac4…`, 12,454,344 bytes | `3085ddcf…`, 12,783,576 bytes |
+  | release, debug info and build-id stripped | `0234cd40…`, text 1,634,846 | `583b0e95…`, text 1,640,810 (+5,964, +0.36 %) |
+  | a second release build | — | `3085ddcf…`, the same bytes |
+  | debug binary (one checkout path) | `7abf7aa0…` | `29ed1a6d…` |
+  | the same at std `0f74ec5` | — | `29ed1a6d…` / `3085ddcf…`, the same bytes |
+  | diagnostics, both tiers, `--error-limit=0` | 0 | 0 |
+
+  The growth is the runtime, not lobo's code: `libwolf_rt.a` was
+  rebuilt (s200 routes descriptors 0–2 through the host's streams under
+  `print`'s lock, s215 adds the spawn-with-map and pipe symbols; the
+  crate's hash, and so every runtime symbol's mangling, changed).
+  `kasumi:~/lanes/ws55/builds-trunk.log` 57a3ccdc….
+- **The manifest moves to `src/wolf.pkg` and declares
+  `capabilities: [env, exec, fs, net]`** (s217's derivation met). `wolf
+  build` reads the manifest beside the entry, and lobo builds
+  `./src/main.lu`, so the root `wolf.pkg` governed no build and
+  `wolf audit --ci` refused it ("the package root has no wolf source
+  files"). Beside the entry it governs both tiers: with no
+  capabilities both are refused with one E1504 per capability, with
+  any one of the four dropped both are refused naming it, with all
+  four the build is clean (`kasumi:~/lanes/ws55/mf.log` b9a724a8…).
+  The gauntlet's manifest step now runs `wolf audit --ci --dir src`.
+  `docs/CAPABILITIES.md` argues each capability call by call (fs 87
+  calls, net 156 and six import reaches, exec 11, env 4; of the std
+  modules lobo imports only `std.net` and `std.x.tls.client` reach
+  anything, `net`). The move changes no release byte (`3085ddcf…`
+  both ways) and no `.wolfi`; the debug binary's bytes move (same size)
+  because every file index shifts by one and the debug tier names its
+  per-file path symbols `_W.site.<file index>`
+  (`kasumi:~/lanes/ws55/mfd.log` 1cee4cad…; the build interns the
+  manifest into the source map before the entry).
+- **The ACME daemon schedules from the clock after its step**
+  (`src/acme/flow.lu`). `tick` scheduled the next action from the
+  pass's `now_ms`, read at the top of the pass, before its wait (up to
+  250 ms) and before the step, which blocks in its CA transactions up
+  to each one's deadline. So the authz poll that must leave the CA
+  800 ms to dial back the challenge ran early (623 ms after the
+  challenge POST in one trace), straight into the CA's validation, and
+  after an attempt that blocked the backoff the error line promises was
+  never waited: the retry fired at once into a CA still busy. Found because the macOS gauntlet went red at 0.2.26
+  on the acme rig's coexistence case (CI runs 37976767680,
+  37978554212, 37981049172; traces from two diagnostic runs on a
+  throwaway branch, 37993340947 at 0.2.26 and 37993343981 at 0.2.25,
+  where the same first-attempt deadlock appears but resolves inside the
+  5 s transaction deadline). Witness `tests/acme/tick_clock.lu`: a CA
+  that takes the connection and never answers; RED before the fix (the
+  second tick retried at once, 10 s), GREEN after
+  (`kasumi:~/lanes/ws55/tickw.log`). With the fix the macOS case is
+  green in CI (run 37995891208) and in three diagnostic repeats at
+  0.2.26 (run 37995901836), where every first attempt now validates. Linux never showed the red, under
+  any of `taskset -c 0`, `0-1`, `0-2`, `0-3`, `0-15` at either pin
+  (`kasumi:~/lanes/ws55/acmets.log` 633e111b…). What remains is filed
+  as lobo#65: each ACME transaction still blocks the serve loop up to
+  its deadline, and the rig's coexistence case is a timing race.
+- **The gauntlet, on kasumi** (strict env,
+  `WOLF_PAIRING_REQUIRE_SIBLING=1`, stdout and stderr together, mask
+  SigBlk 0x10000 / SigIgn 0x7): trunk at 0.2.25, the pin commit
+  `468ffac` and the manifest head `17ade8e` at 0.2.26 are all GREEN
+  with the same counts: corpus 313/313 lane-runs, control 19/19,
+  signal 21/21, prefork 38/38, membudget 17/17, resolver 9/9, the
+  differentials, dryrun, metrics, replay, TLS, ACME and dist green, the
+  census clean, and the same two named SKIP lines (signal's linux-only
+  header, membudget's wolf-lang#191 gate). `g-before.log` e7a4bbf2…,
+  `g-pin.log` adae4323…, `g-head.log` ca698bc6…. At the ACME fix
+  (`389de6f`) the corpus is 314/314 (the new witness) and every other
+  count is the same (`g-head2.log` d480a151…).
+- **membudget**: retention **20 / 20 KB a request** (plain / capped)
+  at both pins; growth plain 8028 / 8052 KB at both, capped
+  8268 / 8220 -> 8264 / 8216 KB.
+- **The stream-cap witness** under `taskset -c 0`, `0-3` and `0-15`,
+  against both binaries, at both pins: twelve of twelve green, rooms
+  4 / 10 / 46, the same bodies started (3/3, 9/9, 45/45; 7/12, 15/20,
+  63/68). `cap-before.log` a26f0079…, `cap-pin.log` b269677f….
+- **Runner parity** (run 37979191081, two trees on one VM, VALID):
+  0.2.26 ÷ 0.2.25 is **1.001x** close and **0.999x** keepalive at
+  N = 4; the bar stays NOT MET (nginx ÷ lobo 1.153x / 1.254x on this
+  slow VM). `docs/PARITY.md` has the row.
+- **CI**: a planted break (`1c36f9f`, `exec` dropped from
+  `src/wolf.pkg`) red at the manifest step on linux and macOS in run
+  37979239121, reverted at `e109715`.
+
 ## ws54 — 2026-10-09 — the open five (lobo#48–#52) and the gap to nginx, measured (two lobo-side costs taken; the rest is the runtime's)
 
 - **lobo#48 — `alias` to a file in an exact location serves it.** An
