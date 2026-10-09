@@ -146,3 +146,45 @@ behaviour the row is differential against the pinned oracle.
 - **F2 — the per-pass generation-table rebuild.** `retire_zero` rebuilds the `List[GenRow]` on every poll pass whether or not anything is draining. Fix: skip it when no generation is draining. Predicted: **−0.5 % to −1.5 %** keepalive (several requests share a pass), about the same on close.
 
 **Predicted effect on the bar:** F1 + F2 take **3–5 %** of lobo's user instructions, which is **0.6–1.0 %** of a request's cpu (user space is ~19 % of it): nginx ÷ lobo moves by **at most 0.01** on either shape, inside one pair's spread. **The 1.10 bar stays NOT MET** (predicted close 1.14–1.20x, keepalive 1.16–1.21x at the head on the runner), and the honest statement of why is the profile above: lobo's remaining gap is the runtime's string arena and the herd's mechanics. Falsified if F1 moves user instructions by less than 1.5 % or the head's runner keepalive ratio leaves 1.15–1.22x on a VALID set.
+
+## §3 against the measurement (written 2026-10-09 after the runs)
+
+**3a, the issues.**
+- #48 — held, with the falsifier firing first: the 200 came back typed
+  `text/html` (the file's extension) where nginx answers `text/plain`
+  (the URI's), exactly the header the prediction named. The fix types a
+  static response by the URI. Row RED at trunk (`kasumi:~/lanes/ws54/rows-trunk48.log`,
+  lobo 404), GREEN at the fix (`rows-fix4849.log`); `/hello/` 404 on both, both ways.
+- #49 — held for the good config (RED at trunk: lobo 2 lines, nginx 0);
+  **wrong for the `user` probe**, predicted green at trunk and RED there
+  too (the success lines printed after the `[warn]`). Bad config green both ways.
+- #50 — 7a/7c green and 7b RED at trunk as predicted (`rows-trunk50.log`),
+  all green at the fix and under `taskset -c 0-3` (`rows-fix50.log`,
+  `rows-fix50ts.log`). **The row's first shape was wrong**: a slow
+  download is a STREAM in lobo, and a stream's abort under the timeout
+  came 25–27 s after a 2 s deadline at trunk and at the fix
+  (`sab-trunk.log` 899ee145…, `stream-abort-witness.log` 42584292…) —
+  filed as lobo#62, and row 7 reads the deadline lobo applies
+  (`shutdown-in-ms`) beside the oracle's worker. A half-sent request
+  was tried and dropped: the oracle does not abort a connection still
+  reading its header at the timeout.
+- #51 — held: RED at trunk (the series absent, `rows-trunk5051.log`),
+  GREEN at the fix; the per-generation series leave as documented.
+- #52 — held: the macOS job's first run reddened at corpus on a missing
+  GNU `timeout` (run 37779996097, a CI host-tool gap, fixed in the job);
+  its second run, trunk's source, RED at confcheck with ws48's numbers
+  (run 37948755649); GREEN at the fix (run 37956609778 at `d7b9223`, both jobs).
+
+**3b, the gap.** F1 held (−2.6 % keepalive, −2.4 % close, predicted
+−2.5 % to −4 %). **F2 falsified** (predicted −0.5 % to −1.5 %, measured
++70/+100 instructions, noise; dropped). **Not predicted: F0**, a +3.2 %
+regression this lane's own lobo#48 fix introduced, found by the same
+instrument and removed. Runner: head ÷ trunk 1.009x / 0.997x (run
+37956342486), within the "at most 0.01" on keepalive and 0.016 on close
+(one pair's spread); the head's keepalive band (1.16–1.21x) **falsified
+at 1.260x by the VM class** — trunk read 1.266x on the same slow VM.
+**The 1.10 bar is NOT MET**, as predicted. Correction to §3b: its trunk
+instruction counts (19,776 / 19,949 / 19,925; 21,686 / 21,735 / 21,777)
+came from a first run of `st-trunk.log` that the second run (20,051 /
+21,636 medians, the ones the PROFILE table cites) overwrote; both runs
+are within 1 % of each other.
