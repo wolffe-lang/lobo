@@ -863,6 +863,16 @@ pub fn tick(mut fl: Flow, now_ms: int) -> str {
         fl.state = "start"
     }
     let ev = step(mut fl, now_ms)
+    // ws55: every schedule below is measured from the clock AFTER the
+    // step, never from the pass's `now_ms`. A step blocks in its CA
+    // transactions (each up to its deadline, 5 s plain and 15 s TLS),
+    // so a schedule taken from `now_ms` could land in the past: the
+    // authz poll that must wait 800 ms for the dial-back fired at once
+    // into the CA's validation (the deadlock the wait exists to avoid),
+    // and a failure's backoff retried at once against a CA that had
+    // just timed out. Seen on macOS at wolf 0.2.26 (the acme rig's
+    // coexistence case); tests/acme/tick_clock.lu is the witness.
+    let after = time_unix_ms()
     if ev == "failed" {
         // Retry-After, when the CA said one, wins over the ladder
         // (the contract's rate-limit discipline)
@@ -871,7 +881,7 @@ pub fn tick(mut fl: Flow, now_ms: int) -> str {
             wait = fl.retry_after_s
         }
         fl.retry_after_s = 0
-        fl.next_ms = now_ms + wait * 1000
+        fl.next_ms = after + wait * 1000
         status_write(
             fl.store,
             fl.primary,
@@ -890,11 +900,11 @@ pub fn tick(mut fl: Flow, now_ms: int) -> str {
         // serving the dial-back. (A blocking poll that overlapped the
         // dial-back would deadlock — client and CA each waiting on the
         // other; this interval is what keeps them out of phase.)
-        fl.next_ms = now_ms + 800
+        fl.next_ms = after + 800
     } else if ev.is_empty() && fl.state == "certpoll" {
         // ORDER finalization: no dial-back — the CA signs on its own,
         // so poll again promptly.
-        fl.next_ms = now_ms + 150
+        fl.next_ms = after + 150
     }
     ev
 }

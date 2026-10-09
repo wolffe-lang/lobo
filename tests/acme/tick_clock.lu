@@ -1,0 +1,59 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native
+//! stage-src: acme config
+//!
+//! ws55: the ACME daemon schedules from the clock AFTER its step. A
+//! step blocks in its CA transactions, each up to its deadline (5 s on
+//! the plain transport), so a retry or a poll scheduled from the pass's
+//! `now_ms` lands in the past and fires at once: the backoff the error
+//! line promises ("will retry with backoff") was never waited, and the
+//! authz poll that must leave 800 ms for the CA's dial-back ran straight
+//! into the CA's validation. Seen on macOS at wolf 0.2.26 as the acme
+//! rig's coexistence red (three CI runs; the ws55 notes carry the
+//! traces). The witness: a CA that takes the connection and never
+//! answers (a listener nobody accepts on: the kernel's backlog
+//! completes the dial), so the first attempt blocks to the deadline and
+//! fails; the retry must then be at least the first rung (2 s) after
+//! the attempt ENDED, so a tick straight after it does nothing. Before
+//! the fix that second tick retried at once and blocked another 5 s.
+//! NATIVE only, as der_and_store: fs (the store) and the account key's
+//! Ed25519 spend the checked tier's step budget.
+
+use acme
+
+fn main() -> int {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        eprint("tick_clock: cannot listen on loopback")
+        return 1
+    }
+    let port = net_port(l) else |_| {
+        eprint("tick_clock: no port")
+        return 1
+    }
+    let store = "target/acme-tick-clock-store"
+    fs_remove_dir_all(store) else |_| {}
+    var fl = acme.flow_new(store, "tick.example", "", "http://127.0.0.1:{port}/dir", "", 3600, 1)
+
+    // 1. the first attempt: the directory dial is taken by the backlog
+    //    and never answered, so it blocks to the transport's deadline
+    let t0 = time_unix_ms()
+    let ev = acme.tick(mut fl, t0)
+    let t1 = time_unix_ms()
+    assert(ev == "failed", "a CA that never answers fails the attempt")
+    assert(t1 - t0 >= 4000, "the attempt blocked to the transport deadline")
+
+    // 2. straight after it, with the clock as the serve loop reads it:
+    //    the retry is not due (it was scheduled 2 s after the attempt
+    //    ended, not 2 s after the pass that started it)
+    let t2 = time_unix_ms()
+    let again = acme.tick(mut fl, t2)
+    let t3 = time_unix_ms()
+    assert(again == "", "no retry before the backoff, measured from the attempt's end")
+    assert(t3 - t2 < 1000, "the second tick is a comparison, not another blocked attempt")
+
+    net_close(l) else |_| {}
+    fs_remove_dir_all(store) else |_| {}
+    print("tick_clock: ok — failed after {t1 - t0} ms; the next tick waited")
+    0
+}
