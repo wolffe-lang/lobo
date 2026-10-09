@@ -883,6 +883,22 @@ fn peer_resolver(c: config.Conf, row: int) -> (str, int, int) {
 /// request whose path does not route to a proxy, or whose target is
 /// literal, or whose names are all fresh, needs nothing. Total.
 pub fn resolve_need(c: config.Conf, path: str, rs: resolver.Resolver, now: int) -> Need {
+    // ws54 (F1): a config whose resolved route rows carry no
+    // `proxy_pass` has no upstream to resolve, so every request on it
+    // was decoding, normalizing and planning its path here a second
+    // time (`handle_request` does it again) to learn nothing — 3.1 %
+    // of a static hand's user cycles (notes/ws54-contract.md §3b).
+    // The rows are the load-time table, so this asks no question the
+    // plan below would answer differently.
+    var any_pass = false
+    for pp in c.rr_pass {
+        if !pp.is_empty() {
+            any_pass = true
+        }
+    }
+    if !any_pass {
+        return no_need()
+    }
     let decoded = http.percent_decode(path) else |_| {
         return no_need()
     }
