@@ -34,6 +34,9 @@
 #      serve `root www` from P/www, `alias alt/` from P/alt/, and an
 #      absolute root as written. Until ws52 lobo resolved root/alias against the start
 #      folder; this was the named delta D5, now a row.
+#   7. (ws54, lobo#50) `worker_shutdown_timeout` is the DRAINING
+#      generation's own: a reload that adds it does not bite the
+#      generation it drains, one that removes it still does (7a–7c).
 #
 # Three rows are NAMED DELTAS, printed with their reason (a
 # differential that hides a delta is a differential that lies —
@@ -312,6 +315,112 @@ for form in slash bare; do
     wait "$lb6pid" 2>/dev/null
 done
 
+# ======================= row 7 (ws54, lobo#50) ======================
+# `worker_shutdown_timeout` across reloads: WHICH deadline a draining
+# generation is held to. One slow download (curl at 32 KB/s of a
+# 64 MiB file, still being written long after every check) is held
+# across each of three reloads, on both servers:
+#   7a  a generation loaded WITHOUT the directive, drained by a reload
+#       that ADDS `worker_shutdown_timeout 2s`, is held to NO deadline;
+#   7b  the generation that reload created (loaded WITH 2 s), drained
+#       by a reload that REMOVES the directive, is held to 2 s;
+#   7c  the generation loaded without it, drained by a third reload,
+#       is held to none.
+# The oracle's answer is its old worker: alive 5 s after the drain
+# began (no deadline) or exited (the deadline bit). lobo's is its own
+# status line for the draining generation: `shutdown-in-ms=` present
+# (≤ 2000) or absent, plus the generation still listed after 5 s where
+# no deadline applies. lobo's ABORT of a streamed response under the
+# deadline is a separate defect (lobo#62: 25 s late against 2 s, the
+# parked write keeps its own budget), which is why this row reads the
+# deadline lobo applies and not the moment its stream gives up.
+p7=$root/p7
+mkdir -p "$p7/www" "$p7/logs"
+head -c 67108864 /dev/zero > "$p7/www/big.bin"
+printf 'P7\n' > "$p7/www/index.html"
+slow() { # slow <port> — one throttled download in the background; sets slowpid
+    curl -s --limit-rate 32k -o /dev/null "http://127.0.0.1:$1/big.bin" > /dev/null 2>&1 &
+    slowpid=$!
+}
+kids() { # kids <ppid> — the pids whose parent is <ppid>, one per line
+    ps -A -o pid= -o ppid= | awk -v p="$1" '$2 == p { print $1 }'
+}
+alive() { kill -0 "$1" 2>/dev/null && echo 1 || echo 0; }
+n7=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+ng7conf() { # ng7conf [main-context extra]
+    printf 'daemon off;\npid logs/o7.pid;\nerror_log logs/error.log;\n%s\nevents { }\nhttp {\n  access_log off;\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root www; }\n}\n' \
+        "${1:-}" "$n7" > "$p7/nginx7.conf"
+}
+ng7conf
+"$BIN" -p "$p7/" -c nginx7.conf -e logs/error.log > "$scratch/ng7.out" 2>&1 &
+ng7pid=$!
+poll_body "$n7" P7 > /dev/null || true
+w1=$(kids "$ng7pid" | head -1)
+slow "$n7"; ng7d1=$slowpid
+sleep 1
+ng7conf 'worker_shutdown_timeout 2s;'
+"$BIN" -p "$p7/" -c nginx7.conf -s reload > /dev/null 2>&1
+sleep 1
+w2=$(kids "$ng7pid" | grep -v "^$w1\$" | head -1)
+slow "$n7"; ng7d2=$slowpid
+sleep 4
+ng7a=$(alive "$w1")
+ng7conf
+"$BIN" -p "$p7/" -c nginx7.conf -s reload > /dev/null 2>&1
+sleep 1
+w3=$(kids "$ng7pid" | grep -v "^$w1\$" | grep -v "^$w2\$" | head -1)
+slow "$n7"; ng7d3=$slowpid
+sleep 4
+ng7b=$(alive "$w2")
+"$BIN" -p "$p7/" -c nginx7.conf -s reload > /dev/null 2>&1
+sleep 5
+ng7c=$(alive "$w3")
+kill "$ng7d1" "$ng7d2" "$ng7d3" 2>/dev/null
+kill "$ng7pid" 2>/dev/null
+wait "$ng7pid" "$ng7d1" "$ng7d2" "$ng7d3" 2>/dev/null
+
+l7=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+c7=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+lb7conf() { # lb7conf [main-context extra]
+    printf 'pid logs/l7.pid;\ncontrol 127.0.0.1:%s;\n%s\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root www; }\n}\n' \
+        "$c7" "${1:-}" "$l7" > "$p7/lobo7.conf"
+}
+gline() { # gline <gen> <statusfile> — that generation's status line, or ""
+    grep "^generation $1: draining" "$2" 2>/dev/null | head -1
+}
+lb7conf
+"$LOBO" serve -p "$p7" -c lobo7.conf 2> "$scratch/lb7.log" &
+lb7pid=$!
+poll_body "$l7" P7 > /dev/null || true
+slow "$l7"; lb7d1=$slowpid
+sleep 1
+lb7conf 'worker_shutdown_timeout 2s;'
+"$LOBO" -p "$p7" -c lobo7.conf -s reload > /dev/null 2>&1
+sleep 1
+slow "$l7"; lb7d2=$slowpid
+sleep 4
+"$LOBO" status -p "$p7" -c lobo7.conf > "$scratch/lb7-s1.txt" 2>&1
+lb7conf
+"$LOBO" -p "$p7" -c lobo7.conf -s reload > /dev/null 2>&1
+sleep 1
+"$LOBO" status -p "$p7" -c lobo7.conf > "$scratch/lb7-s2.txt" 2>&1
+slow "$l7"; lb7d3=$slowpid
+sleep 4
+"$LOBO" -p "$p7" -c lobo7.conf -s reload > /dev/null 2>&1
+sleep 5
+"$LOBO" status -p "$p7" -c lobo7.conf > "$scratch/lb7-s3.txt" 2>&1
+kill "$lb7d1" "$lb7d2" "$lb7d3" 2>/dev/null
+"$LOBO" -p "$p7" -c lobo7.conf -s stop > /dev/null 2>&1 || kill "$lb7pid" 2>/dev/null
+wait "$lb7pid" "$lb7d1" "$lb7d2" "$lb7d3" 2>/dev/null
+rm -f "$p7/www/big.bin"
+# lobo's three answers: 1 = held to no deadline (draining, listed, no
+# shutdown-in-ms), 0 = held to the 2 s deadline (shutdown-in-ms ≤ 2000)
+g1=$(gline 1 "$scratch/lb7-s1.txt"); g2=$(gline 2 "$scratch/lb7-s2.txt"); g3=$(gline 3 "$scratch/lb7-s3.txt")
+lb7a=0; [ -n "$g1" ] && ! echo "$g1" | grep -q 'shutdown-in-ms=' && lb7a=1
+lb7b=1; rem2=$(echo "$g2" | sed -n 's/.*shutdown-in-ms=\([0-9]*\).*/\1/p')
+[ -n "$rem2" ] && [ "$rem2" -le 2000 ] && lb7b=0
+lb7c=0; [ -n "$g3" ] && ! echo "$g3" | grep -q 'shutdown-in-ms=' && lb7c=1
+
 # ============================ the rows ==============================
 echo ""
 note "ROWS THAT CARRY (same measurement, both servers)"
@@ -377,6 +486,18 @@ six_row 6c "a relative \`alias alt/\` serves <prefix>/alt/" AL6 alias slash "P/"
 six_row 6d "a relative \`alias alt/\` serves <prefix>/alt/" AL6 alias bare "P"
 six_row 6e "an absolute \`root\` is taken as written" ABS6 abs slash "P/"
 six_row 6f "an absolute \`root\` is taken as written" ABS6 abs bare "P"
+
+# row 7: 1 = held to no deadline, 0 = held to the 2 s deadline
+seven_row() { # seven_row <label> <what> <want> <nginx> <lobo>
+    if [ "$4" = "$3" ] && [ "$5" = "$3" ]; then
+        row "$1 $2: nginx $([ "$4" = 1 ] && echo 'old worker alive 5 s on' || echo 'old worker exited'), lobo $([ "$5" = 1 ] && echo 'draining with no shutdown-in-ms' || echo "shutdown-in-ms=$rem2") (lobo#50)" 0
+    else
+        row "$1 $2: want $3 on both (1 = no deadline, 0 = 2 s); nginx $4 (workers $w1/$w2/$w3), lobo $5 (lobo#50; status: '$g1' / '$g2' / '$g3'; artifacts: $scratch/lb7*, $p7/logs/error.log)" 1
+    fi
+}
+seven_row 7a "a generation loaded WITHOUT worker_shutdown_timeout, drained by a reload that adds 2s, is held to no deadline" 1 "$ng7a" "$lb7a"
+seven_row 7b "a generation loaded WITH 2s, drained by a reload that removes it, is held to 2 s" 0 "$ng7b" "$lb7b"
+seven_row 7c "a generation loaded without it, drained by a third reload, is held to no deadline" 1 "$ng7c" "$lb7c"
 
 echo ""
 note "NAMED DELTAS (measured, not hidden)"

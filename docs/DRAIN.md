@@ -72,6 +72,18 @@ The one directive ws08 adds to the compat table (main context, one
 argument, nginx's semantics and units). `30s`, `500ms`, and a bare
 number (seconds) all parse; absent or `0` means no forced timeout.
 
+**Which generation's value applies (ws54, lobo#50).** A draining
+generation is held to the timeout of the configuration it was LOADED
+with — frozen with it like its Limits — which is what the pinned oracle
+does (its old workers keep the value they were started with; measured
+in `notes/ws54-contract.md` §2). So a reload that ADDS or CHANGES the
+directive governs the generation it creates, from that generation's own
+drain on; the generation it drains keeps its old value (none, if it had
+none). A reload that REMOVES it still drains the outgoing generation
+under the value it was loaded with. Before ws54 lobo read the value once
+at start and a reload never changed it, silently.
+`tools/lobo-control-differential` row 7 holds this against the oracle.
+
 ## The status surface
 
 `lobo status` reads the stanza off the running master's control channel

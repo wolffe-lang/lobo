@@ -183,6 +183,7 @@ struct GenRow {
     mem_hw: int,
     mem_rt_hw: int,
     bud_hits: int,
+    shut_ms: int,
 }
 
 /// The generation number of the current (accepting) row, or -1. Total.
@@ -257,11 +258,11 @@ fn gen_age(g: GenRow, now: int) -> int {
 /// The worker_shutdown_timeout remaining for a DRAINING generation, or
 /// -1 when none applies (a current generation, or no timeout). Clamped
 /// at 0. Total.
-fn gen_remaining(g: GenRow, shutdown_ms: int, now: int) -> int {
-    if g.state != "draining" || shutdown_ms <= 0 {
+fn gen_remaining(g: GenRow, now: int) -> int {
+    if g.state != "draining" || g.shut_ms <= 0 {
         return -1
     }
-    let rem = shutdown_ms - (now - g.since_ms)
+    let rem = g.shut_ms - (now - g.since_ms)
     if rem < 0 {
         return 0
     }
@@ -287,6 +288,7 @@ fn bump_live(take gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
                 mem_hw: g.mem_hw,
                 mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
+                shut_ms: g.shut_ms,
             })
         } else {
             (mut out).push(take g)
@@ -356,6 +358,7 @@ fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) 
                 mem_hw: nhw,
                 mem_rt_hw: nrt,
                 bud_hits: nhits,
+                shut_ms: g.shut_ms,
             })
         } else {
             (mut out).push(take g)
@@ -401,6 +404,7 @@ fn on_conn_close(take gens: List[GenRow], gen: int, aborted: bool, mut el: ELog)
                 mem_hw: g.mem_hw,
                 mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
+                shut_ms: g.shut_ms,
             })
         } else {
             (mut out).push(take g)
@@ -458,6 +462,7 @@ fn start_reload(
                 mem_hw: g.mem_hw,
                 mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
+                shut_ms: g.shut_ms,
             })
         } else {
             (mut out).push(take g)
@@ -478,6 +483,10 @@ fn start_reload(
         mem_hw: 0,
         mem_rt_hw: 0,
         bud_hits: 0,
+        // ws54 (lobo#50): the deadline this generation drains under is
+        // ITS OWN config's, frozen here like the Limits — the oracle's
+        // old worker keeps the value it was started with
+        shut_ms: shell.shutdown_timeout_ms(newconf),
     })
     out
 }
@@ -502,6 +511,7 @@ fn mark_draining(take gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
                 mem_hw: g.mem_hw,
                 mem_rt_hw: g.mem_rt_hw,
                 bud_hits: g.bud_hits,
+                shut_ms: g.shut_ms,
             })
         } else {
             (mut out).push(take g)
@@ -658,13 +668,7 @@ fn note_served(mut ct: Counters, a: obs.Access, admitted: int) {
 /// scrape is an ordinary request: it appears in these counters and in
 /// the access log on its NEXT scrape, one behind, which is the correct
 /// and only honest ordering for a counter that includes itself.
-fn render_metrics(
-    ct: Counters,
-    gens: List[GenRow],
-    shutdown_ms: int,
-    events: int,
-    worker: int,
-) -> str {
+fn render_metrics(ct: Counters, gens: List[GenRow], events: int, worker: int) -> str {
     let now = time_unix_ms()
     var out = metrics.header("lobo_build_info")
     out = "{out}{metrics.sample1("lobo_build_info", "version", shell.version_token(), 1)}"
@@ -766,10 +770,10 @@ fn render_metrics(
     out = "{out}{metrics.sample0("lobo_log_lines_dropped_total", ct.dropped)}"
     out = "{out}{metrics.header("lobo_events_total")}"
     out = "{out}{metrics.sample0("lobo_events_total", events)}"
-    // `now` and `shutdown_ms` are read by the status object beside
-    // this one; the exposition deliberately publishes no wall clock
-    // (a scraper stamps its own).
-    let _unused = now + shutdown_ms
+    // `now` is read by the status object beside this one; the
+    // exposition deliberately publishes no wall clock (a scraper
+    // stamps its own).
+    let _unused = now
     out
 }
 
@@ -787,7 +791,6 @@ fn retired_row(g: GenRow, outcome: str, value: int) -> str {
 
 fn status_stanza(
     gens: List[GenRow],
-    shutdown_ms: int,
     quitting: bool,
     json: bool,
     events: int,
@@ -829,7 +832,7 @@ fn status_stanza(
                 g.live,
                 gen_age(g, now),
                 g.shash,
-                gen_remaining(g, shutdown_ms, now),
+                gen_remaining(g, now),
                 g.mem_hw,
                 g.bud_hits,
                 g.mem_rt_hw,
@@ -843,7 +846,7 @@ fn status_stanza(
         s = "{s}{shell.status_worker_head(worker, listening, accepted)}"
     }
     for g in gens {
-        s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, shutdown_ms, now), g.mem_hw, g.bud_hits, g.mem_rt_hw)}"
+        s = "{s}{shell.status_line_text(g.gen, g.live, g.state, gen_age(g, now), g.shash, gen_remaining(g, now), g.mem_hw, g.bud_hits, g.mem_rt_hw)}"
     }
     s
 }
@@ -1409,7 +1412,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // through lim_for (a draining generation keeps serving under ITS
     // numbers, the frozen-model discipline).
     let lim1 = serve.resolve_limits(c0)
-    let shutdown_ms = shell.shutdown_timeout_ms(c0)
+    let shut1 = shell.shutdown_timeout_ms(c0)
 
     // ws09: the log outputs — per-output bounded sinks off the frozen
     // model (nothing opens until the first flush), the error-log
@@ -1551,6 +1554,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         mem_hw: 0,
         mem_rt_hw: 0,
         bud_hits: 0,
+        shut_ms: shut1,
     })
     ev_event(mut elog, "notice", shell.ev_generation_loaded(1, h1))
     ev_event(mut elog, "notice", shell.ev_generation_activated(1))
@@ -1847,7 +1851,6 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             } else if verb == "status" {
                 let body = status_stanza(
                     gens,
-                    shutdown_ms,
                     quitting,
                     false,
                     elog.seq,
@@ -1859,7 +1862,6 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             } else if verb == "status json" {
                 let body = status_stanza(
                     gens,
-                    shutdown_ms,
                     quitting,
                     true,
                     elog.seq,
@@ -2125,11 +2127,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                 let di = index_in(sdone, fd)
                 if di < 0 {
                     var nst = sst
-                    if sst < 10 && shutdown_ms > 0 {
+                    if sst < 10 {
                         let sgi = index_of(gens, cg)
                         if sgi >= 0 &&
                             gens[sgi].state == "draining" &&
-                            now - gens[sgi].since_ms >= shutdown_ms {
+                            gens[sgi].shut_ms > 0 &&
+                            now - gens[sgi].since_ms >= gens[sgi].shut_ms {
                             // worker_shutdown_timeout: the loop cannot
                             // close the socket under the stream, so it
                             // arms a 1 ms budget on it — the stream's
@@ -2274,11 +2277,10 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             if !st.admin.is_empty() {
                 let alim = lim_for(gens, cg).memory_budget
                 let body = if st.admin == "metrics" {
-                    render_metrics(counters, gens, shutdown_ms, elog.seq, worker)
+                    render_metrics(counters, gens, elog.seq, worker)
                 } else {
                     status_stanza(
                         gens,
-                        shutdown_ms,
                         quitting,
                         true,
                         elog.seq,
@@ -2390,11 +2392,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             if !close_it && !st.active && now - new_idle >= opts.keepalive_timeout_ms {
                 close_it = true
             }
-            if !close_it && shutdown_ms > 0 {
+            if !close_it {
                 let gi = index_of(gens, cg)
                 if gi >= 0 &&
                     gens[gi].state == "draining" &&
-                    now - gens[gi].since_ms >= shutdown_ms {
+                    gens[gi].shut_ms > 0 &&
+                    now - gens[gi].since_ms >= gens[gi].shut_ms {
                     close_it = true
                     aborted_flag = true
                 }
