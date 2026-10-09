@@ -1,0 +1,152 @@
+# Capabilities — what lobo reaches, call by call
+
+`src/wolf.pkg` declares `capabilities: [env, exec, fs, net]`. Since wolf
+0.2.26 (s217, wolf-lang#615) a package's capabilities are **derived from
+its code**: every prelude host builtin its own files call, charged by the
+sandbox table (`fs_*` → fs, `net_*` → net, the environment and
+process-context reads → env, child processes and signals → exec), plus
+every std module it imports, closed over that module's own imports. A
+capability the code reaches and the manifest does not declare refuses
+the build on both tiers (E1504), and `wolf audit --ci` refuses it with a
+reason line. Stdio, the clock and randomness carry no capability
+(ruling #53).
+
+**Why the manifest is in `src/`** (ws55). `wolf build` reads the
+`wolf.pkg` beside the entry it is given. lobo builds `./src/main.lu`, so
+the manifest that sat at the repository root until ws55 governed no
+build: nothing was ever checked against it, and s217's `wolf audit --ci`
+refuses it ("the package root has no wolf source files"). Moved beside
+the entry, it governs both tiers and the audit reads the code.
+
+**How it is gated.** The gauntlet's manifest step runs
+`wolf audit --ci --dir src` (red before the build, with the reason
+line); the tiers step's two builds refuse the same thing with E1504.
+Measured at ws55 (wolf 0.2.26, lobo `92d860f`'s source,
+`kasumi:~/lanes/ws55/mf.log`): with no `capabilities` line both tiers
+are refused with one E1504 per capability; with any one of the four
+words dropped both tiers are refused naming that one; with all four the
+build is clean and the audit prints
+
+```
+local/lobo 0.1.2 (root) caps=[net, fs, exec, env]
+effective: [net, fs, exec, env]
+  net: local/lobo (root) — declared; imports `std.net` at src/acme/flow.lu:41:1 (+161 more)
+  fs: local/lobo (root) — declared; calls `fs_create_dir_all` at src/main.lu:1464:9 (+86 more)
+  exec: local/lobo (root) — declared; calls `os_signal_listen` at src/main.lu:1525:5 (+10 more)
+  env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
+```
+
+The audit's counts and this file's census agree: fs 87, exec 11, env 4
+calls; net 156 calls plus 6 import reaches (`acme/flow.lu` and
+`proxy/proxy.lu` import `std.net` and `std.x.tls.client`, which reaches
+`net` through `std.net`). Of the other std modules lobo imports,
+`std.base64`, `std.hex`, `std.x.crypto.curve25519`, `std.x.jose`,
+`std.x.tls.cert`, `std.x.tls.handshake` and `std.x.tls.record` reach
+nothing (one throwaway package per module, `caps=[]`, `wolf audit --ci`
+exit 0; `kasumi:~/lanes/ws55/stdreach.log`). No std import reaches fs,
+env or exec.
+
+## Why each one
+
+**env (4 calls).** `env_args` is the command line (`main`). `os_exe` is
+the path the prefork master re-spawns as its hands (`master_main`).
+`os_cpus` sizes `worker_processes auto` (`main`) and the runtime-pool
+stream room (`serve_main`, ws51's `4·t - 2`). A server that reads no
+argv and spawns no copy of itself would not need it.
+
+**exec (11 calls).** The prefork master starts each hand with its
+listeners (`spawn_worker`: `os_spawn_with`, falling back to `os_spawn`)
+and reaps it (`reap_worker`: `os_kill`, `os_wait`). Signal reception is
+exec in the sandbox table (process control): `os_signal_listen` arms
+HUP/TERM/QUIT and the USR2 wake probe in the hand and the master,
+`sig_forwarder` waits on them (`os_signal_wait`), and `os_signal_raise`
+sends the probe to the process's own loop. `config/userconf.lu` runs
+`/bin/sh -c` for the `user` directive's privilege probe where
+`/proc/self/status` is absent (lobo#52, ws54).
+
+**fs (87 calls).** What a web server is: the files it serves
+(`serve.lu`, `budget.lu`: open, chunked reads, `fs_fstat`, close), the
+config and its include graph (`config/parse.lu`: read, `fs_read_dir`,
+`fs_exists`), certificates and keys (`config/sslcert.lu`,
+`config/proxyssl.lu`), the access and error logs (`obs.lu`, `dryrun.lu`:
+`fs_open_mode`, `fs_write_chunk`), the pid file (`shell.lu`, `main.lu`:
+write, rename, remove) and the ACME store (`acme/`, `config/certauto.lu`:
+`fs_create_dir_all`, write, rename, remove).
+
+**net (156 calls + 6 imports).** Every listener (`net_listen`,
+`_with`, `_unix`, `net_adopt_listener` for a hand's inherited sockets),
+the poll loop (`net_wait`, `net_accept`, reads, writes, `net_deadline`,
+`net_close`, `net_nodelay`, `net_writev_head`), the proxy's upstream
+connections, the resolver's queries, the control socket
+(`net_connect_unix` from `-s`), the TLS record layer, and the ACME
+client.
+
+**Uncharged** (no manifest word exists for them, ruling #53): the clock
+(`time_unix_ms` 21, `time_sleep_ms` 5) and the OS random source
+(`os_random` 4: the key-material draws of `tls.lu`, `acme/acme.lu` and
+`proxy/proxy.lu`'s upstream TLS, and the startup entropy probe in
+`main.lu`). Stdio (`print`, `eprint`) likewise.
+
+## The census (lobo `92d860f`'s `src/`, every call, file:line)
+
+Generated by a scan of every tracked `src/**/*.lu` for each sandbox-table
+name followed by `(`, outside comments and string literals; the totals
+match the audit's (+N more) counts above.
+
+### fs — 87 call sites
+- `fs_close` (28): budget/budget.lu:183, budget/budget.lu:318, dryrun/dryrun.lu:663, obs/obs.lu:1011, obs/obs.lu:1033, serve/serve.lu:991, serve/serve.lu:1049, serve/serve.lu:1109, serve/serve.lu:1131, serve/serve.lu:1137, serve/serve.lu:1173, serve/serve.lu:1275, serve/serve.lu:1297, serve/serve.lu:1301, serve/serve.lu:1325, serve/serve.lu:1368, serve/serve.lu:1382, serve/serve.lu:1390, serve/serve.lu:1439, serve/serve.lu:1443, serve/serve.lu:1447, serve/serve.lu:1451, serve/serve.lu:1593, serve/serve.lu:1658, serve/serve.lu:1676, serve/serve.lu:1701, serve/serve.lu:2058, serve/serve.lu:2062
+- `fs_read_text` (12): acme/acme.lu:636, acme/acme.lu:696, acme/flow.lu:159, config/certauto.lu:348, config/parse.lu:482, config/proxyssl.lu:91, config/userconf.lu:65, main.lu:3990, proxy/proxy.lu:1840, serve/serve.lu:2111, shell/shell.lu:556, shell/shell.lu:778
+- `fs_read_chunk` (9): budget/budget.lu:153, budget/budget.lu:288, serve/serve.lu:1357, serve/serve.lu:1402, serve/serve.lu:1481, serve/serve.lu:1507, serve/serve.lu:1542, serve/serve.lu:1725, serve/serve.lu:1737
+- `fs_exists` (8): config/parse.lu:462, config/sslcert.lu:940, config/sslcert.lu:940, main.lu:2989, main.lu:3018, shell/shell.lu:553, shell/shell.lu:565, shell/shell.lu:775
+- `fs_remove` (6): acme/flow.lu:811, acme/flow.lu:832, config/certauto.lu:341, main.lu:2990, main.lu:3019, shell/shell.lu:568
+- `fs_create_dir_all` (4): acme/acme.lu:611, config/certauto.lu:334, main.lu:1464, shell/shell.lu:535
+- `fs_open_mode` (4): dryrun/dryrun.lu:645, obs/obs.lu:994, serve/serve.lu:1678, serve/serve.lu:2040
+- `fs_read_bytes` (4): budget/budget.lu:92, config/sslcert.lu:480, config/sslcert.lu:630, config/sslcert.lu:678
+- `fs_write_text` (3): acme/acme.lu:616, config/certauto.lu:338, shell/shell.lu:538
+- `fs_fstat` (2): dryrun/dryrun.lu:662, serve/serve.lu:2057
+- `fs_is_dir` (2): dryrun/dryrun.lu:604, serve/serve.lu:2263
+- `fs_rename` (2): acme/acme.lu:619, shell/shell.lu:541
+- `fs_open` (1): budget/budget.lu:144
+- `fs_read_dir` (1): config/parse.lu:448
+- `fs_write_chunk` (1): obs/obs.lu:1006
+
+### net — 156 call sites
+- `net_close` (56): acme/flow.lu:114, acme/flow.lu:130, acme/flow.lu:195, acme/flow.lu:210, conn/conn.lu:215, main.lu:1842, main.lu:1973, main.lu:2081, main.lu:2194, main.lu:2449, main.lu:2528, main.lu:2537, main.lu:2542, main.lu:2543, main.lu:2546, main.lu:2549, main.lu:2552, main.lu:3030, main.lu:3033, main.lu:3541, main.lu:3616, main.lu:3721, main.lu:3725, main.lu:3732, main.lu:3735, proxy/proxy.lu:1464, proxy/proxy.lu:1478, proxy/proxy.lu:1504, proxy/proxy.lu:1687, proxy/proxy.lu:1691, proxy/proxy.lu:1696, proxy/proxy.lu:1700, proxy/proxy.lu:1704, proxy/proxy.lu:1712, proxy/proxy.lu:1718, proxy/proxy.lu:1726, proxy/proxy.lu:1730, proxy/proxy.lu:1735, proxy/proxy.lu:1739, resolver/resolver.lu:634, resolver/resolver.lu:659, resolver/resolver.lu:684, resolver/resolver.lu:698, serve/serve.lu:681, serve/serve.lu:685, serve/serve.lu:689, serve/serve.lu:690, serve/serve.lu:693, shell/shell.lu:872, shell/shell.lu:876, shell/shell.lu:911, shell/shell.lu:1504, shell/shell.lu:1508, shell/shell.lu:1536, shell/shell.lu:1854, tls/tls.lu:1106
+- `net_deadline` (18): acme/flow.lu:112, acme/flow.lu:185, budget/budget.lu:40, conn/conn.lu:206, main.lu:1420, main.lu:1826, main.lu:2168, main.lu:2437, main.lu:2655, main.lu:3528, proxy/proxy.lu:1463, proxy/proxy.lu:1686, resolver/resolver.lu:662, serve/serve.lu:3102, serve/serve.lu:3176, shell/shell.lu:871, shell/shell.lu:1503, tls/tls.lu:688
+- `net_write` (15): acme/flow.lu:113, budget/budget.lu:98, budget/budget.lu:126, budget/budget.lu:146, budget/budget.lu:185, budget/budget.lu:319, conn/conn.lu:164, main.lu:2807, main.lu:2862, proxy/proxy.lu:1570, proxy/proxy.lu:1586, proxy/proxy.lu:1690, proxy/proxy.lu:1743, shell/shell.lu:875, shell/shell.lu:1507
+- `net_read` (13): acme/flow.lu:120, budget/budget.lu:41, conn/conn.lu:91, main.lu:126, main.lu:1789, main.lu:1854, main.lu:3547, proxy/proxy.lu:1213, proxy/proxy.lu:1229, proxy/proxy.lu:1245, serve/serve.lu:3179, shell/shell.lu:889, shell/shell.lu:1515
+- `net_write_bytes` (11): budget/budget.lu:107, budget/budget.lu:164, budget/budget.lu:299, conn/conn.lu:180, resolver/resolver.lu:630, serve/serve.lu:1413, serve/serve.lu:1516, tls/tls.lu:559, tls/tls.lu:568, tls/tls.lu:857, tls/tls.lu:1075
+- `net_listen` (8): main.lu:2611, main.lu:2618, main.lu:2720, main.lu:3026, main.lu:3386, main.lu:3394, serve/serve.lu:679, serve/serve.lu:3229
+- `net_port` (8): main.lu:1223, main.lu:1308, main.lu:1664, main.lu:1677, main.lu:2724, main.lu:3029, serve/serve.lu:680, serve/serve.lu:3230
+- `net_connect` (7): acme/flow.lu:109, acme/flow.lu:176, proxy/proxy.lu:1458, proxy/proxy.lu:1681, resolver/resolver.lu:620, serve/serve.lu:684, shell/shell.lu:738
+- `net_accept` (6): main.lu:1820, main.lu:2008, main.lu:2050, main.lu:3522, serve/serve.lu:688, serve/serve.lu:3232
+- `net_read_bytes` (3): conn/conn.lu:130, resolver/resolver.lu:666, tls/tls.lu:463
+- `net_wait` (3): main.lu:1748, main.lu:1999, main.lu:3517
+- `net_adopt_listener` (2): main.lu:1198, main.lu:1283
+- `net_nodelay` (2): main.lu:2024, main.lu:2061
+- `net_connect_unix` (1): shell/shell.lu:720
+- `net_listen_unix` (1): main.lu:2681
+- `net_listen_with` (1): main.lu:2589
+- `net_writev_head` (1): serve/serve.lu:1261
+
+### env — 4 call sites
+- `os_cpus` (2): main.lu:1633, main.lu:4192
+- `env_args` (1): main.lu:4111
+- `os_exe` (1): main.lu:3286
+
+### exec — 11 call sites
+- `os_signal_listen` (2): main.lu:1525, main.lu:3424
+- `os_signal_raise` (2): main.lu:2527, main.lu:3720
+- `os_spawn_with` (2): config/userconf.lu:83, main.lu:3080
+- `os_wait` (2): config/userconf.lu:86, main.lu:3155
+- `os_kill` (1): main.lu:3153
+- `os_signal_wait` (1): main.lu:2803
+- `os_spawn` (1): main.lu:3123
+
+### (none: clock) — 26 call sites
+- `time_unix_ms` (21): acme/flow.lu:146, main.lu:684, main.lu:826, main.lu:1031, main.lu:1573, main.lu:1651, main.lu:3492, main.lu:3502, main.lu:3691, main.lu:3693, main.lu:3976, proxy/proxy.lu:961, proxy/proxy.lu:1272, proxy/proxy.lu:1948, proxy/proxy.lu:1971, resolver/resolver.lu:720, resolver/resolver.lu:724, serve/serve.lu:914, serve/serve.lu:1067, serve/serve.lu:1589, serve/serve.lu:2800
+- `time_sleep_ms` (5): main.lu:1757, main.lu:3556, main.lu:3685, main.lu:3710, resolver/resolver.lu:723
+
+### (none: random) — 4 call sites
+- `os_random` (4): acme/acme.lu:485, main.lu:1276, proxy/proxy.lu:86, tls/tls.lu:71
+
