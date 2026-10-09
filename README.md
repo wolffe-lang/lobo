@@ -78,15 +78,25 @@ lobo is within ten percent of nginx on macOS and not yet on linux.
 [`docs/PARITY.md`](docs/PARITY.md) defines the comparison (it was
 written before the first measurement) as the ratio nginx ÷ lobo on one
 machine, with workers equal to cpus and 32 concurrent clients, over
-five interleaved runs; 1.10 or under is parity. The current ledger,
-re-taken on 2026-10-02 with lobo built by wolf 0.2.20 against nginx
-1.30.4:
+five interleaved runs; 1.10 or under is parity. The current ledger
+(nginx 1.30.4; the macOS row re-taken with wolf 0.2.20, the linux rows
+with wolf 0.2.25):
 
 | host | measured | connection-per-request | keepalive |
 |---|---|---|---|
 | macOS arm64, 18 cpus (load 2.80, other work on the box) | 2026-10-02 | 1.031x | 1.037x |
-| linux x86-64, 4 cpus (GitHub Actions runner, load 1.88) | 2026-10-02 | 1.151x | 1.240x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.85, a slow VM) | 2026-10-09 | 1.140x | 1.260x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.87, a fast VM) | 2026-10-08 | 1.166x | 1.185x |
 | linux x86-64, 16 cpus (kasumi, load 0.34–1.89, shared) | 2026-10-02 | no valid set: ~1.84x | no valid set: ~2.04x |
+
+The two runner rows are two VMs a day apart (the first is ws54's head,
+the second trunk's source before it); the runner's speed differs from
+VM to VM by up to 2.3x, so ratios compare only within one row. At one
+worker the runner reads 1.00–1.05x on connection-per-request and
+1.09–1.18x on keepalive. Where the remaining linux gap goes — lobo's
+own user space, a fifth of a request, much of it the runtime's string
+allocation, and the herd's extra wakeups on connection-per-request — is
+[`docs/PROFILE.md`](docs/PROFILE.md)'s ws54 addendum.
 
 The kasumi row is indicative: all three sets were refused because
 nginx's own five runs spread more than the definition allows. At one
@@ -97,6 +107,9 @@ as history:
 
 | host | measured | wolf | connection-per-request | keepalive |
 |---|---|---|---|---|
+| linux x86-64, 4 cpus (GitHub Actions runner) | 2026-10-07 | 0.2.25 | 1.208x | 1.239x |
+| linux x86-64, 4 cpus (GitHub Actions runner) | 2026-10-07 | 0.2.24 | 1.151x | 1.255x |
+| linux x86-64, 4 cpus (GitHub Actions runner) | 2026-10-02 | 0.2.20 | 1.151x | 1.240x |
 | macOS arm64, 18 cpus | 2026-09-09 | 0.2.8 | 1.033x | 1.072x |
 | linux x86-64, 4 cpus (GitHub Actions runner) | 2026-09-11 | 0.2.11 | 1.197x | 1.263x |
 
