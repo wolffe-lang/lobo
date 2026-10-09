@@ -1,5 +1,5 @@
 module pkg :: tls
-  wolfi v0 · toolchain 0.2.25 · edition v1
+  wolfi v0 · toolchain 0.2.26 · edition v1
   export_hash 0439a05443d20a192841835b978ec899a84d2ded6e4e7bf6f955d201c8caeb0a
   pkg_hash    0439a05443d20a192841835b978ec899a84d2ded6e4e7bf6f955d201c8caeb0a
   deps:

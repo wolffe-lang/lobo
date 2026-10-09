@@ -1,5 +1,5 @@
 module pkg :: proxy
-  wolfi v0 · toolchain 0.2.25 · edition v1
+  wolfi v0 · toolchain 0.2.26 · edition v1
   export_hash 981dd9e27f73e02fab96727b3670ab73ca75f3f1a23d1fd7aaad7cd4ce408a85
   pkg_hash    981dd9e27f73e02fab96727b3670ab73ca75f3f1a23d1fd7aaad7cd4ce408a85
   deps:
