@@ -358,6 +358,85 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws54 — 2026-10-09 — the open five (lobo#48–#52) and the gap to nginx, measured (two lobo-side costs taken; the rest is the runtime's)
+
+- **lobo#48 — `alias` to a file in an exact location serves it.** An
+  empty remainder after the matched prefix maps to the alias itself
+  (it was `<alias>/`, a 404), and a static response is now typed by
+  the URI as nginx types it (`location = /hello { alias x/index.html; }`
+  answers nginx's default type, `text/plain`). Rows:
+  `tests/differential/cases/alias_exact_file.case` (RED at trunk on
+  lobo: 404 → GREEN, byte-equal to the oracle) and
+  `alias_exact_file_slash.case` (404 on both, both ways).
+- **lobo#49 — `-t -q` prints neither success line**, as the oracle;
+  errors, `test failed` and `[warn]` lines still print. `config.check`
+  gains `quiet` (`interface(config)`). Rows: three output-gated
+  probes in `tools/lobo-shell` (the good config RED at trunk: lobo 2
+  lines, nginx 0).
+- **lobo#50 — `worker_shutdown_timeout` is the draining generation's
+  own**, frozen at load beside its Limits, as the oracle's old worker
+  keeps the value it was started with: a reload that adds it does not
+  bite the generation it drains, one that removes it still does.
+  `docs/DRAIN.md` says so. Rows: `tools/lobo-control-differential`
+  7a–7c (7b RED at trunk, GREEN at the fix, also under `taskset -c
+  0-3`). Found beside it and filed as **lobo#62**: a STREAMED response
+  (> 64 KiB) is aborted ~25 s after a 2 s timeout (nginx: 2 s) — the
+  stream's parked write keeps its own budget — so row 7 reads the
+  deadline lobo applies (`shutdown-in-ms`), not the stream's abort.
+- **lobo#51 — a finished drain stays scrapeable.**
+  `lobo_drained_connections_total{outcome}` (every generation that
+  ever drained, summed) and `lobo_generations_retired_total` outlive
+  the generation; `lobo_connections_retired_total{gen,outcome}` keeps
+  its meaning and its HELP says it leaves with its generation. Rows:
+  `tools/lobo-metrics`' finished-drain clause (RED at trunk: the series
+  do not exist).
+- **lobo#52 — `user` on a host with no /proc.** wolf 0.2.25 has no uid
+  surface at all (filed **wolf-lang#633**), so where
+  `/proc/self/status` is absent lobo asks the host (`id -u` through
+  `/bin/sh`, read off the exit code): unprivileged, nginx's `[warn]`
+  and the config loads; root or no answer, the existing `[emerg]`.
+  Rows: a NEW `gauntlet-macos` CI job (the pinned toolchain built from
+  source on macos-latest, the oracle against Homebrew's openssl@3, GNU
+  coreutils for the rig's `timeout`), RED at confcheck on trunk's
+  source with ws48's five configs (run 37948755649: `identical loads
+  moved: 2 vs ratchet 4`), GREEN at the fix: the whole gauntlet on
+  macOS arm64 in CI for the first time (run 37956609778 at `d7b9223`,
+  confcheck 27 exit-parity with 4 identical loads, 0 red).
+- **The parity gap, profiled before anything changed**
+  (`notes/ws54-contract.md` §3b, `docs/PROFILE.md`'s ws54 addendum):
+  on the runner lobo's user space is a fifth of a request and the whole
+  keepalive gap; its largest leaf is the runtime's string arena lock
+  (**wolf-lang#635**, with zeroed read buffers and a growing writev
+  buffer); the herd is the close cell's +2.78 calls a connection; the
+  keepalive spread at N=4 is 1.01x (the 4.1x was sixteen hands). Two
+  lobo-side costs measured with `perf stat -e instructions:u`
+  (`kasumi:~/lanes/ws54/st-*.log`): **F0** — lobo#48's first spelling
+  cost +645 user instructions a keepalive request; the memo check now
+  tries `ends_with` first (back to trunk's 20,098); **F1** —
+  `proxy.resolve_need` answers at once on a server with no
+  `proxy_pass`: **−2.6 %** (19,577 keepalive, 21,283 close). F2 (skip
+  the generation-table rebuild) measured nothing and was dropped.
+- **Runner parity** (run 37956342486, two trees on one VM, VALID, the
+  slow class): head ÷ trunk **1.009x** close / **0.997x** keepalive;
+  nginx ÷ head **1.140x / 1.260x** — the bar stays NOT MET. trunk's
+  source alone on a fast VM the day before (run 37779490101): 1.166x /
+  1.185x. Both rows are in `docs/PARITY.md`; README's table, which
+  stopped at ws47, carries them.
+- **The gauntlet** on kasumi (strict env, `WOLF_PAIRING_REQUIRE_SIBLING=1`,
+  stdout and stderr together, SigBlk 0x10000 / SigIgn 0x7) GREEN at
+  trunk and at every step of the branch (`kasumi:~/lanes/ws54/g-base.log`
+  72e132a4…, `g-w4849.log` 205ad601…, `g-w505152.log` 79301ded…,
+  `g-wperf.log` 963a963f…): corpus 313/313, differential 24/24, control
+  19/19, shell 18 probes 0 red, signal 21/21, metrics green, the same
+  two named SKIP lines. **membudget**: plain retention 19 → **20 KB a
+  request** (round B 7964 → 8052 KB over 400 requests, +0.22 KB a
+  request, from the #50/#51 commits; the ratchet is 64), capped 20 KB
+  unchanged.
+- **CI**: both jobs green at `d7b9223` (run 37956609778); a planted
+  break (`e4cb035`, lobo#49's fix undone) red at the shell step in run
+  37956466421 (linux job 113908130761: 2 probes red), reverted at
+  `d7b9223`.
+
 ## ws53 — 2026-10-07 — the pin at 0.2.25 (nothing refused, nothing to revert; both binaries change by reloads)
 
 - **The pin moves to wolf 0.2.25 (`6710f9e`) / lupin 0.1.48
