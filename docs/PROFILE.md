@@ -464,6 +464,73 @@ keepalive), not the leaf. The load was 4.19, so the req/s columns are
 not the ledger's; the shares and per-request µs are what the split is
 for.
 
+### ws54's addendum — the profile at wolf 0.2.25, two lobo-side costs taken, and what remains (2026-10-09)
+
+Written as `notes/ws54-contract.md` §3b before any serving-path change;
+the numbers here are from the artifacts it names.
+
+**Where a request goes, runner, N=4, all four hands** (run 37779490101,
+trunk's source, the fast class): keepalive **kernel 80.4 %, lobo 13.1 %,
+libc 6.0 %**; lobo's cpu a request 18.2 µs against nginx's 14.8, and
+lobo's user space (19.1 % ≈ 3.5 µs) is the whole +3.4 µs. The largest
+user leaf is **`wolf_rt::str::ambient_alloc` (2.30 % of all cycles)**,
+the runtime's string arena, ahead of anything of lobo's own
+(`serve_main` 0.91 %, `head_warm` 0.90, `str_find` 0.81, `parse_request`
+0.59). Close N=4 (run 37779498932): kernel 78.8 %, lobo 14.4 %. The
+count: keepalive 6.25 calls a request (nginx 6.14), close 10.25 (nginx
+10.13), the close extras being the herd's `poll` 1.28, `read` 1.08,
+`futex` 0.34 and `accept4` +0.08 a connection; idle 1155 calls a second
+(nginx 0).
+
+**One hand, kasumi, user space by call graph** (`perf record -e cycles:u
+--call-graph lbr`, paranoid 2 so no kernel; `kasumi:~/lanes/ws54/cg-ka1.log`
+`d24bc515…`, keepalive N=1, `taskset -c 0-3`): inclusive `serve_request`
+68.7 %, `handle_request` 39.7, `serve_file` 24.0, `parse_request` 15.5,
+`classify` 7.3, `decide` 7.1, `str_find` 6.8, `list_new` 6.5, `join_path`
+5.2, `head_cut` 5.1, `proxy.resolve_need` 3.1; self `serve_main` 8.1,
+`ambient_alloc` 7.4 — of which the `Mutex<Arena>` lock and unlock are
+about six points, one lock pair per string allocation in a
+single-threaded hand. Filed as **wolf-lang#635** with the two other
+runtime rows the same profile shows (`net_read`'s buffer allocated
+zeroed every read, 3.3 %; `net_writev_head`'s growing buffer, 2.6 %).
+
+**The herd and the spread, with numbers.** The herd is the close
+cell's +2.78 calls a connection above; the cure measured at ws32
+(`listen … reuseport`) is a posture the bar does not take (ruling B1),
+and the runtime's shared-listener wake is wolf's. The keepalive spread
+ws47 named (4.1x) is a sixteen-hand effect: at the bar's N=4 the hands
+spread **1.01x** before and **1.02x** after (runs 37779490101,
+37956342486; 1.04x on kasumi). Nothing to fix at N=4.
+
+**The load-proof per-request number.** `perf stat -e instructions:u` on
+the one serving process over 400,000 keepalive / 200,000 close requests
+(`kasumi:~/lanes/ws54/kstat.sh`, three repeats each, medians):
+
+| tree | keepalive instr./req | close instr./req | artifact |
+|---|---|---|---|
+| trunk `a728fab` | 20,051 | 21,636 | `st-trunk.log` (second run) |
+| the five fixes, as first written (`afc458e`) | 20,696 (+3.2 %) | 22,452 (+3.8 %) | `st-hd.log` |
+| + F0, the #48 memo check `ends_with` first (`0e88d29`) | 20,098 | 21,813 | `st-f0.log` |
+| + F1, `resolve_need` answers at once with no `proxy_pass` (`94a2ca4`) | **19,577 (−2.6 %)** | **21,283 (−2.4 %)** | `st-f01.log` |
+| (F2, `retire_zero` looks before it rebuilds — not kept) | +70 / +100 over F1 | | `st-f12.log` |
+
+F0 is a regression this lane introduced and caught with the same
+instrument: lobo#48's fix typed the response by the URI and compared
+two `extension()` calls a request, each lowercasing a fresh string.
+F1 met its prediction (−2.5 % to −4 %); F2 predicted −0.5 % to −1.5 %
+and measured nothing — a one-generation table is cheap to rebuild —
+so it was dropped. The head is 2.4 % (keepalive) and 1.6 % (close)
+fewer user instructions than trunk, about half a percent of a
+request's cpu; the runner's two-tree set reads it as 0.997x / 1.009x
+(run 37956342486), inside the method's noise, as §3b predicted.
+
+**What would move the bar.** Not another lobo leaf: none of lobo's own
+user-space frames is over 1 % of a request on the runner. The three
+runtime rows in wolf-lang#635 are together ~10 % of the user fifth on
+kasumi's profile, and the herd's calls are the close cell's; both are
+wolf's to change, measured here so the change can be priced when it
+lands.
+
 ## What this does NOT say
 
 - The count is the request's; the herd's cost per park is not a
