@@ -427,6 +427,11 @@ jobs:
         run: |
           set -euo pipefail
           command -v gtar > /dev/null || brew install gnu-tar
+          # the rig runs every lane under GNU `timeout -k` (tools/lobo-corpus,
+          # ws25's process hygiene); macOS has none — the first run of this
+          # job (37779996097) red at corpus on `timeout: command not found`
+          brew list coreutils > /dev/null 2>&1 || brew install coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
           echo "OPENSSL_BIN=$(brew --prefix openssl@3)/bin/openssl" >> "$GITHUB_ENV"
           "$(brew --prefix openssl@3)/bin/openssl" version
           gtar --version | head -1; jq --version; command -v nc
