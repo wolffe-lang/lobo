@@ -169,6 +169,54 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws54: the head against trunk, TWO trees on one VM · **VALID** · **NOT MET on both shapes** (close 1.140x, keepalive 1.260x on the slow class); the head moves the rate by **1.009x / 0.997x**
+
+ws54's head (`94a2ca4`: lobo#48–#52 fixed, the #48 memo spelled
+allocation-free, and F1 — `proxy.resolve_need` answering at once on a
+server with no `proxy_pass`) against trunk `a728fab`, both at wolf
+0.2.25, mid-end on, ONE VM, ONE nginx. Run **37956342486**
+(workflow_dispatch, `parity=true`, `ref_tree=a728fab`), load 1.85,
+nginx close 25.4k — the runner's SLOW class:
+
+| cell | shape | head req/s | trunk req/s | nginx req/s | nginx ÷ head | nginx ÷ trunk | **head ÷ trunk** median [min, max] |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 22,291 | 22,064 | 25,428 | **1.140x** [1.137, 1.150] | 1.156x [1.143, 1.172] | **1.009x** [1.002, 1.019] |
+| N=4 c=32 | keepalive | 69,062 | 69,187 | 87,604 | **1.260x** [1.257, 1.283] | 1.266x [1.248, 1.294] | **0.997x** [0.987, 1.027] |
+| N=1 c=32 | close | 15,185 | 15,330 | 15,277 | 1.003x | 0.997x | 0.990x [0.979, 0.993] |
+| N=1 c=32 | keepalive | 30,866 | 30,154 | 34,267 | 1.178x | 1.134x | 1.002x [0.962, 1.028] |
+
+PREDICTED (`notes/ws54-contract.md` §3b, before the change): nginx ÷
+lobo moves by at most 0.01, and the head reads close 1.14–1.20x,
+keepalive 1.16–1.21x. **Close held (1.140x; it moved 0.016, inside
+one pair's spread); keepalive's band was falsified (1.260x) — by the
+VM class, not the change**: on this slow VM trunk itself reads 1.266x,
+as ws52's slow-class row read 1.255x, and head ÷ trunk is 0.997x. The
+change is ~2.4 % of lobo's user instructions a request (kasumi `perf
+stat`, the ws54 addendum in `docs/PROFILE.md`), which is ~0.5 % of a
+request's cpu: below what this method resolves, as predicted. The bar's
+verdict does not move.
+
+### 2026-10-08 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws54: trunk's source at wolf 0.2.25, ONE tree · **VALID** · **NOT MET on both shapes** (close 1.166x, keepalive 1.185x on the fast class)
+
+The "before" of ws54's profile: run **37779490101** at `acd5c09`
+(trunk `a728fab`'s source plus the lane's contract note), load 1.87,
+nginx close 46.3k (the FAST class), with the profile leg (keepalive,
+N=4, all hands) and the count leg in the same job:
+
+| cell | shape | lobo req/s | nginx req/s | nginx ÷ lobo median [min, max] | lobo / nginx cores | µs cpu a request, lobo / nginx |
+|---|---|---|---|---|---|---|
+| **N=4 c=32** | close | 39,866 | 46,320 | **1.166x** [1.142, 1.204] | 1.69 / 1.55 | 42.4 / 33.5 (**+8.9**) |
+| **N=4 c=32** | keepalive | 138,264 | 163,097 | **1.185x** [1.157, 1.197] | 2.51 / 2.41 | 18.2 / 14.8 (**+3.4**) |
+| N=1 c=32 | close | 30,467 | 31,937 | 1.045x [1.017, 1.065] | 0.99 / 0.99 | 32.5 / 31.0 (+1.5) |
+| N=1 c=32 | keepalive | 60,830 | 66,077 | 1.093x [1.070, 1.100] | 1.00 / 1.00 | 16.4 / 15.1 (+1.3) |
+
+The keepalive cell's +3.4 µs is lobo's user space (19.1 % of a
+request, ≈ 3.5 µs, by the profile leg); the close cell's extra is the
+herd's (+2.78 calls a connection: `poll` 1.28, `read` 1.08, `futex`
+0.34, `accept4` +0.08). The hands spread **1.01x** at N=4 — there is no
+keepalive imbalance at the bar's cell. `docs/PROFILE.md`'s ws54
+addendum has the rows.
+
 ### 2026-10-07 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws53: wolf 0.2.25 against 0.2.24, TWO trees on one VM · **VALID** · **NOT MET on both shapes** (close 1.208x, keepalive 1.239x); the pin moves the rate by **0.999x / 1.000x**
 
 The 0.2.25 bump (ws53) adds reloads after calls that may write foreign
