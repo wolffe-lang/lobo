@@ -199,8 +199,9 @@ pub fn check(prefix: str, conf_rel: str, dump: bool, quiet: bool) -> int {
     if dump {
         print_raw(render_t(c))
     }
-    let _q = quiet
-    eprint("lobo: the configuration file {conf} syntax is ok")
-    eprint("lobo: configuration file {conf} test is successful")
+    if !quiet {
+        eprint("lobo: the configuration file {conf} syntax is ok")
+        eprint("lobo: configuration file {conf} test is successful")
+    }
     0
 }
