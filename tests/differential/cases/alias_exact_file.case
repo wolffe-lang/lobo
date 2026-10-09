@@ -1,0 +1,25 @@
+// alias_exact_file — ws54 (lobo#48): `alias` to a FILE in an exact location.
+// nginx serves the file (200); its URI has no extension, so the type is
+// nginx's default type. Until ws54 lobo mapped the empty remainder to
+// '<alias>/' and answered 404. Expected reply generated against the pinned
+// nginx/1.30.4 (corpus mtime 2026-01-01T00:00:00Z); stored pre-normalized.
+--- server
+location = /hello { alias www/index.html; }
+--- request
+GET /hello HTTP/1.1
+Host: 127.0.0.1
+Connection: close
+
+--- expect
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/plain
+Content-Length: 79
+Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
+Connection: close
+ETag: "6955b900-4f"
+Accept-Ranges: bytes
+
+<!doctype html>
+<html><body>lobo differential case: static_basic</body></html>

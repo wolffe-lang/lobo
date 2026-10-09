@@ -952,6 +952,7 @@ fn serve_file(
     c: config.Conf,
     req: http.Request,
     path: str,
+    tpath: str,
     fd: int,
     size: int,
     mms: int,
@@ -1022,6 +1023,7 @@ fn serve_file(
             mut cn,
             c,
             path,
+            tpath,
             fd,
             size,
             secs,
@@ -1066,7 +1068,13 @@ fn serve_file(
     // ws41: `max_ranges 0` (kind 3) drops Accept-Ranges, so its head is
     // neither read from nor written to the memo, which holds the
     // advertised shape
-    var head = if plan.kind == 3 {
+    // ws54 (lobo#48): the type is the URI's (`tpath`), as the oracle
+    // types it — `location = /hello { alias x/index.html; }` answers
+    // nginx's default type, not text/html. The memo is keyed by the
+    // file, so it serves only when the two extensions agree (every
+    // `root` request; an alias whose name differs builds its head)
+    let memo = plan.kind != 3 && extension(tpath) == extension(path)
+    var head = if !memo {
         ""
     } else {
         head_warm(ft, path, size, mms, keep, now_secs, token)
@@ -1074,7 +1082,7 @@ fn serve_file(
     if head.is_empty() {
         let lm = http_date(secs)
         let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
-        let mime = mime_for(c, path)
+        let mime = mime_for(c, tpath)
         let dnow = date_str(mut ft, now_secs)
         head = "HTTP/1.1 200 OK\r\n"
         head = "{head}{hline("Server", token)}"
@@ -1088,7 +1096,7 @@ fn serve_file(
             head = "{head}{hline("Accept-Ranges", "bytes")}"
         }
         head = "{head}\r\n"
-        if plan.kind != 3 {
+        if memo {
             head_remember(mut ft, path, size, mms, keep, now_secs, token, head)
         }
     }
@@ -1562,6 +1570,7 @@ fn serve_range(
     mut cn: conn.Conn,
     c: config.Conf,
     path: str,
+    tpath: str,
     fd: int,
     size: int,
     secs: int,
@@ -1597,7 +1606,7 @@ fn serve_range(
     }
     let lm = http_date(secs)
     let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
-    let mime = mime_for(c, path)
+    let mime = mime_for(c, tpath)
     let nparts = plan.starts.len
     var head = "HTTP/1.1 206 Partial Content\r\n"
     head = "{head}{hline("Server", token)}"
@@ -2148,6 +2157,7 @@ fn handle_request(
                 c,
                 req,
                 d.fs_path,
+                norm_path,
                 cl.fd,
                 cl.size,
                 cl.mtime_ms,
@@ -2215,6 +2225,7 @@ fn handle_request(
                 mut cn,
                 c,
                 req,
+                cand,
                 cand,
                 cl.fd,
                 cl.size,

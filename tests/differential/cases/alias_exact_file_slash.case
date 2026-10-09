@@ -1,0 +1,26 @@
+// alias_exact_file_slash — ws54 (lobo#48): the same exact location, asked
+// with a trailing slash: the exact match misses, the server's root has no
+// /hello/ directory, 404 on both. Expected reply generated against the
+// pinned nginx/1.30.4; stored pre-normalized.
+--- server
+location = /hello { alias www/index.html; }
+--- request
+GET /hello/ HTTP/1.1
+Host: 127.0.0.1
+Connection: close
+
+--- expect
+HTTP/1.1 404 Not Found
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: <normalized>
+Connection: close
+
+<html>
+<head><title>404 Not Found</title></head>
+<body>
+<center><h1>404 Not Found</h1></center>
+<hr><center><normalized></center>
+</body>
+</html>

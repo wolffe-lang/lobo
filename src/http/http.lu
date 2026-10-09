@@ -1352,7 +1352,16 @@ fn decide(c: config.Conf, path: str, m: LocMatch) -> Decision {
         if path.starts_with(matched_prefix) {
             remainder = path[matched_prefix.len..path.len]
         }
-        d.fs_path = join_path(alias, remainder)
+        // ws54 (lobo#48): an EMPTY remainder — `location = /hello {
+        // alias html/index.html; }`, or a prefix location asked for
+        // exactly — maps to the alias itself, as the oracle serves it
+        // (200 with the file). `join_path` would add a `/` between the
+        // two and turn a file into a directory that does not exist.
+        if remainder.is_empty() {
+            d.fs_path = alias
+        } else {
+            d.fs_path = join_path(alias, remainder)
+        }
     } else {
         let root = config.route_root(c, t)
         if !root.is_empty() {
