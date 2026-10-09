@@ -1071,9 +1071,13 @@ fn serve_file(
     // ws54 (lobo#48): the type is the URI's (`tpath`), as the oracle
     // types it — `location = /hello { alias x/index.html; }` answers
     // nginx's default type, not text/html. The memo is keyed by the
-    // file, so it serves only when the two extensions agree (every
-    // `root` request; an alias whose name differs builds its head)
-    let memo = plan.kind != 3 && extension(tpath) == extension(path)
+    // file, so it serves only when the two extensions agree: always
+    // when the file path ENDS with the URI (every `root` request — no
+    // allocation, the common case), else when `extension` says so (an
+    // alias; one whose name differs builds its head). ws54 measured
+    // the unconditional two-`extension` spelling at +800 user
+    // instructions a request (notes/ws54-contract.md, the F0 row).
+    let memo = plan.kind != 3 && (path.ends_with(tpath) || extension(tpath) == extension(path))
     var head = if !memo {
         ""
     } else {
