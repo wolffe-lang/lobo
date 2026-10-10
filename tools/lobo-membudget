@@ -35,9 +35,21 @@
 #   idle         10 seconds with 16 kept-alive connections attached
 # the first two under 512 KB and the idle row under 128 KB. At ws56's
 # trunk (d1bf135) the same rows read 80 MB, 64 MB and 320 KB on
-# macOS arm64, so all three are red there. The capped server takes the first two
-# through its proc as well. A bound is an upper one: the page
-# compressor's shrink (below) can only help it, never trip it.
+# macOS arm64, so all three are red there. A bound is an upper one:
+# the page compressor's shrink (below) can only help it, never trip
+# it.
+#
+# The capped server takes the first two through its proc, under a
+# wider bound, 4 MB, because the residue there is the runtime's and
+# not lobo's: every `spawn proc` that is monitored and joined leaves
+# about 280 bytes behind in wolf 0.2.26's runtime (measured with no
+# lobo code: 5.5 MB per 20,000 procs; wolf-lang#662), and a budgeted
+# response is one proc. The rows read about 1.6 MB and 0.9 MB after
+# ws57 against 81 MB and 65 MB at d1bf135, so they are red at trunk
+# too. What lobo itself still does not return on the plain path is
+# also the runtime's, and far under the bound: its file table grows 4
+# bytes per `fs_open` and its socket table about 57 bytes per accepted
+# connection, neither slot ever reused (wolf-lang#661).
 #
 # THE ORACLE'S OWN NOISE (ws14, measured 2026-09-02 at the 5f99b9f
 # bump, macOS/arm64 with the compressor holding ~40 GB): ps(1)'s RSS
@@ -171,7 +183,7 @@ flat() { # flat <label> <before_kb> <after_kb> <drove_ok(0/1)> <what> [bound_kb]
         check "$1: RSS grew ${g} KB over $5 (>= ${fb} KB; ${3} KB resident) — memory is NOT returned (lobo#66)" 1
     fi
 }
-flat_requests() { # flat_requests <label>
+flat_requests() { # flat_requests <label> [bound_kb]
     ok=0
     quiet_drive 400 /small.html || ok=1
     b=$(rss_kb)
@@ -180,14 +192,14 @@ flat_requests() { # flat_requests <label>
         quiet_drive 400 /small.html || ok=1
         i=$((i + 1))
     done
-    flat "$1" "$b" "$(rss_kb)" "$ok" "4,000 keepalive requests on ten connections"
+    flat "$1" "$b" "$(rss_kb)" "$ok" "4,000 keepalive requests on ten connections" "${2:-$flat_kb}"
 }
-flat_connections() { # flat_connections <label>
+flat_connections() { # flat_connections <label> [bound_kb]
     ok=0
     quiet_drive 200 /small.html close || ok=1
     b=$(rss_kb)
     quiet_drive 2000 /small.html close || ok=1
-    flat "$1" "$b" "$(rss_kb)" "$ok" "2,000 connections of one request each"
+    flat "$1" "$b" "$(rss_kb)" "$ok" "2,000 connections of one request each" "${2:-$flat_kb}"
 }
 flat_idle() { # flat_idle <label>
     ok=0
@@ -289,8 +301,8 @@ if [ -n "${ga:-}" ] && [ "$diff" -ge 3200 ]; then
     pair " (cap, re-drive)"
 fi
 # ws57 (lobo#66): the hard gate through the capped proc
-flat_requests "cap: flat, requests"
-flat_connections "cap: flat, connections"
+flat_requests "cap: flat, requests (one proc each)" 4096
+flat_connections "cap: flat, connections (one proc each)" 4096
 if [ -z "${ga:-}" ]; then
     check "cap: RSS sampled at all checkpoints (r0='$r0' r1='$r1' r2='$r2')" 1
 else
