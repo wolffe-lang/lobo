@@ -39,7 +39,8 @@
 #      generation it drains, one that removes it still does (7a–7c).
 #   8. (ws56, lobo#62) `worker_shutdown_timeout` ends a STREAMED
 #      response on time: one slow download across one reload under a
-#      2 s timeout is ended by both servers inside [2 s, 3 s].
+#      2 s timeout is ended by both servers at the timeout and under a
+#      second past it.
 #
 # Three rows are NAMED DELTAS, printed with their reason (a
 # differential that hides a delta is a differential that lies —
@@ -420,12 +421,19 @@ wait "$lb7pid" "$lb7d1" "$lb7d2" "$lb7d3" 2>/dev/null
 # directive (2 s) is present from the start; one slow download (the
 # same 32 KB/s curl of the 64 MiB file) is in flight; one reload. The
 # oracle's answer is how long its old worker lives after the reload
-# (polled every 0.1 s, so read in tenths); lobo's is its own event,
-# `generation-retired gen=1 … aborted=1 age-ms=N`. Both must end the
-# response inside [2 s, 3 s]: the timeout, and at most a second after
-# it. Before ws56 lobo armed a 1 ms write budget on the socket, which
+# command returns, read off the rig's own clock (tests/rig/nowms,
+# built once: counting 0.1 s sleeps read 1.3 s for 2 s on the macOS
+# runner, where a poll step costs more than its sleep); lobo's is its
+# own event, `generation-retired gen=1 … aborted=1 age-ms=N`. Both
+# must end the response at the timeout and at most a second after it:
+# lobo's age inside [2000, 3000] ms, the oracle's worker gone inside
+# [1700, 3000] ms of the command's return (its clock started when the
+# signal arrived, a little earlier). Before ws56 lobo armed a 1 ms write budget on the socket, which
 # rules only a write that begins afterwards; the stream's parked write
 # ended it 26.8 s after the reload (docs/DRAIN.md).
+NOWMS="$root/nowms"
+"$WOLF" build "$rig_root"/tests/rig/nowms.lu -o "$NOWMS" > "$scratch/nowms-build.out" 2>&1 || true
+nowms() { "$NOWMS" 2>/dev/null || echo 0; }
 ng7conf 'worker_shutdown_timeout 2s;'
 "$BIN" -p "$p7/" -c nginx7.conf -e logs/error.log > "$scratch/ng8.out" 2>&1 &
 ng8pid=$!
@@ -434,11 +442,13 @@ w8=$(kids "$ng8pid" | head -1)
 slow "$n7"; ng8d=$slowpid
 sleep 1
 "$BIN" -p "$p7/" -c nginx7.conf -s reload > /dev/null 2>&1
-ng8ds=0
-while [ "$ng8ds" -lt 100 ] && [ -n "$w8" ] && [ "$(alive "$w8")" = 1 ]; do
-    sleep 0.1
-    ng8ds=$((ng8ds + 1))
+ng8t0=$(nowms)
+ng8n=0
+while [ "$ng8n" -lt 200 ] && [ -n "$w8" ] && [ "$(alive "$w8")" = 1 ]; do
+    sleep 0.05
+    ng8n=$((ng8n + 1))
 done
+ng8ms=$(($(nowms) - ng8t0))
 kill "$ng8d" 2>/dev/null
 kill "$ng8pid" 2>/dev/null
 wait "$ng8pid" "$ng8d" 2>/dev/null
@@ -549,11 +559,11 @@ seven_row 7b "a generation loaded WITH 2s, drained by a reload that removes it, 
 seven_row 7c "a generation loaded without it, drained by a third reload, is held to no deadline" 1 "$ng7c" "$lb7c"
 
 # row 8: both end the streamed response inside [2 s, 3 s] of the reload
-if [ -n "$w8" ] && [ "$ng8ds" -ge 18 ] && [ "$ng8ds" -le 32 ] &&
+if [ -n "$w8" ] && [ "$ng8ms" -ge 1700 ] && [ "$ng8ms" -le 3000 ] &&
     [ -n "$lb8ms" ] && [ "$lb8ms" -ge 2000 ] && [ "$lb8ms" -le 3000 ] && [ "$lb8ab" = 1 ]; then
-    row "8. worker_shutdown_timeout 2s ends a STREAMED response on time: nginx's old worker is gone about $((ng8ds / 10)).$((ng8ds % 10)) s after the reload, lobo retires the generation with aborted=1 at age-ms=$lb8ms — both inside [2 s, 3 s] (lobo#62)" 0
+    row "8. worker_shutdown_timeout 2s ends a STREAMED response on time: nginx's old worker is gone $ng8ms ms after the reload command, lobo retires the generation with aborted=1 at age-ms=$lb8ms — both at the timeout and under a second past it (lobo#62)" 0
 else
-    row "8. worker_shutdown_timeout 2s and a streamed response: want both inside [2 s, 3 s] of the reload; nginx's old worker ($w8) lived ${ng8ds} tenths of a second (100 = still alive after 10 s), lobo's event was '${lb8line:-none within 10 s}' (lobo#62; artifacts: $scratch/lb8.log, $p7/logs/error.log)" 1
+    row "8. worker_shutdown_timeout 2s and a streamed response: want nginx's old worker gone inside [1700, 3000] ms of the reload command and lobo's age-ms inside [2000, 3000] with aborted=1; nginx's old worker ($w8) lived $ng8ms ms (10 s or more = still alive), lobo's event was '${lb8line:-none within 10 s}' (lobo#62; artifacts: $scratch/lb8.log, $p7/logs/error.log)" 1
 fi
 
 echo ""
