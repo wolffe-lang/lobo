@@ -265,21 +265,36 @@ pub fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> O
 // the outcome the way it learns of a signal: a line down a loopback
 // self-pipe whose read end is in its wait set. One proc per stream
 // writes the chunks (each in its own region) and reports `<sock> <cls>
-// <wcode> <rt>`. The loop never touches the socket while the row
-// streams; the stream closes the file. `start_stream` says why it is
-// one proc, uncapped, and why the loop bounds how many run at once.
+// <wcode> <rt> <id>`. The loop never touches the socket while the row
+// streams. `stream_open` says why it is one proc, uncapped, and why
+// the loop bounds how many run at once.
+//
+// ws56 (lobo#62): the LOOP owns the stream's proc and its file. A
+// stream parked in a write cannot be reached by a budget armed after
+// the write began ([os.net.io]: every park goes against the budget
+// computed when the call began), and the park lasts until the kernel
+// calls the socket writable again — measured 26.8 s on a 32 KB/s
+// reader with linux's 2.6 MB loopback send buffer, where
+// `worker_shutdown_timeout` said 2 s. Only a kill reaches a parked
+// net wait, so every stream sits in a `StreamSlot` beside its handle;
+// `stream_kill` ends it, and because a killed proc runs no further
+// code ([conc.proc.kill]) the file is the loop's to close, never the
+// stream's. Each stream carries an id the loop minted, echoed in its
+// line, so a line that arrives after its row is gone can never be
+// read as the report of a newer stream on a reused descriptor.
 // ------------------------------------------------------------------
 
 /// The stream: the rest of `fd` to `sock`, in 64 KiB chunks, each in
-/// its own region (the serve path's ws10 shape), then close `fd` and
-/// report ONE line down the loop's stream pipe `out`: `<sock> <cls>
-/// <wcode> <rt>` — `cls` 0 (the proc ran to its end; the loop reads
-/// any other value as a broken stream), `wcode` 0 clean, 1 the peer
-/// closed, 2 io (a fired write budget included), 3 the file read
-/// failed, `rt` the per-chunk region HIGH WATER (ws12's number). The
-/// line is one short write, so lines from concurrent streams never
-/// interleave. Total.
-fn stream_body(sock: int, fd: int, out: int) -> int {
+/// its own region (the serve path's ws10 shape), then report ONE line
+/// down the loop's stream pipe `out`: `<sock> <cls> <wcode> <rt>
+/// <id>` — `cls` 0 (the proc ran to its end; the loop reads any other
+/// value as a broken stream), `wcode` 0 clean, 1 the peer closed, 2
+/// io, 3 the file read failed, `rt` the per-chunk region HIGH WATER
+/// (ws12's number), `id` the id it was started with. The line is one
+/// short write, so lines from concurrent streams never interleave.
+/// The file stays open: its slot's owner closes it (`stream_done`,
+/// `stream_kill`). Total.
+fn stream_body(sock: int, fd: int, out: int, id: int) -> int {
     var rt = 0
     var wcode = 0
     var streaming = true
@@ -315,15 +330,29 @@ fn stream_body(sock: int, fd: int, out: int) -> int {
             wcode = wcode
         }
     }
-    fs_close(fd) else |_| {}
-    net_write(out, "{sock} 0 {wcode} {rt}\n") else |_| {}
+    net_write(out, "{sock} 0 {wcode} {rt} {id}\n") else |_| {}
     0
 }
 
+/// One stream in flight, as the loop holds it (ws56, lobo#62): the
+/// socket it writes (`sock` < 0 marks a FREE slot, reused by the next
+/// stream), the id the loop minted for it, the open file it reads
+/// (the slot owner's to close), and the proc's handle — the only way
+/// to end a stream parked in a write.
+pub struct StreamSlot {
+    sock: int,
+    id: int,
+    file: int,
+    w: Proc[int],
+}
+
 /// Hand a large plaintext body to a stream beside the loop (ws49,
-/// lobo#46): the head is already on the wire and `fd` is the open
-/// file (the stream closes it). Returns at once; the outcome arrives
-/// as one line on the pipe whose write end is `out`.
+/// lobo#46) and keep it in `slots` (ws56, lobo#62): the head is
+/// already on the wire and `fd` is the open file. Returns the slot's
+/// index at once; the outcome arrives as one line on the pipe whose
+/// write end is `out`, carrying `id`. A free slot is reused, so
+/// `slots` never holds more rows than the most streams that were ever
+/// in flight together.
 ///
 /// ONE proc per stream, uncapped, budget or not, because a proc parked
 /// in a runtime wait holds pool workers, so enough parked streams
@@ -338,14 +367,113 @@ fn stream_body(sock: int, fd: int, out: int) -> int {
 /// used here: the meter rules the body at the `file` site before a
 /// byte is written, and since D40 the cap could not fire on this path
 /// from any config (docs/BUDGET.md). Total.
-pub fn start_stream(sock: int, fd: int, out: int) {
-    let _w = spawn proc stream_body(sock, fd, out)
+pub fn stream_open(mut slots: List[StreamSlot], sock: int, fd: int, out: int, id: int) -> int {
+    var i = 0
+    while i < slots.len {
+        if slots[i].sock < 0 {
+            slots[i] = take StreamSlot {
+                sock: sock,
+                id: id,
+                file: fd,
+                w: spawn proc stream_body(sock, fd, out, id),
+            }
+            return i
+        }
+        i = i + 1
+    }
+    (mut slots).push(take StreamSlot {
+        sock: sock,
+        id: id,
+        file: fd,
+        w: spawn proc stream_body(sock, fd, out, id),
+    })
+    slots.len - 1
 }
 
-/// One line off the stream pipe, read back: (sock, cls, wcode, rt),
-/// or sock -1 when the line is not one `stream_body` wrote. Pure and
-/// total.
-pub fn stream_line(line: str) -> (int, int, int, int) {
+/// Where the live stream on `sock` sits in `slots`, or -1. With `id`
+/// >= 0 the slot must carry that id too — the test a pipe line takes,
+/// so a late line from a stream whose row is gone matches nothing.
+/// Pure and total.
+pub fn stream_slot(slots: List[StreamSlot], sock: int, id: int) -> int {
+    if sock < 0 {
+        return -1
+    }
+    var i = 0
+    while i < slots.len {
+        if slots[i].sock == sock && (id < 0 || slots[i].id == id) {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// How many streams are in flight. Pure and total.
+pub fn stream_live(slots: List[StreamSlot]) -> int {
+    var n = 0
+    for s in slots {
+        if s.sock >= 0 {
+            n = n + 1
+        }
+    }
+    n
+}
+
+/// A stream REPORTED (its line arrived): close its file and free the
+/// slot. The socket is the caller's to close or keep. Total.
+pub fn stream_done(mut slots: List[StreamSlot], i: int) {
+    if i < 0 || i >= slots.len || slots[i].sock < 0 {
+        return
+    }
+    fs_close(slots[i].file) else |_| {}
+    slots[i].sock = -1
+}
+
+/// END the stream in slot `i` now (ws56, lobo#62: a draining
+/// generation's `worker_shutdown_timeout`): kill its proc and wait for
+/// it to be gone — a kill reaches a write parked on a client that
+/// reads slowly or not at all, which no budget armed afterwards does.
+/// `true`: the proc was ended here (or broke); it will write no line,
+/// the file is closed, the slot is free, and the socket is the
+/// caller's to close. `false`: the stream had already run to its end
+/// — its line is in the pipe, the slot stands, and the caller treats
+/// the row as any other that is waiting for its line. Total.
+pub fn stream_kill(mut slots: List[StreamSlot], i: int) -> bool {
+    if i < 0 || i >= slots.len || slots[i].sock < 0 {
+        return true
+    }
+    slots[i].w.kill()
+    var ended = true
+    let _v = slots[i].w.join() else |e| match e {
+        killed => {
+            ended = false
+            0
+        },
+        cancelled => {
+            ended = false
+            0
+        },
+        error => {
+            ended = false
+            0
+        },
+        fault => {
+            ended = false
+            0
+        },
+    }
+    if ended {
+        return false
+    }
+    fs_close(slots[i].file) else |_| {}
+    slots[i].sock = -1
+    true
+}
+
+/// One line off the stream pipe, read back: (sock, cls, wcode, rt,
+/// id), or sock -1 when the line is not one `stream_body` wrote. Pure
+/// and total.
+pub fn stream_line(line: str) -> (int, int, int, int, int) {
     var vals = List[int]()
     for w in line.words() {
         var n: int = 0
@@ -359,12 +487,12 @@ pub fn stream_line(line: str) -> (int, int, int, int) {
             }
         }
         if !ok {
-            return (-1, 0, 0, 0)
+            return (-1, 0, 0, 0, 0)
         }
         (mut vals).push(n)
     }
-    if vals.len != 4 {
-        return (-1, 0, 0, 0)
+    if vals.len != 5 {
+        return (-1, 0, 0, 0, 0)
     }
-    (vals[0], vals[1], vals[2], vals[3])
+    (vals[0], vals[1], vals[2], vals[3], vals[4])
 }

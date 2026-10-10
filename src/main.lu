@@ -40,7 +40,7 @@
 //! process's life, holding two ints and a socket and touching no
 //! server state — which is the whole of D7's amendment. ws49
 //! (lobo#46) adds the second: a large plaintext body leaves in a
-//! STREAM beside the loop (`budget.start_stream`, one proc per
+//! STREAM beside the loop (`budget.stream_open`, one proc per
 //! download), because a body written inside the step held
 //! the whole loop while a slow client's download started, and wolf
 //! has no write readiness to step it with; the outcome comes back as
@@ -1403,7 +1403,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     pipe_w = sp.0
     pipe_r = sp.1
     // ws49 (lobo#46): the STREAM pipe. A large plaintext body leaves in
-    // a proc beside this loop (budget.start_stream), and its one-line
+    // a proc beside this loop (budget.stream_open), and its one-line
     // outcome comes back down this pipe, whose read end joins the wait
     // set — the forwarder's shape. A host that refuses the pair keeps
     // the inline write (the loop then holds for a slow download, as
@@ -1603,6 +1603,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     var cstream = List[int]()
     // the stream pipe's partial line, and this pass's finished streams
     var sbuf = ""
+    // ws56 (lobo#62): every stream in flight, with its proc and its
+    // file — the loop starts a stream, so the loop can end one — and
+    // the id the next stream takes
+    var sslots = List[budget.StreamSlot]()
+    var snext: int = 0
 
     // ws13: the resolver — the cache and the pending query table the
     // loop ticks once per pass like every other socket it owns
@@ -1776,13 +1781,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             ri = ri + 1
         }
 
-        // 0b. ws49 (lobo#46): the streams that finished. Each watch
-        // wrote one `<sock> <cls> <wcode> <rt>` line; read what
-        // is there (the pipe is ready, so the read answers at once),
-        // keep a partial line for the next pass, and fold each
-        // stream's measured region high water into its generation NOW,
-        // before this pass's control dispatch can report it. The rows
-        // themselves close or resume in step 3.
+        // 0b. ws49 (lobo#46): the streams that finished. Each stream
+        // wrote one `<sock> <cls> <wcode> <rt> <id>` line; read what
+        // is there (the pipe is ready, so the read answers at once)
+        // and keep a partial line for the next pass. The rows close or
+        // resume in step 3. ws56 (lobo#62): a line counts only if a
+        // live slot carries its socket AND its id — a stream the loop
+        // ended reports nothing, and a line that outlived its row must
+        // not be read as a newer stream's on the same descriptor.
         var sdone = List[int]()
         var sline = List[str]()
         if stream_r >= 0 && ready_has(ready, stream_r) {
@@ -1797,7 +1803,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     let ln = sbuf[0..nl]
                     sbuf = sbuf[nl + 1..sbuf.len]
                     let sr = budget.stream_line(ln)
-                    if sr.0 >= 0 {
+                    if sr.0 >= 0 && budget.stream_slot(sslots, sr.0, sr.4) >= 0 {
                         (mut sdone).push(sr.0)
                         (mut sline).push(ln)
                     }
@@ -2158,14 +2164,24 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                             gens[sgi].state == "draining" &&
                             gens[sgi].shut_ms > 0 &&
                             now - gens[sgi].since_ms >= gens[sgi].shut_ms {
-                            // worker_shutdown_timeout: the loop cannot
-                            // close the socket under the stream, so it
-                            // arms a 1 ms budget on it — the stream's
-                            // next write fails at once and reports, and
-                            // the row closes as aborted then. A write
-                            // already parked keeps the budget it began
-                            // with ([os.net.io]); docs/DRAIN.md says so.
-                            net_deadline(fd, 1) else |_| {}
+                            // worker_shutdown_timeout (ws56, lobo#62):
+                            // END the stream. Its write may be parked
+                            // on a client that reads slowly or not at
+                            // all, and a budget armed now would rule
+                            // only its NEXT write ([os.net.io]) — 25 s
+                            // late, measured. A kill reaches the park;
+                            // the proc is gone when `stream_kill`
+                            // returns, so the socket is the loop's to
+                            // close. `false` is the stream that ran to
+                            // its end in the same instant: its line is
+                            // in the pipe and the row waits for it.
+                            let si = budget.stream_slot(sslots, fd, -1)
+                            if budget.stream_kill(mut sslots, si) {
+                                net_close(fd) else |_| {}
+                                gens = on_conn_close(take gens, cg, true, mut elog)
+                                k = k + 1
+                                continue
+                            }
                             nst = sst + 10
                         }
                     }
@@ -2181,6 +2197,10 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     continue
                 }
                 let sr = budget.stream_line(sline[di])
+                // ws56: the stream reported, so its file is closed and
+                // its slot freed here (the loop owns both)
+                let dsi = budget.stream_slot(sslots, fd, sr.4)
+                budget.stream_done(mut sslots, dsi)
                 let scls = sr.1
                 let swc = sr.2
                 let srt = sr.3
@@ -2430,21 +2450,28 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             if st.streaming {
                 // ws49 (lobo#46): the body is streaming beside the loop;
                 // the request is logged, and the close decision waits
-                // for the stream's report (an abort, if the generation
-                // is already past its timeout, rides as +10)
-                var cst = if close_it { 2 } else { 1 }
+                // for the stream's report. ws56 (lobo#62): the step
+                // handed the open file back and the stream starts
+                // HERE, in a slot that keeps its proc. A generation
+                // already past its worker_shutdown_timeout starts no
+                // stream: the head is on the wire, the body never
+                // leaves, and the row closes as aborted now.
                 if aborted_flag {
-                    net_deadline(fd, 1) else |_| {}
-                    cst = cst + 10
+                    fs_close(st.stream_fd) else |_| {}
+                    net_close(fd) else |_| {}
+                    gens = on_conn_close(take gens, cg, true, mut elog)
+                } else {
+                    snext = snext + 1
+                    let _slot = budget.stream_open(mut sslots, fd, st.stream_fd, stream_w, snext)
+                    (mut nfds).push(fd)
+                    (mut ngens).push(cg)
+                    (mut ncarry).push(st.carry)
+                    (mut nserved).push(st.served)
+                    (mut nidle).push(new_idle)
+                    (mut ncstart).push(new_start)
+                    (mut nwait).push("")
+                    (mut nstream).push(if close_it { 2 } else { 1 })
                 }
-                (mut nfds).push(fd)
-                (mut ngens).push(cg)
-                (mut ncarry).push(st.carry)
-                (mut nserved).push(st.served)
-                (mut nidle).push(new_idle)
-                (mut ncstart).push(new_start)
-                (mut nwait).push("")
-                (mut nstream).push(cst)
             } else if close_it {
                 net_close(fd) else |_| {}
                 gens = on_conn_close(take gens, cg, aborted_flag, mut elog)

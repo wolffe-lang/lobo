@@ -463,7 +463,7 @@ pub fn mime_for(c: config.Conf, path: str) -> str {
 /// ServerOpts freeze is routed residue. ws49 adds `stream_w`: the
 /// write end of the loop's STREAM pipe (lobo#46) — when it is set
 /// (>= 0) a large plaintext body is handed to a stream beside the
-/// loop (`budget.start_stream`) instead of written inside the step;
+/// loop (`budget.stream_open`, by the loop) instead of written inside the step;
 /// -1, every caller but the poll loop, keeps the inline write. And
 /// `proc_room`: false while the loop's streams fill the room the
 /// runtime's pool leaves for one more proc (main.lu's `stream_room`),
@@ -578,6 +578,7 @@ struct Charge {
     pipe_r: int,
     stream_w: int,
     handed: bool,
+    handed_fd: int,
     procs_ok: bool,
 }
 
@@ -593,6 +594,7 @@ fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
         pipe_r: pipe_r,
         stream_w: -1,
         handed: false,
+        handed_fd: -1,
         procs_ok: true,
     }
 }
@@ -1163,7 +1165,7 @@ fn serve_file(
         // ws49: `procs_ok` false — the loop's streams hold the workers a
         // proc would need — falls through to the plain regioned write
         // below: the meter has ruled this body, only the cap's
-        // backstop is skipped (budget.start_stream says why)
+        // backstop is skipped (budget.stream_open says why)
         if chg.limit > 0 && chg.procs_ok {
             // ws13: BUDGETED — the body work runs in a proc under the
             // region cap; the join maps the reason (see the cap block
@@ -1309,11 +1311,14 @@ fn serve_file(
     // off this handle, budget or not: the meter has already ruled the
     // `file` site above, and the stream is one uncapped proc because a
     // parked proc holds pool workers (wolf-lang#570;
-    // budget.start_stream says so). TLS keeps the inline write (its
+    // budget.stream_open says so). TLS keeps the inline write (its
     // session cannot cross a proc boundary, the D24 residue).
+    // ws56 (lobo#62): the step hands the open FILE back and the loop
+    // starts the stream, because the loop must hold the stream's proc
+    // to end it at a worker_shutdown_timeout.
     if chg.stream_w >= 0 && !conn.is_tls(cn) {
-        budget.start_stream(conn.fd(cn), fd, chg.stream_w)
         chg.handed = true
+        chg.handed_fd = fd
         return !keep
     }
     if chg.limit > 0 {
@@ -2643,6 +2648,7 @@ pub struct ReqOut {
     resolve_timeout_ms: int,
     resolve_valid_ms: int,
     streaming: bool,
+    stream_fd: int,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -2666,6 +2672,7 @@ fn req_out(close: bool, carry: str, take acc: obs.Access, chg: Charge) -> ReqOut
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
         streaming: chg.handed,
+        stream_fd: chg.handed_fd,
     }
 }
 
@@ -2692,6 +2699,7 @@ fn req_out_wait(take acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
         resolve_timeout_ms: need.timeout_ms,
         resolve_valid_ms: need.valid_ms,
         streaming: false,
+        stream_fd: -1,
     }
 }
 
@@ -2717,6 +2725,7 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
         streaming: false,
+        stream_fd: -1,
     }
 }
 
@@ -3007,7 +3016,9 @@ fn head_cut(buf: str) -> HeadCut {
 /// a stream beside the loop — the step has logged the request and its
 /// `close` is the decision to apply AFTER the stream reports; until
 /// then the socket is the stream's, and the loop must not read, write
-/// or close it.
+/// or close it. ws56 (lobo#62): the step does not start the stream; it
+/// hands back the open file as `stream_fd` (-1 otherwise) and the loop
+/// starts it, keeps its proc, and closes the file.
 pub struct ConnStep {
     active: bool,
     close: bool,
@@ -3027,6 +3038,7 @@ pub struct ConnStep {
     resolve_timeout_ms: int,
     resolve_valid_ms: int,
     streaming: bool,
+    stream_fd: int,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -3059,6 +3071,7 @@ fn step_out(
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
         streaming: false,
+        stream_fd: -1,
     }
 }
 
@@ -3133,6 +3146,7 @@ fn step_serve(
         resolve_timeout_ms: 0,
         resolve_valid_ms: 0,
         streaming: ro.streaming,
+        stream_fd: ro.stream_fd,
     }
 }
 
