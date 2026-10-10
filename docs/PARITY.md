@@ -169,6 +169,53 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws57: the memory returned, TWO trees on one VM, THREE VMs · **three VALID sets** · close **MET on two of three** (1.062x, 1.075x; 1.104x), keepalive **MET on one of three** (1.082x; 1.111x, 1.130x); the head moves the rate by **1.06x–1.10x / 1.05x–1.09x**
+
+ws57 (lobo#66) scopes the serving loop: a pass and a connection step
+each run in a region that is freed, and what the loop keeps is
+stored in place, so a request no longer leaves 2 KB (and a connection
+10 KB) of memory behind for the kernel to fault in fresh
+(`docs/PROFILE.md`, ws57's addendum). Each set measures it as a
+two-tree delta on ONE VM against ONE nginx: this side is ws57's
+branch (`dbd68b1` in the first set, `91247eb` in the other two: the
+same serving code), the reference is trunk `d1bf135` (ws56), both at
+wolf 0.2.26 / lupin 0.1.49; workflow_dispatch, `parity=true`,
+`ref_tree=d1bf135`. Three dispatches, because the first set's close
+row stopped four thousandths over the bar with its pairs spanning
+it; all three are here, none was dropped, and they are three VMs:
+
+| run | load, nginx close req/s | shape | ws57 req/s | trunk req/s | nginx req/s | nginx ÷ ws57 median [min, max] | nginx ÷ trunk | **ws57 ÷ trunk** median [min, max] |
+|---|---|---|---|---|---|---|---|---|
+| **38085780224** | 1.82, 63,513 | close | 57,586 | 52,487 | 63,513 | **1.104x** [1.071, 1.122] | 1.211x | **1.095x** [1.081, 1.104] |
+| | | keepalive | 176,599 | 160,221 | 200,614 | **1.130x** [1.113, 1.150] | 1.247x | **1.094x** [1.088, 1.116] |
+| **38088570687** | 1.91, 48,761 | close | 45,961 | 43,521 | 48,761 | **1.062x** [1.039, 1.074] | 1.125x | **1.058x** [1.053, 1.060] |
+| | | keepalive | 157,375 | 149,425 | 170,356 | **1.082x** [1.071, 1.089] | 1.144x | **1.050x** [1.047, 1.072] |
+| **38089299844** | 1.68, 36,805 | close | 34,390 | 32,368 | 36,805 | **1.075x** [1.064, 1.105] | 1.134x | **1.062x** [1.052, 1.067] |
+| | | keepalive | 113,997 | 105,988 | 126,683 | **1.111x** [1.096, 1.117] | 1.196x | **1.076x** [1.075, 1.079] |
+
+(All rows N=4 c=32, the gating cell.) The one-hand cell, informative
+(refused in the first set on the oracle's own spread, 1.174x; valid
+in the other two): close 0.940x, 0.914x, 0.897x — one lobo process
+answers more connection-per-request traffic than one nginx worker —
+and keepalive 1.048x, 1.056x, 1.058x.
+
+The lever is the same on every VM and the bar's verdict is not: ws57
+is 5 to 10 % faster than trunk in all six rows, and how far that
+carries depends on where the VM put trunk (1.125x to 1.211x on
+close, 1.144x to 1.247x on keepalive, with no change to either
+server). Read as the ledger reads everything else, one row at a
+time: the connection-per-request shape is inside the bar on two VMs
+and four thousandths outside on the third; keepalive is inside on
+one and outside on two. ws57 predicted 1.04–1.11x and 1.10–1.17x for
+this host. On kasumi (16 cpus, the server and the generators on four
+of them under `taskset -c 0-3`, load 0.54,
+`kasumi:~/lanes/ws57/par-head1b.log` 9ce9ac44…, `162e8ee`) the same
+two trees read **1.034x** [1.029, 1.042] close (MET there; trunk
+1.142x) and **1.130x** [1.112, 1.139] keepalive (trunk 1.263x), with
+1.106x and 1.123x between the trees; a 16-cpu box with three quarters
+of it idle is not the bar's cell, so that set is a fourth reading and
+not a row of the README's table.
+
 ### 2026-10-09 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws55: wolf 0.2.26 against 0.2.25, TWO trees on one VM · **VALID** · **NOT MET on both shapes** (close 1.153x, keepalive 1.254x); the pin moves the rate by **1.001x / 0.999x**
 
 The 0.2.26 bump (ws55) rebuilds the runtime lobo links (descriptors
