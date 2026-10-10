@@ -531,6 +531,158 @@ kasumi's profile, and the herd's calls are the close cell's; both are
 wolf's to change, measured here so the change can be priced when it
 lands.
 
+### ws57's addendum — the memory returned: what a request costs once nothing is kept (2026-10-10)
+
+Predicted in `notes/ws57-contract.md` §3 before the first change.
+lobo#66 is ws56's finding (the addendum below): the gap to nginx was
+kernel time with equal system calls, and the time was page faults
+from memory lobo never returned. ws57 returns it, by scoping: a pass
+of the serving loop runs in `region pass`, a connection step in
+`copy region step`, and what the loop keeps is stored in place
+(`src/main.lu`; `docs/BUDGET.md` has the rules and what may still
+grow). Everything here is at the pin (wolf 0.2.26), on kasumi (linux
+x86-64, 16 cpus) with the server and the four `ab -c 8` generators
+under `taskset -c 0-3`, the parity file; "trunk" is `d1bf135`, "ws57"
+is `162e8ee` (release 96553ee8…). Artifacts are under
+`kasumi:~/lanes/ws57/`.
+
+**Growth and faults, counted** (`flt.sh`, `idle.sh`: 400,000 keepalive
+or 200,000 close requests after a 4,000-request warm-up; RSS and
+minor faults from /proc; `flt-trunk.log` ef89b5a9…, `idle-trunk.log`
+6a4404c6…, `flt-head1.log` 3b6db73a…, `idle-head1.log` b0440442…; the
+oracle is ws56's `flt-nginx.log`):
+
+| cell | trunk: faults / bytes a request | ws57: faults / bytes a request | RSS after, trunk → ws57 | nginx |
+|---|---|---|---|---|
+| keepalive, 1 process | 0.503 / 2,060 | **0.0011 / 4.6** | 819 MB → 6.0 MB | 0 / 0, 3.7 MB |
+| close, 1 process | 2.419 / 9,940 | **0.0094 / 70** | 2,015 MB → 18 MB | 0 / 0, 3.8 MB |
+| keepalive, 4 hands | 0.858 / 3,515 | **0.0015 / 6.6** | 1,407 MB → 21 MB (sum) | 0 / 0, 15 MB |
+| close, 4 hands | 3.024 / 12,386 | **0.0158 / 63** | 2,509 MB → 32 MB (sum) | 0.0001 / 2.6, 15 MB |
+| idle 20 s, no connection | 85 faults, 344 kB | **0 faults, 0 kB** | | |
+| idle 20 s, 32 kept-alive connections | 256 faults, 1,024 kB | **0 faults, 0 kB** | | |
+
+**What is left is not lobo's.** The residue is linear (five rounds of
+each shape, `lin-head1-ka.log`, `lin-head1-close.log`: 4.4 to 8.2
+bytes a keepalive request, 53 to 69 a connection) and is two tables
+in wolf 0.2.26's runtime that take a slot per open and never reuse
+one, each measured with no lobo code: the file table, 4.0 bytes per
+`fs_open` (5,000,000 opens and closes: the handle number reaches
+5,000,006 and RSS grows 4.0 MB a million; `probe/p14`), and the
+socket table, 52 to 63 bytes per accepted connection in an 80-line
+accept/read/write/close loop inside `region pass` (`probe/p13`,
+`p13.log`; the same loop on keepalive is flat at 2.6 MB). Filed as
+wolf-lang#661. The 2 MB steps RSS takes on the keepalive drive are
+that vector doubling.
+
+**Three things the regions needed that the checker and the runtime
+did not hand over, each measured.**
+
+1. *`net_read` is not returned by a region.* Its bytes are placed in
+   the process root whatever region is open (`ambient_copy`,
+   wolf-lang#374, open since 0.2.14): with the step scoped and the
+   read left alone, a request still kept the head it read.
+   `net_read_bytes` and `str_from_utf8` build in the current region,
+   so every read on a serving path goes through `conn.sock_read`.
+2. *A copy out of a region costs a call per string, empty ones
+   included.* The first build copied the whole `ConnStep` out of the
+   step's region — thirteen strings and the access record's two
+   header lists — and spent 11 % of its user cycles in
+   `__wolf_rt_str_repeat` under `serve_main`, which is how
+   `copy region` materializes a `str` (`cg-work1-keepalive-1.log`
+   794fb05f…): 23,590 user instructions a keepalive request
+   (`prof-work1.log` a2f38dc1…) against trunk's 19,730.
+   `serve.step_pack` packs the result first: the numbers
+   every step has are fields, and everything a plain served request
+   leaves empty rides in a list of none or one. 19,650.
+3. *A `List[byte]` slice copies element by element.* Reading a 4 KiB
+   carry back as `str_from_utf8(h[a..b])` took 8.7 µs, 7.8 of them
+   the slice (nomad-1, release tier, `probe/d-p9`, `d-p10`); decoding a buffer whole and slicing the `str` (a view)
+   takes 0.13 µs. So a carry has a buffer of its own from a pool, kept
+   a valid string by zeroing what a shorter carry leaves behind
+   (`carry_put`, `carry_str`).
+
+**Per request, by count and by clock** (`prof.sh`: `perf stat -e
+instructions:u,cycles:u` on every serving process and the /proc user
+and system split, three repeats, medians; ws57 is `prof-head1.log`
+1a68fb6f…, trunk `prof-trunk.log` 855e7c4f… twenty minutes later;
+nginx is ws56's `prof-nginx.log` 48200551…, taken with the same
+script five hours earlier — a re-run here, `prof-nginx.log`
+e53dde50…, counted the same instructions to within four and ran into
+another lane's build on its last cell):
+
+| server | cell | instr.:u/req | user µs | system µs | CPU µs/req | req/s |
+|---|---|---|---|---|---|---|
+| trunk | keepalive N=1 | 19,730 | 1.80 | 3.48 | 5.30 | 155,207 |
+| **ws57** | keepalive N=1 | **19,648** | 1.60 | 3.02 | **4.65** | 176,819 |
+| nginx | keepalive N=1 | 13,605 | 1.32 | 2.88 | 4.17 | 190,800 |
+| trunk | close N=1 | 21,087 | 2.30 | 7.35 | 9.65 | 80,509 |
+| **ws57** | close N=1 | **19,440** | 1.80 | 5.35 | **7.15** | 101,417 |
+| nginx | close N=1 | 14,326 | 1.75 | 6.10 | 7.90 | 93,469 |
+| trunk | keepalive N=4 | 22,239 | 2.25 | 4.65 | 6.85 | 328,994 |
+| **ws57** | keepalive N=4 | **21,340** | 1.98 | 3.90 | **5.85** | 361,742 |
+| nginx | keepalive N=4 | 13,680 | 1.55 | 3.60 | 5.15 | 404,532 |
+| trunk | close N=4 | 24,407 | 3.70 | 10.50 | 14.20 | 102,599 |
+| **ws57** | close N=4 | **21,751** | 2.95 | 7.95 | **10.85** | 114,547 |
+| nginx | close N=4 | 14,421 | 2.15 | 7.50 | 9.65 | 120,549 |
+
+System time fell by 0.46 to 2.55 µs a request, which is the faults
+(ws56 priced one fresh page at 0.61–0.69 µs on this box), and user
+time fell as well, by 0.2 to 0.75 µs, with the instruction count
+0.4 % and 4.0 % lower on keepalive and 8–11 % lower on close: the same instructions
+run faster on memory that is reused, and the connection table is no
+longer rebuilt every pass. On the connection-per-request shape lobo
+now spends less CPU a request than nginx at one process (7.15 against
+7.90 µs).
+
+**Parity on this box** (`tools/lobo-parity 5 5 32 4 4` under
+`taskset -c 0-3`, trunk beside ws57 against the same oracle,
+interleaved; `par-head1b.log` 9ce9ac44…, load 0.54, VALID):
+
+| cell | shape | ws57 req/s | trunk req/s | nginx req/s | nginx ÷ ws57 median [min, max] | nginx ÷ trunk | ws57 ÷ trunk |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 116,037 | 104,760 | 119,719 | **1.034x** [1.029, 1.042] | 1.142x | 1.106x [1.102, 1.112] |
+| N=4 c=32 | keepalive | 364,729 | 325,541 | 411,336 | **1.130x** [1.112, 1.139] | 1.263x | 1.123x [1.110, 1.136] |
+| N=1 c=32 | close | 98,268 | 80,009 | 91,336 | **0.929x** [0.904, 0.938] | 1.142x | 1.229x [1.224, 1.233] |
+| N=1 c=32 | keepalive | 165,648 | 153,336 | 185,567 | **1.099x** [1.095, 1.141] | 1.210x | 1.079x [1.068, 1.104] |
+
+The connection-per-request cell is inside the bar on this box at four
+hands (and lobo is ahead of nginx at one); the keepalive cell is not.
+The bar's own cell is the runner's (`docs/PARITY.md`: three valid
+sets on three VMs, runs 38085780224, 38088570687, 38089299844):
+close 1.104x, 1.062x, 1.075x and keepalive 1.130x, 1.082x, 1.111x —
+close inside the bar on two VMs of three, keepalive on one.
+
+**Against the prediction** (`notes/ws57-contract.md` §3 has the
+table). Held: idle growth zero; faults under 0.01 a request on
+keepalive (0.0011, 0.0015) and RSS under 8 MB after 400,000 requests
+(6.0); parity on this box at four hands on both shapes (1.034x in
+1.03–1.09x, 1.130x in 1.09–1.14x) and on close at one (0.929x); user
+instructions within ±4 % on keepalive (−0.4 %, −4.0 %). Missed:
+"under 4 B a request, under 8 B a connection" (4.6 and 70: the
+runtime's tables, which the prediction did not know of, and which
+also put the close cells' faults at 0.009 and 0.016 against "under
+0.01"); close instructions fell 8–11 %, outside the ±4 % band on the
+good side; and keepalive at one hand, predicted at 1.02–1.08x, which
+reads 1.099x. ws56's ablation (huge pages, the same binary) had
+removed the faults on a lobo built with wolf-lang trunk, where s222's
+arena had already taken a tenth of the user instructions; at the pin
+that tenth is still there, and it is the keepalive gap now: 19,650
+user instructions a request against nginx's 13,605, with system time
+within 5 % of nginx's at one process (3.02 against 2.88 µs).
+
+**What would move the keepalive cell now** (user cycles by function,
+`cg-work2-keepalive-4.log`, four hands): the parse (`http.parse_request`
+inclusive 14.9 %), the loop's own frame (`serve_main` self 7–8.6 %),
+the two head scans (`serve.head_cut`, 4.8 %, `str_find` 6.3 % self in
+all), `serve.head_warm` 5.0 % self (its slot is a byte fold over the
+whole file path on every request), and the runtime's per-region
+bookkeeping now that a request opens three regions where it opened
+one (`ledger_on_free` 1.9 %, `region_alloc_slow` 1.8 %). These are
+lobo#68's rows; the next pin (wolf 0.2.27) brings s222's arena and
+s218's one-call `fs_stat` with the inode, which is what lobo#67's
+file memo needs to be sound (at 0.2.26 a path stat is two calls and
+answers neither the inode nor the kind).
+
 ### ws56's addendum — the profile on wolf-lang trunk after s222: the gap is kernel time, and it is page faults (2026-10-10)
 
 Predicted in `notes/ws56-contract.md` §3 (P3) before the trunk-built
