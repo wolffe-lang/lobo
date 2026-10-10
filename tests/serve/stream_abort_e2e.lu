@@ -1,0 +1,260 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! `worker_shutdown_timeout` ENDS A STREAMED RESPONSE ON TIME (ws56,
+//! lobo#62). A large plaintext body leaves in a stream beside the loop
+//! (ws49), and until ws56 the loop's only way to end one was a 1 ms
+//! write budget armed on its socket — which rules the stream's NEXT
+//! write, not the one already parked ([os.net.io]). Measured on linux
+//! with a 2 s timeout: a 32 KB/s reader was aborted 26.8 s after the
+//! reload, a 64 KB/s one 13.8 s after (the park ends when the kernel
+//! calls the socket writable, about a third of its 2.6 MB send buffer
+//! later), and a client that reads nothing was never aborted at all.
+//! The pinned nginx 1.30.4 ends its old worker 2.15 s after the reload
+//! (tools/lobo-control-differential, row 8).
+//!
+//! The client here is the slowest there is: it reads the head and the
+//! first piece of a 24 MiB file and then NOTHING. One reload under
+//! `worker_shutdown_timeout 2s`; the draining generation must leave
+//! the status table between 1.9 s and 3.0 s after the reload was
+//! answered (the timeout, plus one loop pass and the status poll's
+//! step; the measured number is printed), the client's connection must
+//! be closed short of the whole body, and the new generation must
+//! answer a GET while and after. Twice: unbudgeted, and under
+//! `memory_budget 128k` (the reel's config). Then the control: with NO
+//! `worker_shutdown_timeout` the same stalled download is still held
+//! 3 s after the reload — the deadline is the directive's, not the
+//! reload's. Loopback only; OS-chosen ports; scratch under target/,
+//! cleared at START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// One whole short exchange on a fresh connection: the reply, or "" if
+/// none arrived inside `ms`. Total.
+fn ask(port: int, req: str, ms: int) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return ""
+    }
+    net_deadline(c, ms) else |_| {}
+    net_write(c, req) else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// Read off `c` until it ends or `ms` pass with nothing arriving.
+/// Answers how many bytes arrived. Total.
+fn drain_all(c: int, ms: int) -> int {
+    net_deadline(c, ms) else |_| {}
+    var got: int = 0
+    var reading = true
+    while reading {
+        let b = net_read_bytes(c, 65536) else |_| {
+            reading = false
+            List[byte]()
+        }
+        if b.len == 0 {
+            reading = false
+        }
+        got = got + b.len
+    }
+    got
+}
+
+/// One server whose main context carries `main_extra` and whose server
+/// block carries `extra`: a stalled download, one reload, and how long
+/// generation 1 stays in the status table (up to `watch_ms`). Answers
+/// (wrong answers, ms until generation 1 left or -1, body bytes the
+/// client got). Total.
+fn one(name: str, root: str, d: str, main_extra: str, extra: str, watch_ms: int) -> (
+    int,
+    int,
+    int,
+) {
+    var bad: int = 0
+    let hp = free_port() else |_| 0
+    let cp = free_port() else |_| 0
+    let ep = "127.0.0.1:{cp}"
+    fs_write_text(
+        "{d}/lobo.conf",
+        "pid {d}/lobo.pid;\ncontrol {ep};\n{main_extra}\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; {extra} }}\n}}\n",
+    ) else |_| {
+        return (1, -1, 0)
+    }
+    var argv = List[str]()
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        print("{name}: could not spawn target/lobo-debug")
+        return (1, -1, 0)
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| 0
+        print("{name}: the server never answered on {ep}")
+        return (1, -1, 0)
+    }
+
+    // the stalled client: the head and one piece, then nothing
+    let a = net_connect("127.0.0.1:{hp}") else |_| {
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| 0
+        return (1, -1, 0)
+    }
+    net_deadline(a, 20000) else |_| {}
+    net_write(a, "GET /big.bin HTTP/1.1\r\nHost: x\r\n\r\n") else |_| {}
+    let first = net_read_bytes(a, 4096) else |_| { List[byte]() }
+    if first.len == 0 {
+        print("{name}: the stalled client got nothing")
+        bad = bad + 1
+    }
+    time_sleep_ms(300)
+
+    // one reload; generation 1 drains with the stalled stream in it
+    let rl = shell.control_fetch(ep, "reload") else |_| { "" }
+    let t0 = time_unix_ms()
+    if !rl.contains("generation 2") {
+        print("{name}: the reload answered [{rl}]")
+        bad = bad + 1
+    }
+    var gone_ms: int = -1
+    var seen_draining = false
+    while gone_ms < 0 && time_unix_ms() - t0 < watch_ms {
+        let st = shell.control_fetch(ep, "status") else |_| { "" }
+        if st.contains("generation 1: draining") {
+            seen_draining = true
+        } else if st.contains("current generation: 2") {
+            gone_ms = time_unix_ms() - t0
+        }
+        if gone_ms < 0 {
+            time_sleep_ms(40)
+        }
+    }
+    if !seen_draining {
+        print("{name}: generation 1 was never seen draining")
+        bad = bad + 1
+    }
+    // the new generation serves throughout
+    let r = ask(hp, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", 3000)
+    if !r.contains("200 OK") || !r.contains("small-page") {
+        print("{name}: generation 2 answered [{r.len} bytes]")
+        bad = bad + 1
+    }
+    // what the stalled client finds when it finally reads: whatever
+    // the kernel still held, then the end (an aborted stream) — or a
+    // stream still running (the control), cut off by this read's
+    // deadline
+    let rest = drain_all(a, 1500)
+    net_close(a) else |_| {}
+
+    shell.control_fetch(ep, "stop") else |_| {
+        os_kill(child) else |_| {}
+        ""
+    }
+    let _w = os_wait(child) else |_| 0
+    (bad, gone_ms, first.len + rest)
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws56_stream_abort"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let size = 25165824
+    var argv = List[str]()
+    (mut argv).push("/bin/sh")
+    (mut argv).push("-c")
+    (mut argv).push("head -c \"$1\" /dev/zero | tr '\\000' w > \"$2\"")
+    (mut argv).push("sh")
+    (mut argv).push("{size}")
+    (mut argv).push("{d}/www/big.bin")
+    let h = os_spawn(argv)?
+    let mk = os_wait(h)?
+    assert(mk == 0, "the 24 MiB file is written")
+
+    let a = one("2s", root, d, "worker_shutdown_timeout 2s;", "", 8000)
+    print(
+        "2s: generation 1 left {a.1} ms after the reload; the stalled client got {a.2} of {size} bytes",
+    )
+    let b = one(
+        "2s + memory_budget 128k",
+        root,
+        d,
+        "worker_shutdown_timeout 2s;",
+        "memory_budget 128k;",
+        8000,
+    )
+    print(
+        "2s + memory_budget 128k: generation 1 left {b.1} ms after the reload; the stalled client got {b.2} of {size} bytes",
+    )
+    let c = one("no timeout", root, d, "", "", 3000)
+    print(
+        "no timeout: generation 1 {if c.1 < 0 { "still draining after 3000 ms" } else { "left early" }}",
+    )
+
+    assert(
+        a.0 == 0 && b.0 == 0 && c.0 == 0,
+        "every side answer was right ({a.0}, {b.0}, {c.0} wrong)",
+    )
+    assert(
+        a.1 >= 1900 && a.1 <= 3000,
+        "worker_shutdown_timeout 2s ends a stalled stream between 1.9 and 3.0 s after the reload (got {a.1} ms; -1 is never, lobo#62)",
+    )
+    assert(
+        b.1 >= 1900 && b.1 <= 3000,
+        "the same under memory_budget 128k (got {b.1} ms; -1 is never, lobo#62)",
+    )
+    assert(a.2 < size && b.2 < size, "an aborted stream is cut short ({a.2}, {b.2} of {size})")
+    assert(
+        c.1 < 0,
+        "with no worker_shutdown_timeout the stalled stream is held (left after {c.1} ms)",
+    )
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

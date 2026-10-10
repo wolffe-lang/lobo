@@ -37,6 +37,9 @@
 #   7. (ws54, lobo#50) `worker_shutdown_timeout` is the DRAINING
 #      generation's own: a reload that adds it does not bite the
 #      generation it drains, one that removes it still does (7a–7c).
+#   8. (ws56, lobo#62) `worker_shutdown_timeout` ends a STREAMED
+#      response on time: one slow download across one reload under a
+#      2 s timeout is ended by both servers inside [2 s, 3 s].
 #
 # Three rows are NAMED DELTAS, printed with their reason (a
 # differential that hides a delta is a differential that lies —
@@ -330,10 +333,9 @@ done
 # began (no deadline) or exited (the deadline bit). lobo's is its own
 # status line for the draining generation: `shutdown-in-ms=` present
 # (≤ 2000) or absent, plus the generation still listed after 5 s where
-# no deadline applies. lobo's ABORT of a streamed response under the
-# deadline is a separate defect (lobo#62: 25 s late against 2 s, the
-# parked write keeps its own budget), which is why this row reads the
-# deadline lobo applies and not the moment its stream gives up.
+# no deadline applies. WHEN lobo ends a streamed response under the
+# deadline is row 8's question (lobo#62, fixed at ws56); this row
+# reads the deadline lobo applies.
 p7=$root/p7
 mkdir -p "$p7/www" "$p7/logs"
 head -c 67108864 /dev/zero > "$p7/www/big.bin"
@@ -412,6 +414,53 @@ sleep 5
 kill "$lb7d1" "$lb7d2" "$lb7d3" 2>/dev/null
 "$LOBO" -p "$p7" -c lobo7.conf -s stop > /dev/null 2>&1 || kill "$lb7pid" 2>/dev/null
 wait "$lb7pid" "$lb7d1" "$lb7d2" "$lb7d3" 2>/dev/null
+
+# ======================= row 8 (ws56, lobo#62) ======================
+# WHEN a streamed response is ended by `worker_shutdown_timeout`. The
+# directive (2 s) is present from the start; one slow download (the
+# same 32 KB/s curl of the 64 MiB file) is in flight; one reload. The
+# oracle's answer is how long its old worker lives after the reload
+# (polled every 0.1 s, so read in tenths); lobo's is its own event,
+# `generation-retired gen=1 … aborted=1 age-ms=N`. Both must end the
+# response inside [2 s, 3 s]: the timeout, and at most a second after
+# it. Before ws56 lobo armed a 1 ms write budget on the socket, which
+# rules only a write that begins afterwards; the stream's parked write
+# ended it 26.8 s after the reload (docs/DRAIN.md).
+ng7conf 'worker_shutdown_timeout 2s;'
+"$BIN" -p "$p7/" -c nginx7.conf -e logs/error.log > "$scratch/ng8.out" 2>&1 &
+ng8pid=$!
+poll_body "$n7" P7 > /dev/null || true
+w8=$(kids "$ng8pid" | head -1)
+slow "$n7"; ng8d=$slowpid
+sleep 1
+"$BIN" -p "$p7/" -c nginx7.conf -s reload > /dev/null 2>&1
+ng8ds=0
+while [ "$ng8ds" -lt 100 ] && [ -n "$w8" ] && [ "$(alive "$w8")" = 1 ]; do
+    sleep 0.1
+    ng8ds=$((ng8ds + 1))
+done
+kill "$ng8d" 2>/dev/null
+kill "$ng8pid" 2>/dev/null
+wait "$ng8pid" "$ng8d" 2>/dev/null
+
+lb7conf 'worker_shutdown_timeout 2s;'
+"$LOBO" serve -p "$p7" -c lobo7.conf 2> "$scratch/lb8.log" &
+lb8pid=$!
+poll_body "$l7" P7 > /dev/null || true
+slow "$l7"; lb8d=$slowpid
+sleep 1
+"$LOBO" -p "$p7" -c lobo7.conf -s reload > /dev/null 2>&1
+i=0
+while [ $i -lt 100 ] && ! grep -q 'generation-retired gen=1 ' "$scratch/lb8.log" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+done
+lb8line=$(grep 'generation-retired gen=1 ' "$scratch/lb8.log" 2>/dev/null | head -1)
+lb8ms=$(echo "$lb8line" | sed -n 's/.*age-ms=\([0-9]*\).*/\1/p')
+lb8ab=$(echo "$lb8line" | sed -n 's/.*aborted=\([0-9]*\).*/\1/p')
+kill "$lb8d" 2>/dev/null
+"$LOBO" -p "$p7" -c lobo7.conf -s stop > /dev/null 2>&1 || kill "$lb8pid" 2>/dev/null
+wait "$lb8pid" "$lb8d" 2>/dev/null
 rm -f "$p7/www/big.bin"
 # lobo's three answers: 1 = held to no deadline (draining, listed, no
 # shutdown-in-ms), 0 = held to the 2 s deadline (shutdown-in-ms ≤ 2000)
@@ -498,6 +547,14 @@ seven_row() { # seven_row <label> <what> <want> <nginx> <lobo>
 seven_row 7a "a generation loaded WITHOUT worker_shutdown_timeout, drained by a reload that adds 2s, is held to no deadline" 1 "$ng7a" "$lb7a"
 seven_row 7b "a generation loaded WITH 2s, drained by a reload that removes it, is held to 2 s" 0 "$ng7b" "$lb7b"
 seven_row 7c "a generation loaded without it, drained by a third reload, is held to no deadline" 1 "$ng7c" "$lb7c"
+
+# row 8: both end the streamed response inside [2 s, 3 s] of the reload
+if [ -n "$w8" ] && [ "$ng8ds" -ge 18 ] && [ "$ng8ds" -le 32 ] &&
+    [ -n "$lb8ms" ] && [ "$lb8ms" -ge 2000 ] && [ "$lb8ms" -le 3000 ] && [ "$lb8ab" = 1 ]; then
+    row "8. worker_shutdown_timeout 2s ends a STREAMED response on time: nginx's old worker is gone about $((ng8ds / 10)).$((ng8ds % 10)) s after the reload, lobo retires the generation with aborted=1 at age-ms=$lb8ms — both inside [2 s, 3 s] (lobo#62)" 0
+else
+    row "8. worker_shutdown_timeout 2s and a streamed response: want both inside [2 s, 3 s] of the reload; nginx's old worker ($w8) lived ${ng8ds} tenths of a second (100 = still alive after 10 s), lobo's event was '${lb8line:-none within 10 s}' (lobo#62; artifacts: $scratch/lb8.log, $p7/logs/error.log)" 1
+fi
 
 echo ""
 note "NAMED DELTAS (measured, not hidden)"
