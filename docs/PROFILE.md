@@ -531,6 +531,155 @@ kasumi's profile, and the herd's calls are the close cell's; both are
 wolf's to change, measured here so the change can be priced when it
 lands.
 
+### ws56's addendum — the profile on wolf-lang trunk after s222: the gap is kernel time, and it is page faults (2026-10-10)
+
+Predicted in `notes/ws56-contract.md` §3 (P3) before the trunk-built
+lobo was measured; half of that prediction was wrong, and the wrong
+half is the finding. Everything here is lobo trunk's source
+(`ebace85`) built with a toolchain made from wolf-lang trunk
+`76436101` (s222's lock-free arena; not released, and never pinned on
+any pushed branch), beside the same source at the pin (wolf 0.2.26)
+and the pinned nginx 1.30.4, on kasumi (linux x86-64, 16 cpus) with
+the server AND the four `ab -c 8` generators under `taskset -c 0-3`,
+the parity file. Artifacts are under `kasumi:~/lanes/ws56/`.
+
+**Per request, by count and by clock** (`prof.sh`: `perf stat -e
+instructions:u,cycles:u` on every serving process, the /proc user and
+system split, 400,000 keepalive or 200,000 close requests, three
+repeats, medians; `prof-tw.log` 768a9687…, `prof-nginx.log`
+48200551…, `prof-0226.log` 1ac757dc…):
+
+| server | cell | instr.:u/req | user µs | system µs | CPU µs/req | req/s |
+|---|---|---|---|---|---|---|
+| lobo, wolf trunk | keepalive N=1 | 16,990 | 1.48 | 3.33 | 4.88 | 168,537 |
+| lobo, wolf 0.2.26 | keepalive N=1 | 19,564 | 1.80 | 3.38 | 5.17 | 158,837 |
+| nginx | keepalive N=1 | 13,605 | 1.32 | 2.88 | 4.17 | 190,800 |
+| lobo, wolf trunk | close N=1 | 17,912 | 1.90 | 7.20 | 9.10 | 84,198 |
+| lobo, wolf 0.2.26 | close N=1 | 20,902 | 2.35 | 7.20 | 9.55 | 81,578 |
+| nginx | close N=1 | 14,326 | 1.75 | 6.10 | 7.90 | 93,469 |
+| lobo, wolf trunk | keepalive N=4 | 19,020 | 1.88 | 4.50 | 6.38 | 342,272 |
+| lobo, wolf 0.2.26 | keepalive N=4 | 21,975 | 2.23 | 4.53 | 6.78 | 328,138 |
+| nginx | keepalive N=4 | 13,680 | 1.55 | 3.60 | 5.15 | 404,532 |
+| lobo, wolf trunk | close N=4 | 20,529 | 3.00 | 10.25 | 13.35 | 106,381 |
+| lobo, wolf 0.2.26 | close N=4 | 24,168 | 3.50 | 10.30 | 13.85 | 104,682 |
+| nginx | close N=4 | 14,421 | 2.15 | 7.50 | 9.65 | 120,549 |
+
+s222 is worth 13.2 % of lobo's user instructions on keepalive and
+14.3 % on close at one process (s222 measured 12.0 and 12.8), and it
+moved no system time. nginx is not the 8,000 instructions P3 guessed:
+it spends 13,605, so lobo's user-space excess is 25 %, and in time
+0.16 µs at one process and 0.33 at four. **The rest of the gap is
+system time: 0.45 µs of 0.71 at one process on keepalive, 0.90 of
+1.23 at four; 1.10 of 1.20 and 2.75 of 3.70 on close.**
+
+**The calls are not the reason** (`sys.sh`: each server started under
+`strace -f -c`, 100,000 requests a cell; `sys-tw.log` c366219d…,
+`sys-nginx.log` e01e003e…):
+
+| cell | lobo calls/req | nginx calls/req | lobo's | nginx's |
+|---|---|---|---|---|
+| keepalive N=1 | 6.06 | 6.04 | `recvfrom` `openat` `statx` `read` `close` `writev` 1.00 each, `poll` 0.03 | `recvfrom` `openat` `fstat` `pread64` `close` `writev` 1.00 each, `epoll_wait` 0.03 |
+| keepalive N=4 | 6.25 | 6.14 | the same, `poll` 0.18, `futex` 0.03 | the same, `epoll_wait` 0.13 |
+| close N=1 | 9.14 | 10.00 | + `accept4` 1.00, `close` 2.00, `poll` 1.06 | + `accept4` 1.00, `close` 2.00, `epoll_ctl` 1.00, `epoll_wait` 1.00 |
+| close N=4 | 10.11 | 10.13 | `accept4` 1.08, `poll` 1.28, `futex` 0.24, `epoll_ctl` 0.15, `epoll_wait` 0.14, `read` 1.08, `write` 0.08 | `epoll_ctl` 1.13, `epoll_wait` 1.00 |
+
+ws54's "2.78 more calls a connection" is gone: on close lobo makes
+0.87 FEWER calls than nginx at one process and the same number at
+four.
+
+**The reason is memory** (`flt.sh`, counts from /proc; `flt-tw.log`
+3f3bfae5…, `flt-0226.log` 958b748e…, `flt-nginx.log` 58a1abdb…,
+`idle-tw.log` 01471bc6…): lobo touches fresh pages for every request
+and never gives them back.
+
+| cell | lobo minor faults/req | lobo RSS growth/req | lobo RSS after | nginx |
+|---|---|---|---|---|
+| keepalive N=1 | 0.50 | 2,054 B | 816 MB | 0 faults, 3.7 MB |
+| close N=1 | 2.42 | 9,941 B | 2,017 MB | 0 faults, 3.8 MB |
+| keepalive N=4 | 0.91 | 3,743 B | 1,503 MB | 0 faults, 15 MB |
+| close N=4 | 3.02 | 12,390 B | 2,515 MB | 0 faults, 15 MB |
+
+The same numbers at the 0.2.26 pin, so this is lobo's and not s222's.
+An idle lobo grows too: 4.3 KB a 250 ms pass with no connection
+(344 kB in 20 s, about 1.5 GB a day) and 12.8 KB a pass holding 32
+idle connections. `docs/BUDGET.md` charges this to wolf-lang#191,
+which closed on 2026-09-13; the serving path simply never scopes a
+region around a pass's row lists or a request's strings (lobo#66).
+One fresh 4 KiB page costs this kernel 0.61–0.69 µs (`pf.py`, a
+gigabyte touched page by page with huge pages refused; `pf.log`
+a54d89a8…), so the faults alone are 0.33 µs a request at one process
+on keepalive and 0.60 at four, 1.6 and 2.0 on close.
+
+**The ablation, with no code change** (`prof-tw-thp.log` c7412480…
+against the plain binary `prof-tw2.log` f38b36c7… and nginx
+`prof-nginx2.log` 9126689b… in one window; `flt-tw-thp.log`
+b992ed29…): the same binary started with
+`GLIBC_TUNABLES=glibc.malloc.hugetlb=1`, which puts malloc's heap on
+huge pages. The bytes retained are the same; the faults fall to
+0.002–0.02 a request.
+
+| cell | CPU µs/req plain → huge pages | system µs | req/s | nginx ÷ lobo |
+|---|---|---|---|---|
+| keepalive N=4 | 6.57 → 5.72 | 4.60 → 3.95 | 333,469 → 355,678 (+6.7 %) | 1.192x → **1.118x** |
+| close N=4 | 13.85 → 11.85 | 10.55 → 8.70 | 102,668 → 108,094 (+5.3 %) | 1.138x → **1.081x** |
+| keepalive N=1 | 5.07 → 4.65 | 3.48 → 3.20 | 161,666 → 174,971 (+8.2 %) | 1.137x → 1.050x |
+| close N=1 | 9.45 → 7.70 | 7.50 → 6.00 | 81,553 → 95,497 (+17.1 %) | 1.100x → 0.939x |
+
+That run still zeroes and touches every retained byte, so it is a
+floor for what reusing the memory is worth. It also calibrates the
+model the bounds below use: at the bar's cell a 12.9 % saving in CPU
+a request became 6.7 % more requests (elasticity 0.47 on keepalive,
+0.33 on close), because the generators share the four cpus.
+
+**Where lobo's user time goes** (`cg.sh`: `perf record -e cycles:u
+--call-graph lbr`; keepalive, one process, `cg-tw-keepalive-1.log`
+865cb121…; the other three cells are `cg-tw-keepalive-4.log`
+27c90bbc…, `cg-tw-close-1.log` 995bb889…, `cg-tw-close-4.log`
+29e7bc35…): inclusive `serve_request` 73.9 %, `handle_request` 41.3,
+`serve_file` 27.6, `parse_request` 21.2, `str_find` 9.5, `classify`
+8.5, `head_cut` 6.4, `net_writev_head` 6.4, `fs_fstat` 4.9,
+`fs_read_chunk` 4.7, `net_read` 4.7, `list_new` 4.1, `list_push` 3.7,
+the clock 3.3, `fs_open` 3.3; self `str_find` 7.6, `serve_main` 7.2,
+`head_warm` 6.1, `parse_request` 5.4, `serve_request` 4.0,
+`split_lines_strict` 3.6, `list_new` 3.5. `ambient_alloc`, ws54's
+largest leaf at 7.4 %, is gone from the table. At four hands a request
+costs 2,030 more user instructions than at one (19,020 against 16,990)
+and 0.178 `poll` calls against 0.033: passes that wake and find
+nothing; nginx is flat.
+
+**The levers, ranked.** "Bound" is nginx ÷ lobo at the bar's cell if
+the lever's cost were zero and every saved microsecond became
+requests, from the runner's 1.203x keepalive and 1.145x close (s222);
+"expected" applies the measured elasticity. The bar is 1.10.
+
+| # | lever | owner | cost a request at N=4 | keepalive bound / expected | close bound / expected |
+|---|---|---|---|---|---|
+| 1 | the memory a pass and a request touch and never return (lobo#66) | lobo | measured by the ablation: 0.85 µs keepalive, 2.0 µs close | **1.128x measured** (the ablation's +6.7 %); about 1.12x if the retained bytes' zeroing went too | **1.087x measured** (+5.3 %) |
+| 2 | the four file calls a request (lobo#67) | lobo | 0.27 µs user (14.6 % of user) + 0.75–0.83 µs system (`fsys.log` 79edf632…); nginx pays the same four | 1.01x / 1.11x; with one `stat` kept 1.07x / 1.14x | 1.05x / 1.11x |
+| 3 | parsing (lobo#68) | lobo | 0.40 µs (21.2 % of user) | 1.128x / 1.167x | 1.111x / 1.134x |
+| 4 | head and route (lobo#68) | lobo | up to 0.39 µs keepalive, 0.47 close (`head_cut` + `head_warm` 12.5 %, `classify` 8.5 %; 8.9 and 7.0 on close) | 1.129x / 1.168x | 1.105x / 1.132x |
+| 5 | the loop's bookkeeping (lobo#68) | lobo | up to 0.37 µs keepalive, 0.63 close (19.5 % and 21.1 % of user), and the 2,030 instructions of empty passes at four hands | 1.134x / 1.170x | 1.091x / 1.127x |
+| 6 | `str_find`'s byte loop (wolf-lang#654) | wolf-lang | 0.18 µs (9.45 % of user; inside rows 3 and 4) | 1.17x / 1.19x | 1.13x / 1.14x |
+
+Row 1 is the only measured one, the only one that also ends a defect
+(a server that grows without bound), and with it the close shape
+crosses the bar; keepalive lands at about 1.12x and needs row 2 or
+row 3 beside it (1.118x × the stat-validated file memo's expected
+0.94 is about 1.05x; × parsing's 0.97, about 1.08x).
+
+**What this does not say.** The ratios in the ablation table are
+kasumi's, taken while this lane's own runs kept the 1-minute load
+near 4; `tools/lobo-parity` refused its set for that (trunk-wolf
+1.227x keepalive and 1.140x close at N=4, 0.2.26 1.265x and 1.146x,
+trunk-wolf ÷ 0.2.26 1.036x and 1.008x; `parity-kasumi.log`), and the
+runner was not re-run because a trunk pin may not reach this
+repository's origin. The counts (instructions, calls, faults, bytes)
+do not move with load. Kernel time was read from /proc, not profiled
+(`perf_event_paranoid` is 2); that the faults ARE the system-time gap
+is shown by the ablation, not by a kernel profile. Rows 2–6 are
+shares of a user-space profile turned into microseconds, not
+ablations.
+
 ## What this does NOT say
 
 - The count is the request's; the herd's cost per park is not a
