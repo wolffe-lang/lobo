@@ -37,6 +37,16 @@ half-true at the current pin:
   wolf-lang#191. Until that pin lands, a long-running lobo retains
   each request's string work; the audit witness names the gap
   on every run and flips to a hard O(1) gate at the fix's pin bump.
+- ws56 (2026-10-10) corrects the bullet above: wolf-lang#191 closed
+  on 2026-09-13 and the flip was never made, because the fix lets a
+  string join a region and lobo's serving path scopes none around a
+  pass or a request. Counted at the 0.2.26 pin and on wolf-lang trunk
+  alike: 2,054 bytes of RSS a keepalive request, 9,941 a connection,
+  4.3 KB a 250 ms idle pass (816 MB after 400,000 requests; about
+  1.5 GB a day idle), against none for the oracle. The retention is
+  lobo's to scope and is filed as lobo#66 with the parity numbers
+  that follow from it (docs/PROFILE.md, ws56's addendum); the audit's
+  named skip still prints wolf-lang#191 until that lane flips it.
 
 ### The audit method (a deliverable)
 
