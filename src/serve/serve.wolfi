@@ -1,9 +1,9 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.26 · edition v1
-  export_hash 6e4e32b44c8f3affa221ccea84cb1eb23b4170334dda837f96220554c8be6e38
-  pkg_hash    6e4e32b44c8f3affa221ccea84cb1eb23b4170334dda837f96220554c8be6e38
+  export_hash ec3a0bea78bf3ffa05e981dee0ddd4035ef075121aead793f5352fceec14de30
+  pkg_hash    ec3a0bea78bf3ffa05e981dee0ddd4035ef075121aead793f5352fceec14de30
   deps:
-    budget  b55483cdb4fa980b9c9e538caa1a72bafd8c2469140bbfc2dedbbfac38a2632d
+    budget  d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
     config  073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
     conn  bef157cb41fac0431870c12dcc851fa1804760a291b5d6f821312aa769715436
     http  4329d409434ad2e150ebfd5458543257856a67d2c3590fc756ceca444dc9896a
@@ -48,9 +48,9 @@ module pkg :: serve
     [32] pub write_admin — fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io}
     [33] pub write_admin_503 — fn write_admin_503(conn: int, token: str)
     [34] pub Classified — struct Classified { kind: int, fd: int, size: int, mtime_ms: int }
-    [35] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool }
+    [35] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int }
     [36] pub FileKinds — struct FileKinds { hpath: prelude.List[str], hsize: prelude.List[int], hmtime: prelude.List[int], hsecs: prelude.List[int], hkeep: prelude.List[int], htoken: prelude.List[str], hhead: prelude.List[str], date_secs: int, date_str: str, boundary: int }
     [37] pub RangePlan — struct RangePlan { kind: int, starts: prelude.List[int], ends: prelude.List[int] }
-    [38] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool }
+    [38] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int }
     [39] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int, stream_w: int, proc_room: bool }
 

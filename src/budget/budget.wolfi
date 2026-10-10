@@ -1,14 +1,20 @@
 module pkg :: budget
   wolfi v0 · toolchain 0.2.26 · edition v1
-  export_hash b55483cdb4fa980b9c9e538caa1a72bafd8c2469140bbfc2dedbbfac38a2632d
-  pkg_hash    b55483cdb4fa980b9c9e538caa1a72bafd8c2469140bbfc2dedbbfac38a2632d
+  export_hash d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
+  pkg_hash    d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
   deps:
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
+    std.str  dc7ce11212aa0aefa04bfb36ce9514e82a7e3a81f51bfa61d26b0c931032be35
   items:
     [0] pub run_small — fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -, -) -> ρ_caller
     [1] pub run_stream — fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -) -> ρ_caller
-    [2] pub start_stream — fn start_stream(sock: int, fd: int, out: int)
-    [3] pub stream_line — fn stream_line(line: str) -> (int, int, int, int) · regions (-) -> ρ_caller
-    [4] pub version — fn version() -> str
-    [5] pub Outcome — struct Outcome { cls: int, wcode: int, rt: int }
+    [2] pub stream_done — fn stream_done(mut slots: prelude.List[self.StreamSlot], i: int) · regions (ρ1, -) -> -
+    [3] pub stream_kill — fn stream_kill(mut slots: prelude.List[self.StreamSlot], i: int) -> bool · regions (ρ1, -) -> -
+    [4] pub stream_line — fn stream_line(line: str) -> (int, int, int, int, int) · regions (-) -> ρ_caller
+    [5] pub stream_live — fn stream_live(slots: prelude.List[self.StreamSlot]) -> int · regions (ρ1) -> -
+    [6] pub stream_open — fn stream_open(mut slots: prelude.List[self.StreamSlot], sock: int, fd: int, out: int, id: int) -> int · regions (ρ1, -, -, -, -) -> -
+    [7] pub stream_slot — fn stream_slot(slots: prelude.List[self.StreamSlot], sock: int, id: int) -> int · regions (ρ1, -, -) -> -
+    [8] pub version — fn version() -> str
+    [9] pub Outcome — struct Outcome { cls: int, wcode: int, rt: int }
+    [10] pub StreamSlot — struct StreamSlot { sock: int, id: int, file: int, w: prelude.Proc[int] }
 
