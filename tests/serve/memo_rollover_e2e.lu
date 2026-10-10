@@ -1,0 +1,257 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native
+//! stage-src: shell config obs
+//!
+//! ws57 (lobo#66): THE MEMO'S REGION IS LET GO, AND NOTHING SHOWS.
+//! The per-hand head-and-date memo lives in a region of its own that
+//! the serving loop frees and starts again once it has grown past
+//! 1 MiB (`memo_cap` in src/main.lu): the memo's strings change every
+//! second, and a region that is never freed would keep every one of
+//! them. A miss builds what the memo would have answered, so the wire
+//! must not show the moment the table empties — and the multipart
+//! boundary counter, which the table used to carry, must count on
+//! across it (nginx's is a per-process counter; a repeat would be a
+//! wire change).
+//!
+//! The drive: 900 files, each asked once in each of five different
+//! seconds over keep-alive connections. Every one of those 4,500
+//! requests is a memo miss (a head is memoized under the second it
+//! was built for) and stores a path and a head of about 300 bytes in
+//! the memo's region, so the drive puts about 1.4 MB through a 1 MiB
+//! region and the loop lets it go at least once on the way. Before
+//! the drive and after it a two-range request reads the boundary
+//! (they must be consecutive numbers), and every one of the 4,500
+//! answers is checked for its own length and body. Loopback only,
+//! OS-chosen ports, scratch cleared at START, the master stopped
+//! through its desk and waited for.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn dial(port: int) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 8000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    c
+}
+
+/// The decimal value after `key` on its line in `head`, or -1. Total.
+fn number_after(head: str, key: str) -> int {
+    let at = head.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    var n: int = 0
+    var seen = false
+    for b_raw in head[at + key.len..head.len].bytes() {
+        let b = b_raw as int
+        if b >= 48 && b <= 57 {
+            n = n * 10 + b - 48
+            seen = true
+        } else if seen {
+            return n
+        } else if b != 32 {
+            return -1
+        }
+    }
+    if seen { n } else { -1 }
+}
+
+/// Read ONE whole fixed-length response off `c`; answers (response,
+/// bytes left over). Rows: `io`.
+fn read_one(c: int, carry: str) -> (str, str) ! {io} {
+    var buf = carry
+    var marker: int = -1
+    while marker < 0 {
+        let m = buf.find("\r\n\r\n") else -1
+        if m >= 0 {
+            marker = m
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                return io
+            }
+            if piece.is_empty() {
+                return io
+            }
+            buf = "{buf}{piece}"
+        }
+    }
+    let cl = number_after(buf[0..marker], "Content-Length:")
+    if cl < 0 {
+        return io
+    }
+    let total = marker + 4 + cl
+    while buf.len < total {
+        let piece = net_read(c, 4096) else |_| {
+            return io
+        }
+        if piece.is_empty() {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+    (buf[0..total], buf[total..buf.len])
+}
+
+/// What file `i` holds. Total.
+fn body_of(i: int) -> str {
+    "MEMO-ROLLOVER-FILE-{i}\n"
+}
+
+/// The boundary number a two-range request is answered with. Rows:
+/// `io` (no multipart answer).
+fn boundary_now(port: int) -> int ! {io} {
+    let c = dial(port)?
+    net_write(
+        c,
+        "GET /f0.html HTTP/1.1\r\nHost: x\r\nRange: bytes=0-3,5-8\r\nConnection: close\r\n\r\n",
+    ) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    if !buf.starts_with("HTTP/1.1 206") {
+        return io
+    }
+    let n = number_after(buf, "boundary=")
+    if n < 0 {
+        return io
+    }
+    n
+}
+
+fn main() -> !int {
+    let d = "ws57_memo_e2e"
+    let files = 900
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    var i: int = 0
+    while i < files {
+        fs_write_text("{d}/w/f{i}.html", body_of(i))?
+        i = i + 1
+    }
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    let b0 = boundary_now(hp)?
+    assert(b0 == 1, "a fresh server's first boundary is 1 (got {b0})")
+
+    // five sweeps over the 900 files, each in a second of its own
+    var sweep: int = 0
+    var asked: int = 0
+    while sweep < 5 {
+        let t0 = time_unix_ms()
+        var f: int = 0
+        while f < files {
+            // 450 requests a connection (keepalive_requests is 1000)
+            let c = dial(hp)?
+            var carry = ""
+            var k: int = 0
+            while k < 450 && f < files {
+                net_write(c, "GET /f{f}.html HTTP/1.1\r\nHost: x\r\n\r\n")?
+                let r = read_one(c, carry)?
+                carry = r.1
+                let want = body_of(f)
+                assert(
+                    r.0.starts_with("HTTP/1.1 200 OK") && r.0.ends_with(want),
+                    "sweep {sweep}: f{f}.html answers its own body: {r.0}",
+                )
+                assert(
+                    number_after(r.0, "Content-Length:") == want.len,
+                    "sweep {sweep}: f{f}.html answers its own length: {r.0}",
+                )
+                asked = asked + 1
+                f = f + 1
+                k = k + 1
+            }
+            net_close(c) else |_| {}
+        }
+        // the next sweep starts in a later second, so its heads miss
+        let spent = time_unix_ms() - t0
+        if spent < 1100 {
+            time_sleep_ms(1100 - spent)
+        }
+        sweep = sweep + 1
+    }
+    assert(asked == 4500, "4,500 requests were answered (got {asked})")
+
+    let b1 = boundary_now(hp)?
+    assert(b1 == b0 + 1, "the boundary counts on across the memo's region ({b0} then {b1})")
+
+    let st = shell.control_send(ep, "status") else |_| ""
+    assert(st.contains("live=0"), "every connection is closed and counted: {st}")
+
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "lobo exited 0 (got {code})")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
