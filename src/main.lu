@@ -2150,6 +2150,12 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         // ws49: the streams in flight as this pass begins; a hand-off
         // below adds one
         var inflight: int = 0
+        // ws56 (lobo#65): the ACME daemon is one more proc parked
+        // beside the loop for the life of the process, so it takes one
+        // place in the room
+        if acme_beside {
+            inflight = 1
+        }
         for sx in cstream {
             if sx != 0 {
                 inflight = inflight + 1
