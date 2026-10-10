@@ -47,6 +47,45 @@ half-true at the current pin:
   lobo's to scope and is filed as lobo#66 with the parity numbers
   that follow from it (docs/PROFILE.md, ws56's addendum); the audit's
   named skip still prints wolf-lang#191 until that lane flips it.
+- ws57 (2026-10-10, lobo#66) scopes them, and the skip is a gate. The
+  serving loop runs each pass in `region pass` and each connection
+  step in `copy region step` (`src/main.lu`), so a request's strings,
+  its parse and its response head die with the step and a pass's
+  lists die with the pass; what the loop keeps from one pass to the
+  next is stored in place, by index, in tables that are never rebuilt
+  on a hot path (the connection table, the generation counts, the
+  carry as bytes in a pooled buffer), and the head-and-date memo lives
+  in a region of its own that is let go once it passes 1 MiB. Counted
+  on the same drive: **4.6 bytes** of RSS a keepalive request (it was
+  2,060), **63 to 70** a connection (9,940), **none** idle, with or
+  without connections attached (4.3 KB a pass); RSS 6.0 MB after
+  400,000 keepalive requests (819 MB). What is left is the runtime's,
+  measured with no lobo code and filed: its file table grows 4 bytes
+  per `fs_open` and its socket table about 57 bytes per accepted
+  connection, neither slot ever reused (wolf-lang#661); a proc that
+  is spawned, monitored and joined leaves about 280 bytes
+  (wolf-lang#662), which is what a budgeted response still costs,
+  since it runs in one. `tools/lobo-membudget` holds all of it as
+  hard rows (see Witnesses).
+
+  **What may still grow, by rule.** A call that must grow one of the
+  loop's tables is aimed at a region that lives as long as the
+  process (`in life { … }`), so each of these is bounded by something
+  other than the number of requests: the connection table and the
+  carry pool by the most connections ever open (or holding a partial
+  request) at once, each carry buffer by the longest carry it ever
+  held; the list of parked names by the upstream names the configs
+  name; a reload by one generation (its frozen model, its TLS
+  material, its log outputs — a reload has never returned its
+  predecessor's); an issuance by one `SslConf`; the resolver by about
+  three copies of its tables per DNS query (it is replaced whole when
+  a query starts, when an answer's bytes arrive and when it settles);
+  a draining generation's retirement by one table. With `cert auto`
+  on, the renewal daemon is a proc that lives as long as the process
+  and frees nothing between checks (one check per
+  `cert_check_interval`, a day by default): the one thing left that
+  grows with time and not with events; what a check costs was not
+  measured.
 
 ### The audit method (a deliverable)
 
@@ -55,8 +94,9 @@ wolf-lang s131 landed `region_bytes(r)` and `live_region_bytes()`
 ([mem.region.account.1/.2]) at pin `0.2.1+dev.e6cf24e`, and lobo reads
 them, so the numbers below stopped being estimates. What follows is kept
 in full because it is still the *shape* of the audit, and because the
-`ps(1)` witness still guards the half the ledger cannot see (#191's
-string work, which lands in no named region at all). The OUTSIDE
+`ps(1)` witness still guards the half the ledger cannot see (the
+process root, where at ws10 all string work landed and where since
+ws57 nothing a request or a pass allocates does). The OUTSIDE
 method:
 
 1. `tests/rig/memdrive.lu` drives N keepalive requests over one
@@ -66,13 +106,16 @@ method:
    two same-shape drives whose only difference is body size (16 B vs
    16 KiB), and asserts the difference is allocator noise, not bodies;
 3. a per-request retention ratchet (< 64 KB/req under a padded-head
-   shape) catches lobo-side structural regressions while #191 heals.
+   shape) caught lobo-side structural regressions while the string
+   half was open; since ws57 the three flat-memory rows below it are
+   the gate and the ratchet reads 0.
 
 Probes behind the fix (recorded 2026-08-31, pin addcd7f, macOS/arm64):
 a 20k-iteration `region`-wrapped List loop holds 1.5 MB where the bare
 loop holds 84 MB (regions work, cross-call included, despite a
 misleading W1001, filed as wolf-lang#192); the same loop over str
-interpolation holds 666 MB with or without the region (#191).
+interpolation holds 666 MB with or without the region (wolf-lang#191,
+fixed at 0.2.14: a built string joins the region it is built in).
 #192 healed at the ws12 pin: r04 fixed both halves (W1001 gains its
 call test, E1010 reads through the error row), so the misleading
 diagnostic that made the ws10 probe hard to read is gone.
@@ -139,8 +182,9 @@ by 16x.
 
 `live_region_bytes()` is the process-wide companion, with its own
 caveat from the clause: it is not an RSS proxy. The
-process-root arena, where at this pin every string materialization
-still lands (#191), is never counted. On an idle lobo it reads 0,
+process-root arena is never counted (through ws56 every string a
+request built landed there, for want of a region around the request;
+since ws57 only what the loop keeps does). On an idle lobo it reads 0,
 because every response region has died; that is `[mem.region.account.2]`
 working, not a broken gauge.
 
@@ -395,7 +439,25 @@ is no longer gated on anything upstream).
 
 - `tools/lobo-membudget`, the audit witness (gauntlet step): bodies
   die per-response (differential drive), the retention ratchet, and
-  the #191 named gate.
+  since ws57 the flat-memory gate (lobo#66), three bounds on RSS
+  growth after a warm-up of each shape: under 512 KB over 4,000
+  keepalive requests, under 512 KB over 2,000 connections of one
+  request each, under 128 KB over 10 idle seconds with 16 kept-alive
+  connections attached. At ws56's trunk the three read 80 MB, 64 MB
+  and 320 KB (run 38081745433, red on linux and macOS); after ws57
+  about 100 KB, 180 KB and 0. The capped server takes the first two
+  through its proc under a 4 MB bound (1.6 MB and 0.9 MB, against
+  81 MB and 65 MB), the difference being the runtime's per-proc
+  residue (wolf-lang#662). No one region carries the property alone:
+  with the pass's region removed the memo's region still frees a
+  pass's work (the gate stays green, a megabyte more resident), and
+  with both removed the first two rows read 21 MB and 12 MB.
+- `tests/serve/carry_e2e.lu` (the carry as pooled bytes: a dripped
+  head, pipelined requests, rows that move while they hold half a
+  head, twelve partial heads at once) and
+  `tests/serve/memo_rollover_e2e.lu` (the memo's region let go under
+  4,500 misses, every answer checked, the multipart boundary counting
+  on across it).
 - `tests/serve/budget_shapes.lu`, pure: limit resolution from config
   (defaults, overrides, `0` semantics, buffer math), the 503 shape.
 - `tests/serve/budget_refusals.lu`, in-process round-trips: every
