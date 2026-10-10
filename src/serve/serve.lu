@@ -965,7 +965,8 @@ fn serve_file(
     max_ranges: int,
     mut acc: obs.Access,
     mut chg: Charge,
-    mut ft: FileKinds,
+    ft: FileKinds,
+    mut fu: MemoUpd,
 ) -> bool ! {closed, io} {
     // ws30 (wolf-lang#289 consumed): the handle arrives OPEN from
     // `classify` — ONE `fs_open_mode(path, 5)`, the read open that
@@ -1034,7 +1035,8 @@ fn serve_file(
             is_head,
             plan,
             mut acc,
-            mut ft,
+            ft,
+            mut fu,
         )
     }
 
@@ -1089,7 +1091,7 @@ fn serve_file(
         let lm = http_date(secs)
         let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
         let mime = mime_for(c, tpath)
-        let dnow = date_str(mut ft, now_secs)
+        let dnow = date_str(ft, mut fu, now_secs)
         head = "HTTP/1.1 200 OK\r\n"
         head = "{head}{hline("Server", token)}"
         head = "{head}{hline("Date", dnow)}"
@@ -1103,7 +1105,7 @@ fn serve_file(
         }
         head = "{head}\r\n"
         if memo {
-            head_remember(mut ft, path, size, mms, keep, now_secs, token, head)
+            head_remember(mut fu, path, size, mms, keep, now_secs, token, head)
         }
     }
 
@@ -1588,10 +1590,11 @@ fn serve_range(
     is_head: bool,
     plan: RangePlan,
     mut acc: obs.Access,
-    mut ft: FileKinds,
+    ft: FileKinds,
+    mut fu: MemoUpd,
 ) -> bool ! {closed, io} {
     let conn_hdr = keep_token(keep)
-    let dnow = date_str(mut ft, time_unix_ms() / 1000)
+    let dnow = date_str(ft, mut fu, time_unix_ms() / 1000)
     if plan.kind == 2 {
         // nginx's special response: the default page, no Last-Modified
         // or ETag, and Content-Range naming the length (RFC 9110 §15.5.17)
@@ -1636,7 +1639,7 @@ fn serve_range(
         // nginx's part head: CRLF "--" boundary CRLF, the type (when
         // there is one), "Content-Range: bytes " and the range; the
         // close is CRLF "--" boundary "--" CRLF
-        bound = next_boundary(mut ft)
+        bound = next_boundary(ft, mut fu)
         bhead = "\r\n--{bound}\r\n"
         if !mime.is_empty() {
             bhead = "{bhead}Content-Type: {mime}\r\n"
@@ -1914,9 +1917,9 @@ pub fn file_kinds_new() -> FileKinds {
 /// out the same number — a boundary need only be absent from the
 /// parts, and a byte range of a file of digits could contain it on
 /// either server. Total.
-pub fn next_boundary(mut ft: FileKinds) -> str {
-    ft.boundary = ft.boundary + 1
-    var out = "{ft.boundary}"
+pub fn next_boundary(ft: FileKinds, mut fu: MemoUpd) -> str {
+    fu.bounds = fu.bounds + 1
+    var out = "{ft.boundary + fu.bounds}"
     while out.len < 20 {
         out = "0{out}"
     }
@@ -1928,13 +1931,16 @@ pub fn next_boundary(mut ft: FileKinds) -> str {
 /// interpolation) otherwise. ws28: every response asked `now_date()`,
 /// a fresh date string per request for a value that changes once a
 /// second. Total.
-pub fn date_str(mut ft: FileKinds, secs: int) -> str {
+pub fn date_str(ft: FileKinds, mut fu: MemoUpd, secs: int) -> str {
     if ft.date_secs == secs {
         return ft.date_str
     }
+    if fu.date_secs == secs {
+        return fu.date_str
+    }
     let d = http_date(secs)
-    ft.date_secs = secs
-    ft.date_str = d
+    fu.date_secs = secs
+    fu.date_str = d
     d
 }
 
@@ -1971,9 +1977,10 @@ pub fn head_warm(
 }
 
 /// Remember `head` as the response head for `path` under the inputs
-/// it was built from (see `head_warm`). Total.
+/// it was built from (see `head_warm`): noted in the request's
+/// `MemoUpd`, stored by whoever owns the table (`memo_store`). Total.
 pub fn head_remember(
-    mut ft: FileKinds,
+    mut fu: MemoUpd,
     path: str,
     size: int,
     mtime_ms: int,
@@ -1982,14 +1989,96 @@ pub fn head_remember(
     token: str,
     head: str,
 ) {
-    let s = kind_slot(path)
-    ft.hpath[s] = path
-    ft.hsize[s] = size
-    ft.hmtime[s] = mtime_ms
-    ft.hsecs[s] = secs
-    ft.hkeep[s] = if keep { 1 } else { 0 }
-    ft.htoken[s] = token
-    ft.hhead[s] = head
+    fu.h_set = true
+    fu.hpath = path
+    fu.hsize = size
+    fu.hmtime = mtime_ms
+    fu.hsecs = secs
+    fu.hkeep = keep
+    fu.htoken = token
+    fu.hhead = head
+}
+
+/// What one request would have written into the memo table (ws57,
+/// lobo#66). A request is served inside a region that is freed when
+/// it ends, and the table outlives it, so the request cannot store
+/// into the table (E1010); it reads the table, notes here what it
+/// built — the Date string for a second the table does not hold, the
+/// head it built for a file, how many multipart boundaries it took —
+/// and the table's owner stores that afterwards (`memo_store`), in
+/// the table's own region. `date_secs` is -1 and `h_set` false when
+/// there is nothing of that kind to store.
+pub struct MemoUpd {
+    date_secs: int,
+    date_str: str,
+    bounds: int,
+    h_set: bool,
+    hpath: str,
+    hsize: int,
+    hmtime: int,
+    hsecs: int,
+    hkeep: bool,
+    htoken: str,
+    hhead: str,
+}
+
+/// A `MemoUpd` with nothing to store. Total.
+pub fn memo_upd_new() -> MemoUpd {
+    MemoUpd {
+        date_secs: -1,
+        date_str: "",
+        bounds: 0,
+        h_set: false,
+        hpath: "",
+        hsize: 0,
+        hmtime: 0,
+        hsecs: 0,
+        hkeep: false,
+        htoken: "",
+        hhead: "",
+    }
+}
+
+/// Whether `u` carries anything for `memo_store`. Total.
+pub fn memo_dirty(u: MemoUpd) -> bool {
+    u.h_set || u.date_secs >= 0 || u.bounds > 0
+}
+
+/// Store one request's memo notes into the table: the Date string
+/// when `date_secs` is not negative, the head when `h_set`, and
+/// `bounds` more boundaries taken. The strings are stored as given,
+/// so THE CALLER builds them in the region the table lives in (the
+/// serving loop does, under `in memo`; `serve_conn_cn`'s table shares
+/// its requests' region). Total.
+pub fn memo_store(
+    mut ft: FileKinds,
+    date_secs: int,
+    date: str,
+    bounds: int,
+    h_set: bool,
+    path: str,
+    size: int,
+    mtime_ms: int,
+    secs: int,
+    keep: bool,
+    token: str,
+    head: str,
+) {
+    ft.boundary = ft.boundary + bounds
+    if date_secs >= 0 {
+        ft.date_secs = date_secs
+        ft.date_str = date
+    }
+    if h_set {
+        let s = kind_slot(path)
+        ft.hpath[s] = path
+        ft.hsize[s] = size
+        ft.hmtime[s] = mtime_ms
+        ft.hsecs[s] = secs
+        ft.hkeep[s] = if keep { 1 } else { 0 }
+        ft.htoken[s] = token
+        ft.hhead[s] = head
+    }
 }
 
 /// The slot a path hashes to in the memo table: a byte fold (the
@@ -2084,7 +2173,8 @@ fn handle_request(
     challenge_dir: str,
     mut acc: obs.Access,
     mut chg: Charge,
-    mut ft: FileKinds,
+    ft: FileKinds,
+    mut fu: MemoUpd,
 ) -> bool ! {closed, io} {
     // method: GET and HEAD serve; anything else is 405 (the CVE
     // corpus's POSTs are already rejected at parse when they smuggle)
@@ -2177,7 +2267,8 @@ fn handle_request(
                 d.max_ranges,
                 mut acc,
                 mut chg,
-                mut ft,
+                ft,
+                mut fu,
             )
         }
         if cl.kind == 1 {
@@ -2246,7 +2337,8 @@ fn handle_request(
                 d.max_ranges,
                 mut acc,
                 mut chg,
-                mut ft,
+                ft,
+                mut fu,
             )
         }
         if cl.kind == 4 {
@@ -2377,6 +2469,15 @@ pub fn serve_conn(
     // dial literals, so this cache stays empty in every gauntlet run
     var rs0 = resolver.new()
     serve_conn_cn(mut cn, c, opts, limits, local_port, mut rs0)
+}
+
+/// `conn.sock_read` under a name of this file's own (the reason
+/// `conn_mod_plain` exists: `conn` is a parameter name all through
+/// this file). Rows are `net_read`'s.
+/// (W0602 allowed: the row mirrors net_read exactly (closed/timeout/utf8/io).)
+#[allow(w0602)]
+fn sock_read_str(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
+    conn.sock_read(fd, max)?
 }
 
 /// A plaintext Conn over `fd` (the wrapper avoids importing `conn` as
@@ -2579,6 +2680,10 @@ pub fn serve_conn_cn(
             }
         } else {
             var acc0 = obs.access_new()
+            // ws57: the request notes what it would memoize and this
+            // driver, which owns the table, stores it (one region
+            // here: the table and its requests share the caller's)
+            var fu = memo_upd_new()
             should_close = handle_request(
                 mut cn,
                 c,
@@ -2590,10 +2695,27 @@ pub fn serve_conn_cn(
                 opts.challenge_dir,
                 mut acc0,
                 mut chg,
-                mut ft,
+                ft,
+                mut fu,
             ) else |_| {
                 conn.conn_close(mut cn)
                 return
+            }
+            if memo_dirty(fu) {
+                memo_store(
+                    mut ft,
+                    fu.date_secs,
+                    fu.date_str,
+                    fu.bounds,
+                    fu.h_set,
+                    fu.hpath,
+                    fu.hsize,
+                    fu.hmtime,
+                    fu.hsecs,
+                    fu.hkeep,
+                    fu.htoken,
+                    fu.hhead,
+                )
             }
         }
         served = served + 1
@@ -2649,6 +2771,8 @@ pub struct ReqOut {
     resolve_valid_ms: int,
     streaming: bool,
     stream_fd: int,
+    rs_rot: str,
+    rs_new: List[resolver.Resolver],
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -2673,6 +2797,8 @@ fn req_out(close: bool, carry: str, take acc: obs.Access, chg: Charge) -> ReqOut
         resolve_valid_ms: 0,
         streaming: chg.handed,
         stream_fd: chg.handed_fd,
+        rs_rot: "",
+        rs_new: List[resolver.Resolver](),
     }
 }
 
@@ -2700,6 +2826,8 @@ fn req_out_wait(take acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
         resolve_valid_ms: need.valid_ms,
         streaming: false,
         stream_fd: -1,
+        rs_rot: "",
+        rs_new: List[resolver.Resolver](),
     }
 }
 
@@ -2726,6 +2854,8 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
         resolve_valid_ms: 0,
         streaming: false,
         stream_fd: -1,
+        rs_rot: "",
+        rs_new: List[resolver.Resolver](),
     }
 }
 
@@ -2737,8 +2867,15 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
 /// watch an old generation drain while a new one serves (ws08). Does
 /// NOT close the socket — the caller closes when `close` is true; the
 /// caller arms the body-read deadline. `served` is how many requests
-/// this connection has already handled (the keepalive budget). Total:
-/// every path resolves to a written response and a close-or-carry.
+/// this connection has already handled (the keepalive budget). ws57:
+/// `rs` and `ft` are READ here — this runs inside the loop's per-step
+/// region, which is freed when the step ends, so nothing in it may be
+/// stored into either table. What the request would have stored comes
+/// back instead: the memo notes in `fu`, and in the `ReqOut` the
+/// resolver's cursor steps (`rs_rot`) or, when a proxied request had
+/// to resolve a name itself, the resolver it ended with (`rs_new`,
+/// one element). Total: every path resolves to a written response
+/// and a close-or-carry.
 pub fn serve_request(
     conn: int,
     c: config.Conf,
@@ -2748,8 +2885,9 @@ pub fn serve_request(
     head: str,
     rest0: str,
     served: int,
-    mut rs: resolver.Resolver,
-    mut ft: FileKinds,
+    rs: resolver.Resolver,
+    ft: FileKinds,
+    mut fu: MemoUpd,
 ) -> ReqOut {
     var cn = conn_mod_plain(conn)
     var acc = obs.access_new()
@@ -2912,6 +3050,10 @@ pub fn serve_request(
     if pplan.is_proxy {
         var pacc = proxy.run_acc()
         var raised = false
+        // ws57: the exchange works on its own copy of the resolver
+        // (the copy dies with this step's region) and reports what it
+        // changed: a cursor step by index, anything else whole
+        var rsx = copy rs
         should_close = proxy.run(
             conn,
             c,
@@ -2922,7 +3064,7 @@ pub fn serve_request(
             opts.token,
             now_date(),
             keep,
-            mut rs,
+            mut rsx,
             mut pacc,
         ) else |_| {
             raised = true
@@ -2934,9 +3076,13 @@ pub fn serve_request(
         acc.up_ms = pacc.up_ms
         acc.status = pacc.status
         acc.body_bytes = pacc.body_bytes
-        if raised {
-            return req_out(true, "", take acc, chg)
+        let pclose = raised || should_close || !keep
+        var pro = req_out(pclose, if pclose { "" } else { rest }, take acc, chg)
+        pro.rs_rot = resolver.rot_diff(rs, rsx)
+        if resolver.muts(rsx) != resolver.muts(rs) {
+            (mut pro.rs_new).push(take rsx)
         }
+        return pro
     } else {
         var raised = false
         should_close = handle_request(
@@ -2950,7 +3096,8 @@ pub fn serve_request(
             opts.challenge_dir,
             mut acc,
             mut chg,
-            mut ft,
+            ft,
+            mut fu,
         ) else |_| {
             raised = true
             true
@@ -3018,7 +3165,14 @@ fn head_cut(buf: str) -> HeadCut {
 /// then the socket is the stream's, and the loop must not read, write
 /// or close it. ws56 (lobo#62): the step does not start the stream; it
 /// hands back the open file as `stream_fd` (-1 otherwise) and the loop
-/// starts it, keeps its proc, and closes the file.
+/// starts it, keeps its proc, and closes the file. ws57 (lobo#66): a
+/// step runs in a region of its own and this value is what is copied
+/// out of it, so it also carries what the step would once have stored
+/// into the loop's tables — `memo` (the head and date memo's notes),
+/// `rs_rot` and `rs_new` (the resolver's, see `serve_request`) — and
+/// `has_head`, whether `carry` already holds a whole request head
+/// (`carry_has_head`, answered here so the loop need not rebuild the
+/// carry to ask).
 pub struct ConnStep {
     active: bool,
     close: bool,
@@ -3039,6 +3193,10 @@ pub struct ConnStep {
     resolve_valid_ms: int,
     streaming: bool,
     stream_fd: int,
+    has_head: bool,
+    memo: MemoUpd,
+    rs_rot: str,
+    rs_new: List[resolver.Resolver],
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -3072,6 +3230,10 @@ fn step_out(
         resolve_valid_ms: 0,
         streaming: false,
         stream_fd: -1,
+        has_head: false,
+        memo: memo_upd_new(),
+        rs_rot: "",
+        rs_new: List[resolver.Resolver](),
     }
 }
 
@@ -3107,19 +3269,21 @@ fn step_serve(
     buf: str,
     cut: HeadCut,
     served: int,
-    mut rs: resolver.Resolver,
-    mut ft: FileKinds,
+    rs: resolver.Resolver,
+    ft: FileKinds,
 ) -> ConnStep {
     let head = buf[0..cut.marker]
     let rest = buf[cut.marker + cut.mlen..buf.len]
     net_deadline(conn, opts.read_timeout_ms) else |_| {}
-    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served, mut rs, mut ft)
+    var fu = memo_upd_new()
+    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served, rs, ft, mut fu)
     if !ro.resolve.is_empty() {
         // ws13: parked — the WHOLE buffer rides back as the carry
         // (the head is unconsumed as far as the loop is concerned),
         // nothing was served, and the loop steps this connection
         // again once `resolve` settles
         var w = step_out(false, false, buf, served, false, take obs.access_new())
+        w.has_head = true
         w.resolve = ro.resolve
         w.resolve_addr = ro.resolve_addr
         w.resolve_timeout_ms = ro.resolve_timeout_ms
@@ -3127,10 +3291,11 @@ fn step_serve(
         return w
     }
     let ns = served + 1
+    let ncarry = if ro.close { "" } else { ro.carry }
     ConnStep {
         active: true,
         close: ro.close,
-        carry: if ro.close { "" } else { ro.carry },
+        carry: ncarry,
         served: ns,
         logged: ro.logged,
         acc: ro.acc,
@@ -3147,6 +3312,10 @@ fn step_serve(
         resolve_valid_ms: 0,
         streaming: ro.streaming,
         stream_fd: ro.stream_fd,
+        has_head: carry_has_head(ncarry),
+        memo: fu,
+        rs_rot: ro.rs_rot,
+        rs_new: ro.rs_new,
     }
 }
 
@@ -3168,13 +3337,13 @@ pub fn conn_step(
     carry: str,
     served: int,
     poll_ms: int,
-    mut rs: resolver.Resolver,
-    mut ft: FileKinds,
+    rs: resolver.Resolver,
+    ft: FileKinds,
 ) -> ConnStep {
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, mut rs, mut ft)
+        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, rs, ft)
     }
     if buf.len > limits.max_header_total {
         // ws28: the conn seam is built in the arms that write through
@@ -3190,7 +3359,9 @@ pub fn conn_step(
     net_deadline(conn, poll_ms) else |_| {
         return step_out(false, true, buf, served, false, take obs.access_new())
     }
-    let piece = net_read(conn, 4096) else |e| match e {
+    // ws57: `conn.sock_read`, not `net_read` — the same rows, the
+    // bytes in this step's region instead of the process root
+    let piece = sock_read_str(conn, 4096) else |e| match e {
         closed => {
             return step_out(false, true, buf, served, false, take obs.access_new())
         },
@@ -3223,7 +3394,7 @@ pub fn conn_step(
     }
     let cut = head_cut(buf)
     if cut.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, mut rs, mut ft)
+        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, rs, ft)
     }
     step_out(true, false, buf, served, false, take obs.access_new())
 }

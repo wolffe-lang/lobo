@@ -123,7 +123,7 @@ fn read_command(conn: int) -> str {
         if buf.len > 4096 {
             return buf.trim()
         }
-        let piece = net_read(conn, 512) else |_| {
+        let piece = sock_line(conn, 512) else |_| {
             reading = false
             ""
         }
@@ -146,14 +146,16 @@ fn read_command(conn: int) -> str {
 // ws04). The table is a local List[GenRow]: a List of an IMPORTED
 // struct is refused in the checked tier, but a List of a LOCAL struct
 // is fine, so the row type lives here and shell formats it one field at
-// a time. Rows are never mutated in place (index-assignment is a
-// one-lane shape) — every update REBUILDS the list, which is cheap: a
-// server holds a handful of generations, never more. ws38 (lobo#28):
-// cheap only because every rebuild TAKES the list and MOVES its rows
-// (`push(take g)`). At 0.2.16 a plain push copies a non-Copy element
-// ([mem.region.edge.elem], wolf-lang#385), and a GenRow carries a whole
-// config.Conf — so the old spelling deep-copied the model per row per
-// rebuild, and `retire_zero` rebuilds on EVERY poll pass.
+// a time. Through ws56 rows were never mutated in place — every update
+// REBUILT the list (ws38, lobo#28: by taking it and moving its rows,
+// because a GenRow carries a whole config.Conf and a plain push copies
+// one). ws57 (lobo#66): a rebuilt list is memory the process never
+// gets back, and the loop rebuilt this one on every accept, every
+// close and every pass. The counts and marks are now stored in place
+// (`gen_live_add`, `conn_closed`, `gen_note`, `gen_drain`: an index
+// store is legal on every lane at this pin), and the list is rebuilt
+// only when a generation enters or leaves it (`start_reload`,
+// `retire_drop`).
 // ------------------------------------------------------------------
 
 /// One live generation. `state` is "current" (the one accepting new
@@ -269,34 +271,6 @@ fn gen_remaining(g: GenRow, now: int) -> int {
     rem
 }
 
-/// Rebuild `gens` with `gen`'s live count changed by `delta`. Total.
-fn bump_live(take gens: List[GenRow], gen: int, delta: int) -> List[GenRow] {
-    var out = List[GenRow]()
-    for g in gens {
-        if g.gen == gen {
-            (mut out).push(take GenRow {
-                conf: g.conf,
-                gen: g.gen,
-                live: g.live + delta,
-                state: g.state,
-                loaded_ms: g.loaded_ms,
-                since_ms: g.since_ms,
-                drained: g.drained,
-                aborted: g.aborted,
-                shash: g.shash,
-                lim: g.lim,
-                mem_hw: g.mem_hw,
-                mem_rt_hw: g.mem_rt_hw,
-                bud_hits: g.bud_hits,
-                shut_ms: g.shut_ms,
-            })
-        } else {
-            (mut out).push(take g)
-        }
-    }
-    out
-}
-
 /// The frozen effective Limits a connection tagged `gen` serves under
 /// (the same freeze-and-fall-back rule as conf_for). Total.
 fn lim_for(gens: List[GenRow], gen: int) -> http.Limits {
@@ -325,115 +299,50 @@ fn note_needed(gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> boo
     hit || hw > gens[i].mem_hw || rt > gens[i].mem_rt_hw
 }
 
-/// Fold one served request's budget outcome into its generation's
-/// aggregates: raise the high-water mark, count a refusal. Called only
-/// when `note_needed` says something changed. Total.
-fn note_request(take gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) -> List[GenRow] {
-    var out = List[GenRow]()
-    for g in gens {
-        if g.gen == gen {
-            var nhw = g.mem_hw
-            if hw > nhw {
-                nhw = hw
-            }
-            var nrt = g.mem_rt_hw
-            if rt > nrt {
-                nrt = rt
-            }
-            var nhits = g.bud_hits
-            if hit {
-                nhits = nhits + 1
-            }
-            (mut out).push(take GenRow {
-                conf: g.conf,
-                gen: g.gen,
-                live: g.live,
-                state: g.state,
-                loaded_ms: g.loaded_ms,
-                since_ms: g.since_ms,
-                drained: g.drained,
-                aborted: g.aborted,
-                shash: g.shash,
-                lim: g.lim,
-                mem_hw: nhw,
-                mem_rt_hw: nrt,
-                bud_hits: nhits,
-                shut_ms: g.shut_ms,
-            })
-        } else {
-            (mut out).push(take g)
-        }
-    }
-    out
-}
-
-/// Account one closed connection on `gen`: decrement its live count and,
-/// when the generation is DRAINING, tally it (`aborted` on a timeout
-/// force-close, else `drained`) and emit `connection-retired`. THE
-/// never-negative assertion lives here and stays in every profile
-/// (checked-arithmetic spirit — a leak that made a generation immortal
-/// would be loud). Returns the rebuilt table. Total unless the
-/// invariant breaks (then it traps, by design).
-fn on_conn_close(take gens: List[GenRow], gen: int, aborted: bool, mut el: ELog) -> List[GenRow] {
-    var out = List[GenRow]()
-    for g in gens {
-        if g.gen == gen {
-            let nlive = g.live - 1
-            assert(nlive >= 0, "generation {gen} live-connection count went negative")
-            var nd = g.drained
-            var na = g.aborted
-            if g.state == "draining" {
-                if aborted {
-                    na = na + 1
-                } else {
-                    nd = nd + 1
-                }
-                ev_event(mut el, "notice", shell.ev_connection_retired(gen, nlive))
-            }
-            (mut out).push(take GenRow {
-                conf: g.conf,
-                gen: g.gen,
-                live: nlive,
-                state: g.state,
-                loaded_ms: g.loaded_ms,
-                since_ms: g.since_ms,
-                drained: nd,
-                aborted: na,
-                shash: g.shash,
-                lim: g.lim,
-                mem_hw: g.mem_hw,
-                mem_rt_hw: g.mem_rt_hw,
-                bud_hits: g.bud_hits,
-                shut_ms: g.shut_ms,
-            })
-        } else {
-            (mut out).push(take g)
-        }
-    }
-    out
-}
-
-/// Retire every DRAINING generation that has reached zero connections:
-/// emit `generation-retired` with its accounting, fold that accounting
-/// into the process-wide totals that outlive it (ws54, lobo#51: a
-/// finished drain's count stays scrapeable after its `gen` series
-/// leave) and drop it from the table. Runs at the end of every poll
-/// pass, so it takes the list and moves the rows it keeps (ws38).
+/// Retire every DRAINING generation that has reached zero connections,
+/// in three parts the loop calls together when `gens_retirable` says
+/// there is one (ws57: one function did all three and rebuilt the
+/// table every pass; inside a pass's region the event must be built in
+/// the pass, and the table may only be rebuilt where it will live).
+/// This part emits `generation-retired` with each one's accounting.
 /// Total.
-fn retire_zero(take gens: List[GenRow], now: int, mut el: ELog, mut ct: Counters) -> List[GenRow] {
-    var out = List[GenRow]()
-    for g in gens {
-        if g.state == "draining" && g.live == 0 {
-            ct.ret_drained = ct.ret_drained + g.drained
-            ct.ret_aborted = ct.ret_aborted + g.aborted
-            ct.gens_retired = ct.gens_retired + 1
-            let age = now - g.since_ms
+fn retire_note(gens: List[GenRow], now: int, mut el: ELog) {
+    var i: int = 0
+    while i < gens.len {
+        if gens[i].state == "draining" && gens[i].live == 0 {
+            let age = now - gens[i].since_ms
             ev_event(
                 mut el,
                 "notice",
-                shell.ev_generation_retired(g.gen, g.drained, g.aborted, age),
+                shell.ev_generation_retired(gens[i].gen, gens[i].drained, gens[i].aborted, age),
             )
-        } else {
+        }
+        i = i + 1
+    }
+}
+
+/// The second part: fold each retiring generation's accounting into
+/// the process-wide totals that outlive it (ws54, lobo#51: a finished
+/// drain's count stays scrapeable after its `gen` series leave). No
+/// allocation. Total.
+fn retire_count(gens: List[GenRow], mut ct: Counters) {
+    var i: int = 0
+    while i < gens.len {
+        if gens[i].state == "draining" && gens[i].live == 0 {
+            ct.ret_drained = ct.ret_drained + gens[i].drained
+            ct.ret_aborted = ct.ret_aborted + gens[i].aborted
+            ct.gens_retired = ct.gens_retired + 1
+        }
+        i = i + 1
+    }
+}
+
+/// The third part: the table without the retiring generations. It
+/// takes the list and moves the rows it keeps (ws38). Total.
+fn retire_drop(take gens: List[GenRow]) -> List[GenRow] {
+    var out = List[GenRow]()
+    for g in gens {
+        if !(g.state == "draining" && g.live == 0) {
             (mut out).push(take g)
         }
     }
@@ -494,35 +403,6 @@ fn start_reload(
         // old worker keeps the value it was started with
         shut_ms: shell.shutdown_timeout_ms(newconf),
     })
-    out
-}
-
-/// Mark `gen` draining (as of `now`) without creating a successor — the
-/// quit path (drain everything, then exit). Total.
-fn mark_draining(take gens: List[GenRow], gen: int, now: int) -> List[GenRow] {
-    var out = List[GenRow]()
-    for g in gens {
-        if g.gen == gen && g.state == "current" {
-            (mut out).push(take GenRow {
-                conf: g.conf,
-                gen: g.gen,
-                live: g.live,
-                state: "draining",
-                loaded_ms: g.loaded_ms,
-                since_ms: now,
-                drained: g.drained,
-                aborted: g.aborted,
-                shash: g.shash,
-                lim: g.lim,
-                mem_hw: g.mem_hw,
-                mem_rt_hw: g.mem_rt_hw,
-                bud_hits: g.bud_hits,
-                shut_ms: g.shut_ms,
-            })
-        } else {
-            (mut out).push(take g)
-        }
-    }
     out
 }
 
@@ -634,10 +514,22 @@ fn status_class(code: int) -> str {
 /// Fold one finished access record into the counters: the status
 /// class, the byte totals, the duration observation, and — when the
 /// request was proxied — the upstream leg's class and time. Every
-/// write is a scalar add on a local. Total (the histogram's own
-/// checked arithmetic traps on an impossible overflow, by design).
-fn note_served(mut ct: Counters, a: obs.Access, admitted: int) {
-    let cls = status_class(a.status)
+/// write is a scalar add on a local. ws57: it takes the record's
+/// NUMBERS, not the record — the loop calls it from inside a pass's
+/// region on the counters that outlive the pass, and a callee handed
+/// only scalars can keep nothing of the pass. Total (the histogram's
+/// own checked arithmetic traps on an impossible overflow, by design).
+fn note_served(
+    mut ct: Counters,
+    status: int,
+    body_bytes: int,
+    req_ms: int,
+    proxied: bool,
+    up_status: int,
+    up_ms: int,
+    admitted: int,
+) {
+    let cls = status_class(status)
     if cls == "2xx" {
         ct.req_2xx = ct.req_2xx + 1
     } else if cls == "3xx" {
@@ -648,13 +540,13 @@ fn note_served(mut ct: Counters, a: obs.Access, admitted: int) {
         ct.req_5xx = ct.req_5xx + 1
     }
     ct.req_bytes = ct.req_bytes + admitted
-    ct.resp_bytes = ct.resp_bytes + a.body_bytes
-    metrics.hist_observe(mut ct.rdur, a.req_ms)
-    if a.proxied {
-        if a.up_status <= 0 {
+    ct.resp_bytes = ct.resp_bytes + body_bytes
+    metrics.hist_observe(mut ct.rdur, req_ms)
+    if proxied {
+        if up_status <= 0 {
             ct.up_err = ct.up_err + 1
         } else {
-            let ucls = status_class(a.up_status)
+            let ucls = status_class(up_status)
             if ucls == "2xx" {
                 ct.up_2xx = ct.up_2xx + 1
             } else if ucls == "3xx" {
@@ -665,7 +557,7 @@ fn note_served(mut ct: Counters, a: obs.Access, admitted: int) {
                 ct.up_5xx = ct.up_5xx + 1
             }
         }
-        var ums = a.up_ms
+        var ums = up_ms
         if ums < 0 {
             ums = 0
         }
@@ -1049,34 +941,6 @@ fn ev_event(mut el: ELog, level: str, body: str) {
     ev_log(mut el, level, shell.ev_seq(body, el.seq))
 }
 
-/// Pump the access sinks: render this pass's records through each
-/// output's door, one bounded flush per sink, drops reported LOUDLY
-/// through the event seam. Returns the rebuilt rows. fs tier.
-fn pump_sinks(rows: List[SinkRow], accs: List[AccRow], optin: str, mut el: ELog) -> List[SinkRow] {
-    var out = List[SinkRow]()
-    for r in rows {
-        var sk = r.s
-        if accs.len > 0 {
-            let f = obs.compile(r.fmttext)
-            for ar in accs {
-                let line = if r.json {
-                    obs.render_access_jsonl(ar.a, optin.words())
-                } else {
-                    obs.render_access(f, ar.a, r.esc)
-                }
-                obs.sink_emit(mut sk, line)
-            }
-        }
-        let _ = obs.sink_flush(mut sk)
-        let note = obs.sink_drop_note(mut sk)
-        if !note.is_empty() {
-            ev_log(mut el, "warn", note)
-        }
-        (mut out).push(SinkRow { s: sk, json: r.json, fmttext: r.fmttext, esc: r.esc })
-    }
-    out
-}
-
 /// Flush the error-log sink (its own drop note goes to stderr only —
 /// never recurse into the seam that overflowed). fs tier.
 fn flush_elog(el: ELog) -> ELog {
@@ -1111,6 +975,274 @@ fn reopen_elog(el: ELog) -> ELog {
         obs.sink_reopen(mut sk)
     }
     ELog { s: sk, have: el.have, json: el.json, level: el.level, seq: el.seq, worker: el.worker }
+}
+
+// ------------------------------------------------------------------
+// ws57 (lobo#66): what the serving loop keeps, and how.
+//
+// Through ws56 the loop built everything in `serve_main`'s ambient
+// region, which lives as long as the process: eight row lists rebuilt
+// every pass, every request's strings, every generation table a close
+// rebuilt. None of it was ever freed (2 KB a keepalive request, 10 KB a
+// connection, 4.3 KB an idle pass; docs/PROFILE.md, ws56's addendum).
+// Now a pass runs in `region pass` and a connection step in
+// `copy region step`, both freed at their closing brace, and what the
+// loop keeps from one pass to the next is stored IN PLACE, by index,
+// in tables that are never rebuilt on a hot path:
+//
+//   * a store of a scalar into a table that outlives the region is
+//     legal from inside it (`cfds[w] = fd`, `gens[i].live = n`);
+//   * a call that takes such a table `mut` is E1010 inside a region,
+//     unless it is aimed at the region the table may grow in:
+//     `in life { f(mut table, …) }`. Whatever `f` allocates then lives
+//     as long as `life` — the process — so the helpers below allocate
+//     nothing unless a table has to grow, and each says what bounds
+//     its growth. They take scalars, or bytes they copy and do not
+//     keep: the checker does NOT refuse a callee that keeps a string
+//     built in the enclosing region block under `in life` (wolf 0.2.26
+//     prints freed bytes where lupin traps: wolf-lang#660), so nothing here
+//     may hold on to one;
+//   * a string cannot be stored in place, so the two strings a row
+//     carried are kept otherwise: the carry as bytes in a buffer of
+//     the row's own, taken from a pool and given back when the carry
+//     empties (`carry_put`, `carry_str`), the parked name as an index
+//     into a list of names appended to once per distinct name.
+// ------------------------------------------------------------------
+
+/// Store `s`'s bytes at the front of the carry buffer `h`, which last
+/// held `was` bytes: the bytes are written in place (pushed where `h`
+/// has never been that long) and what is left of the old `was` is
+/// zeroed, so the whole buffer stays a valid string and `carry_str`
+/// can decode it in one call. Allocates only when `h` grows, which a
+/// buffer does up to the longest carry it ever holds; keeps nothing of
+/// `s`. Total.
+fn carry_put(mut h: List[byte], s: str, was: int) {
+    var j: int = 0
+    for b in s.bytes() {
+        if j < h.len {
+            h[j] = b
+        } else {
+            (mut h).push(b)
+        }
+        j = j + 1
+    }
+    while j < was && j < h.len {
+        h[j] = 0 as byte
+        j = j + 1
+    }
+}
+
+/// The first `len` bytes of the carry buffer `h` as the str they were
+/// stored from, built in the caller's region: the whole buffer is
+/// decoded (one runtime call; a `List` slice copies element by
+/// element, measured 60 times slower on 4 KiB) and the answer is a
+/// view of its front. A carry is always whole characters at its END
+/// (a read that splits one is the `utf8` row, a 400) and nearly always
+/// at its start; the one way to a split start is a body whose declared
+/// length ends inside a character, and then the continuation bytes
+/// left at the front (three at most) are answered as U+0001 each — as
+/// unparseable a request line as the one they stood in, so the request
+/// that follows is the same 400. Total.
+fn carry_str(h: List[byte], len: int) -> str {
+    var bad = false
+    let whole = str_from_utf8(h) else |_| {
+        bad = true
+        ""
+    }
+    if !bad && whole.len >= len {
+        return whole[0..len]
+    }
+    var skip: int = 0
+    var lead = ""
+    while skip < len && skip < 3 && h[skip] as int >= 128 && h[skip] as int < 192 {
+        lead = "{lead}\x01"
+        skip = skip + 1
+    }
+    let tail = str_from_utf8(h[skip..len]) else |_| { "" }
+    "{lead}{tail}"
+}
+
+/// `conn.sock_read` under a name of this file's own (`conn` is a
+/// local name in the loop and a parameter in `read_command`): up to
+/// `max` bytes off `fd` as a str, `net_read`'s rows, the bytes in the
+/// caller's region.
+fn sock_line(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
+    conn.sock_read(fd, max)?
+}
+
+/// The index of `name` in `names`, or -1. Pure and total.
+fn name_index(names: List[str], name: str) -> int {
+    var i: int = 0
+    while i < names.len {
+        if names[i] == name {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// Change `gen`'s live count by `delta`, in place (ws57: `bump_live`
+/// rebuilt the table per accept). No allocation. Total.
+fn gen_live_add(mut gens: List[GenRow], gen: int, delta: int) {
+    let i = index_of(gens, gen)
+    if i >= 0 {
+        gens[i].live = gens[i].live + delta
+    }
+}
+
+/// Account one closed connection on `gen`, in place (ws57:
+/// `on_conn_close` rebuilt the table per close): decrement its live
+/// count and, when the generation is DRAINING, tally it (`aborted` on
+/// a timeout force-close, else `drained`). Answers the live count left
+/// when the generation is draining — the caller then emits
+/// `connection-retired` with it — and -1 otherwise. THE never-negative
+/// assertion lives here and stays in every profile (checked-arithmetic
+/// spirit — a leak that made a generation immortal would be loud). No
+/// allocation. Total unless the invariant breaks (then it traps, by
+/// design).
+fn conn_closed(mut gens: List[GenRow], gen: int, aborted: bool) -> int {
+    let i = index_of(gens, gen)
+    if i < 0 {
+        return -1
+    }
+    let nlive = gens[i].live - 1
+    if nlive < 0 {
+        assert(false, "generation {gen} live-connection count went negative")
+    }
+    gens[i].live = nlive
+    if gens[i].state != "draining" {
+        return -1
+    }
+    if aborted {
+        gens[i].aborted = gens[i].aborted + 1
+    } else {
+        gens[i].drained = gens[i].drained + 1
+    }
+    nlive
+}
+
+/// Fold one served request's budget outcome into its generation's
+/// aggregates, in place (ws57: `note_request` rebuilt the table):
+/// raise the high-water marks, count a refusal. No allocation. Total.
+fn gen_note(mut gens: List[GenRow], gen: int, hw: int, rt: int, hit: bool) {
+    let i = index_of(gens, gen)
+    if i < 0 {
+        return
+    }
+    if hw > gens[i].mem_hw {
+        gens[i].mem_hw = hw
+    }
+    if rt > gens[i].mem_rt_hw {
+        gens[i].mem_rt_hw = rt
+    }
+    if hit {
+        gens[i].bud_hits = gens[i].bud_hits + 1
+    }
+}
+
+/// Mark `gen` draining as of `now`, in place, when it is current (the
+/// quit path and a reload's first half). No allocation. Total.
+fn gen_drain(mut gens: List[GenRow], gen: int, now: int) {
+    let i = index_of(gens, gen)
+    if i >= 0 && gens[i].state == "current" {
+        gens[i].state = "draining"
+        gens[i].since_ms = now
+    }
+}
+
+/// Whether any DRAINING generation has reached zero connections — the
+/// test the loop makes every pass before it pays for `retire_zero`
+/// (ws57: the rebuild ran every pass, a table's worth of memory each
+/// time). Pure and total.
+fn gens_retirable(gens: List[GenRow]) -> bool {
+    var i: int = 0
+    while i < gens.len {
+        if gens[i].state == "draining" && gens[i].live == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    false
+}
+
+/// What a flush of pending log lines left behind: the descriptor and
+/// whether it is open, the output's running drop total, and the drop
+/// note for this flush ("" when nothing was dropped).
+struct Flushed {
+    fd: int,
+    is_open: bool,
+    dropped_total: int,
+    note: str,
+}
+
+/// Write one pass's pending lines `buf` to the output at `path` with
+/// ONE bounded append (`obs.sink_flush`: opening lazily, dropping and
+/// counting the lines on an unwritable path), given the output's
+/// persistent scalars; `dropped` lines were already refused by the
+/// pass's own cap. ws57: an output's pending text is a pass's own and
+/// dies with the pass; what an output keeps between passes is these
+/// scalars, stored back by the caller. fs tier.
+fn sink_flush_lines(
+    path: str,
+    buf: str,
+    dropped: int,
+    dropped_total: int,
+    cap: int,
+    fd: int,
+    is_open: bool,
+) -> Flushed {
+    var sk = obs.Sink {
+        path: copy path,
+        buf: copy buf,
+        cap: cap,
+        dropped: dropped,
+        dropped_total: dropped_total + dropped,
+        fd: fd,
+        is_open: is_open,
+    }
+    let _ = obs.sink_flush(mut sk)
+    let note = obs.sink_drop_note(mut sk)
+    Flushed { fd: sk.fd, is_open: sk.is_open, dropped_total: sk.dropped_total, note: note }
+}
+
+/// The error_log level as one of its literal names (static bytes): the
+/// pass-local log value is built in the pass's region and may not hold
+/// a string of a longer-lived one beside its own (E1004). An unknown
+/// name answers "" — `obs.level_passes` passes everything for it, as
+/// it does for the name itself. Total.
+fn level_lit(level: str) -> str {
+    if level == "error" {
+        return "error"
+    }
+    if level == "warn" {
+        return "warn"
+    }
+    if level == "notice" {
+        return "notice"
+    }
+    if level == "info" {
+        return "info"
+    }
+    if level == "debug" {
+        return "debug"
+    }
+    if level == "crit" {
+        return "crit"
+    }
+    if level == "alert" {
+        return "alert"
+    }
+    if level == "emerg" {
+        return "emerg"
+    }
+    ""
+}
+
+/// The memo region's size limit, in ledger bytes: past it the loop
+/// lets the region go and starts the head-and-date memo empty. Total.
+fn memo_cap() -> int {
+    1048576
 }
 
 fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> int {
@@ -1444,7 +1576,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // mirror (stderr keeps every line — the ws02 seam the rig reads),
     // and the JSON door's header opt-in list.
     var asinks = build_sinks(c0, prefix)
-    var elog = build_elog(c0, prefix, 0, worker)
+    var elog_st = build_elog(c0, prefix, 0, worker)
     // ws12: the counter block, allocated ONCE (the histograms' slot
     // lists are built here and never again — an observation is an
     // index write, never an allocation)
@@ -1535,7 +1667,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         "loopback + token"
     }
     ev_log(
-        mut elog,
+        mut elog_st,
         "notice",
         "serving on {where}, control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}",
     )
@@ -1576,13 +1708,13 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     }
     if sig_on {
         ev_log(
-            mut elog,
+            mut elog_st,
             "notice",
             "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])",
         )
     } else {
         ev_log(
-            mut elog,
+            mut elog_st,
             "notice",
             "signal reception unavailable on this platform; the control channel is the trigger",
         )
@@ -1607,28 +1739,58 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         bud_hits: 0,
         shut_ms: shut1,
     })
-    ev_event(mut elog, "notice", shell.ev_generation_loaded(1, h1))
-    ev_event(mut elog, "notice", shell.ev_generation_activated(1))
+    ev_event(mut elog_st, "notice", shell.ev_generation_loaded(1, h1))
+    ev_event(mut elog_st, "notice", shell.ev_generation_activated(1))
 
-    // the connection table (parallel primitive lists — a List of a
-    // local/primitive type constructs on every lane; rebuilt each pass)
+    // the connection table: parallel primitive columns, one row per
+    // open plaintext connection, rows [0, crows). ws57 (lobo#66): the
+    // columns are compacted IN PLACE every pass and never rebuilt (they
+    // were eight fresh lists a pass, the old ones never freed); a new
+    // row is an index store, or a push when the table has never been
+    // that long, so the columns' length is the most connections ever
+    // open at once.
     var cfds = List[int]()
     var cgens = List[int]()
-    var ccarry = List[str]()
     var cserved = List[int]()
     var cidle = List[int]()
     var cstart = List[int]()
-    // ws13: the name a connection is PARKED on ("" = not parked): the
-    // loop skips its step until the resolver settles that name
-    var cwait = List[str]()
+    // ws13: the name a connection is PARKED on, as its index in
+    // `wnames` (-1 = not parked): the loop skips its step until the
+    // resolver settles that name. `wnames` gains a name the first time
+    // any connection parks on it and never loses one (the names are the
+    // upstream hosts the configs name)
+    var cwait = List[int]()
+    var wnames = List[str]()
     // ws49 (lobo#46): a connection whose body is STREAMING beside the
     // loop: 0 not streaming; 1 streaming, keep-alive after; 2
     // streaming, close after; +10 once its draining generation's
     // worker_shutdown_timeout asked for an abort. The row is out of
     // the wait set and never stepped until its stream reports.
     var cstream = List[int]()
-    // the stream pipe's partial line, and this pass's finished streams
-    var sbuf = ""
+    // the carry — the bytes a connection has sent that are not yet a
+    // served request. ws57: kept as BYTES in a buffer from the pool
+    // `cbufs` (`ccbuf` is the buffer's index, -1 with no carry; `cclen`
+    // the carry's length; `chead` 1 when it already holds a whole
+    // head), because a string built in a pass's region cannot be kept
+    // past it and one built outside is never freed. A buffer is taken
+    // when a step leaves a carry, written in place, and given back
+    // (`cbfree`, a stack of `cbfree_n` indexes) when the carry empties
+    // or the row closes; `cbwas` is the bytes each buffer last held.
+    // The pool grows to the most connections that ever held a carry at
+    // once, each buffer to the longest carry it ever held.
+    var ccbuf = List[int]()
+    var cclen = List[int]()
+    var chead = List[int]()
+    var crows: int = 0
+    var cbufs = List[List[byte]]()
+    var cbwas = List[int]()
+    var cbfree = List[int]()
+    var cbfree_n: int = 0
+    // the stream pipe's partial line, kept the same way (`spart_n`
+    // bytes of `spart`, which last held `spart_was`)
+    var spart = List[byte]()
+    var spart_n: int = 0
+    var spart_was: int = 0
     // ws56 (lobo#62): every stream in flight, with its proc and its
     // file — the loop starts a stream, so the loop can end one — and
     // the id the next stream takes
@@ -1638,11 +1800,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // ws13: the resolver — the cache and the pending query table the
     // loop ticks once per pass like every other socket it owns
     var rs = resolver.new()
-    // ws27/ws28: the per-hand memo table (the head cache and the date
-    // memo; its kind half retired at ws30 with the stat it remembered)
-    // rides beside the resolver — one per hand, threaded into every
-    // step the same way
-    var ft = serve.file_kinds_new()
+    // ws41: the multipart boundary counter, per hand, from 1 (nginx's
+    // shape). ws57: it is the loop's own int — the memo table that
+    // carried it is rebuilt from time to time (below) and a boundary
+    // must not repeat
+    var bound_ctr: int = 0
 
     // ws49 (lobo#46), re-measured at ws51: the room the runtime's pool
     // leaves beside the streams. A stream parked on a slow client holds
@@ -1676,925 +1838,1418 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         proc_room: false,
     }
 
-    // this pass's ACME events off the stream pipe, oldest first
-    var aevs = List[str]()
+    // ws57: the lines the start-up wrote are flushed here, once, so
+    // the error log's pending text is empty when the loop begins; from
+    // here on a pass's lines are the pass's own (see `sink_flush_lines`)
+    elog_st = flush_elog(elog_st)
 
+    // ws57 (lobo#66): THE REGIONS. `life` is where a call that must grow
+    // one of the loop's tables is aimed (`in life { … }`); it lives as
+    // long as the process, so only bounded things land there. `memo`
+    // holds the per-hand memo table (ws27/ws28: the head cache and the
+    // date memo) — the one long-lived table whose strings change every
+    // second and which can be dropped without a wrong answer: a miss
+    // builds what the memo would have answered. The region is let go,
+    // and the table starts empty, when it has grown past `memo_cap()`.
+    // `pass` is one pass of the loop; everything a pass allocates dies
+    // with it. A connection step has a region of its own inside it.
+    let life = region()
     var running = true
     var quitting = false
     while running {
-        let now = time_unix_ms()
-
-        // 0a. ws16: a standing-by hand retries its bind — the failover
-        // half of this pin's accept-distribution posture (the holder
-        // died: the port is free within its kernel teardown, and the
-        // first hand to retry serves)
-        if standby_http && running && !quitting && !adopting {
-            let sb = bind_listener(addr, reuseport)
-            let cand = sb.0
-            let got = sb.1
-            if got {
-                hl = cand
-                arm_accept(hl)
-                hport = net_port(hl) else |_| { 0 }
-                have_http = true
-                standby_http = false
-                ev_log(mut elog, "notice", "listener {addr} acquired (port {hport}) — serving")
-            }
-        }
-        if standby_tls && running && !quitting && !adopting {
-            let tsb = bind_listener(tls_addr, reuseport)
-            let tcand = tsb.0
-            let tgot = tsb.1
-            if tgot {
-                tls_l = tcand
-                arm_accept(tls_l)
-                let tport = net_port(tls_l) else |_| { 0 }
-                if !have_http {
-                    hport = tport
-                }
-                have_tls = true
-                standby_tls = false
-                ev_log(
-                    mut elog,
-                    "notice",
-                    "TLS listener {tls_addr} acquired (port {tport}) — serving",
-                )
-            }
-        }
-        let listening = (!want_http || have_http) && (!want_tls || have_tls)
-
-        // 0a2. ws17: THE WAIT. One `net_wait` over every socket this
-        // process owns — the control listener, the http listener, the
-        // TLS listener and every open connection that is not parked on
-        // a name — replaces the deadline ws16 armed on each of them
-        // (25 ms in the control accept, 25 in each listener's, 12 per
-        // connection, every idle pass: wolf-lang#127's customer report
-        // was this loop). Readiness is level-triggered, so asking
-        // consumes nothing and a socket this pass declines to service
-        // is still ready next pass; an EMPTY answer is the deadline
-        // expiring with nothing ready, which is an ANSWER and not a
-        // failure ([os.net.wait]) — the loop falls through and does
-        // its timer work. A peer that closed reads as READY: the
-        // `net_read` behind it is what reports `closed`, which is how
-        // a connection leaves the table instead of being parked on.
-        var wfds = List[int]()
-        if have_ctrl {
-            (mut wfds).push(cl)
-        }
-        // ws29: the forwarder's read end — the readiness handle a
-        // signal did not have until this sprint (lobo#8)
-        if sig_on {
-            (mut wfds).push(sig_r)
-        }
-        // ws18: EVERY hand's listeners join the wait set, every pass —
-        // FREE-FOR-ALL, which is the posture ws17 measured (17,347
-        // req/s) and could not ship. ws17 admitted a listener only
-        // during the hand's own accept turn, because a hand that lost
-        // the race then parked inside a blocking `accept(2)` until the
-        // next connection (wolf-lang#242). s138 closed that: a lost
-        // race answers NOTHING, inside the budget `arm_accept` armed —
-        // so there is nothing left for a turn to buy, and the twenty
-        // lines that bought it are gone.
-        if have_http && running && !quitting {
-            (mut wfds).push(hl)
-        }
-        if have_tls && running && !quitting {
-            (mut wfds).push(tls_l)
-        }
-        // ws49 (lobo#46): the stream pipe's read end — a finished
-        // stream's line wakes the loop the way a signal's byte does
-        if stream_r >= 0 {
-            (mut wfds).push(stream_r)
-        }
-        var wi: int = 0
-        var parked = false
-        while wi < cfds.len {
-            if !cwait[wi].is_empty() {
-                parked = true
-            } else if cstream[wi] == 0 {
-                (mut wfds).push(cfds[wi])
-            }
-            wi = wi + 1
-        }
-        let wms = wait_budget(parked)
-        var ready = List[int]()
-        if wfds.len > 0 {
-            ready = net_wait(wfds, wms) else |_| {
-                List[int]()
-            }
-        } else {
-            // nothing to wait ON (a standing-by hand with no endpoint,
-            // or a wound-down loop): the pass still has to end, and
-            // `net_wait` refuses an empty set with an unbounded
-            // deadline by name — `time_sleep_ms` is the call that
-            // means to sleep, and the clause says so.
-            time_sleep_ms(wms)
-        }
-
-        // 0. ws13: one resolver pass — every pending query socket
-        // gets a 1 ms read under its deadline; settled names become
-        // vocabulary events through the ws09 seam (stamped seq=) and
-        // counter movement
-        resolver.tick(mut rs, now)
-        let revs = resolver.take_events(mut rs)
-        var ri: int = 0
-        while ri < revs.len {
-            let body = revs[ri]
-            if body.starts_with("upstream-resolved ") {
-                counters.res_ok = counters.res_ok + 1
-                ev_event(mut elog, "notice", body)
-            } else {
-                counters.res_failed = counters.res_failed + 1
-                ev_event(mut elog, "error", body)
-            }
-            ri = ri + 1
-        }
-
-        // 0b. ws49 (lobo#46): the streams that finished. Each stream
-        // wrote one `<sock> <cls> <wcode> <rt> <id>` line; read what
-        // is there (the pipe is ready, so the read answers at once)
-        // and keep a partial line for the next pass. The rows close or
-        // resume in step 3. ws56 (lobo#62): a line counts only if a
-        // live slot carries its socket AND its id — a stream the loop
-        // ended reports nothing, and a line that outlived its row must
-        // not be read as a newer stream's on the same descriptor.
-        var sdone = List[int]()
-        var sline = List[str]()
-        if stream_r >= 0 && ready_has(ready, stream_r) {
-            let piece = net_read(stream_r, 4096) else |_| { "" }
-            sbuf = "{sbuf}{piece}"
-            var more = true
-            while more {
-                let nl = sbuf.find("\n") else -1
-                if nl < 0 {
-                    more = false
-                } else {
-                    let ln = sbuf[0..nl]
-                    sbuf = sbuf[nl + 1..sbuf.len]
-                    let sr = budget.stream_line(ln)
-                    if sr.0 >= 0 && budget.stream_slot(sslots, sr.0, sr.4) >= 0 {
-                        (mut sdone).push(sr.0)
-                        (mut sline).push(ln)
-                    } else if ln.starts_with("acme ") {
-                        // ws56 (lobo#65): the ACME daemon's event,
-                        // acted on in step 3b
-                        (mut aevs).push(ln[5..ln.len])
+        region memo {
+            var ft = serve.file_kinds_new()
+            ft.boundary = bound_ctr
+            while running && region_bytes(memo) < memo_cap() {
+                region pass {
+                    let now = time_unix_ms()
+                    // this pass's ACME events off the stream pipe, oldest first
+                    var aevs = List[str]()
+                    // the error log for this pass: its pending lines are built
+                    // here and flushed at the pass's end; the descriptor, the open
+                    // flag, the drop total and the event sequence are `elog_st`'s
+                    var elog = ELog {
+                        s: obs.sink_new("", elog_st.s.cap),
+                        have: elog_st.have,
+                        json: elog_st.json,
+                        level: level_lit(elog_st.level),
+                        seq: elog_st.seq,
+                        worker: elog_st.worker,
                     }
-                }
-            }
-        }
 
-        // 1. collect ONE trigger for the verb dispatch: a control-
-        // channel line (with a reply socket) or a received signal
-        // (reply-less; a real SIGHUP lands here). Both flow through
-        // the SAME dispatch below — ws04's one-layer design,
-        // flipped real by s114. A control verb wins the pass; a
-        // signal waits buffered for the next pass, so neither is
-        // lost.
-        var verb = ""
-        var cc = -1
-        var denied = false
-        if have_ctrl && ready_has(ready, cl) {
-            var got_ctrl = true
-            let cand = net_accept(cl) else |_| {
-                got_ctrl = false
-                0
-            }
-            if got_ctrl {
-                cc = cand
-                net_deadline(cc, 2000) else |_| {}
-                let line = read_command(cc)
-                if shell.control_authorized(line, ctok) {
-                    verb = shell.control_verb_of(line, ctok)
-                } else {
-                    denied = true
-                }
-            }
-        }
-        // an unauthorized line dispatches NOTHING and emits no
-        // vocabulary event — the refusal is a prose notice at `warn`,
-        // so the frozen event stream stays the stream of decisions the
-        // loop actually took (docs/CONTROL.md)
-        if denied {
-            ev_log(mut elog, "warn", "control: unauthorized command rejected")
-            reply(cc, "unauthorized\n")
-            net_close(cc) else |_| {}
-            cc = -1
-        }
-        if sig_on && cc < 0 && ready_has(ready, sig_r) {
-            // ws29 (lobo#8): a signal ARRIVED — the forwarder wrote
-            // its meaning down the self-pipe and the wait above said
-            // the read end is ready. Nothing was asked and nothing
-            // was raised: this branch costs a `read` on the pass a
-            // signal actually reaches the process, and zero on every
-            // other pass. ONE BYTE, one meaning: a second signal that
-            // landed in the same gap stays in the socket, and
-            // level-triggered readiness brings the loop back for it.
-            let b = net_read(sig_r, 1) else |_| { "" }
-            let m = sig_meaning_of(b)
-            if m > 0 {
-                verb = shell.signal_verb(m)
-            }
-        }
-        if cc >= 0 || !verb.is_empty() {
-            let curgen = current_gen(gens)
-            // ws15: ONE emission site for the trigger event, reached
-            // by BOTH doors. A control verb and a real signal run the
-            // same dispatch below, so the vocabulary line — and every
-            // generation event that follows it — is byte-identical
-            // but for `source`. The verbs with no signal twin
-            // (status, reopen, ping, upgrade) emit nothing: `sig`'s
-            // value set stays the frozen reload|terminate|quit.
-            let mtrig = shell.signal_meaning(verb)
-            if mtrig > 0 {
-                let src = if cc >= 0 { "control" } else { "signal" }
-                ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
-            }
-            if verb == "ping" {
-                reply(cc, "pong\n")
-            } else if verb == "status" {
-                let body = status_stanza(
-                    gens,
-                    quitting,
-                    false,
-                    elog.seq,
-                    worker,
-                    listening,
-                    counters.accepted,
-                )
-                reply(cc, "{body}\n")
-            } else if verb == "status json" {
-                let body = status_stanza(
-                    gens,
-                    quitting,
-                    true,
-                    elog.seq,
-                    worker,
-                    listening,
-                    counters.accepted,
-                )
-                reply(cc, "{body}\n")
-            } else if verb == "stop" {
-                reply(cc, "stop: shutting down (generation {curgen})\n")
-                running = false
-            } else if verb == "quit" {
-                reply(cc, "quit: draining then exiting (generation {curgen})\n")
-                quitting = true
-                let held = held_of(gens, curgen)
-                gens = mark_draining(take gens, curgen, now)
-                ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
-                gens = retire_zero(take gens, now, mut elog, mut counters)
-            } else if verb == "reopen" {
-                asinks = reopen_sinks(asinks)
-                elog = reopen_elog(elog)
-                ev_log(mut elog, "notice", "reopening log files")
-                reply(cc, "reopen: log outputs cycled (generation {curgen})\n")
-            } else if verb == "reload" {
-                let ci = index_of(gens, curgen)
-                let prev = shell.Gen {
-                    conf: copy gens[ci].conf,
-                    gen: curgen,
-                    ok: true,
-                    note: "",
-                }
-                let ng = shell.reload(prefix, conf, take prev)
-                if ng.ok && ng.gen > curgen {
-                    let held = gens[ci].live
-                    let nhash = shell.conf_hash(ng.conf)
-                    // cert-reload atomicity (ws05): rebuild the frozen
-                    // SslConf from the new model. ssl_resolve validates
-                    // the PAIR; a reload whose certs fail keeps serving
-                    // (the ng.ok gate already held the config valid, and
-                    // TLS conns are served to completion, so in-flight
-                    // ones finish under the old cert — the ws04 rule).
-                    let nssl = config.ssl_resolve(ng.conf, prefix)
-                    if config.ssl_ok(nssl) {
-                        ssl0 = nssl
-                    } else {
-                        eprint(
-                            "lobo: [error] reloaded config has invalid TLS ({nssl.err}); keeping the previous certificates",
-                        )
-                    }
-                    gens = start_reload(take gens, curgen, ng.conf, ng.gen, nhash, now)
-                    ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
-                    ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
-                    ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
-                    gens = retire_zero(take gens, now, mut elog, mut counters)
-                    // ws09: the log outputs follow the CURRENT
-                    // generation (named delta — nginx's old workers
-                    // keep old-config logs; lobo's one process logs
-                    // through the live model's outputs)
-                    asinks = reopen_sinks(asinks)
-                    asinks = build_sinks(ng.conf, prefix)
-                    elog = reopen_elog(elog)
-                    elog = build_elog(ng.conf, prefix, elog.seq, worker)
-                    optin = config.log_headers_join(ng.conf)
-                }
-                reply(cc, "{ng.note}\n")
-            } else if verb == "upgrade" {
-                // ws15: the binary-swap verb EXISTS on the endpoint
-                // and answers by name. It is unclaimed on every
-                // platform at this pin — and it is the one verb the
-                // control channel reaches that no signal does: on
-                // unix UPGRADE's bit is lobo's own poll probe (an
-                // outside SIGUSR2 is indistinguishable from it), and
-                // on windows RELOAD/UPGRADE have no analog at all
-                // ([os.signal.platform]). Naming it here is what
-                // makes the endpoint the place it will land.
-                reply(
-                    cc,
-                    "upgrade: not implemented at this pin — the binary-swap verb is unclaimed on every platform; when it lands it lands HERE, on the control endpoint (docs/CONTROL.md)\n",
-                )
-            } else {
-                reply(cc, "unknown verb \"{verb}\"\n")
-            }
-            if cc >= 0 {
-                net_close(cc) else |_| {}
-            }
-        }
-
-        // 2. accept a new http connection (unless winding down) — it is
-        // tagged with the CURRENT generation and bumps that counter
-        if have_http && running && !quitting && ready_has(ready, hl) {
-            // DRAIN the accept queue, bounded. One accept per pass
-            // was ws16's shape and it is what held a
-            // connection-per-request load to one accept per poll, so
-            // the honest thing is to take what is there. Every accept
-            // after the first is guarded by a ZERO-deadline
-            // `net_wait` on the listener alone — the ask that cannot
-            // block ([os.net.wait]) — which keeps the common case one
-            // syscall wide. ws18: a sibling CAN now take the queue out
-            // from under us between that ask and the take, because
-            // readiness is not exclusivity — and that is exactly the
-            // race `[os.net.accept]` bounds at the listener's own 5 ms
-            // budget (arm_accept), so the loop pays a budget at worst
-            // and never a park.
-            var burst: int = 0
-            var draining = true
-            var probe = List[int]()
-            (mut probe).push(hl)
-            while draining && burst < 64 {
-                if burst > 0 {
-                    let again = net_wait(probe, 0) else |_| {
-                        List[int]()
-                    }
-                    if again.len == 0 {
-                        draining = false
-                        continue
-                    }
-                }
-                var got_conn = true
-                let conn = net_accept(hl) else |_| {
-                    got_conn = false
-                    0
-                }
-                if !got_conn {
-                    draining = false
-                    continue
-                }
-                let curgen = current_gen(gens)
-                counters.accepted = counters.accepted + 1
-                gens = bump_live(take gens, curgen, 1)
-                // ws24: `tcp_nodelay off` is the one value that moves
-                // anything — every accepted stream is already NODELAY
-                // ([os.net.nodelay]); a host that declines is an
-                // unchanged socket, which is what `on` means
-                if !lim_for(gens, curgen).nodelay {
-                    net_nodelay(conn, false) else |_| {}
-                }
-                (mut cfds).push(conn)
-                (mut cgens).push(curgen)
-                (mut ccarry).push("")
-                (mut cserved).push(0)
-                (mut cidle).push(now)
-                (mut cstart).push(now)
-                (mut cwait).push("")
-                (mut cstream).push(0)
-                burst = burst + 1
-            }
-        }
-
-        // 2b. TLS: accept and serve BLOCKING to completion (ws05).
-        // A TLS connection is handshaked and served here, start to
-        // finish, under the current generation's frozen SslConf. It is
-        // tagged to the current gen for the live counter (a reload
-        // while a TLS conn serves waits for it — acceptable on
-        // loopback). The #144 layout gate retired at the wsm02 pin;
-        // joining the drain table is now lobo's own stepper refactor,
-        // the NAMED D24 rider (see the listener comment above). A
-        // stalled handshake is bounded by the read deadline, never a
-        // hang.
-        if have_tls && running && !quitting && ready_has(ready, tls_l) {
-            var got_tls = true
-            let tconn = net_accept(tls_l) else |_| {
-                got_tls = false
-                0
-            }
-            if got_tls {
-                let tgen = current_gen(gens)
-                gens = bump_live(take gens, tgen, 1)
-                let tci = conf_index(gens, tgen)
-                var aborted_t = false
-                counters.accepted = counters.accepted + 1
-                if !lim_for(gens, tgen).nodelay {
-                    net_nodelay(tconn, false) else |_| {}
-                }
-                var z = tls.accept(tconn, ssl0, opts.read_timeout_ms) else |e| match e {
-                    refused => {
-                        aborted_t = true
-                        counters.tls_refused = counters.tls_refused + 1
-                        tls.no_sess()
-                    },
-                    timeout => {
-                        aborted_t = true
-                        counters.tls_timeout = counters.tls_timeout + 1
-                        tls.no_sess()
-                    },
-                    io => {
-                        aborted_t = true
-                        counters.tls_io = counters.tls_io + 1
-                        tls.no_sess()
-                    },
-                }
-                if aborted_t {
-                    net_close(tconn) else |_| {}
-                } else {
-                    counters.tls_ok = counters.tls_ok + 1
-                    var tcn = conn.tls_conn(tconn, take z)
-                    serve.serve_conn_cn(
-                        mut tcn,
-                        gens[tci].conf,
-                        opts,
-                        lim_for(gens, tgen),
-                        hport,
-                        mut rs,
-                    )
-                }
-                gens = on_conn_close(take gens, tgen, false, mut elog)
-            }
-        }
-
-        // 3. give every open connection ONE short poll step, rebuilding
-        // the table without the ones that finished. A close decrements
-        // the owning generation; a draining generation past its
-        // worker_shutdown_timeout has its remainder aborted.
-        var nfds = List[int]()
-        var ngens = List[int]()
-        var ncarry = List[str]()
-        var nserved = List[int]()
-        var nidle = List[int]()
-        var ncstart = List[int]()
-        var nwait = List[str]()
-        var nstream = List[int]()
-        var pass_accs = List[AccRow]()
-        // ws49: the streams in flight as this pass begins; a hand-off
-        // below adds one
-        var inflight: int = 0
-        // ws56 (lobo#65): the ACME daemon is one more proc parked
-        // beside the loop for the life of the process, so it takes one
-        // place in the room
-        if acme_beside {
-            inflight = 1
-        }
-        for sx in cstream {
-            if sx != 0 {
-                inflight = inflight + 1
-            }
-        }
-        var k: int = 0
-        let ktot = cfds.len
-        while k < ktot {
-            let fd = cfds[k]
-            let cg = cgens[k]
-            let car = ccarry[k]
-            let sv = cserved[k]
-            let idle0 = cidle[k]
-            let cs0 = cstart[k]
-            let waiting = cwait[k]
-            // ws13: a PARKED connection is not stepped while its name
-            // is still in flight — the row rides forward untouched
-            // (its idle clock too: waiting on the resolver is work,
-            // not idleness; resolver_timeout bounds it)
-            if !waiting.is_empty() && resolver.is_pending(rs, waiting) {
-                (mut nfds).push(fd)
-                (mut ngens).push(cg)
-                (mut ncarry).push(car)
-                (mut nserved).push(sv)
-                (mut nidle).push(now)
-                (mut ncstart).push(cs0)
-                (mut nwait).push(waiting)
-                (mut nstream).push(0)
-                k = k + 1
-                continue
-            }
-            // ws49 (lobo#46): a STREAMING row belongs to its stream until
-            // the stream's line arrives (step 0b). Until then the loop
-            // neither reads, writes nor closes the socket: the runtime
-            // hands a closed handle out again, and the stream's next
-            // chunk would go to whoever got it.
-            let sst = cstream[k]
-            if sst != 0 {
-                let di = index_in(sdone, fd)
-                if di < 0 {
-                    var nst = sst
-                    if sst < 10 {
-                        let sgi = index_of(gens, cg)
-                        if sgi >= 0 &&
-                            gens[sgi].state == "draining" &&
-                            gens[sgi].shut_ms > 0 &&
-                            now - gens[sgi].since_ms >= gens[sgi].shut_ms {
-                            // worker_shutdown_timeout (ws56, lobo#62):
-                            // END the stream. Its write may be parked
-                            // on a client that reads slowly or not at
-                            // all, and a budget armed now would rule
-                            // only its NEXT write ([os.net.io]) — 25 s
-                            // late, measured. A kill reaches the park;
-                            // the proc is gone when `stream_kill`
-                            // returns, so the socket is the loop's to
-                            // close. `false` is the stream that ran to
-                            // its end in the same instant: its line is
-                            // in the pipe and the row waits for it.
-                            let si = budget.stream_slot(sslots, fd, -1)
-                            if budget.stream_kill(mut sslots, si) {
-                                net_close(fd) else |_| {}
-                                gens = on_conn_close(take gens, cg, true, mut elog)
-                                k = k + 1
-                                continue
-                            }
-                            nst = sst + 10
+                    // 0a. ws16: a standing-by hand retries its bind — the failover
+                    // half of this pin's accept-distribution posture (the holder
+                    // died: the port is free within its kernel teardown, and the
+                    // first hand to retry serves)
+                    if standby_http && running && !quitting && !adopting {
+                        let sb = bind_listener(addr, reuseport)
+                        let cand = sb.0
+                        let got = sb.1
+                        if got {
+                            hl = cand
+                            arm_accept(hl)
+                            hport = net_port(hl) else |_| { 0 }
+                            have_http = true
+                            standby_http = false
+                            ev_log(
+                                mut elog,
+                                "notice",
+                                "listener {addr} acquired (port {hport}) — serving",
+                            )
                         }
                     }
-                    (mut nfds).push(fd)
-                    (mut ngens).push(cg)
-                    (mut ncarry).push(car)
-                    (mut nserved).push(sv)
-                    (mut nidle).push(now)
-                    (mut ncstart).push(cs0)
-                    (mut nwait).push("")
-                    (mut nstream).push(nst)
-                    k = k + 1
-                    continue
-                }
-                let sr = budget.stream_line(sline[di])
-                // ws56: the stream reported, so its file is closed and
-                // its slot freed here (the loop owns both)
-                let dsi = budget.stream_slot(sslots, fd, sr.4)
-                budget.stream_done(mut sslots, dsi)
-                let scls = sr.1
-                let swc = sr.2
-                let srt = sr.3
-                // ws12: the stream's measured region high water joins
-                // its generation's, as the inline write's always did
-                if note_needed(gens, cg, 0, srt, false) {
-                    gens = note_request(take gens, cg, 0, srt, false)
-                }
-                let sabort = sst >= 10
-                if scls != 0 || swc != 0 || sst % 10 == 2 || sabort {
-                    net_close(fd) else |_| {}
-                    gens = on_conn_close(take gens, cg, sabort, mut elog)
-                } else {
-                    (mut nfds).push(fd)
-                    (mut ngens).push(cg)
-                    (mut ncarry).push(car)
-                    (mut nserved).push(sv)
-                    (mut nidle).push(now)
-                    (mut ncstart).push(now)
-                    (mut nwait).push("")
-                    (mut nstream).push(0)
-                }
-                k = k + 1
-                continue
-            }
-            let cci = conf_index(gens, cg)
-            // ws17: a connection is STEPPED only when the wait named
-            // it. A socket the poll did not name has nothing to read,
-            // so ws16's 12 ms deadline-and-read on it was the loop
-            // paying to learn what it already knew — a hand holding
-            // twelve idle keepalive connections spent 144 ms of every
-            // pass on them. The row still rides the idle and drain
-            // clocks below, which is the work a timer, not a socket,
-            // has to do.
-            // ws17: a connection is stepped when the wait named it —
-            // OR when it has work that no incoming byte will announce.
-            // Two such rows, and BOTH were hangs before they were
-            // measured (tests/resolver/proxy_e2e.lu found the first
-            // inside an hour):
-            //   * a connection coming OUT of a resolver park was never
-            //     in the wait set while it was parked, so it could not
-            //     be in the answer either — it would have ridden
-            //     forward forever with its name settled and nobody to
-            //     write the response;
-            //   * a connection whose CARRY already holds a whole head
-            //     (the pipelined request) is waiting on lobo, not on
-            //     its client, and a poll will never name it again.
-            // ws16 never met either, because ws16 stepped every
-            // connection every pass and paid 12 ms each for the
-            // privilege.
-            let must_step = !waiting.is_empty() || serve.carry_has_head(car)
-            let st = if !(must_step || ready_has(ready, fd)) {
-                serve.conn_idle(car, sv)
-            } else if inflight < room {
-                serve.conn_step(
-                    fd,
-                    gens[cci].conf,
-                    opts,
-                    lim_for(gens, cg),
-                    hport,
-                    car,
-                    sv,
-                    12,
-                    mut rs,
-                    mut ft,
-                )
-            } else {
-                serve.conn_step(
-                    fd,
-                    gens[cci].conf,
-                    crowded,
-                    lim_for(gens, cg),
-                    hport,
-                    car,
-                    sv,
-                    12,
-                    mut rs,
-                    mut ft,
-                )
-            }
-            if st.streaming {
-                inflight = inflight + 1
-            }
-            var close_it = st.close
-            var new_idle = idle0
-            if st.active {
-                new_idle = now
-            }
-            // ws13: serve asked to WAIT on a name — park the row and
-            // make sure a query is in flight (start is a no-op while
-            // one is, or while the cache is fresh)
-            var new_wait = ""
-            if !st.resolve.is_empty() {
-                new_wait = st.resolve
-                new_idle = now
-                resolver.start(
-                    mut rs,
-                    st.resolve,
-                    st.resolve_addr,
-                    st.resolve_timeout_ms,
-                    st.resolve_valid_ms,
-                    now,
-                )
-            }
-            // ws12: the admin endpoint's SECOND PHASE. serve
-            // recognised /metrics or /status.json and handed the
-            // request back unanswered because the numbers live here;
-            // this is where the body is rendered and written. Every
-            // fence and every ws10 budget site already ran inside
-            // serve, and the generated body takes the `file` site's
-            // rule — a scrape whose exposition would blow the budget
-            // is a 503 with a name, which is the CORRECT answer and a
-            // rig case. The `admin` site name joins head|body|
-            // body-chunked|file as an additive value in a frozen field
-            // (docs/BUDGET.md carries it).
-            var st_acc = st.acc
-            var adm_hit = false
-            var adm_would = 0
-            if !st.admin.is_empty() {
-                let alim = lim_for(gens, cg).memory_budget
-                let body = if st.admin == "metrics" {
-                    render_metrics(counters, gens, elog.seq, worker)
-                } else {
-                    status_stanza(
-                        gens,
-                        quitting,
-                        true,
-                        elog.seq,
-                        worker,
-                        listening,
-                        counters.accepted,
-                    )
-                }
-                let would = st.mem_hw + body.len
-                if alim > 0 && would > alim {
-                    serve.write_admin_503(fd, opts.token)
-                    st_acc.status = 503
-                    st_acc.body_bytes = serve.admin_err_len(opts.token)
-                    adm_hit = true
-                    adm_would = would
-                    close_it = true
-                } else {
-                    let ctype = if st.admin == "metrics" {
-                        metrics.content_type()
+                    if standby_tls && running && !quitting && !adopting {
+                        let tsb = bind_listener(tls_addr, reuseport)
+                        let tcand = tsb.0
+                        let tgot = tsb.1
+                        if tgot {
+                            tls_l = tcand
+                            arm_accept(tls_l)
+                            let tport = net_port(tls_l) else |_| { 0 }
+                            if !have_http {
+                                hport = tport
+                            }
+                            have_tls = true
+                            standby_tls = false
+                            ev_log(
+                                mut elog,
+                                "notice",
+                                "TLS listener {tls_addr} acquired (port {tport}) — serving",
+                            )
+                        }
+                    }
+                    let listening = (!want_http || have_http) && (!want_tls || have_tls)
+
+                    // 0a2. ws17: THE WAIT. One `net_wait` over every socket this
+                    // process owns — the control listener, the http listener, the
+                    // TLS listener and every open connection that is not parked on
+                    // a name — replaces the deadline ws16 armed on each of them
+                    // (25 ms in the control accept, 25 in each listener's, 12 per
+                    // connection, every idle pass: wolf-lang#127's customer report
+                    // was this loop). Readiness is level-triggered, so asking
+                    // consumes nothing and a socket this pass declines to service
+                    // is still ready next pass; an EMPTY answer is the deadline
+                    // expiring with nothing ready, which is an ANSWER and not a
+                    // failure ([os.net.wait]) — the loop falls through and does
+                    // its timer work. A peer that closed reads as READY: the
+                    // `net_read` behind it is what reports `closed`, which is how
+                    // a connection leaves the table instead of being parked on.
+                    var wfds = List[int]()
+                    if have_ctrl {
+                        (mut wfds).push(cl)
+                    }
+                    // ws29: the forwarder's read end — the readiness handle a
+                    // signal did not have until this sprint (lobo#8)
+                    if sig_on {
+                        (mut wfds).push(sig_r)
+                    }
+                    // ws18: EVERY hand's listeners join the wait set, every pass —
+                    // FREE-FOR-ALL, which is the posture ws17 measured (17,347
+                    // req/s) and could not ship. ws17 admitted a listener only
+                    // during the hand's own accept turn, because a hand that lost
+                    // the race then parked inside a blocking `accept(2)` until the
+                    // next connection (wolf-lang#242). s138 closed that: a lost
+                    // race answers NOTHING, inside the budget `arm_accept` armed —
+                    // so there is nothing left for a turn to buy, and the twenty
+                    // lines that bought it are gone.
+                    if have_http && running && !quitting {
+                        (mut wfds).push(hl)
+                    }
+                    if have_tls && running && !quitting {
+                        (mut wfds).push(tls_l)
+                    }
+                    // ws49 (lobo#46): the stream pipe's read end — a finished
+                    // stream's line wakes the loop the way a signal's byte does
+                    if stream_r >= 0 {
+                        (mut wfds).push(stream_r)
+                    }
+                    var wi: int = 0
+                    var parked = false
+                    while wi < crows {
+                        if cwait[wi] >= 0 {
+                            parked = true
+                        } else if cstream[wi] == 0 {
+                            (mut wfds).push(cfds[wi])
+                        }
+                        wi = wi + 1
+                    }
+                    let wms = wait_budget(parked)
+                    var ready = List[int]()
+                    if wfds.len > 0 {
+                        ready = net_wait(wfds, wms) else |_| {
+                            List[int]()
+                        }
                     } else {
-                        "application/json"
+                        // nothing to wait ON (a standing-by hand with no endpoint,
+                        // or a wound-down loop): the pass still has to end, and
+                        // `net_wait` refuses an empty set with an unbounded
+                        // deadline by name — `time_sleep_ms` is the call that
+                        // means to sleep, and the clause says so.
+                        time_sleep_ms(wms)
                     }
-                    var wrote = 0
-                    var wfail = false
-                    wrote = serve.write_admin(fd, body, ctype, opts.token, !st.close) else |_| {
-                        wfail = true
-                        0
-                    }
-                    st_acc.status = 200
-                    st_acc.body_bytes = wrote
-                    if wfail {
-                        close_it = true
-                    }
-                }
-            }
-            // ws09: a served request becomes an access record — the
-            // entry stamps the times serve cannot know (wall clock,
-            // and the span since this request's first byte)
-            var new_start = cs0
-            if st.logged {
-                var a2 = st_acc
-                a2.unix_ms = now
-                var span = now - cs0
-                if span < 0 {
-                    span = 0
-                }
-                a2.req_ms = span
-                new_start = now
-                // ws10: the budget observability — a refusal is a LOUD
-                // error event (the ws09 seam) and the generation's
-                // counters move; every served request feeds the
-                // high-water aggregate
-                let hit = !st.bud_site.is_empty() || adm_hit
-                if st.bud_site == "region" {
-                    // ws13: the runtime's own refusal — the cap in
-                    // ledger units rides as the appended field
-                    ev_event(
-                        mut elog,
-                        "error",
-                        shell.ev_budget_exceeded_cap(
-                            cg,
-                            st.bud_site,
-                            st.bud_limit,
-                            st.bud_would,
-                            st.bud_cap,
-                        ),
-                    )
-                } else if !st.bud_site.is_empty() {
-                    ev_event(
-                        mut elog,
-                        "error",
-                        shell.ev_budget_exceeded(cg, st.bud_site, st.bud_limit, st.bud_would),
-                    )
-                } else if adm_hit {
-                    ev_event(
-                        mut elog,
-                        "error",
-                        shell.ev_budget_exceeded(
-                            cg,
-                            "admin",
-                            lim_for(gens, cg).memory_budget,
-                            adm_would,
-                        ),
-                    )
-                }
-                var admitted = st.mem_hw
-                if adm_hit {
-                    admitted = adm_would
-                }
-                if note_needed(gens, cg, admitted, st.mem_rt, hit) {
-                    gens = note_request(take gens, cg, admitted, st.mem_rt, hit)
-                }
-                // ws12: the same record that becomes an access line
-                // becomes counter movement — one fold, no second pass
-                note_served(mut counters, a2, admitted)
-                // ws28: with no access output configured nothing renders
-                // the record, so it is not kept. ws42 (B156): it is kept
-                // by MOVING it — the counters above were its last reader,
-                // so neither the record nor its row is copied (it was a
-                // `copy` and a plain push, two deep copies of the two
-                // header lists per logged request, at 0.2.16).
-                if !asinks.is_empty() {
-                    (mut pass_accs).push(take AccRow { a: a2 })
-                }
-            } else if !st.active && st.carry.is_empty() {
-                new_start = now
-            }
-            var aborted_flag = false
-            if !close_it && !st.active && now - new_idle >= opts.keepalive_timeout_ms {
-                close_it = true
-            }
-            if !close_it {
-                let gi = index_of(gens, cg)
-                if gi >= 0 &&
-                    gens[gi].state == "draining" &&
-                    gens[gi].shut_ms > 0 &&
-                    now - gens[gi].since_ms >= gens[gi].shut_ms {
-                    close_it = true
-                    aborted_flag = true
-                }
-            }
-            if st.streaming {
-                // ws49 (lobo#46): the body is streaming beside the loop;
-                // the request is logged, and the close decision waits
-                // for the stream's report. ws56 (lobo#62): the step
-                // handed the open file back and the stream starts
-                // HERE, in a slot that keeps its proc. A generation
-                // already past its worker_shutdown_timeout starts no
-                // stream: the head is on the wire, the body never
-                // leaves, and the row closes as aborted now.
-                if aborted_flag {
-                    fs_close(st.stream_fd) else |_| {}
-                    net_close(fd) else |_| {}
-                    gens = on_conn_close(take gens, cg, true, mut elog)
-                } else {
-                    snext = snext + 1
-                    let _slot = budget.stream_open(mut sslots, fd, st.stream_fd, stream_w, snext)
-                    (mut nfds).push(fd)
-                    (mut ngens).push(cg)
-                    (mut ncarry).push(st.carry)
-                    (mut nserved).push(st.served)
-                    (mut nidle).push(new_idle)
-                    (mut ncstart).push(new_start)
-                    (mut nwait).push("")
-                    (mut nstream).push(if close_it { 2 } else { 1 })
-                }
-            } else if close_it {
-                net_close(fd) else |_| {}
-                gens = on_conn_close(take gens, cg, aborted_flag, mut elog)
-            } else {
-                (mut nfds).push(fd)
-                (mut ngens).push(cg)
-                (mut ncarry).push(st.carry)
-                (mut nserved).push(st.served)
-                (mut nidle).push(new_idle)
-                (mut ncstart).push(new_start)
-                (mut nwait).push(new_wait)
-                (mut nstream).push(0)
-            }
-            k = k + 1
-        }
-        cfds = nfds
-        cgens = ngens
-        ccarry = ncarry
-        cserved = nserved
-        cidle = nidle
-        cstart = ncstart
-        cwait = nwait
-        cstream = nstream
 
-        // ws09: pump the pass's records through every access output
-        // (ONE bounded append per sink per pass — emit never blocked
-        // the serve path) and flush the error mirror
-        asinks = pump_sinks(asinks, pass_accs, optin, mut elog)
-        elog = flush_elog(elog)
+                    // 0. ws13: one resolver pass — every pending query socket
+                    // gets a 1 ms read under its deadline; settled names become
+                    // vocabulary events through the ws09 seam (stamped seq=) and
+                    // counter movement. ws57: only while a query is in flight or
+                    // an event is waiting, and on a COPY of the resolver made in
+                    // this pass — the pass's region frees the tick's own work, and
+                    // the copy replaces the table (under `in life`, materialized by
+                    // `copy region`) only when the tick changed something. One
+                    // table is kept per change: about three per DNS query.
+                    if resolver.pending(rs) > 0 || resolver.waiting_events(rs) > 0 {
+                        var rst = copy rs
+                        resolver.tick(mut rst, now)
+                        let revs = resolver.take_events(mut rst)
+                        var ri: int = 0
+                        while ri < revs.len {
+                            let body = revs[ri]
+                            if body.starts_with("upstream-resolved ") {
+                                counters.res_ok = counters.res_ok + 1
+                                ev_event(mut elog, "notice", body)
+                            } else {
+                                counters.res_failed = counters.res_failed + 1
+                                ev_event(mut elog, "error", body)
+                            }
+                            ri = ri + 1
+                        }
+                        if resolver.muts(rst) != resolver.muts(rs) {
+                            in life {
+                                rs = copy region rtick {
+                                    copy rst
+                                }
+                            }
+                        }
+                    }
 
-        // 3b. ws06: the renewal daemon's events. Since ws56 (lobo#65)
-        // the daemon is a proc beside the loop and an event is a line
-        // it wrote down the stream pipe (step 0b gathered them), so
-        // the accept path never waits on a CA — measured 5006 ms per
-        // wedged transaction when the tick ran here. On issuance the
-        // running server REBUILDS its frozen SslConf from the store
-        // and swaps it — no reload, no deploy hook: certbot's dance
-        // eliminated (the "finally"). Every failure is LOUD (an error
-        // log line per attempt) with the named reason the flow
-        // carries. A host with no stream pipe ticks here, as every
-        // lobo before ws56 did.
-        if have_auto && running && !quitting {
-            if !acme_beside {
-                let tev = acme.tick(mut flow, now)
-                if tev == "issued" {
-                    (mut aevs).push("issued")
-                } else if tev == "failed" {
-                    (mut aevs).push("failed {flow.err}")
-                }
-            }
-            for aev in aevs {
-                if aev == "issued" {
-                    let rssl = config.ssl_resolve(conf_for(gens, current_gen(gens)), prefix)
-                    if config.ssl_ok(rssl) {
-                        ssl0 = rssl
-                        ev_log(
-                            mut elog,
-                            "notice",
-                            "cert auto: issued/renewed {auto_primary}; new TLS connections serve the fresh certificate (no reload)",
+                    // 0b. ws49 (lobo#46): the streams that finished. Each stream
+                    // wrote one `<sock> <cls> <wcode> <rt> <id>` line; read what
+                    // is there (the pipe is ready, so the read answers at once)
+                    // and keep a partial line for the next pass. The rows close or
+                    // resume in step 3. ws56 (lobo#62): a line counts only if a
+                    // live slot carries its socket AND its id — a stream the loop
+                    // ended reports nothing, and a line that outlived its row must
+                    // not be read as a newer stream's on the same descriptor.
+                    var sdone = List[int]()
+                    var sline = List[str]()
+                    if stream_r >= 0 && ready_has(ready, stream_r) {
+                        let piece = sock_line(stream_r, 4096) else |_| { "" }
+                        var sbuf = if spart_n == 0 {
+                            piece
+                        } else {
+                            "{carry_str(spart, spart_n)}{piece}"
+                        }
+                        var more = true
+                        while more {
+                            let nl = sbuf.find("\n") else -1
+                            if nl < 0 {
+                                more = false
+                            } else {
+                                let ln = sbuf[0..nl]
+                                sbuf = sbuf[nl + 1..sbuf.len]
+                                let sr = budget.stream_line(ln)
+                                if sr.0 >= 0 && budget.stream_slot(sslots, sr.0, sr.4) >= 0 {
+                                    (mut sdone).push(sr.0)
+                                    (mut sline).push(ln)
+                                } else if ln.starts_with("acme ") {
+                                    // ws56 (lobo#65): the ACME daemon's event,
+                                    // acted on in step 3b
+                                    (mut aevs).push(ln[5..ln.len])
+                                }
+                            }
+                        }
+                        // ws57: a line the read split keeps its front as bytes
+                        if sbuf.len > 0 {
+                            in life {
+                                carry_put(mut spart, sbuf, spart_was)
+                            }
+                            spart_was = sbuf.len
+                        }
+                        spart_n = sbuf.len
+                    }
+
+                    // 1. collect ONE trigger for the verb dispatch: a control-
+                    // channel line (with a reply socket) or a received signal
+                    // (reply-less; a real SIGHUP lands here). Both flow through
+                    // the SAME dispatch below — ws04's one-layer design,
+                    // flipped real by s114. A control verb wins the pass; a
+                    // signal waits buffered for the next pass, so neither is
+                    // lost.
+                    var verb = ""
+                    var cc = -1
+                    var denied = false
+                    if have_ctrl && ready_has(ready, cl) {
+                        var got_ctrl = true
+                        let cand = net_accept(cl) else |_| {
+                            got_ctrl = false
+                            0
+                        }
+                        if got_ctrl {
+                            cc = cand
+                            net_deadline(cc, 2000) else |_| {}
+                            let line = read_command(cc)
+                            if shell.control_authorized(line, ctok) {
+                                verb = shell.control_verb_of(line, ctok)
+                            } else {
+                                denied = true
+                            }
+                        }
+                    }
+                    // an unauthorized line dispatches NOTHING and emits no
+                    // vocabulary event — the refusal is a prose notice at `warn`,
+                    // so the frozen event stream stays the stream of decisions the
+                    // loop actually took (docs/CONTROL.md)
+                    if denied {
+                        ev_log(mut elog, "warn", "control: unauthorized command rejected")
+                        reply(cc, "unauthorized\n")
+                        net_close(cc) else |_| {}
+                        cc = -1
+                    }
+                    if sig_on && cc < 0 && ready_has(ready, sig_r) {
+                        // ws29 (lobo#8): a signal ARRIVED — the forwarder wrote
+                        // its meaning down the self-pipe and the wait above said
+                        // the read end is ready. Nothing was asked and nothing
+                        // was raised: this branch costs a `read` on the pass a
+                        // signal actually reaches the process, and zero on every
+                        // other pass. ONE BYTE, one meaning: a second signal that
+                        // landed in the same gap stays in the socket, and
+                        // level-triggered readiness brings the loop back for it.
+                        let b = net_read(sig_r, 1) else |_| { "" }
+                        let m = sig_meaning_of(b)
+                        if m > 0 {
+                            verb = shell.signal_verb(m)
+                        }
+                    }
+                    if cc >= 0 || !verb.is_empty() {
+                        let curgen = current_gen(gens)
+                        // ws15: ONE emission site for the trigger event, reached
+                        // by BOTH doors. A control verb and a real signal run the
+                        // same dispatch below, so the vocabulary line — and every
+                        // generation event that follows it — is byte-identical
+                        // but for `source`. The verbs with no signal twin
+                        // (status, reopen, ping, upgrade) emit nothing: `sig`'s
+                        // value set stays the frozen reload|terminate|quit.
+                        let mtrig = shell.signal_meaning(verb)
+                        if mtrig > 0 {
+                            let src = if cc >= 0 { "control" } else { "signal" }
+                            ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
+                        }
+                        if verb == "ping" {
+                            reply(cc, "pong\n")
+                        } else if verb == "status" {
+                            let body = status_stanza(
+                                gens,
+                                quitting,
+                                false,
+                                elog.seq,
+                                worker,
+                                listening,
+                                counters.accepted,
+                            )
+                            reply(cc, "{body}\n")
+                        } else if verb == "status json" {
+                            let body = status_stanza(
+                                gens,
+                                quitting,
+                                true,
+                                elog.seq,
+                                worker,
+                                listening,
+                                counters.accepted,
+                            )
+                            reply(cc, "{body}\n")
+                        } else if verb == "stop" {
+                            reply(cc, "stop: shutting down (generation {curgen})\n")
+                            running = false
+                        } else if verb == "quit" {
+                            reply(cc, "quit: draining then exiting (generation {curgen})\n")
+                            quitting = true
+                            let held = held_of(gens, curgen)
+                            in life {
+                                gen_drain(mut gens, curgen, now)
+                            }
+                            ev_event(mut elog, "notice", shell.ev_generation_draining(curgen, held))
+                            if gens_retirable(gens) {
+                                retire_note(gens, now, mut elog)
+                                in life {
+                                    retire_count(gens, mut counters)
+                                    gens = retire_drop(take gens)
+                                }
+                            }
+                        } else if verb == "reopen" {
+                            // ws57: an access output holds no text between passes,
+                            // so cycling it is closing its descriptor; the error
+                            // log's pending lines are written first, to the file
+                            // they were meant for
+                            var oi: int = 0
+                            while oi < asinks.len {
+                                if asinks[oi].s.is_open {
+                                    fs_close(asinks[oi].s.fd) else |_| {}
+                                    asinks[oi].s.is_open = false
+                                }
+                                oi = oi + 1
+                            }
+                            if elog.have {
+                                let fl = sink_flush_lines(
+                                    elog_st.s.path,
+                                    elog.s.buf,
+                                    elog.s.dropped,
+                                    elog_st.s.dropped_total,
+                                    elog_st.s.cap,
+                                    elog_st.s.fd,
+                                    elog_st.s.is_open,
+                                )
+                                if !fl.note.is_empty() {
+                                    eprint("lobo: [warn] {fl.note}")
+                                }
+                                elog.s.buf = ""
+                                elog.s.dropped = 0
+                                elog_st.s.dropped_total = fl.dropped_total
+                                elog_st.s.fd = fl.fd
+                                elog_st.s.is_open = fl.is_open
+                                if elog_st.s.is_open {
+                                    fs_close(elog_st.s.fd) else |_| {}
+                                    elog_st.s.is_open = false
+                                }
+                            }
+                            ev_log(mut elog, "notice", "reopening log files")
+                            reply(cc, "reopen: log outputs cycled (generation {curgen})\n")
+                        } else if verb == "reload" {
+                            // ws57: a reload is the one place the loop builds
+                            // something it keeps for good — a generation's frozen
+                            // model, its TLS material, its log outputs — so the
+                            // whole of it runs under `in life`: the parse happens in
+                            // a region of its own (`copy region` keeps the result
+                            // and frees the work) and everything the new
+                            // generation holds is built where it will live. What a
+                            // reload leaves behind is bounded by the reloads.
+                            let ci = index_of(gens, curgen)
+                            let held = gens[ci].live
+                            var note = ""
+                            var took = false
+                            var newgen: int = 0
+                            var newhash = ""
+                            var tls_err = ""
+                            in life {
+                                let ng = copy region rload {
+                                    let prev = shell.Gen {
+                                        conf: copy gens[ci].conf,
+                                        gen: curgen,
+                                        ok: true,
+                                        note: "",
+                                    }
+                                    shell.reload(prefix, conf, take prev)
+                                }
+                                note = ng.note
+                                if ng.ok && ng.gen > curgen {
+                                    took = true
+                                    newgen = ng.gen
+                                    let nhash = shell.conf_hash(ng.conf)
+                                    newhash = nhash
+                                    // cert-reload atomicity (ws05): rebuild the frozen
+                                    // SslConf from the new model. ssl_resolve validates
+                                    // the PAIR; a reload whose certs fail keeps serving
+                                    // (the ng.ok gate already held the config valid, and
+                                    // TLS conns are served to completion, so in-flight
+                                    // ones finish under the old cert — the ws04 rule).
+                                    let nssl = copy region rssl {
+                                        config.ssl_resolve(ng.conf, prefix)
+                                    }
+                                    if config.ssl_ok(nssl) {
+                                        ssl0 = nssl
+                                    } else {
+                                        tls_err = nssl.err
+                                    }
+                                    gens = start_reload(
+                                        take gens,
+                                        curgen,
+                                        ng.conf,
+                                        ng.gen,
+                                        nhash,
+                                        now,
+                                    )
+                                }
+                                if took {
+                                    if !tls_err.is_empty() {
+                                        eprint(
+                                            "lobo: [error] reloaded config has invalid TLS ({tls_err}); keeping the previous certificates",
+                                        )
+                                    }
+                                    ev_event(
+                                        mut elog,
+                                        "notice",
+                                        shell.ev_generation_draining(curgen, held),
+                                    )
+                                    ev_event(
+                                        mut elog,
+                                        "notice",
+                                        shell.ev_generation_loaded(newgen, newhash),
+                                    )
+                                    ev_event(
+                                        mut elog,
+                                        "notice",
+                                        shell.ev_generation_activated(newgen),
+                                    )
+                                    if gens_retirable(gens) {
+                                        retire_note(gens, now, mut elog)
+                                        retire_count(gens, mut counters)
+                                        gens = retire_drop(take gens)
+                                    }
+                                    // ws09: the log outputs follow the CURRENT
+                                    // generation (named delta — nginx's old workers
+                                    // keep old-config logs; lobo's one process logs
+                                    // through the live model's outputs). ws57: the
+                                    // old outputs hold no text between passes, so
+                                    // they are closed; this pass's error lines are
+                                    // written to the old error log first.
+                                    var oi: int = 0
+                                    while oi < asinks.len {
+                                        if asinks[oi].s.is_open {
+                                            fs_close(asinks[oi].s.fd) else |_| {}
+                                            asinks[oi].s.is_open = false
+                                        }
+                                        oi = oi + 1
+                                    }
+                                    if elog.have {
+                                        let fl = sink_flush_lines(
+                                            elog_st.s.path,
+                                            elog.s.buf,
+                                            elog.s.dropped,
+                                            elog_st.s.dropped_total,
+                                            elog_st.s.cap,
+                                            elog_st.s.fd,
+                                            elog_st.s.is_open,
+                                        )
+                                        if !fl.note.is_empty() {
+                                            eprint("lobo: [warn] {fl.note}")
+                                        }
+                                        elog.s.buf = ""
+                                        elog.s.dropped = 0
+                                        if fl.is_open {
+                                            fs_close(fl.fd) else |_| {}
+                                        }
+                                    }
+                                    let cur = conf_index(gens, newgen)
+                                    asinks = build_sinks(gens[cur].conf, prefix)
+                                    elog_st = build_elog(gens[cur].conf, prefix, elog.seq, worker)
+                                    optin = config.log_headers_join(gens[cur].conf)
+                                    elog.have = elog_st.have
+                                    elog.json = elog_st.json
+                                    elog.level = level_lit(elog_st.level)
+                                }
+                            }
+                            reply(cc, "{note}\n")
+                        } else if verb == "upgrade" {
+                            // ws15: the binary-swap verb EXISTS on the endpoint
+                            // and answers by name. It is unclaimed on every
+                            // platform at this pin — and it is the one verb the
+                            // control channel reaches that no signal does: on
+                            // unix UPGRADE's bit is lobo's own poll probe (an
+                            // outside SIGUSR2 is indistinguishable from it), and
+                            // on windows RELOAD/UPGRADE have no analog at all
+                            // ([os.signal.platform]). Naming it here is what
+                            // makes the endpoint the place it will land.
+                            reply(
+                                cc,
+                                "upgrade: not implemented at this pin — the binary-swap verb is unclaimed on every platform; when it lands it lands HERE, on the control endpoint (docs/CONTROL.md)\n",
+                            )
+                        } else {
+                            reply(cc, "unknown verb \"{verb}\"\n")
+                        }
+                        if cc >= 0 {
+                            net_close(cc) else |_| {}
+                        }
+                    }
+
+                    // 2. accept a new http connection (unless winding down) — it is
+                    // tagged with the CURRENT generation and bumps that counter
+                    if have_http && running && !quitting && ready_has(ready, hl) {
+                        // DRAIN the accept queue, bounded. One accept per pass
+                        // was ws16's shape and it is what held a
+                        // connection-per-request load to one accept per poll, so
+                        // the honest thing is to take what is there. Every accept
+                        // after the first is guarded by a ZERO-deadline
+                        // `net_wait` on the listener alone — the ask that cannot
+                        // block ([os.net.wait]) — which keeps the common case one
+                        // syscall wide. ws18: a sibling CAN now take the queue out
+                        // from under us between that ask and the take, because
+                        // readiness is not exclusivity — and that is exactly the
+                        // race `[os.net.accept]` bounds at the listener's own 5 ms
+                        // budget (arm_accept), so the loop pays a budget at worst
+                        // and never a park.
+                        var burst: int = 0
+                        var draining = true
+                        var probe = List[int]()
+                        (mut probe).push(hl)
+                        while draining && burst < 64 {
+                            if burst > 0 {
+                                let again = net_wait(probe, 0) else |_| {
+                                    List[int]()
+                                }
+                                if again.len == 0 {
+                                    draining = false
+                                    continue
+                                }
+                            }
+                            var got_conn = true
+                            let conn = net_accept(hl) else |_| {
+                                got_conn = false
+                                0
+                            }
+                            if !got_conn {
+                                draining = false
+                                continue
+                            }
+                            let curgen = current_gen(gens)
+                            counters.accepted = counters.accepted + 1
+                            in life {
+                                gen_live_add(mut gens, curgen, 1)
+                            }
+                            // ws24: `tcp_nodelay off` is the one value that moves
+                            // anything — every accepted stream is already NODELAY
+                            // ([os.net.nodelay]); a host that declines is an
+                            // unchanged socket, which is what `on` means
+                            if !lim_for(gens, curgen).nodelay {
+                                net_nodelay(conn, false) else |_| {}
+                            }
+                            // ws57: the new row, in place when the table has been
+                            // this long before
+                            if crows < cfds.len {
+                                cfds[crows] = conn
+                                cgens[crows] = curgen
+                                cserved[crows] = 0
+                                cidle[crows] = now
+                                cstart[crows] = now
+                                cwait[crows] = -1
+                                cstream[crows] = 0
+                                ccbuf[crows] = -1
+                                cclen[crows] = 0
+                                chead[crows] = 0
+                            } else {
+                                in life {
+                                    (mut cfds).push(conn)
+                                    (mut cgens).push(curgen)
+                                    (mut cserved).push(0)
+                                    (mut cidle).push(now)
+                                    (mut cstart).push(now)
+                                    (mut cwait).push(-1)
+                                    (mut cstream).push(0)
+                                    (mut ccbuf).push(-1)
+                                    (mut cclen).push(0)
+                                    (mut chead).push(0)
+                                }
+                            }
+                            crows = crows + 1
+                            burst = burst + 1
+                        }
+                    }
+
+                    // 2b. TLS: accept and serve BLOCKING to completion (ws05).
+                    // A TLS connection is handshaked and served here, start to
+                    // finish, under the current generation's frozen SslConf. It is
+                    // tagged to the current gen for the live counter (a reload
+                    // while a TLS conn serves waits for it — acceptable on
+                    // loopback). The #144 layout gate retired at the wsm02 pin;
+                    // joining the drain table is now lobo's own stepper refactor,
+                    // the NAMED D24 rider (see the listener comment above). A
+                    // stalled handshake is bounded by the read deadline, never a
+                    // hang.
+                    if have_tls && running && !quitting && ready_has(ready, tls_l) {
+                        var got_tls = true
+                        let tconn = net_accept(tls_l) else |_| {
+                            got_tls = false
+                            0
+                        }
+                        if got_tls {
+                            let tgen = current_gen(gens)
+                            in life {
+                                gen_live_add(mut gens, tgen, 1)
+                            }
+                            let tci = conf_index(gens, tgen)
+                            var aborted_t = false
+                            counters.accepted = counters.accepted + 1
+                            if !lim_for(gens, tgen).nodelay {
+                                net_nodelay(tconn, false) else |_| {}
+                            }
+                            var z = tls.accept(tconn, ssl0, opts.read_timeout_ms) else |e| match e {
+                                refused => {
+                                    aborted_t = true
+                                    counters.tls_refused = counters.tls_refused + 1
+                                    tls.no_sess()
+                                },
+                                timeout => {
+                                    aborted_t = true
+                                    counters.tls_timeout = counters.tls_timeout + 1
+                                    tls.no_sess()
+                                },
+                                io => {
+                                    aborted_t = true
+                                    counters.tls_io = counters.tls_io + 1
+                                    tls.no_sess()
+                                },
+                            }
+                            if aborted_t {
+                                net_close(tconn) else |_| {}
+                            } else {
+                                counters.tls_ok = counters.tls_ok + 1
+                                var tcn = conn.tls_conn(tconn, take z)
+                                // ws57: a TLS connection never reaches the
+                                // resolver (a proxy route on a TLS listener is the
+                                // named 502), so it is handed an empty one of this
+                                // pass's own; everything it allocates dies with the
+                                // pass
+                                var trs = resolver.new()
+                                serve.serve_conn_cn(
+                                    mut tcn,
+                                    gens[tci].conf,
+                                    opts,
+                                    lim_for(gens, tgen),
+                                    hport,
+                                    mut trs,
+                                )
+                            }
+                            var tnl: int = -1
+                            in life {
+                                tnl = conn_closed(mut gens, tgen, false)
+                            }
+                            if tnl >= 0 {
+                                ev_event(mut elog, "notice", shell.ev_connection_retired(tgen, tnl))
+                            }
+                        }
+                    }
+
+                    // 3. give every open connection ONE short poll step. ws57
+                    // (lobo#66): the table is compacted IN PLACE — row `k` is
+                    // read into locals, stepped, and when it stays it is stored
+                    // at `w`, which never runs ahead of `k`, so order is kept and
+                    // nothing is rebuilt (through ws56 eight lists were built
+                    // anew every pass and the old ones never freed). A close
+                    // decrements the owning generation; a draining generation
+                    // past its worker_shutdown_timeout has its remainder aborted.
+                    var pass_accs = List[AccRow]()
+                    // ws49: the streams in flight as this pass begins; a hand-off
+                    // below adds one
+                    var inflight: int = 0
+                    // ws56 (lobo#65): the ACME daemon is one more proc parked
+                    // beside the loop for the life of the process, so it takes one
+                    // place in the room
+                    if acme_beside {
+                        inflight = 1
+                    }
+                    var sx: int = 0
+                    while sx < crows {
+                        if cstream[sx] != 0 {
+                            inflight = inflight + 1
+                        }
+                        sx = sx + 1
+                    }
+                    var k: int = 0
+                    var w: int = 0
+                    let ktot = crows
+                    while k < ktot {
+                        let fd = cfds[k]
+                        let cg = cgens[k]
+                        let sv = cserved[k]
+                        let idle0 = cidle[k]
+                        let cs0 = cstart[k]
+                        let wi0 = cwait[k]
+                        let sst = cstream[k]
+                        let cbuf0 = ccbuf[k]
+                        let clen0 = cclen[k]
+                        let hh0 = chead[k]
+                        // what the row becomes: stored at `w` when it stays
+                        var keep = true
+                        var n_served = sv
+                        var n_idle = idle0
+                        var n_start = cs0
+                        var n_wait = wi0
+                        var n_stream = sst
+                        var n_cbuf = cbuf0
+                        var n_clen = clen0
+                        var n_head = hh0
+                        // the carry a step left, stored below when the row stays
+                        var carry_set = false
+                        var carry_new = ""
+                        // a close is accounted after the branches, once
+                        var closed_now = false
+                        var closed_abort = false
+                        if wi0 >= 0 && resolver.is_pending(rs, wnames[wi0]) {
+                            // ws13: a PARKED connection is not stepped while its
+                            // name is still in flight — the row rides forward
+                            // untouched (its idle clock too: waiting on the
+                            // resolver is work, not idleness; resolver_timeout
+                            // bounds it)
+                            n_idle = now
+                            n_stream = 0
+                        } else if sst != 0 {
+                            // ws49 (lobo#46): a STREAMING row belongs to its stream
+                            // until the stream's line arrives (step 0b). Until then
+                            // the loop neither reads, writes nor closes the socket:
+                            // the runtime hands a closed handle out again, and the
+                            // stream's next chunk would go to whoever got it.
+                            let di = index_in(sdone, fd)
+                            if di < 0 {
+                                var nst = sst
+                                var killed = false
+                                if sst < 10 {
+                                    let sgi = index_of(gens, cg)
+                                    if sgi >= 0 &&
+                                        gens[sgi].state == "draining" &&
+                                        gens[sgi].shut_ms > 0 &&
+                                        now - gens[sgi].since_ms >= gens[sgi].shut_ms {
+                                        // worker_shutdown_timeout (ws56, lobo#62):
+                                        // END the stream. Its write may be parked
+                                        // on a client that reads slowly or not at
+                                        // all, and a budget armed now would rule
+                                        // only its NEXT write ([os.net.io]) — 25 s
+                                        // late, measured. A kill reaches the park;
+                                        // the proc is gone when `stream_kill`
+                                        // returns, so the socket is the loop's to
+                                        // close. `false` is the stream that ran to
+                                        // its end in the same instant: its line is
+                                        // in the pipe and the row waits for it.
+                                        let si = budget.stream_slot(sslots, fd, -1)
+                                        in life {
+                                            killed = budget.stream_kill(mut sslots, si)
+                                        }
+                                        if killed {
+                                            net_close(fd) else |_| {}
+                                            keep = false
+                                            closed_now = true
+                                            closed_abort = true
+                                        }
+                                        nst = sst + 10
+                                    }
+                                }
+                                if !killed {
+                                    n_idle = now
+                                    n_wait = -1
+                                    n_stream = nst
+                                }
+                            } else {
+                                let sr = budget.stream_line(sline[di])
+                                // ws56: the stream reported, so its file is closed
+                                // and its slot freed here (the loop owns both)
+                                let dsi = budget.stream_slot(sslots, fd, sr.4)
+                                in life {
+                                    budget.stream_done(mut sslots, dsi)
+                                }
+                                let scls = sr.1
+                                let swc = sr.2
+                                let srt = sr.3
+                                // ws12: the stream's measured region high water
+                                // joins its generation's, as the inline write's
+                                // always did
+                                if note_needed(gens, cg, 0, srt, false) {
+                                    in life {
+                                        gen_note(mut gens, cg, 0, srt, false)
+                                    }
+                                }
+                                let sabort = sst >= 10
+                                if scls != 0 || swc != 0 || sst % 10 == 2 || sabort {
+                                    net_close(fd) else |_| {}
+                                    keep = false
+                                    closed_now = true
+                                    closed_abort = sabort
+                                } else {
+                                    n_idle = now
+                                    n_start = now
+                                    n_wait = -1
+                                    n_stream = 0
+                                }
+                            }
+                        } else {
+                            let cci = conf_index(gens, cg)
+                            // ws17: a connection is STEPPED only when the wait named
+                            // it. A socket the poll did not name has nothing to read,
+                            // so ws16's 12 ms deadline-and-read on it was the loop
+                            // paying to learn what it already knew — a hand holding
+                            // twelve idle keepalive connections spent 144 ms of every
+                            // pass on them. The row still rides the idle and drain
+                            // clocks below, which is the work a timer, not a socket,
+                            // has to do.
+                            // ws17: a connection is stepped when the wait named it —
+                            // OR when it has work that no incoming byte will announce.
+                            // Two such rows, and BOTH were hangs before they were
+                            // measured (tests/resolver/proxy_e2e.lu found the first
+                            // inside an hour):
+                            //   * a connection coming OUT of a resolver park was never
+                            //     in the wait set while it was parked, so it could not
+                            //     be in the answer either — it would have ridden
+                            //     forward forever with its name settled and nobody to
+                            //     write the response;
+                            //   * a connection whose CARRY already holds a whole head
+                            //     (the pipelined request) is waiting on lobo, not on
+                            //     its client, and a poll will never name it again.
+                            // ws16 never met either, because ws16 stepped every
+                            // connection every pass and paid 12 ms each for the
+                            // privilege. ws57: whether the carry holds a head is
+                            // the row's own flag, set when the carry was stored.
+                            let must_step = wi0 >= 0 || hh0 == 1
+                            var close_it = false
+                            var aborted_flag = false
+                            var streaming_now = false
+                            var stream_file: int = -1
+                            if !(must_step || ready_has(ready, fd)) {
+                                // nothing to read and nothing owed: the row keeps
+                                // its carry and its counters, and only the timers
+                                // look at it (ws57: no step value is built for it)
+                                n_wait = -1
+                                if clen0 == 0 {
+                                    n_start = now
+                                }
+                                if now - idle0 >= opts.keepalive_timeout_ms {
+                                    close_it = true
+                                }
+                            } else {
+                                // ws57 (lobo#66): THE STEP'S REGION. Everything the
+                                // step allocates — the bytes it reads, the parsed
+                                // request, the response head, the file's body in
+                                // `region resp` inside it — is freed at this brace;
+                                // the `ConnStep` is copied out into the pass.
+                                let st = copy region step {
+                                    let car = if clen0 == 0 {
+                                        ""
+                                    } else {
+                                        carry_str(cbufs[cbuf0], clen0)
+                                    }
+                                    if inflight < room {
+                                        serve.conn_step(
+                                            fd,
+                                            gens[cci].conf,
+                                            opts,
+                                            lim_for(gens, cg),
+                                            hport,
+                                            car,
+                                            sv,
+                                            12,
+                                            rs,
+                                            ft,
+                                        )
+                                    } else {
+                                        serve.conn_step(
+                                            fd,
+                                            gens[cci].conf,
+                                            crowded,
+                                            lim_for(gens, cg),
+                                            hport,
+                                            car,
+                                            sv,
+                                            12,
+                                            rs,
+                                            ft,
+                                        )
+                                    }
+                                }
+                                if st.streaming {
+                                    inflight = inflight + 1
+                                }
+                                close_it = st.close
+                                if st.active {
+                                    n_idle = now
+                                }
+                                n_served = st.served
+                                // the memo: what the step would have remembered is
+                                // stored here, its strings built in the memo's own
+                                // region
+                                if serve.memo_dirty(st.memo) {
+                                    in memo {
+                                        serve.memo_store(
+                                            mut ft,
+                                            st.memo.date_secs,
+                                            "{st.memo.date_str}",
+                                            st.memo.bounds,
+                                            st.memo.h_set,
+                                            "{st.memo.hpath}",
+                                            st.memo.hsize,
+                                            st.memo.hmtime,
+                                            st.memo.hsecs,
+                                            st.memo.hkeep,
+                                            "{st.memo.htoken}",
+                                            "{st.memo.hhead}",
+                                        )
+                                    }
+                                    bound_ctr = bound_ctr + st.memo.bounds
+                                }
+                                // the resolver: a proxied step that had to resolve a
+                                // name itself hands its table back whole (one table
+                                // kept per such answer); a cursor step is an index
+                                if st.rs_new.len > 0 {
+                                    in life {
+                                        rs = copy region rkeep {
+                                            copy st.rs_new[0]
+                                        }
+                                    }
+                                } else if !st.rs_rot.is_empty() {
+                                    var ri2: int = 0
+                                    for b_raw in st.rs_rot.bytes() {
+                                        let b = b_raw as int
+                                        if b == 44 {
+                                            in life {
+                                                resolver.rr_bump(mut rs, ri2)
+                                            }
+                                            ri2 = 0
+                                        } else {
+                                            ri2 = ri2 * 10 + b - 48
+                                        }
+                                    }
+                                }
+                                carry_set = true
+                                carry_new = st.carry
+                                n_head = if st.has_head { 1 } else { 0 }
+                                // ws13: serve asked to WAIT on a name — park the row
+                                // and make sure a query is in flight (start is a
+                                // no-op while one is, or while the cache is fresh).
+                                // ws57: the name is kept as its index in `wnames`,
+                                // which grows once per name never parked on before,
+                                // and the query starts on a copy of the resolver
+                                // that is kept when it changed
+                                n_wait = -1
+                                if !st.resolve.is_empty() {
+                                    var ni = name_index(wnames, st.resolve)
+                                    if ni < 0 {
+                                        in life {
+                                            (mut wnames).push("{st.resolve}")
+                                        }
+                                        ni = wnames.len - 1
+                                    }
+                                    n_wait = ni
+                                    n_idle = now
+                                    var rsq = copy rs
+                                    resolver.start(
+                                        mut rsq,
+                                        st.resolve,
+                                        st.resolve_addr,
+                                        st.resolve_timeout_ms,
+                                        st.resolve_valid_ms,
+                                        now,
+                                    )
+                                    if resolver.muts(rsq) != resolver.muts(rs) {
+                                        in life {
+                                            rs = copy region rkeep2 {
+                                                copy rsq
+                                            }
+                                        }
+                                    }
+                                }
+                                // ws12: the admin endpoint's SECOND PHASE. serve
+                                // recognised /metrics or /status.json and handed the
+                                // request back unanswered because the numbers live
+                                // here; this is where the body is rendered and
+                                // written. Every fence and every ws10 budget site
+                                // already ran inside serve, and the generated body
+                                // takes the `file` site's rule — a scrape whose
+                                // exposition would blow the budget is a 503 with a
+                                // name, which is the CORRECT answer and a rig case.
+                                // The `admin` site name joins head|body|
+                                // body-chunked|file as an additive value in a frozen
+                                // field (docs/BUDGET.md carries it).
+                                var st_acc = st.acc
+                                var adm_hit = false
+                                var adm_would = 0
+                                if !st.admin.is_empty() {
+                                    let alim = lim_for(gens, cg).memory_budget
+                                    let body = if st.admin == "metrics" {
+                                        render_metrics(counters, gens, elog.seq, worker)
+                                    } else {
+                                        status_stanza(
+                                            gens,
+                                            quitting,
+                                            true,
+                                            elog.seq,
+                                            worker,
+                                            listening,
+                                            counters.accepted,
+                                        )
+                                    }
+                                    let would = st.mem_hw + body.len
+                                    if alim > 0 && would > alim {
+                                        serve.write_admin_503(fd, opts.token)
+                                        st_acc.status = 503
+                                        st_acc.body_bytes = serve.admin_err_len(opts.token)
+                                        adm_hit = true
+                                        adm_would = would
+                                        close_it = true
+                                    } else {
+                                        let ctype = if st.admin == "metrics" {
+                                            metrics.content_type()
+                                        } else {
+                                            "application/json"
+                                        }
+                                        var wrote = 0
+                                        var wfail = false
+                                        wrote = serve.write_admin(
+                                            fd,
+                                            body,
+                                            ctype,
+                                            opts.token,
+                                            !st.close,
+                                        ) else |_| {
+                                            wfail = true
+                                            0
+                                        }
+                                        st_acc.status = 200
+                                        st_acc.body_bytes = wrote
+                                        if wfail {
+                                            close_it = true
+                                        }
+                                    }
+                                }
+                                // ws09: a served request becomes an access record —
+                                // the entry stamps the times serve cannot know (wall
+                                // clock, and the span since this request's first
+                                // byte)
+                                if st.logged {
+                                    var a2 = st_acc
+                                    a2.unix_ms = now
+                                    var span = now - cs0
+                                    if span < 0 {
+                                        span = 0
+                                    }
+                                    a2.req_ms = span
+                                    n_start = now
+                                    // ws10: the budget observability — a refusal is a
+                                    // LOUD error event (the ws09 seam) and the
+                                    // generation's counters move; every served
+                                    // request feeds the high-water aggregate
+                                    let hit = !st.bud_site.is_empty() || adm_hit
+                                    if st.bud_site == "region" {
+                                        // ws13: the runtime's own refusal — the cap
+                                        // in ledger units rides as the appended field
+                                        ev_event(
+                                            mut elog,
+                                            "error",
+                                            shell.ev_budget_exceeded_cap(
+                                                cg,
+                                                st.bud_site,
+                                                st.bud_limit,
+                                                st.bud_would,
+                                                st.bud_cap,
+                                            ),
+                                        )
+                                    } else if !st.bud_site.is_empty() {
+                                        ev_event(
+                                            mut elog,
+                                            "error",
+                                            shell.ev_budget_exceeded(
+                                                cg,
+                                                st.bud_site,
+                                                st.bud_limit,
+                                                st.bud_would,
+                                            ),
+                                        )
+                                    } else if adm_hit {
+                                        ev_event(
+                                            mut elog,
+                                            "error",
+                                            shell.ev_budget_exceeded(
+                                                cg,
+                                                "admin",
+                                                lim_for(gens, cg).memory_budget,
+                                                adm_would,
+                                            ),
+                                        )
+                                    }
+                                    var admitted = st.mem_hw
+                                    if adm_hit {
+                                        admitted = adm_would
+                                    }
+                                    if note_needed(gens, cg, admitted, st.mem_rt, hit) {
+                                        in life {
+                                            gen_note(mut gens, cg, admitted, st.mem_rt, hit)
+                                        }
+                                    }
+                                    // ws12: the same record that becomes an access
+                                    // line becomes counter movement — one fold, no
+                                    // second pass (ws57: the fold takes the record's
+                                    // numbers, so nothing of the pass can stay in
+                                    // the counters)
+                                    in life {
+                                        note_served(
+                                            mut counters,
+                                            a2.status,
+                                            a2.body_bytes,
+                                            a2.req_ms,
+                                            a2.proxied,
+                                            a2.up_status,
+                                            a2.up_ms,
+                                            admitted,
+                                        )
+                                    }
+                                    // ws28: with no access output configured nothing
+                                    // renders the record, so it is not kept. ws42
+                                    // (B156): it is kept by MOVING it — the counters
+                                    // above were its last reader, so neither the
+                                    // record nor its row is copied (it was a `copy`
+                                    // and a plain push, two deep copies of the two
+                                    // header lists per logged request, at 0.2.16).
+                                    if !asinks.is_empty() {
+                                        (mut pass_accs).push(take AccRow { a: a2 })
+                                    }
+                                } else if !st.active && st.carry.is_empty() {
+                                    n_start = now
+                                }
+                                if !close_it &&
+                                    !st.active &&
+                                    now - n_idle >= opts.keepalive_timeout_ms {
+                                    close_it = true
+                                }
+                                streaming_now = st.streaming
+                                stream_file = st.stream_fd
+                            }
+                            if !close_it {
+                                let gi = index_of(gens, cg)
+                                if gi >= 0 &&
+                                    gens[gi].state == "draining" &&
+                                    gens[gi].shut_ms > 0 &&
+                                    now - gens[gi].since_ms >= gens[gi].shut_ms {
+                                    close_it = true
+                                    aborted_flag = true
+                                }
+                            }
+                            if streaming_now {
+                                // ws49 (lobo#46): the body is streaming beside the
+                                // loop; the request is logged, and the close decision
+                                // waits for the stream's report. ws56 (lobo#62): the
+                                // step handed the open file back and the stream
+                                // starts HERE, in a slot that keeps its proc. A
+                                // generation already past its worker_shutdown_timeout
+                                // starts no stream: the head is on the wire, the body
+                                // never leaves, and the row closes as aborted now.
+                                if aborted_flag {
+                                    fs_close(stream_file) else |_| {}
+                                    net_close(fd) else |_| {}
+                                    keep = false
+                                    closed_now = true
+                                    closed_abort = true
+                                } else {
+                                    snext = snext + 1
+                                    in life {
+                                        let _slot = budget.stream_open(
+                                            mut sslots,
+                                            fd,
+                                            stream_file,
+                                            stream_w,
+                                            snext,
+                                        )
+                                    }
+                                    n_wait = -1
+                                    n_stream = if close_it { 2 } else { 1 }
+                                }
+                            } else if close_it {
+                                net_close(fd) else |_| {}
+                                keep = false
+                                closed_now = true
+                                closed_abort = aborted_flag
+                            } else {
+                                n_stream = 0
+                            }
+                        }
+                        if closed_now {
+                            // the row is gone and its generation hears of it
+                            var nl: int = -1
+                            in life {
+                                nl = conn_closed(mut gens, cg, closed_abort)
+                            }
+                            if nl >= 0 {
+                                ev_event(mut elog, "notice", shell.ev_connection_retired(cg, nl))
+                            }
+                        }
+                        // the carry (ws57): bytes in a buffer of the row's own from
+                        // the pool, written in place; an emptied carry or a closed
+                        // row gives its buffer back
+                        if keep && carry_set && carry_new.len > 0 {
+                            if n_cbuf < 0 {
+                                if cbfree_n > 0 {
+                                    cbfree_n = cbfree_n - 1
+                                    n_cbuf = cbfree[cbfree_n]
+                                } else {
+                                    in life {
+                                        (mut cbufs).push(List[byte]())
+                                        (mut cbwas).push(0)
+                                        (mut cbfree).push(0)
+                                    }
+                                    n_cbuf = cbufs.len - 1
+                                }
+                            }
+                            in life {
+                                carry_put(mut cbufs[n_cbuf], carry_new, cbwas[n_cbuf])
+                            }
+                            cbwas[n_cbuf] = carry_new.len
+                            n_clen = carry_new.len
+                        } else if !keep || carry_set {
+                            if n_cbuf >= 0 {
+                                cbfree[cbfree_n] = n_cbuf
+                                cbfree_n = cbfree_n + 1
+                                n_cbuf = -1
+                            }
+                            n_clen = 0
+                            n_head = 0
+                        }
+                        if keep {
+                            cfds[w] = fd
+                            cgens[w] = cg
+                            cserved[w] = n_served
+                            cidle[w] = n_idle
+                            cstart[w] = n_start
+                            cwait[w] = n_wait
+                            cstream[w] = n_stream
+                            ccbuf[w] = n_cbuf
+                            cclen[w] = n_clen
+                            chead[w] = n_head
+                            w = w + 1
+                        }
+                        k = k + 1
+                    }
+                    crows = w
+
+                    // ws09: pump the pass's records through every access output
+                    // (ONE bounded append per sink per pass — emit never blocked
+                    // the serve path). ws57: an output's pending text is built here
+                    // and written here, so nothing but its descriptor, its open flag
+                    // and its drop total outlives the pass; a pass that served
+                    // nothing has nothing to pump.
+                    if asinks.len > 0 && pass_accs.len > 0 {
+                        var si: int = 0
+                        while si < asinks.len {
+                            let f = obs.compile(asinks[si].fmttext)
+                            var lines = obs.sink_new("", asinks[si].s.cap)
+                            for ar in pass_accs {
+                                let line = if asinks[si].json {
+                                    obs.render_access_jsonl(ar.a, optin.words())
+                                } else {
+                                    obs.render_access(f, ar.a, asinks[si].esc)
+                                }
+                                obs.sink_emit(mut lines, line)
+                            }
+                            let fl = sink_flush_lines(
+                                asinks[si].s.path,
+                                lines.buf,
+                                lines.dropped,
+                                asinks[si].s.dropped_total,
+                                asinks[si].s.cap,
+                                asinks[si].s.fd,
+                                asinks[si].s.is_open,
+                            )
+                            asinks[si].s.fd = fl.fd
+                            asinks[si].s.is_open = fl.is_open
+                            asinks[si].s.dropped_total = fl.dropped_total
+                            if !fl.note.is_empty() {
+                                ev_log(mut elog, "warn", fl.note)
+                            }
+                            si = si + 1
+                        }
+                    }
+
+                    // 3b. ws06: the renewal daemon's events. Since ws56 (lobo#65)
+                    // the daemon is a proc beside the loop and an event is a line
+                    // it wrote down the stream pipe (step 0b gathered them), so
+                    // the accept path never waits on a CA — measured 5006 ms per
+                    // wedged transaction when the tick ran here. On issuance the
+                    // running server REBUILDS its frozen SslConf from the store
+                    // and swaps it — no reload, no deploy hook: certbot's dance
+                    // eliminated (the "finally"). Every failure is LOUD (an error
+                    // log line per attempt) with the named reason the flow
+                    // carries. A host with no stream pipe ticks here, as every
+                    // lobo before ws56 did.
+                    if have_auto && running && !quitting {
+                        if !acme_beside {
+                            // the no-pipe fallback: the flow is the loop's own and
+                            // what a tick allocates stays (named, with the warning
+                            // printed at start)
+                            var tev = ""
+                            var terr = ""
+                            in life {
+                                let ev = acme.tick(mut flow, now)
+                                if ev == "issued" {
+                                    tev = "issued"
+                                } else if ev == "failed" {
+                                    tev = "failed"
+                                    terr = flow.err
+                                }
+                            }
+                            if tev == "issued" {
+                                (mut aevs).push("issued")
+                            } else if tev == "failed" {
+                                (mut aevs).push("failed {terr}")
+                            }
+                        }
+                        for aev in aevs {
+                            if aev == "issued" {
+                                // ws57: resolved in this pass, and kept (under
+                                // `in st`, materialized by `copy region`) only
+                                // when the server can load it: one SslConf per
+                                // issuance
+                                let rssl = config.ssl_resolve(
+                                    conf_for(gens, current_gen(gens)),
+                                    prefix,
+                                )
+                                if config.ssl_ok(rssl) {
+                                    in life {
+                                        ssl0 = copy region rcert {
+                                            copy rssl
+                                        }
+                                    }
+                                    ev_log(
+                                        mut elog,
+                                        "notice",
+                                        "cert auto: issued/renewed {auto_primary}; new TLS connections serve the fresh certificate (no reload)",
+                                    )
+                                } else {
+                                    ev_log(
+                                        mut elog,
+                                        "error",
+                                        "cert auto: issued a certificate the server cannot load ({rssl.err}); keeping the previous certificates",
+                                    )
+                                }
+                            } else if aev.starts_with("failed ") {
+                                ev_log(
+                                    mut elog,
+                                    "error",
+                                    "cert auto: issuance/renewal attempt failed: {aev[7..aev.len]} (will retry with backoff)",
+                                )
+                            }
+                        }
+                    }
+
+                    // 4. retire drained generations (ws57: the table is rebuilt
+                    // only when one has actually drained — it was rebuilt every
+                    // pass), 5. finish a quit once empty
+                    if gens_retirable(gens) {
+                        retire_note(gens, now, mut elog)
+                        in life {
+                            retire_count(gens, mut counters)
+                            gens = retire_drop(take gens)
+                        }
+                    }
+                    if quitting && crows == 0 {
+                        running = false
+                    }
+
+                    // ws09: flush the error mirror. ws57: at the END of the pass,
+                    // so every line the pass wrote is on disk when its region is
+                    // freed (the flush sat before step 3b, and a line written
+                    // after it waited in memory for the next pass)
+                    if elog.have && (!elog.s.buf.is_empty() || elog.s.dropped > 0) {
+                        let fl = sink_flush_lines(
+                            elog_st.s.path,
+                            elog.s.buf,
+                            elog.s.dropped,
+                            elog_st.s.dropped_total,
+                            elog_st.s.cap,
+                            elog_st.s.fd,
+                            elog_st.s.is_open,
                         )
-                    } else {
-                        ev_log(
-                            mut elog,
-                            "error",
-                            "cert auto: issued a certificate the server cannot load ({rssl.err}); keeping the previous certificates",
-                        )
+                        if !fl.note.is_empty() {
+                            eprint("lobo: [warn] {fl.note}")
+                        }
+                        elog_st.s.fd = fl.fd
+                        elog_st.s.is_open = fl.is_open
+                        elog_st.s.dropped_total = fl.dropped_total
                     }
-                } else if aev.starts_with("failed ") {
-                    ev_log(
-                        mut elog,
-                        "error",
-                        "cert auto: issuance/renewal attempt failed: {aev[7..aev.len]} (will retry with backoff)",
-                    )
+                    elog_st.seq = elog.seq
                 }
             }
-        }
-        if aevs.len > 0 {
-            aevs = List[str]()
-        }
-
-        // 4. retire drained generations, 5. finish a quit once empty
-        gens = retire_zero(take gens, now, mut elog, mut counters)
-        if quitting && cfds.len == 0 {
-            running = false
         }
     }
 
@@ -2613,9 +3268,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // flush-on-quit rule: the last request of a quit run is in the
     // log), then close connections, listeners, pid
     asinks = reopen_sinks(asinks)
-    elog = reopen_elog(elog)
-    for fd in cfds {
-        net_close(fd) else |_| {}
+    elog_st = reopen_elog(elog_st)
+    var xi: int = 0
+    while xi < crows {
+        net_close(cfds[xi]) else |_| {}
+        xi = xi + 1
     }
     // ws49: the stream pipe last — a stream still running when `stop`
     // lands finds its socket closed above and its report goes nowhere
@@ -2635,6 +3292,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     if worker == 0 {
         shell.pid_remove(pidp) else |_| {}
     }
+    // ws57: `life` is the loop's to the end — everything `in life` built
+    // (the generations, the resolver) was read up to here
+    let _st_bytes = region_bytes(life)
     0
 }
 

@@ -87,11 +87,22 @@ fn main() -> !int {
     // ---- phrases and the boundary counter
     assert(serve.status_phrase(206) == "Partial Content", "206 phrase")
     assert(serve.status_phrase(416) == "Requested Range Not Satisfiable", "416 phrase (nginx's)")
+    // ws57: a request reads the table's counter and notes how many
+    // boundaries it took (`MemoUpd.bounds`); the table's owner adds
+    // them (`memo_store`), so the next request counts on
     var ft = serve.file_kinds_new()
+    var fu = serve.memo_upd_new()
     assert(
-        serve.next_boundary(mut ft) == "00000000000000000001",
+        serve.next_boundary(ft, mut fu) == "00000000000000000001",
         "a fresh process's first boundary",
     )
-    assert(serve.next_boundary(mut ft) == "00000000000000000002", "then counts")
+    assert(serve.next_boundary(ft, mut fu) == "00000000000000000002", "then counts")
+    assert(fu.bounds == 2 && serve.memo_dirty(fu), "the request noted two boundaries")
+    serve.memo_store(mut ft, -1, "", fu.bounds, false, "", 0, 0, 0, false, "", "")
+    var fu2 = serve.memo_upd_new()
+    assert(
+        serve.next_boundary(ft, mut fu2) == "00000000000000000003",
+        "the next request counts on from the stored table",
+    )
     0
 }

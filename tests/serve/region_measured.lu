@@ -104,9 +104,12 @@ fn drive(c: config.Conf, req: str) -> serve.ReqOut ! {io} {
     }
     let cut = req.find("\r\n\r\n") else req.len
     let head = req[0..cut]
-    var rs = resolver.new()
-    var ft = serve.file_kinds_new()
-    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, mut rs, mut ft)
+    // ws57: the request READS the resolver and the memo table and
+    // notes what it would have stored (`fu`); nothing here keeps it
+    let rs = resolver.new()
+    let ft = serve.file_kinds_new()
+    var fu = serve.memo_upd_new()
+    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, rs, ft, mut fu)
     net_close(conn) else |_| {}
     let _reply = read_reply(cli)?
     net_close(cli) else |_| {}
