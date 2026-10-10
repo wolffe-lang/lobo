@@ -51,13 +51,18 @@ A draining generation retires when its live count hits zero or its
 `worker_shutdown_timeout` expires. Connections still open when the
 timeout bites are ABORTED (force-closed) and counted as such, so the
 retirement event reads `drained=N aborted=M` and the operator sees that
-the timeout ended it. A STREAMING connection is aborted through its
-socket's write budget, not closed under the stream: at the timeout the
-loop arms a 1 ms budget on the socket, the stream's next write fails,
-and the connection closes as aborted when the stream reports. A write
-already parked keeps the budget it began with ([os.net.io]), so a
-stream to a client that is still reading stops within one 64 KiB chunk,
-and one to a client that stopped reading within its send budget (60 s).
+the timeout ended it. A STREAMING connection is ended by ending its
+stream (ws56, lobo#62): the loop holds each stream's proc, and at the
+timeout it KILLS the proc, waits for it to be gone, closes the socket
+and the file, and counts the connection as aborted — in the pass that
+finds the timeout expired, so within one loop pass of it (under 100 ms;
+measured 2005 ms and 2030 ms after a 2 s timeout, for a reader at
+32 KB/s and for one that reads nothing, where the pinned nginx's old
+worker is gone after 2.15 s). Until ws56 the loop armed a 1 ms write
+budget on the socket instead, which rules only a write that BEGINS
+afterwards ([os.net.io]): the write already parked was woken by the
+kernel when it pleased — 26.8 s late on linux at 32 KB/s, 13.8 s at
+64 KB/s, and never for a client that reads nothing.
 With no `worker_shutdown_timeout`
 (the directive absent, or `0`, the nginx default) a generation drains
 FULLY, however long that takes.

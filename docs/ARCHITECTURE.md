@@ -52,7 +52,7 @@ the loop has to go and ask about. It holds two ints and a socket and
 touches no server state.
 
 ws49 (lobo#46) adds the second sentence: a large plaintext body
-(over 64 KiB) leaves in a STREAM beside the loop — `budget.start_stream`
+(over 64 KiB) leaves in a STREAM beside the loop — `budget.stream_open`
 spawns one proc that writes the chunks and then reports one line down a
 second loopback self-pipe whose read end is in the same wait set. Until ws49 the body was written inside the
 step, so a slow client held the whole loop while its download started
@@ -71,6 +71,19 @@ worker. The room was `cpus / 2 - 2` at the 0.2.22 pin (ws49,
 wolf-lang#570); at 0.2.24, which fixed the pool's retire rule, it is
 `3·max(cpus, 2) - 2` against a measured `4·max(cpus, 2) - 2` (ws51,
 `tests/serve/stream_cap_e2e.lu`).
+
+ws56 adds two more. The LOOP starts each stream and keeps its proc
+and its file in a slot (lobo#62): a stream parked in a write to a slow
+client can be ended only by a kill — a write budget armed afterwards
+rules the next write, not the parked one — and a killed proc runs no
+further code, so the file is the loop's to close; each stream's line
+carries an id the loop minted, so a late line is never read as
+another stream's. And the ACME renewal daemon is a proc beside the
+loop too (lobo#65, `acme.daemon_start`): every CA transaction blocks
+its caller up to its deadline (5 s plain, 15 s TLS), and until ws56
+the loop was that caller. The daemon owns the issuance flow and
+reports `acme issued` / `acme failed <why>` down the stream pipe; it
+exists only under `cert auto` and takes one place in `stream_room`.
 
 ## Who calls whom
 
