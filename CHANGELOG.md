@@ -358,6 +358,80 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws57 — 2026-10-10 — the returned memory (lobo#66), one owner for the renewal daemon (lobo#69)
+
+- **lobo#66: a serving lobo's memory is flat.** Through ws56 the
+  serving loop built everything in a region that lives as long as
+  the process: 2,060 bytes of RSS a keepalive request, 9,940 a
+  connection, 4.3 KB an idle pass (819 MB after 400,000 requests;
+  about 1.5 GB a day with no client). Now a pass of the loop runs in
+  `region pass` and a connection step in `copy region step`
+  (`src/main.lu`), both freed at their closing brace, and what the
+  loop keeps is stored in place: the connection table is compacted by
+  index every pass and never rebuilt, a generation's counts are index
+  stores, a connection's unserved bytes are kept as bytes in a buffer
+  from a pool, the head-and-date memo lives in a region that is let
+  go when it passes 1 MiB, and a request reads the memo and the
+  resolver and hands back what it would have stored
+  (`serve.MemoUpd`, `serve.StepOut`). Measured on kasumi (linux
+  x86-64, `taskset -c 0-3`, 4 × `ab -c 8`, the parity file):
+
+  | | ws56's trunk | ws57 |
+  |---|---|---|
+  | RSS growth, a keepalive request (1 process / 4 hands) | 2,060 / 3,515 B | **4.6 / 6.6 B** |
+  | RSS growth, a connection | 9,940 / 12,386 B | **70 / 63 B** |
+  | minor faults, a keepalive request | 0.503 / 0.858 | **0.0011 / 0.0015** |
+  | minor faults, a connection | 2.42 / 3.02 | **0.009 / 0.016** |
+  | idle 20 s, no connection / 32 kept alive | 344 / 1,024 kB | **0 / 0 kB** |
+  | RSS after 400,000 keepalive requests | 819 MB | **6.0 MB** |
+  | CPU a request, keepalive (1 / 4) | 5.30 / 6.85 µs | **4.65 / 5.85 µs** |
+  | CPU a request, connection-per-request (1 / 4) | 9.65 / 14.20 µs | **7.15 / 10.85 µs** |
+  | user instructions a request, keepalive (1 / 4) | 19,730 / 22,240 | 19,650 / 21,340 |
+
+  What is left is the runtime's and is filed: its file table takes 4
+  bytes per `fs_open` and its socket table about 57 bytes per accepted
+  connection, and neither reuses a slot (wolf-lang#661, measured with
+  no lobo code). No wire behaviour changes: the corpus, the
+  differential and the control rows hold as they were.
+- **The memory gate can fail.** `tools/lobo-membudget`'s named skip
+  ("full O(1) is upstream-gated — wolf-lang#191", printed on every run
+  since ws10 and never red; #191 closed on 2026-09-13) is three hard
+  rows: RSS growth under 512 KB over 4,000 keepalive requests, under
+  512 KB over 2,000 connections, under 128 KB over 10 idle seconds
+  with 16 connections attached. Red at trunk's code on linux and
+  macOS (80 MB, 64 MB, 320 KB; run 38081745433), green after
+  (about 100 KB, 180 KB, 0). `docs/BUDGET.md` says what may still grow
+  and what bounds each.
+- **Socket reads no longer land in the process root.** wolf 0.2.26's
+  `net_read` places its bytes in the root arena whatever region is
+  open (wolf-lang#374), so a region around a step returned everything
+  but the request it read. Every read on a serving path goes through
+  `conn.sock_read` (`net_read_bytes` + `str_from_utf8`: the same rows,
+  the bytes in the caller's region).
+- **lobo#69: one process owns the renewal daemon.** Under
+  `worker_processes N` every hand ran its own `cert auto` flow, so N
+  hands placed N orders for one certificate (two loud failures in 7 s
+  against a silent CA with two hands; against a CA that issues once,
+  the hand that lost the race never took the certificate up and three
+  of six handshakes were answered without it). The daemon now runs in the single
+  process or in hand 1; the other hands serve the http-01 challenge
+  as before and take a new certificate up from the store, which they
+  look at once a second. `tools/lobo-acme` gains the two cases, red
+  on the code before the fix (run **38086265653**) and green after.
+- Found on the way and filed: wolf-lang#660 (under `in r { f(mut
+  outer, s) }` a callee can keep a string built in the enclosing
+  region block; every compiler tier then reads freed bytes, lupin
+  traps), wolf-lang#661, wolf-lang#662 (a spawned, monitored and
+  joined proc leaves about 280 bytes: what a budgeted response still
+  costs), and lobo's numbers on wolf-lang#374.
+- Parity (nginx ÷ lobo, bar 1.10): three valid sets on three CI runner VMs, trunk beside this branch on each (runs 38085780224, 38088570687, 38089299844), at four workers: connection-per-request **1.104x, 1.062x, 1.075x** (trunk 1.211x, 1.125x, 1.134x) — inside the bar on two VMs, four thousandths outside on the third; keepalive **1.130x, 1.082x, 1.111x** (trunk 1.247x, 1.144x, 1.196x) — inside on one, outside on two. On a quiet kasumi, four cpus: 1.142x → **1.034x** (met there) and 1.263x → **1.130x**; at one process 1.142x → 0.929x and 1.210x → 1.099x. The connection-per-request shape is at the bar; keepalive is not yet.
+- Left for the next lane: lobo#67 (the static file's four calls a
+  request). At 0.2.26 a path stat is two calls (`fs_size`,
+  `fs_modified_ms`) and answers neither the inode nor the kind, so a
+  memo validated by it could serve a replaced file; the one-call
+  `fs_stat` record with the inode is in wolf-lang trunk (s218) and
+  arrives with the next pin.
+
 ## ws56 — 2026-10-10 — the open two (lobo#62, lobo#65), and the gap after s222: kernel time, from memory never returned
 
 - **lobo#62: `worker_shutdown_timeout` ends a streamed response on
