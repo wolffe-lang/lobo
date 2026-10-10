@@ -16,6 +16,15 @@
 //! the is15-reproducer discipline applied to lobo). A close before
 //! `count` responses is a named failure, not a shrug — the keepalive
 //! half of the witness. Loopback only, forever.
+//!
+//! ws57 (lobo#66) adds two shapes behind a fourth argument, for the
+//! hard memory gate's other two rows. `close`: `count` CONNECTIONS,
+//! one padded GET with `Connection: close` on each, read to its end —
+//! what a connection costs, where the keepalive shape says what a
+//! request costs. `hold <ms>`: `count` connections opened, one
+//! keep-alive GET answered on each, then all of them held open for
+//! `ms` — the idle server with clients attached, whose memory the
+//! gate samples while this driver sleeps.
 
 /// Parse a decimal port from argv — `io` on anything not 1..65535 (a
 /// driver argument error, not a case outcome).
@@ -146,20 +155,85 @@ fn read_response(c: int, carry: str) -> str ! {io} {
     rest[cl..rest.len]
 }
 
+/// Parse a hold time in ms — `io` past ten minutes.
+fn to_ms(s: str) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b as int < 48 {
+            return io
+        }
+        if b as int > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > 600000 {
+            return io
+        }
+    }
+    n
+}
+
+fn usage() -> int {
+    eprint("usage: memdrive <port> <count> <abs-path> [close | hold <ms>]")
+    2
+}
+
 fn main() -> !int {
     let args = env_args()
-    if args.len != 3 {
-        eprint("usage: memdrive <port> <count> <abs-path>")
-        return 2
+    if args.len < 3 || args.len > 5 {
+        return usage()
     }
     let port = to_port(args[0])?
     let count = to_count(args[1])?
     let path = args[2]
     if !path.starts_with("/") {
-        eprint("usage: memdrive <port> <count> <abs-path>")
-        return 2
+        return usage()
     }
     let pad = pad_value()
+    if args.len == 4 {
+        if args[3] != "close" {
+            return usage()
+        }
+        // ws57: one connection per request
+        var done: int = 0
+        while done < count {
+            let c = net_connect("127.0.0.1:{port}")?
+            net_deadline(c, 8000)?
+            let req = "GET {path} HTTP/1.1\r\nHost: x\r\nX-Pad: {pad}\r\nConnection: close\r\n\r\n"
+            net_write(c, req)?
+            let _rest = read_response(c, "")?
+            net_close(c) else |_| {}
+            done = done + 1
+        }
+        print("memdrive: served={done} conn={done}")
+        return 0
+    }
+    if args.len == 5 {
+        if args[3] != "hold" {
+            return usage()
+        }
+        let ms = to_ms(args[4])?
+        // ws57: `count` clients attached and silent
+        var held = List[int]()
+        while held.len < count {
+            let c = net_connect("127.0.0.1:{port}")?
+            net_deadline(c, 8000)?
+            let req = "GET {path} HTTP/1.1\r\nHost: x\r\nX-Pad: {pad}\r\nConnection: keep-alive\r\n\r\n"
+            net_write(c, req)?
+            let _rest = read_response(c, "")?
+            (mut held).push(c)
+        }
+        time_sleep_ms(ms)
+        for c in held {
+            net_close(c) else |_| {}
+        }
+        print("memdrive: held={held.len} ms={ms}")
+        return 0
+    }
     let c = net_connect("127.0.0.1:{port}")?
     net_deadline(c, 8000)?
     var served: int = 0
