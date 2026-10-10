@@ -358,6 +358,64 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws56 — 2026-10-10 — the open two (lobo#62, lobo#65), and the gap after s222: kernel time, from memory never returned
+
+- **lobo#62: `worker_shutdown_timeout` ends a streamed response on
+  time.** A stream parked in a write to a slow client could not be
+  reached by the 1 ms budget the loop armed at the timeout (a budget
+  rules a write that begins after it, `[os.net.io]`), so the abort
+  waited for the kernel to call the socket writable: 26.8 s after a
+  2 s timeout with a 32 KB/s reader, 13.8 s at 64 KB/s (a third of
+  the 2.6 MB loopback send buffer each time), never for a client that
+  reads nothing; the pinned nginx's old worker is gone after 2.15 s.
+  The loop now starts each stream itself and keeps its proc and its
+  file in a slot (`budget.StreamSlot`); at the timeout it kills the
+  proc, waits for it, closes socket and file and retires the row as
+  aborted: `age-ms=2005` (release), 2030 ms for the client that reads
+  nothing. Every stream line carries an id the loop minted, so a late
+  line cannot be read as a newer stream's. Witnesses:
+  `tests/serve/stream_abort_e2e.lu` and control-differential row 8
+  (nginx beside lobo), red at `6f4920c` (CI run 38077091798;
+  `kasumi:~/lanes/ws56/corp-red-corp.log`, `rig-red-ctl.log`) and
+  green from `31614a8`.
+- **lobo#65: an ACME transaction no longer holds the serve loop.**
+  The renewal daemon runs in one proc beside the loop
+  (`acme.daemon_start`), owns the issuance flow, and reports `acme
+  issued` / `acme failed <why>` down the stream pipe. A static GET
+  sent while a transaction waits out a silent CA answered in 5006 ms
+  at trunk and answers in under 10 ms now (`acw-trunk.log`,
+  `acw-head.log`). The acme rig gains the wedged-CA case
+  (`tests/rig/wedge.lu`: a CA that takes the dial and never answers),
+  red at `edc2a16` (CI run 38077177455, 5005 ms) and green from
+  `90a8e13`; its coexistence case is green under `taskset -c 0`,
+  `0-3` and all cores and on macOS. The daemon takes one place in the
+  stream room. A host with no stream pipe keeps the tick in the loop
+  and says so at start.
+- **The profile on wolf-lang trunk (`76436101`, s222; kasumi, four
+  cpus for server and generators).** lobo spends 16,990 user
+  instructions a keepalive request (19,564 at the 0.2.26 pin) against
+  nginx's 13,605, and makes the same system calls as nginx (6.06
+  against 6.04 a request; 9.14 against 10.00 a connection on close).
+  The gap is KERNEL time (0.90 of the 1.23 µs at four hands on
+  keepalive), and it is page faults: lobo's memory grows 2,054 bytes a
+  request and 9,941 a connection and is never returned (816 MB after
+  400,000 requests; 4.3 KB every idle pass), where nginx faults
+  nothing. With malloc's heap on huge pages (no code change, the same
+  bytes retained) nginx ÷ lobo moves 1.192x → 1.118x on keepalive and
+  1.138x → 1.081x on close at four hands. Six levers are ranked with
+  bounds in docs/PROFILE.md and filed: lobo#66 (the memory), lobo#67
+  (the four file calls a request), lobo#68 (parsing, head and route,
+  the loop's bookkeeping), wolf-lang#654 (`str_find`). The bar (1.10)
+  is not met by this lane and no serving-path code was changed for it.
+- Also filed: lobo#69 (under `worker_processes N` every hand runs its
+  own issuance), wolf-lang#655 (`List[Proc[T]]` and `spawn proc
+  module.f` refused where their wrappers compile), wolf-lang#656 (a
+  parked write can only be ended by a kill).
+- Gauntlet GREEN on kasumi at `0374b1c` (corpus 318/318, four more
+  lane-runs than trunk, all this lane's; control 20/20, one more row;
+  the same 2 named SKIP lines; `g-head1.log` 02a58dca…). CI green on
+  linux and macOS at `45b7052` (run 38078339632).
+
 ## ws55 — 2026-10-09 — the pin at 0.2.26 (nothing refused; the runtime moves the binaries); the manifest governs src/ with its capabilities; the ACME daemon schedules from the clock after its step
 
 - **The pin moves to wolf 0.2.26 (`89dc139`) / lupin 0.1.49
