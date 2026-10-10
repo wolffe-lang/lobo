@@ -182,7 +182,7 @@ if ! tools/lobo-metrics; then
     exit 1
 fi
 
-step "membudget (ws10 structure audit: keepalive drives, bodies die per-response; the str half is named wolf-lang#191)"
+step "membudget (ws10 structure audit: bodies die per-response; ws57: memory flat over requests, connections and idle time, lobo#66)"
 if ! tools/lobo-membudget; then
     echo "lobo-gauntlet: FAILED at membudget — the structure-audit witness (ws10)" >&2
     exit 1
