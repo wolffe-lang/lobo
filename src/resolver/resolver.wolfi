@@ -1,7 +1,7 @@
 module pkg :: resolver
   wolfi v0 · toolchain 0.2.26 · edition v1
-  export_hash 915b57fb63a5793ef1de62249bc2545d4c9839763f6827c25b58f0a7a42ca4c1
-  pkg_hash    915b57fb63a5793ef1de62249bc2545d4c9839763f6827c25b58f0a7a42ca4c1
+  export_hash 937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
+  pkg_hash    937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
   deps:
     std.hex  010d8f201aeb49f03761eae41455a019bf7742895b61509c97db43179f8f4530
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
@@ -17,16 +17,20 @@ module pkg :: resolver
     [8] pub is_ip_literal — fn is_ip_literal(host: str) -> bool
     [9] pub is_pending — fn is_pending(rs: self.Resolver, host: str) -> bool · regions (ρ1, -) -> -
     [10] pub min_ttl_ms — fn min_ttl_ms() -> int
-    [11] pub new — fn new() -> self.Resolver · regions () -> ρ_caller
-    [12] pub parse_answer — fn parse_answer(id: int, msg: prelude.List[byte]) -> self.Answer · regions (-, ρ1) -> ρ_caller
-    [13] pub pending — fn pending(rs: self.Resolver) -> int · regions (ρ1) -> -
-    [14] pub resolve_now — fn resolve_now(mut rs: self.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int) · regions (ρ1, -, -, -, -) -> -
-    [15] pub rotate — fn rotate(mut rs: self.Resolver, host: str) -> prelude.List[str] · regions (ρ1, -) -> ρ_caller
-    [16] pub split_set — fn split_set(set: str) -> prelude.List[str] · regions (-) -> ρ_caller
-    [17] pub start — fn start(mut rs: self.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int, now: int) · regions (ρ1, -, -, -, -, -) -> -
-    [18] pub take_events — fn take_events(mut rs: self.Resolver) -> prelude.List[str] · regions (ρ1) -> ρ_caller
-    [19] pub tick — fn tick(mut rs: self.Resolver, now: int) · regions (ρ1, -) -> -
-    [20] pub version — fn version() -> str
-    [21] pub Answer — struct Answer { ok: bool, reason: str, addrs: prelude.List[str], ttl_ms: int }
-    [22] pub Resolver — struct Resolver { hosts: prelude.List[str], addrs: prelude.List[str], fails: prelude.List[str], expires: prelude.List[int], rr: prelude.List[int], q_hosts: prelude.List[str], q_fds: prelude.List[int], q_ids: prelude.List[int], q_bufs: prelude.List[str], q_deadline: prelude.List[int], q_started: prelude.List[int], q_valid: prelude.List[int], events: prelude.List[str], next_id: int }
+    [11] pub muts — fn muts(rs: self.Resolver) -> int · regions (ρ1) -> -
+    [12] pub new — fn new() -> self.Resolver · regions () -> ρ_caller
+    [13] pub parse_answer — fn parse_answer(id: int, msg: prelude.List[byte]) -> self.Answer · regions (-, ρ1) -> ρ_caller
+    [14] pub pending — fn pending(rs: self.Resolver) -> int · regions (ρ1) -> -
+    [15] pub resolve_now — fn resolve_now(mut rs: self.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int) · regions (ρ1, -, -, -, -) -> -
+    [16] pub rot_diff — fn rot_diff(old: self.Resolver, new: self.Resolver) -> str · regions (ρ1, ρ2) -> -
+    [17] pub rotate — fn rotate(mut rs: self.Resolver, host: str) -> prelude.List[str] · regions (ρ1, -) -> ρ_caller
+    [18] pub rr_bump — fn rr_bump(mut rs: self.Resolver, i: int) · regions (ρ1, -) -> -
+    [19] pub split_set — fn split_set(set: str) -> prelude.List[str] · regions (-) -> ρ_caller
+    [20] pub start — fn start(mut rs: self.Resolver, host: str, addr: str, timeout_ms: int, valid_ms: int, now: int) · regions (ρ1, -, -, -, -, -) -> -
+    [21] pub take_events — fn take_events(mut rs: self.Resolver) -> prelude.List[str] · regions (ρ1) -> ρ_caller
+    [22] pub tick — fn tick(mut rs: self.Resolver, now: int) · regions (ρ1, -) -> -
+    [23] pub version — fn version() -> str
+    [24] pub waiting_events — fn waiting_events(rs: self.Resolver) -> int · regions (ρ1) -> -
+    [25] pub Answer — struct Answer { ok: bool, reason: str, addrs: prelude.List[str], ttl_ms: int }
+    [26] pub Resolver — struct Resolver { hosts: prelude.List[str], addrs: prelude.List[str], fails: prelude.List[str], expires: prelude.List[int], rr: prelude.List[int], q_hosts: prelude.List[str], q_fds: prelude.List[int], q_ids: prelude.List[int], q_bufs: prelude.List[str], q_deadline: prelude.List[int], q_started: prelude.List[int], q_valid: prelude.List[int], events: prelude.List[str], next_id: int, muts: int }
 

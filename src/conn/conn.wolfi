@@ -1,7 +1,7 @@
 module pkg :: conn
   wolfi v0 · toolchain 0.2.26 · edition v1
-  export_hash bef157cb41fac0431870c12dcc851fa1804760a291b5d6f821312aa769715436
-  pkg_hash    bef157cb41fac0431870c12dcc851fa1804760a291b5d6f821312aa769715436
+  export_hash 9623a07ac964d6dc80f9732b3fe6dbcd3d417155f2c3b806403d4d227c064d05
+  pkg_hash    9623a07ac964d6dc80f9732b3fe6dbcd3d417155f2c3b806403d4d227c064d05
   deps:
     tls  0439a05443d20a192841835b978ec899a84d2ded6e4e7bf6f955d201c8caeb0a
   items:
@@ -15,7 +15,8 @@ module pkg :: conn
     [7] pub is_tls — fn is_tls(cn: self.Conn) -> bool · regions (ρ1) -> -
     [8] pub plain — fn plain(fd: int) -> self.Conn · regions (-) -> ρ_caller
     [9] pub sni — fn sni(cn: self.Conn) -> str · regions (ρ1) -> -
-    [10] pub tls_conn — fn tls_conn(fd: int, take sess: tls.Sess) -> self.Conn · regions (-, ρ1) -> ρ_caller
-    [11] pub truncated — fn truncated(cn: self.Conn) -> bool · regions (ρ1) -> -
-    [12] pub Conn — struct Conn { kind: int, fd: int, sess: tls.Sess }
+    [10] pub sock_read — fn sock_read(fd: int, max: int) -> str ! {closed, io, timeout, utf8}
+    [11] pub tls_conn — fn tls_conn(fd: int, take sess: tls.Sess) -> self.Conn · regions (-, ρ1) -> ρ_caller
+    [12] pub truncated — fn truncated(cn: self.Conn) -> bool · regions (ρ1) -> -
+    [13] pub Conn — struct Conn { kind: int, fd: int, sess: tls.Sess }
 
