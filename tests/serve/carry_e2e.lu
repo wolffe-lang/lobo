@@ -1,0 +1,305 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! ws57 (lobo#66): THE CARRY, END TO END. Since ws57 the serving loop
+//! keeps a connection's unserved bytes (its carry) as bytes in a
+//! buffer taken from a pool and written in place, and compacts its
+//! connection table in place every pass; through ws56 the carry was a
+//! string in a list rebuilt every pass. This spawns the real lobo and
+//! drives every way a carry is stored, moved and given back, each
+//! answer checked against the file it asked for:
+//!   1. a request head dripped in three writes, a pass apart (the
+//!      carry is stored, read back and extended twice);
+//!   2. two requests in one write (the carry left by the first
+//!      already holds a whole head, so the row is stepped again with
+//!      nothing new to read);
+//!   3. a request and half of the next in one write, the rest later;
+//!   4. four connections at once, two of them holding half a head
+//!      while a third closes between them (the rows below it move up
+//!      one, and each must keep its own carry) and a fourth is served;
+//!   5. a head longer than one read (6 KiB of header);
+//!   6. twelve connections each holding a different partial head,
+//!      finished in reverse order (the pool grows to twelve buffers;
+//!      every row gets its own bytes back), then twelve more on fresh
+//!      connections (the buffers are reused).
+//! Loopback only, OS-chosen ports, scratch cleared at START, the
+//! master stopped through its desk and waited for.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Dial the server with a 4 s deadline. Rows: `io`.
+fn dial(port: int) -> int ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 4000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    c
+}
+
+/// The Content-Length of a response head, or -1. Total.
+fn content_length_of(head: str) -> int {
+    for line in head.lines() {
+        let low = line.lower()
+        if low.starts_with("content-length:") {
+            var n: int = 0
+            var seen = false
+            for b_raw in low[15..low.len].bytes() {
+                let b = b_raw as int
+                if b >= 48 && b <= 57 {
+                    n = n * 10 + b - 48
+                    seen = true
+                }
+            }
+            if seen {
+                return n
+            }
+        }
+    }
+    -1
+}
+
+/// Read ONE whole fixed-length response off `c`, given the bytes
+/// already read past the previous one (`carry`); answers (response,
+/// bytes left over). Rows: `io` (a close or a deadline mid-response).
+fn read_one(c: int, carry: str) -> (str, str) ! {io} {
+    var buf = carry
+    var marker: int = -1
+    while marker < 0 {
+        let m = buf.find("\r\n\r\n") else -1
+        if m >= 0 {
+            marker = m
+        } else {
+            let piece = net_read(c, 4096) else |_| {
+                return io
+            }
+            if piece.is_empty() {
+                return io
+            }
+            buf = "{buf}{piece}"
+        }
+    }
+    let cl = content_length_of(buf[0..marker])
+    if cl < 0 {
+        return io
+    }
+    let total = marker + 4 + cl
+    while buf.len < total {
+        let piece = net_read(c, 4096) else |_| {
+            return io
+        }
+        if piece.is_empty() {
+            return io
+        }
+        buf = "{buf}{piece}"
+    }
+    (buf[0..total], buf[total..buf.len])
+}
+
+/// A keep-alive GET of `path`. Total.
+fn req(path: str) -> str {
+    "GET {path} HTTP/1.1\r\nHost: x\r\n\r\n"
+}
+
+/// The body each of the four files carries. Total.
+fn body_of(name: str) -> str {
+    "CARRY-FILE-{name}-{name}{name}{name}\n"
+}
+
+/// A reply is a 200 for the file `name`. Total.
+fn is_file(reply: str, name: str) -> bool {
+    reply.starts_with("HTTP/1.1 200 OK") && reply.ends_with(body_of(name))
+}
+
+fn name_at(i: int) -> str {
+    let k = i % 4
+    if k == 0 {
+        return "a"
+    }
+    if k == 1 {
+        return "b"
+    }
+    if k == 2 {
+        return "c"
+    }
+    "d"
+}
+
+fn main() -> !int {
+    let d = "ws57_carry_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/a.html", body_of("a"))?
+    fs_write_text("{d}/w/b.html", body_of("b"))?
+    fs_write_text("{d}/w/c.html", body_of("c"))?
+    fs_write_text("{d}/w/d.html", body_of("d"))?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        assert(false, "os_spawn failed — is the debug tier built?")
+        0
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "the spawned lobo never became alive")
+    }
+
+    // 1. a head dripped in three writes, more than a pass apart
+    let c1 = dial(hp)?
+    net_write(c1, "GET /a.html HT")?
+    time_sleep_ms(350)
+    net_write(c1, "TP/1.1\r\nHost: x\r\n")?
+    time_sleep_ms(350)
+    net_write(c1, "\r\n")?
+    let r1 = read_one(c1, "")?
+    assert(is_file(r1.0, "a"), "1. the dripped head is answered with a.html: {r1.0}")
+    assert(r1.1.is_empty(), "1. nothing past the reply: {r1.1}")
+
+    // 2. two requests in one write, on the same connection
+    net_write(c1, "{req("/b.html")}{req("/c.html")}")?
+    let r2a = read_one(c1, "")?
+    assert(is_file(r2a.0, "b"), "2. the first pipelined request is b.html: {r2a.0}")
+    let r2b = read_one(c1, r2a.1)?
+    assert(is_file(r2b.0, "c"), "2. the second pipelined request is c.html: {r2b.0}")
+
+    // 3. a request and half of the next, the rest a pass later
+    let whole = req("/d.html")
+    let next = req("/a.html")
+    let half = next.len / 2
+    net_write(c1, "{whole}{next[0..half]}")?
+    let r3a = read_one(c1, r2b.1)?
+    assert(is_file(r3a.0, "d"), "3. the whole request is answered first: {r3a.0}")
+    time_sleep_ms(350)
+    net_write(c1, next[half..next.len])?
+    let r3b = read_one(c1, r3a.1)?
+    assert(is_file(r3b.0, "a"), "3. the half that waited is answered when it completes: {r3b.0}")
+    net_close(c1) else |_| {}
+
+    // 4. four connections: two hold half a head while one between
+    //    them closes and a fourth is served
+    let ka = req("/a.html")
+    let kc = req("/c.html")
+    let x1 = dial(hp)?
+    let x2 = dial(hp)?
+    let x3 = dial(hp)?
+    let x4 = dial(hp)?
+    net_write(x1, ka[0..9])?
+    net_write(x2, "GET /b.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    net_write(x3, kc[0..17])?
+    time_sleep_ms(350)
+    let y2 = read_one(x2, "")?
+    assert(is_file(y2.0, "b"), "4. the closing connection got b.html: {y2.0}")
+    net_close(x2) else |_| {}
+    time_sleep_ms(350)
+    net_write(x4, req("/d.html"))?
+    let y4 = read_one(x4, "")?
+    assert(is_file(y4.0, "d"), "4. the connection that came last got d.html: {y4.0}")
+    net_write(x3, kc[17..kc.len])?
+    let y3 = read_one(x3, "")?
+    assert(is_file(y3.0, "c"), "4. the row that moved up kept ITS half (c.html): {y3.0}")
+    net_write(x1, ka[9..ka.len])?
+    let y1 = read_one(x1, "")?
+    assert(is_file(y1.0, "a"), "4. the first row kept its half (a.html): {y1.0}")
+    net_write(x1, req("/c.html"))?
+    let y1b = read_one(x1, y1.1)?
+    assert(is_file(y1b.0, "c"), "4. and serves again afterwards: {y1b.0}")
+    net_close(x1) else |_| {}
+    net_close(x3) else |_| {}
+    net_close(x4) else |_| {}
+
+    // 5. a head longer than one read
+    var pad = "p"
+    while pad.len < 6144 {
+        pad = "{pad}{pad}"
+    }
+    let big = dial(hp)?
+    net_write(big, "GET /b.html HTTP/1.1\r\nHost: x\r\nX-Pad: {pad[0..6144]}\r\n\r\n")?
+    let rb = read_one(big, "")?
+    assert(is_file(rb.0, "b"), "5. a 6 KiB head is answered: {rb.0[0..40]}")
+    net_close(big) else |_| {}
+
+    // 6. twelve partial heads at once, finished in reverse order; then
+    //    twelve more on fresh connections
+    var round: int = 0
+    while round < 2 {
+        var conns = List[int]()
+        var i: int = 0
+        while i < 12 {
+            let c = dial(hp)?
+            let full = req("/{name_at(i + round)}.html")
+            net_write(c, full[0..5 + i])?
+            (mut conns).push(c)
+            i = i + 1
+        }
+        time_sleep_ms(350)
+        i = 11
+        while i >= 0 {
+            let full = req("/{name_at(i + round)}.html")
+            net_write(conns[i], full[5 + i..full.len])?
+            let r = read_one(conns[i], "")?
+            assert(
+                is_file(r.0, name_at(i + round)),
+                "6. round {round}, connection {i} got its own file ({name_at(i + round)}): {r.0}",
+            )
+            net_close(conns[i]) else |_| {}
+            i = i - 1
+        }
+        round = round + 1
+    }
+
+    let st = shell.control_send(ep, "status") else |_| ""
+    assert(st.contains("live=0"), "every connection is closed and counted: {st}")
+
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "lobo exited 0 (got {code})")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
