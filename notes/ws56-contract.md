@@ -174,3 +174,115 @@ number). Predicted before the trunk-built lobo is measured:
 **P4, CI.** Both gauntlet jobs green at the head. Each witness is
 pushed BEFORE its fix, so trunk's code is red in CI at that sha by
 run id (linux and macOS), and green at the fix.
+
+### §3 against the measurement (written at the close, 2026-10-10)
+
+- **P1, the cause: held.** The check predicted before it was run: a
+  64 KB/s reader is aborted after 13.8 s (`age-ms=13771`,
+  `sab-trunk64.log`; predicted 13–14), where 32 KB/s read 26.8 s. The
+  16 KB/s run was not aborted inside the witness's 40 s window
+  (predicted 53 s; not measured to its end). A client that reads
+  nothing is never aborted at trunk (`stream_abort_e2e.lu` waits 8 s).
+- **P1, the fix's shape: held as written.** `StreamSlot` in
+  `budget.lu`; serve hands the file back; the loop spawns, kills,
+  joins and closes. One thing the prediction did not name: a
+  generation already past its timeout when a step hands a stream back
+  starts none (the head is on the wire, the row closes as aborted).
+- **P1, what moves: held.** `age-ms=2005`/`2006` (release), `2008`
+  (debug) with the 32 KB/s reader (`sab-head.log`, `sab-h2.log` at
+  `45b7052`); 2030 and 2070 ms for the client that reads nothing
+  (`stream_abort_e2e.lu`, printed). Row 8 red at trunk's code and
+  green after; rows 1–7 hold (20/20). Stream cap rooms unchanged
+  (`tests/serve/stream_cap_e2e.lu` green under `taskset -c 0`, `0-3`
+  and all cores). membudget 20 / 20 KB a request, 17/17. macOS: the
+  corpus witness is green there (run 38077177455); row 8 was red on
+  macOS in that run for a reason of the row's own, not lobo's — it
+  timed the oracle by counting 0.1 s sleeps, which read 1.3 s for 2 s
+  on that runner — and is green with the rig's clock (`45b7052`, run
+  38078339632).
+- **P2: held.** Under 10 ms for every GET (0 ms by curl's clock)
+  against 5006 ms; `status` in 1–6 ms; `stop` in 1–7 ms (it was not
+  slow at trunk either unless it met a transaction). The wedged-CA
+  case red at trunk's code (5006 ms on kasumi, 5005 ms in CI) and
+  green after; the four older cases green under three cpusets;
+  `tick_clock.lu` unchanged and green. Not predicted: `spawn proc
+  acme.daemon(…)` does not compile from another module ("a dotted
+  proc path"), so the module carries `daemon_start` (wolf-lang#655);
+  and the daemon is counted in the stream room rather than argued out
+  of it.
+- **P3: the instruments held, the explanation did not.**
+  - lobo on wolf trunk: 16,990 instructions on keepalive (predicted
+    17.0–17.4 k: ten under the band) and 17,912 on close (predicted
+    18.0–18.4 k: under it). nginx: **13,605, not "under 8 k" —
+    falsified.**
+  - Calls on keepalive within one of nginx's: held (6.06 / 6.04).
+    "2–3 more a connection on close": **falsified** — 9.14 against
+    10.00 at one process, 10.11 against 10.13 at four.
+  - Shares of user time: parsing 21.2 % (predicted 25), the file
+    27.6 % for `serve_file` inclusive (predicted 25), bookkeeping up
+    to 19.5 % (predicted 15), head 12.5 % (predicted 10).
+  - "No single user-space lever crosses 1.10 on keepalive": held.
+  - **"Falsified if kernel time, not user time, is the keepalive
+    gap": FALSIFIED, and this is the lane's finding.** 0.90 of the
+    1.23 µs at four hands is system time, with equal calls. The cause
+    is memory: 0.5 to 3.0 minor faults a request from 2 to 12 KB a
+    request that is never returned (nginx: none), shown by an ablation
+    with no code change (malloc's heap on huge pages): 1.192x → 1.118x
+    keepalive, 1.138x → 1.081x close at four hands.
+  - The recommendation I expected to write (the file path with the
+    close shape's extra calls, parsing after) is not the one written:
+    the extra calls do not exist, and the memory is first.
+- **P4: held.** Run 38077091798 (`6f4920c`, the witnesses on trunk's
+  code): red at the corpus on `stream_abort_e2e.lu`, linux and macOS.
+  Run 38077177455 (`edc2a16`, lobo#62 fixed, lobo#65 not): the corpus
+  and row 8 green on linux, red at the acme rig's wedged-CA case.
+  Run 38078339632 (`45b7052`): green on both.
+
+Corrections to §2: none of the inputs drifted. To §1: nothing touched
+outside `~/lanes/ws56/` on either box; the trunk toolchain was never
+pinned on a pushed branch, so the runner's parity was not re-taken
+(the brief forbids the pin on origin) and kasumi's set was refused by
+the tool for load.
+
+## 4. Evidence index
+
+kasumi paths are under `~/lanes/ws56/`.
+
+| claim | artifact |
+|---|---|
+| the archives by digest, the oracle | `dl/digest-check.txt` 43c51a48…, `toolchain-tc-0226.txt` 6efcfbdc…, `nginx.sha256` ce8daa6e… |
+| the prediction before the first change | commit `3556503` |
+| lobo#62 at trunk: 26.8 s, nginx 2.15 s; 13.8 s at 64 KB/s | `sab-trunk.log` 93a8413b…, `sab-trunk64.log` 97ee9256… (release d2d78003…, `build-trunk.log` 74f58b35…) |
+| lobo#62 red on trunk's code | CI run **38077091798** at `6f4920c` (corpus, both jobs); `corp-red-corp.log` 84aea7dd…, `rig-red-ctl.log` 21676a35… (row 8: nginx 2.1 s, lobo none in 10 s) |
+| lobo#62 green | `31614a8` onward; `sab-h2.log` 54761240… (`age-ms=2006`, nginx 2.11 s) and `rig-ctl2-03.log` 98c6309a… (20/20; row 8 nginx 2111 ms, lobo 2002) at `45b7052`; CI run 38077177455 (linux row 8: nginx 2.1 s, lobo `age-ms=2249`) |
+| lobo#65 at trunk: 5006 ms | `acw-trunk.log` 1b951e4a… |
+| lobo#65 red with lobo#62 fixed | CI run **38077177455** at `edc2a16` (acme, linux: 5005 ms); `rig-red-acme.log` c0d8224e… |
+| lobo#65 green | `90a8e13` onward; `acw-h2.log` 3719b7ae… at `45b7052` |
+| the witnesses under three cpusets at `0374b1c` | `corp-w-0.log` 57835313…, `corp-w-03.log` 9f0e8adb…, `corp-w-all.log` 056a4489… (7/7 each: stream abort, slow stream, stream cap, tick clock); `rig-acme-0.log` 7a6ae82e…, `rig-acme-03.log` 17b9db71…, `rig-acme-all.log` 07027703… (GREEN each); 0 SKIP lines in all six |
+| gauntlet GREEN at the code head | `g-head1.log` 02a58dca… at `0374b1c`: exit 0; SigBlk 0x10000 / SigIgn 0x7; corpus 318/318, control 20/20, signal 21/21, prefork 38/38, membudget 17/17, resolver 9/9; 2 SKIP lines, both named (signal's linux-only header, membudget's wolf-lang#191 gate); release ebf2134b…, debug dc65b4e5… |
+| the trunk toolchain and the two lobos profiled | `bt-trunk.log` c56fcf59… (wolf-lang `76436101`, `wolf` 95daf2d2…, `libwolf_rt.a` a08075b1…); `lb.log` 4f901933… (lobo `ebace85`: trunk wolf 052967a8…, 0.2.26 d2d78003…) |
+| instructions, cycles, user and system time a request | `prof-tw.log` 768a9687…, `prof-nginx.log` 48200551…, `prof-0226.log` 1ac757dc… |
+| calls a request | `sys-tw.log` c366219d…, `sys-nginx.log` e01e003e… |
+| faults and growth a request, idle growth | `flt-tw.log` 3f3bfae5…, `flt-0226.log` 958b748e…, `flt-nginx.log` 58a1abdb…, `idle-tw.log` 01471bc6…, `idle-0226.log` 4bc8a198… |
+| what a fault and the four file calls cost this kernel | `pf.log` a54d89a8…, `pf2.log` d81e139d…, `fsys.log` 79edf632… |
+| the huge-page ablation, one window | `flt-tw-thp.log` b992ed29…, `prof-tw-thp.log` c7412480…, `prof-tw2.log` f38b36c7…, `prof-nginx2.log` 9126689b… |
+| user time by function, four cells | `cg-tw-keepalive-1.log` 865cb121…, `cg-tw-keepalive-4.log` 27c90bbc…, `cg-tw-close-1.log` 995bb889…, `cg-tw-close-4.log` 29e7bc35… |
+| kasumi parity, REFUSED for load (indicative) | `parity-kasumi.log` c5520c8c… |
+| CI green at `45b7052` on linux and macOS | run **38078339632** |
+| CI at the head | in the PR body (the head is this commit's child) |
+
+## 5. Done-when
+
+- [x] Branch `ws56` on origin; PR open against `trunk`, unmerged, five
+  sections by name, commit shas as bullets, a test checklist.
+- [x] lobo#62 and lobo#65 each red first by run id, then green.
+- [x] The profile on wolf-lang trunk: instructions and calls a request
+  for keepalive and close at 1 and 4 workers, lobo beside nginx,
+  attributed to functions; six levers ranked with a bound each, each
+  filed in the repository that owns it (lobo#66, #67, #68;
+  wolf-lang#654).
+- [x] The recommendation for ws57 (the PR body and docs/PROFILE.md).
+- [ ] CI green at the head sha on linux and macOS;
+  `wolf/tools/lane-audit.sh lobo ws56 <PR>` run; kasumi worktrees
+  removed and the build directories pruned (logs kept); no orphan
+  pids. Nothing closed by this lane.
