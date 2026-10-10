@@ -1,11 +1,16 @@
 //! member: true
 //! acme/flow — the RFC 8555 conversation (ws06 §2/§4): the loopback
 //! HTTP client, the JOSE envelope calls (std.x.jose, the sc19 seam
-//! frozen for exactly this consumer), and the issuance state machine
-//! the serve loop steps WITHOUT ever blocking the accept path (the
-//! never-block-serving pitfall: every step is a handful of loopback
-//! round trips; between steps the loop serves — including the
-//! challenge dial-back the CA makes mid-flow).
+//! frozen for exactly this consumer), and the issuance state machine.
+//! Every step is a handful of loopback round trips, and each of them
+//! BLOCKS its caller until the CA answers or the transaction's
+//! deadline fires (5 s plain, 15 s TLS). Until ws56 the serve loop was
+//! that caller: a CA that took a dial and never answered held every
+//! request and every control verb for 5006 ms, once per transaction
+//! (lobo#65), and the CA's own challenge dial-back could only be
+//! served between ticks. Since ws56 the caller is `daemon`, ONE proc
+//! beside the loop that owns the `Flow`; the loop never waits on a
+//! CA, and it serves the dial-back while a poll is in flight.
 //! The nonce lifecycle (contract pitfall): every response's
 //! Replay-Nonce replaces the held nonce; a badNonce rejection is
 //! retried ONCE with the fresh nonce the rejection carried (RFC 8555
@@ -844,11 +849,13 @@ fn fail(mut fl: Flow, why: str) -> str {
     "failed"
 }
 
-/// The daemon tick, called every poll pass by the entry: acts only
-/// when `now_ms` has reached the flow's own schedule, so its cost in
-/// the serve loop is a comparison. Returns "" / "issued" /
+/// The daemon tick: acts only when `now_ms` has reached the flow's
+/// own schedule (a comparison otherwise). Returns "" / "issued" /
 /// "failed" (fl.err names why — the entry logs it LOUD every
-/// attempt). fs+net; native/checked.
+/// attempt). It BLOCKS for as long as its CA transactions do, which is
+/// why `daemon` calls it from a proc beside the serve loop (ws56,
+/// lobo#65); the loop itself ticks only on a host with no stream pipe.
+/// fs+net; native/checked.
 pub fn tick(mut fl: Flow, now_ms: int) -> str {
     if fl.state == "off" || now_ms < fl.next_ms {
         return ""
@@ -907,4 +914,103 @@ pub fn tick(mut fl: Flow, now_ms: int) -> str {
         fl.next_ms = after + 150
     }
     ev
+}
+
+/// `s` on one line: every run of whitespace (a CA's error body brings
+/// its own newlines) becomes one space, cut at 600 bytes' worth of
+/// words. The daemon's report is ONE line down a pipe. Total.
+fn one_line(s: str) -> str {
+    var out = ""
+    for w in s.words() {
+        if out.len > 600 {
+            return "{out} …"
+        }
+        if out.is_empty() {
+            out = w
+        } else {
+            out = "{out} {w}"
+        }
+    }
+    out
+}
+
+/// The renewal daemon as ONE proc beside the serve loop (ws56,
+/// lobo#65). It owns the `Flow` for the life of the process: sleep
+/// until the flow's next due time, `tick`, and report each event as
+/// one line on `out`, the write end of the loop's stream pipe (whose
+/// read end is in the loop's wait set, so an event wakes the loop the
+/// way a finished stream does): `acme issued` — the pair is INSTALLED
+/// under the store and the loop swaps its SslConf — or `acme failed
+/// <why>`, which the loop logs LOUD. Everything else an attempt
+/// produces (the account key, the order, the challenge token the loop
+/// serves from the webroot, the installed pair, the status record) is
+/// a file, as it always was.
+///
+/// Why a proc and not a non-blocking client in the loop: a
+/// transaction is a dial, a write and a read to the peer's close, the
+/// TLS transport's handshake included, and `tick` runs up to seven of
+/// them in one step — the loop would need the whole conversation as a
+/// resumable state machine, where a proc needs nothing: its parks are
+/// the runtime's. The cost is one parked proc for the life of a
+/// server that has `cert auto` (main.lu's `stream_room` counts it).
+/// Never returns; the process's exit ends it ([conc.proc.root]). With
+/// no names there is nothing to do and it returns 0 at once.
+/// fs+net; native/checked.
+fn daemon(
+    store: str,
+    names: str,
+    contact: str,
+    ca_url: str,
+    ca_root: str,
+    renew_before_s: int,
+    check_interval_s: int,
+    out: int,
+) -> int {
+    var fl = flow_new(store, names, contact, ca_url, ca_root, renew_before_s, check_interval_s)
+    if fl.state == "off" {
+        return 0
+    }
+    loop {
+        let now = time_unix_ms()
+        if now < fl.next_ms {
+            time_sleep_ms(fl.next_ms - now)
+            continue
+        }
+        let ev = tick(mut fl, now)
+        if ev == "issued" {
+            net_write(out, "acme issued\n") else |_| {}
+        } else if ev == "failed" {
+            net_write(out, "acme failed {one_line(fl.err)}\n") else |_| {}
+        }
+        // a schedule that is already due again (a zero check interval)
+        // must not spin
+        time_sleep_ms(20)
+    }
+    0
+}
+
+/// Start `daemon` as a proc beside the caller and return at once (the
+/// spawn lives here because a proc is spawned by its own module's
+/// name). The handle is dropped: the daemon ends with the process.
+/// Total.
+pub fn daemon_start(
+    store: str,
+    names: str,
+    contact: str,
+    ca_url: str,
+    ca_root: str,
+    renew_before_s: int,
+    check_interval_s: int,
+    out: int,
+) {
+    let _w = spawn proc daemon(
+        store,
+        names,
+        contact,
+        ca_url,
+        ca_root,
+        renew_before_s,
+        check_interval_s,
+        out,
+    )
 }

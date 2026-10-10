@@ -1453,7 +1453,8 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
 
     // ws06: the ACME renewal daemon. When `cert auto` is on, arm the
     // challenge webroot (the http-01 route serves from it) and build
-    // the issuance flow, ticked spawn-free in the poll loop below. The
+    // the issuance flow (ws56: stepped by a proc beside the loop, see
+    // `acme_beside` below; this `flow` is the no-pipe fallback's). The
     // flow is entirely async to the accept path — a server with `cert
     // auto` and no cert yet serves the challenge and the pending-TLS
     // posture ssl_resolve set (the never-block-serving pitfall).
@@ -1485,6 +1486,31 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         config.auto_renew_before_s(c0),
         config.auto_check_interval_s(c0),
     )
+    // ws56 (lobo#65): the daemon runs in ONE proc beside the loop and
+    // reports down the stream pipe (`acme issued` / `acme failed
+    // <why>`), because every CA transaction blocks its caller up to
+    // its deadline (5 s plain, 15 s TLS) and the loop was that caller.
+    // The proc starts here (the listeners are bound, so the CA's
+    // dial-back waits in the backlog for the loop's first pass) and
+    // ends with the process. A host that refused the pipe keeps the
+    // tick in the loop, said out loud.
+    let acme_beside = have_auto && stream_w >= 0
+    if acme_beside {
+        acme.daemon_start(
+            config.auto_store(c0, prefix),
+            config.auto_names(c0),
+            config.auto_contact(c0),
+            config.auto_ca(c0),
+            config.auto_ca_root(c0),
+            config.auto_renew_before_s(c0),
+            config.auto_check_interval_s(c0),
+            stream_w,
+        )
+    } else if have_auto {
+        eprint(
+            "lobo: [warn] no loopback stream pipe: cert auto runs inside the serving loop, so each ACME transaction holds every connection until the CA answers or its deadline fires (lobo#65)",
+        )
+    }
     // announce the BOUND plaintext port (not the configured addr,
     // which may carry :0) so a client — the ACME challenge dial-back
     // included — can find the http listener. The TLS notice already
@@ -1650,6 +1676,9 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         proc_room: false,
     }
 
+    // this pass's ACME events off the stream pipe, oldest first
+    var aevs = List[str]()
+
     var running = true
     var quitting = false
     while running {
@@ -1806,6 +1835,10 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     if sr.0 >= 0 && budget.stream_slot(sslots, sr.0, sr.4) >= 0 {
                         (mut sdone).push(sr.0)
                         (mut sline).push(ln)
+                    } else if ln.starts_with("acme ") {
+                        // ws56 (lobo#65): the ACME daemon's event,
+                        // acted on in step 3b
+                        (mut aevs).push(ln[5..ln.len])
                     }
                 }
             }
@@ -2502,39 +2535,54 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         asinks = pump_sinks(asinks, pass_accs, optin, mut elog)
         elog = flush_elog(elog)
 
-        // 3b. ws06: the renewal daemon tick — spawn-free, in the loop's
-        // own bookkeeping (D7). Acts only when the flow's schedule is
-        // due (a comparison otherwise), so the accept path never waits
-        // on ACME. On issuance the running server REBUILDS its frozen
-        // SslConf from the store and swaps it — no reload, no deploy
-        // hook: certbot's dance eliminated (the "finally"). Every
-        // failure is LOUD (an error log line per attempt) with the
-        // named reason the flow carries.
+        // 3b. ws06: the renewal daemon's events. Since ws56 (lobo#65)
+        // the daemon is a proc beside the loop and an event is a line
+        // it wrote down the stream pipe (step 0b gathered them), so
+        // the accept path never waits on a CA — measured 5006 ms per
+        // wedged transaction when the tick ran here. On issuance the
+        // running server REBUILDS its frozen SslConf from the store
+        // and swaps it — no reload, no deploy hook: certbot's dance
+        // eliminated (the "finally"). Every failure is LOUD (an error
+        // log line per attempt) with the named reason the flow
+        // carries. A host with no stream pipe ticks here, as every
+        // lobo before ws56 did.
         if have_auto && running && !quitting {
-            let ev = acme.tick(mut flow, now)
-            if ev == "issued" {
-                let rssl = config.ssl_resolve(conf_for(gens, current_gen(gens)), prefix)
-                if config.ssl_ok(rssl) {
-                    ssl0 = rssl
-                    ev_log(
-                        mut elog,
-                        "notice",
-                        "cert auto: issued/renewed {auto_primary}; new TLS connections serve the fresh certificate (no reload)",
-                    )
-                } else {
+            if !acme_beside {
+                let tev = acme.tick(mut flow, now)
+                if tev == "issued" {
+                    (mut aevs).push("issued")
+                } else if tev == "failed" {
+                    (mut aevs).push("failed {flow.err}")
+                }
+            }
+            for aev in aevs {
+                if aev == "issued" {
+                    let rssl = config.ssl_resolve(conf_for(gens, current_gen(gens)), prefix)
+                    if config.ssl_ok(rssl) {
+                        ssl0 = rssl
+                        ev_log(
+                            mut elog,
+                            "notice",
+                            "cert auto: issued/renewed {auto_primary}; new TLS connections serve the fresh certificate (no reload)",
+                        )
+                    } else {
+                        ev_log(
+                            mut elog,
+                            "error",
+                            "cert auto: issued a certificate the server cannot load ({rssl.err}); keeping the previous certificates",
+                        )
+                    }
+                } else if aev.starts_with("failed ") {
                     ev_log(
                         mut elog,
                         "error",
-                        "cert auto: issued a certificate the server cannot load ({rssl.err}); keeping the previous certificates",
+                        "cert auto: issuance/renewal attempt failed: {aev[7..aev.len]} (will retry with backoff)",
                     )
                 }
-            } else if ev == "failed" {
-                ev_log(
-                    mut elog,
-                    "error",
-                    "cert auto: issuance/renewal attempt failed: {flow.err} (will retry with backoff)",
-                )
             }
+        }
+        if aevs.len > 0 {
+            aevs = List[str]()
         }
 
         // 4. retire drained generations, 5. finish a quit once empty
