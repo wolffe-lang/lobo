@@ -1626,7 +1626,32 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // dial-back waits in the backlog for the loop's first pass) and
     // ends with the process. A host that refused the pipe keeps the
     // tick in the loop, said out loud.
-    let acme_beside = have_auto && stream_w >= 0
+    //
+    // ws57 (lobo#69): ONE process owns the daemon — the single
+    // process, or hand 1 of `worker_processes N`. Until ws57 every
+    // hand started its own from the same gate, so N hands placed N
+    // orders for one certificate (measured: two loud failures in 7 s
+    // against a silent CA under `worker_processes 2`, one a hand,
+    // where one attempt takes 5 s), each with its own account-key
+    // read and its own install into the one store. The other hands
+    // still serve the http-01 challenge (the CA's dial-back lands on
+    // whichever hand accepts it; the webroot is the store's), and
+    // they learn of an issuance from the store itself: once a second
+    // a hand that does not own the daemon reads the installed chain's
+    // modification time (`install` writes the key first and renames
+    // the chain into place last, so a chain that moved has its key)
+    // and, when it moved, takes the same path the owner takes on
+    // `issued` — rebuild the frozen SslConf, swap, say so. A hand
+    // that dies is respawned under its own number (the master), so
+    // hand 1's successor owns the daemon.
+    let acme_owner = worker <= 1
+    let auto_chain = "{config.auto_store(c0, prefix)}/{auto_primary}/fullchain.pem"
+    var chain_seen_ms: int = -1
+    var chain_look_ms: int = 0
+    if have_auto && !acme_owner {
+        chain_seen_ms = fs_modified_ms(auto_chain) else |_| { -1 }
+    }
+    let acme_beside = have_auto && acme_owner && stream_w >= 0
     if acme_beside {
         acme.daemon_start(
             config.auto_store(c0, prefix),
@@ -1638,7 +1663,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
             config.auto_check_interval_s(c0),
             stream_w,
         )
-    } else if have_auto {
+    } else if have_auto && acme_owner {
         eprint(
             "lobo: [warn] no loopback stream pipe: cert auto runs inside the serving loop, so each ACME transaction holds every connection until the CA answers or its deadline fires (lobo#65)",
         )
@@ -3171,7 +3196,20 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     // carries. A host with no stream pipe ticks here, as every
                     // lobo before ws56 did.
                     if have_auto && running && !quitting {
-                        if !acme_beside {
+                        if !acme_owner {
+                            // ws57 (lobo#69): not this hand's daemon —
+                            // look at the store once a second
+                            if now - chain_look_ms >= 1000 {
+                                chain_look_ms = now
+                                let cm = fs_modified_ms(auto_chain) else |_| { -1 }
+                                if cm != chain_seen_ms {
+                                    chain_seen_ms = cm
+                                    if cm >= 0 {
+                                        (mut aevs).push("issued")
+                                    }
+                                }
+                            }
+                        } else if !acme_beside {
                             // the no-pipe fallback: the flow is the loop's own and
                             // what a tick allocates stays (named, with the warning
                             // printed at start)
