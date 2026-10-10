@@ -1,0 +1,51 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked
+//! conforms: err.propagate
+//!
+//! wedge — rig DRIVER (the corpus lane runs it bare, which exercises
+//! exactly the no-argument usage path: exit 2). The WEDGED PEER
+//! (ws56, lobo#65): argv is `<hold_ms>`; listen on an OS-chosen
+//! loopback port, print it, and then accept NOTHING for `hold_ms`. The
+//! kernel's backlog completes every dial, so a client connects, writes
+//! its request and waits for an answer that never comes — a CA that
+//! is up and silent, which is the shape that holds an ACME transaction
+//! to its deadline (a dead port refuses at once and proves nothing).
+//! tools/lobo-acme points `cert_ca` at it and times lobo's answers
+//! meanwhile. Loopback only, forever. Failures ride out of `main` as
+//! their own tags (the rig convention: the toolchain names the tag).
+
+/// Parse a decimal count of milliseconds from argv — `io` on anything
+/// that is not 1..600000 (a driver argument error, not a case outcome).
+fn to_ms(s: str) -> int ! {io} {
+    if s.is_empty() || s.len > 6 {
+        return io
+    }
+    var n: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b < 48 || b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+    }
+    if n < 1 || n > 600000 {
+        return io
+    }
+    n
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len != 1 {
+        eprint("usage: wedge <hold_ms>")
+        return 2
+    }
+    let hold = to_ms(args[0])?
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    print("{port}")
+    time_sleep_ms(hold)
+    net_close(l)?
+    0
+}
