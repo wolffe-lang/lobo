@@ -284,7 +284,12 @@ pub fn parse_answer(id: int, msg: List[byte]) -> Answer {
 /// socket, the message id, the bytes received so far as hex, the
 /// deadline, the start time, and the `valid=` override to cache
 /// under). `events` accumulates vocabulary events for the loop to
-/// emit and drain. `next_id` seeds message ids.
+/// emit and drain. `next_id` seeds message ids. `muts` (ws57) counts
+/// every change to a column other than a round-robin cursor's step:
+/// the loop works on a copy of this value inside a region and keeps
+/// the copy only when the count moved (`muts`, `rot_diff`,
+/// `rr_bump`), because a table rebuilt inside a region cannot be
+/// stored into the one that outlives it.
 pub struct Resolver {
     hosts: List[str],
     addrs: List[str],
@@ -300,6 +305,7 @@ pub struct Resolver {
     q_valid: List[int],
     events: List[str],
     next_id: int,
+    muts: int,
 }
 
 /// An empty resolver. Total.
@@ -319,6 +325,7 @@ pub fn new() -> Resolver {
         q_valid: List[int](),
         events: List[str](),
         next_id: 1,
+        muts: 0,
     }
 }
 
@@ -330,6 +337,48 @@ pub fn cached(rs: Resolver) -> int {
 /// The number of in-flight queries. Total.
 pub fn pending(rs: Resolver) -> int {
     rs.q_hosts.len
+}
+
+/// The number of events waiting for `take_events`. Total.
+pub fn waiting_events(rs: Resolver) -> int {
+    rs.events.len
+}
+
+/// The change count (see `Resolver`): equal on two values means their
+/// columns differ at most in round-robin cursors. Total.
+pub fn muts(rs: Resolver) -> int {
+    rs.muts
+}
+
+/// The cursor steps that turn `old` into `new`, as the cache indexes
+/// stepped, each followed by a comma and repeated once per step
+/// ("" for none, which is nearly always). Meaningful only when
+/// `muts(old) == muts(new)`; "" otherwise (the caller keeps `new`
+/// whole). Total.
+pub fn rot_diff(old: Resolver, new: Resolver) -> str {
+    if old.muts != new.muts || old.rr.len != new.rr.len {
+        return ""
+    }
+    var out = ""
+    var i: int = 0
+    while i < old.rr.len {
+        var k = new.rr[i] - old.rr[i]
+        while k > 0 {
+            out = "{out}{i},"
+            k = k - 1
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// Step cache row `i`'s round-robin cursor once, in place: no
+/// allocation (the loop calls it on the table that outlives a pass).
+/// An index outside the table is ignored. Total.
+pub fn rr_bump(mut rs: Resolver, i: int) {
+    if i >= 0 && i < rs.rr.len {
+        rs.rr[i] = rs.rr[i] + 1
+    }
 }
 
 /// The cache index of `host`, or -1. Total.
@@ -433,13 +482,9 @@ pub fn rotate(mut rs: Resolver, host: str) -> List[str] {
         (mut out).push(all[(start + k) % all.len])
         k = k + 1
     }
-    var nrr = List[int]()
-    var j: int = 0
-    while j < rs.rr.len {
-        (mut nrr).push(if j == i { rs.rr[j] + 1 } else { rs.rr[j] })
-        j = j + 1
-    }
-    rs.rr = nrr
+    // ws57: the cursor steps in place (it was a rebuilt column per
+    // proxied request)
+    rs.rr[i] = rs.rr[i] + 1
     out
 }
 
@@ -484,6 +529,7 @@ fn cache_put(mut rs: Resolver, host: str, set: str, fail: str, expires: int) {
     rs.fails = nf
     rs.expires = ne
     rs.rr = nr
+    rs.muts = rs.muts + 1
 }
 
 /// Remove pending row `at`, closing nothing (the caller closed the
@@ -516,6 +562,7 @@ fn pending_drop(mut rs: Resolver, at: int) {
     rs.q_deadline = nd
     rs.q_started = ns
     rs.q_valid = nv
+    rs.muts = rs.muts + 1
 }
 
 /// Replace pending row `at`'s received-bytes hex. Total.
@@ -527,6 +574,7 @@ fn pending_buf(mut rs: Resolver, at: int, buf: str) {
         i = i + 1
     }
     rs.q_bufs = nb
+    rs.muts = rs.muts + 1
 }
 
 /// Failures are held this long: one second — nginx does not cache a
@@ -595,6 +643,9 @@ pub fn ev_resolve_failed(host: str, reason: str, took_ms: int) -> str {
 /// ws09 seam, which stamps `seq=`). Total.
 pub fn take_events(mut rs: Resolver) -> List[str] {
     let out = rs.events
+    if out.len > 0 {
+        rs.muts = rs.muts + 1
+    }
     rs.events = List[str]()
     out
 }
@@ -643,6 +694,7 @@ pub fn start(mut rs: Resolver, host: str, addr: str, timeout_ms: int, valid_ms: 
     (mut rs.q_deadline).push(now + timeout_ms)
     (mut rs.q_started).push(now)
     (mut rs.q_valid).push(valid_ms)
+    rs.muts = rs.muts + 1
 }
 
 /// One poll pass over the pending table: each query socket gets a
