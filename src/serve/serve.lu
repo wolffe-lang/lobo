@@ -3237,6 +3237,110 @@ fn step_out(
     }
 }
 
+/// The part of a step's result that most steps do not have: the
+/// access record (kept only when an access output will render it, or
+/// the entry must finish the answer), a budget refusal's site, an
+/// admin request's kind, the name to wait on, the memo notes and the
+/// resolver's changes. See `StepOut`.
+pub struct StepRare {
+    acc: obs.Access,
+    bud_site: str,
+    admin: str,
+    resolve: str,
+    resolve_addr: str,
+    memo: MemoUpd,
+    rs_rot: str,
+    rs_new: List[resolver.Resolver],
+}
+
+/// A `ConnStep` as it leaves the step's region (ws57, lobo#66). The
+/// loop copies a step's result out of the region the step ran in, and
+/// that copy materializes every string the value reaches, empty ones
+/// included — measured at a tenth of lobo's user time with the whole
+/// `ConnStep` copied (thirteen strings and two header lists a
+/// request). So the numbers every step has are fields here, and
+/// everything a plain served request leaves empty rides in `rare`,
+/// a list of none or one: the common request copies one string (the
+/// carry) and one empty list. `status`, `body_bytes`, `proxied`,
+/// `up_status` and `up_ms` are the access record's, for the counters.
+pub struct StepOut {
+    active: bool,
+    close: bool,
+    carry: str,
+    served: int,
+    logged: bool,
+    status: int,
+    body_bytes: int,
+    proxied: bool,
+    up_status: int,
+    up_ms: int,
+    bud_limit: int,
+    bud_would: int,
+    bud_cap: int,
+    mem_hw: int,
+    mem_rt: int,
+    resolve_timeout_ms: int,
+    resolve_valid_ms: int,
+    streaming: bool,
+    stream_fd: int,
+    has_head: bool,
+    rare: List[StepRare],
+}
+
+/// Pack a step's result for the copy out of its region (`StepOut`).
+/// `keep_acc` says an access output is configured, so a logged
+/// request's record must travel. Total.
+pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
+    let need = !s.bud_site.is_empty() ||
+        !s.admin.is_empty() ||
+        !s.resolve.is_empty() ||
+        !s.rs_rot.is_empty() ||
+        s.rs_new.len > 0 ||
+        memo_dirty(s.memo) ||
+        keep_acc && s.logged
+    let status = s.acc.status
+    let body_bytes = s.acc.body_bytes
+    let proxied = s.acc.proxied
+    let up_status = s.acc.up_status
+    let up_ms = s.acc.up_ms
+    var rare = List[StepRare]()
+    if need {
+        (mut rare).push(take StepRare {
+            acc: s.acc,
+            bud_site: s.bud_site,
+            admin: s.admin,
+            resolve: s.resolve,
+            resolve_addr: s.resolve_addr,
+            memo: s.memo,
+            rs_rot: s.rs_rot,
+            rs_new: s.rs_new,
+        })
+    }
+    StepOut {
+        active: s.active,
+        close: s.close,
+        carry: s.carry,
+        served: s.served,
+        logged: s.logged,
+        status: status,
+        body_bytes: body_bytes,
+        proxied: proxied,
+        up_status: up_status,
+        up_ms: up_ms,
+        bud_limit: s.bud_limit,
+        bud_would: s.bud_would,
+        bud_cap: s.bud_cap,
+        mem_hw: s.mem_hw,
+        mem_rt: s.mem_rt,
+        resolve_timeout_ms: s.resolve_timeout_ms,
+        resolve_valid_ms: s.resolve_valid_ms,
+        streaming: s.streaming,
+        stream_fd: s.stream_fd,
+        has_head: s.has_head,
+        rare: rare,
+    }
+}
+
 /// Does `carry` already hold a complete request head? (ws17)
 ///
 /// A serving loop with readiness steps a connection when the poll

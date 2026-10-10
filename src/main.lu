@@ -2543,6 +2543,17 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                         }
                         sx = sx + 1
                     }
+                    // whether any generation is draining: the per-row
+                    // worker_shutdown_timeout checks below are a table
+                    // lookup and a string compare a row, asked only then
+                    var any_drain = false
+                    var dgi: int = 0
+                    while dgi < gens.len {
+                        if gens[dgi].state == "draining" {
+                            any_drain = true
+                        }
+                        dgi = dgi + 1
+                    }
                     var k: int = 0
                     var w: int = 0
                     let ktot = crows
@@ -2591,7 +2602,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                             if di < 0 {
                                 var nst = sst
                                 var killed = false
-                                if sst < 10 {
+                                if sst < 10 && any_drain {
                                     let sgi = index_of(gens, cg)
                                     if sgi >= 0 &&
                                         gens[sgi].state == "draining" &&
@@ -2659,7 +2670,6 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 }
                             }
                         } else {
-                            let cci = conf_index(gens, cg)
                             // ws17: a connection is STEPPED only when the wait named
                             // it. A socket the poll did not name has nothing to read,
                             // so ws16's 12 ms deadline-and-read on it was the loop
@@ -2707,13 +2717,14 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 // request, the response head, the file's body in
                                 // `region resp` inside it — is freed at this brace;
                                 // the `ConnStep` is copied out into the pass.
+                                let cci = conf_index(gens, cg)
                                 let st = copy region step {
                                     let car = if clen0 == 0 {
                                         ""
                                     } else {
                                         carry_str(cbufs[cbuf0], clen0)
                                     }
-                                    if inflight < room {
+                                    let full = if inflight < room {
                                         serve.conn_step(
                                             fd,
                                             gens[cci].conf,
@@ -2740,6 +2751,8 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                             ft,
                                         )
                                     }
+                                    // only what the loop needs leaves the region (`step_pack`)
+                                    serve.step_pack(take full, !asinks.is_empty())
                                 }
                                 if st.streaming {
                                     inflight = inflight + 1
@@ -2752,37 +2765,38 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 // the memo: what the step would have remembered is
                                 // stored here, its strings built in the memo's own
                                 // region
-                                if serve.memo_dirty(st.memo) {
+                                let rare = st.rare.len > 0
+                                if rare && serve.memo_dirty(st.rare[0].memo) {
                                     in memo {
                                         serve.memo_store(
                                             mut ft,
-                                            st.memo.date_secs,
-                                            "{st.memo.date_str}",
-                                            st.memo.bounds,
-                                            st.memo.h_set,
-                                            "{st.memo.hpath}",
-                                            st.memo.hsize,
-                                            st.memo.hmtime,
-                                            st.memo.hsecs,
-                                            st.memo.hkeep,
-                                            "{st.memo.htoken}",
-                                            "{st.memo.hhead}",
+                                            st.rare[0].memo.date_secs,
+                                            "{st.rare[0].memo.date_str}",
+                                            st.rare[0].memo.bounds,
+                                            st.rare[0].memo.h_set,
+                                            "{st.rare[0].memo.hpath}",
+                                            st.rare[0].memo.hsize,
+                                            st.rare[0].memo.hmtime,
+                                            st.rare[0].memo.hsecs,
+                                            st.rare[0].memo.hkeep,
+                                            "{st.rare[0].memo.htoken}",
+                                            "{st.rare[0].memo.hhead}",
                                         )
                                     }
-                                    bound_ctr = bound_ctr + st.memo.bounds
+                                    bound_ctr = bound_ctr + st.rare[0].memo.bounds
                                 }
                                 // the resolver: a proxied step that had to resolve a
                                 // name itself hands its table back whole (one table
                                 // kept per such answer); a cursor step is an index
-                                if st.rs_new.len > 0 {
+                                if rare && st.rare[0].rs_new.len > 0 {
                                     in life {
                                         rs = copy region rkeep {
-                                            copy st.rs_new[0]
+                                            copy st.rare[0].rs_new[0]
                                         }
                                     }
-                                } else if !st.rs_rot.is_empty() {
+                                } else if rare && !st.rare[0].rs_rot.is_empty() {
                                     var ri2: int = 0
-                                    for b_raw in st.rs_rot.bytes() {
+                                    for b_raw in st.rare[0].rs_rot.bytes() {
                                         let b = b_raw as int
                                         if b == 44 {
                                             in life {
@@ -2805,11 +2819,11 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 // and the query starts on a copy of the resolver
                                 // that is kept when it changed
                                 n_wait = -1
-                                if !st.resolve.is_empty() {
-                                    var ni = name_index(wnames, st.resolve)
+                                if rare && !st.rare[0].resolve.is_empty() {
+                                    var ni = name_index(wnames, st.rare[0].resolve)
                                     if ni < 0 {
                                         in life {
-                                            (mut wnames).push("{st.resolve}")
+                                            (mut wnames).push("{st.rare[0].resolve}")
                                         }
                                         ni = wnames.len - 1
                                     }
@@ -2818,8 +2832,8 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                     var rsq = copy rs
                                     resolver.start(
                                         mut rsq,
-                                        st.resolve,
-                                        st.resolve_addr,
+                                        st.rare[0].resolve,
+                                        st.rare[0].resolve_addr,
                                         st.resolve_timeout_ms,
                                         st.resolve_valid_ms,
                                         now,
@@ -2844,12 +2858,13 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 // The `admin` site name joins head|body|
                                 // body-chunked|file as an additive value in a frozen
                                 // field (docs/BUDGET.md carries it).
-                                var st_acc = st.acc
+                                var a_status = st.status
+                                var a_bytes = st.body_bytes
                                 var adm_hit = false
                                 var adm_would = 0
-                                if !st.admin.is_empty() {
+                                if rare && !st.rare[0].admin.is_empty() {
                                     let alim = lim_for(gens, cg).memory_budget
-                                    let body = if st.admin == "metrics" {
+                                    let body = if st.rare[0].admin == "metrics" {
                                         render_metrics(counters, gens, elog.seq, worker)
                                     } else {
                                         status_stanza(
@@ -2865,13 +2880,13 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                     let would = st.mem_hw + body.len
                                     if alim > 0 && would > alim {
                                         serve.write_admin_503(fd, opts.token)
-                                        st_acc.status = 503
-                                        st_acc.body_bytes = serve.admin_err_len(opts.token)
+                                        a_status = 503
+                                        a_bytes = serve.admin_err_len(opts.token)
                                         adm_hit = true
                                         adm_would = would
                                         close_it = true
                                     } else {
-                                        let ctype = if st.admin == "metrics" {
+                                        let ctype = if st.rare[0].admin == "metrics" {
                                             metrics.content_type()
                                         } else {
                                             "application/json"
@@ -2888,8 +2903,8 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                             wfail = true
                                             0
                                         }
-                                        st_acc.status = 200
-                                        st_acc.body_bytes = wrote
+                                        a_status = 200
+                                        a_bytes = wrote
                                         if wfail {
                                             close_it = true
                                         }
@@ -2900,20 +2915,18 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 // clock, and the span since this request's first
                                 // byte)
                                 if st.logged {
-                                    var a2 = st_acc
-                                    a2.unix_ms = now
                                     var span = now - cs0
                                     if span < 0 {
                                         span = 0
                                     }
-                                    a2.req_ms = span
                                     n_start = now
                                     // ws10: the budget observability — a refusal is a
                                     // LOUD error event (the ws09 seam) and the
                                     // generation's counters move; every served
                                     // request feeds the high-water aggregate
-                                    let hit = !st.bud_site.is_empty() || adm_hit
-                                    if st.bud_site == "region" {
+                                    let bsite = if rare { st.rare[0].bud_site } else { "" }
+                                    let hit = !bsite.is_empty() || adm_hit
+                                    if bsite == "region" {
                                         // ws13: the runtime's own refusal — the cap
                                         // in ledger units rides as the appended field
                                         ev_event(
@@ -2921,19 +2934,19 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                             "error",
                                             shell.ev_budget_exceeded_cap(
                                                 cg,
-                                                st.bud_site,
+                                                bsite,
                                                 st.bud_limit,
                                                 st.bud_would,
                                                 st.bud_cap,
                                             ),
                                         )
-                                    } else if !st.bud_site.is_empty() {
+                                    } else if !bsite.is_empty() {
                                         ev_event(
                                             mut elog,
                                             "error",
                                             shell.ev_budget_exceeded(
                                                 cg,
-                                                st.bud_site,
+                                                bsite,
                                                 st.bud_limit,
                                                 st.bud_would,
                                             ),
@@ -2967,23 +2980,28 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                     in life {
                                         note_served(
                                             mut counters,
-                                            a2.status,
-                                            a2.body_bytes,
-                                            a2.req_ms,
-                                            a2.proxied,
-                                            a2.up_status,
-                                            a2.up_ms,
+                                            a_status,
+                                            a_bytes,
+                                            span,
+                                            st.proxied,
+                                            st.up_status,
+                                            st.up_ms,
                                             admitted,
                                         )
                                     }
                                     // ws28: with no access output configured nothing
-                                    // renders the record, so it is not kept. ws42
-                                    // (B156): it is kept by MOVING it — the counters
-                                    // above were its last reader, so neither the
-                                    // record nor its row is copied (it was a `copy`
-                                    // and a plain push, two deep copies of the two
-                                    // header lists per logged request, at 0.2.16).
-                                    if !asinks.is_empty() {
+                                    // renders the record, so it is not kept — and
+                                    // since ws57 it does not leave the step's region
+                                    // at all (`serve.step_pack`: copying a record out
+                                    // is a copy of every string in it). With an
+                                    // output it rides in `rare` and is copied once
+                                    // more here, into the pass's list.
+                                    if !asinks.is_empty() && rare {
+                                        var a2 = copy st.rare[0].acc
+                                        a2.status = a_status
+                                        a2.body_bytes = a_bytes
+                                        a2.unix_ms = now
+                                        a2.req_ms = span
                                         (mut pass_accs).push(take AccRow { a: a2 })
                                     }
                                 } else if !st.active && st.carry.is_empty() {
@@ -2997,7 +3015,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 streaming_now = st.streaming
                                 stream_file = st.stream_fd
                             }
-                            if !close_it {
+                            if !close_it && any_drain {
                                 let gi = index_of(gens, cg)
                                 if gi >= 0 &&
                                     gens[gi].state == "draining" &&
