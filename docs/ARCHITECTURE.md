@@ -85,6 +85,32 @@ the loop was that caller. The daemon owns the issuance flow and
 reports `acme issued` / `acme failed <why>` down the stream pipe; it
 exists only under `cert auto` and takes one place in `stream_room`.
 
+ws57 (lobo#66) gives the loop its memory discipline. Through ws56
+everything the loop built landed in a region that lives as long as
+the process and was never freed. Now there are four lifetimes, all in
+`serve_main`: `life`, a region made once, where a call that must grow
+one of the loop's tables is aimed (`in life { … }`) and where only
+bounded things land; `memo`, around a run of passes, which holds the
+head-and-date memo and is let go once it passes 1 MiB (the memo
+starts empty again; a miss builds what it would have answered);
+`pass`, one pass of the loop; and `step`, one connection step, whose
+result is copied out (`copy region step { … }`, packed first by
+`serve.step_pack`, because the copy costs a call per string). What
+the loop keeps from pass to pass is stored IN PLACE: the connection
+table is compacted by index every pass, a generation's counts are
+index stores, a connection's unserved bytes are bytes in a buffer
+from a pool. A step READS the memo table and the resolver and hands
+back what it would have stored (`serve.MemoUpd`; a resolver's cursor
+step by index, any other change as the whole table), because a store
+from inside a region into a table that outlives it is E1010.
+`docs/BUDGET.md` lists what may still grow and what bounds each;
+`tools/lobo-membudget` holds the result as three hard rows.
+
+ws57 (lobo#69) also gives the renewal daemon ONE owner: the single
+process, or hand 1 under `worker_processes N`. The other hands serve
+the http-01 challenge as before and take a new certificate up from
+the store, whose chain they look at once a second.
+
 ## Who calls whom
 
 Read from the `use` lines, both directions:
