@@ -1210,7 +1210,7 @@ fn read_up_head(conn: int) -> (str, str) ! {timeout, closed, io} {
         if buf.len > 65536 {
             return io
         }
-        let piece = net_read(conn, 4096) else |e| match e {
+        let piece = sock_read(conn, 4096) else |e| match e {
             timeout => { return timeout },
             closed => { return closed },
             utf8 => { return io },
@@ -1220,13 +1220,55 @@ fn read_up_head(conn: int) -> (str, str) ! {timeout, closed, io} {
     }
 }
 
+/// `conn.sock_read`'s private twin (`conn` is a parameter name all
+/// through this file): up to `max` bytes off the socket `fd` as a str, with
+/// `net_read`'s rows (`closed`, `timeout`, `utf8`, `io`) and its
+/// answer for every input, built from `net_read_bytes` and
+/// `str_from_utf8` (ws57, lobo#66). `net_read`'s own bytes are placed
+/// in the process root whatever region is open (wolf 0.2.26's
+/// runtime), so a read made inside a region was never returned with
+/// it: about a request head of memory per request, kept for the life
+/// of the process. These bytes are built in the caller's region.
+fn sock_read(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
+    var code = 0
+    let b = net_read_bytes(fd, max) else |e| match e {
+        closed => {
+            code = 1
+            List[byte]()
+        },
+        timeout => {
+            code = 2
+            List[byte]()
+        },
+        io => {
+            code = 3
+            List[byte]()
+        },
+    }
+    if code == 1 {
+        return closed
+    }
+    if code == 2 {
+        return timeout
+    }
+    if code == 3 {
+        return io
+    }
+    if b.len == 0 {
+        return ""
+    }
+    str_from_utf8(b) else |_| {
+        return utf8
+    }
+}
+
 /// Read exactly `want` bytes of body beyond `carry` from `conn`.
 /// Rows: net `io`/`timeout` folded to `io` (a broken read mid-body is
 /// a truncation the caller must close on). str-only (D8).
 fn read_up_length(conn: int, carry: str, want: int) -> str ! {io} {
     var buf = carry
     while buf.len < want {
-        let piece = net_read(conn, 4096) else |_| {
+        let piece = sock_read(conn, 4096) else |_| {
             return io
         }
         buf = "{buf}{piece}"
@@ -1242,7 +1284,7 @@ fn read_up_close(conn: int, carry: str, cap: int) -> str ! {io} {
         if buf.len > cap {
             return io
         }
-        let piece = net_read(conn, 4096) else |e| match e {
+        let piece = sock_read(conn, 4096) else |e| match e {
             closed => { return buf },
             timeout => { return buf },
             utf8 => { return io },

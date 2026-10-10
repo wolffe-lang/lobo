@@ -30,6 +30,48 @@ pub struct Outcome {
     rt: int,
 }
 
+/// `conn.sock_read`'s private twin (this module imports nothing): up
+/// to `max` bytes off the socket `fd` as a str, with
+/// `net_read`'s rows (`closed`, `timeout`, `utf8`, `io`) and its
+/// answer for every input, built from `net_read_bytes` and
+/// `str_from_utf8` (ws57, lobo#66). `net_read`'s own bytes are placed
+/// in the process root whatever region is open (wolf 0.2.26's
+/// runtime), so a read made inside a region was never returned with
+/// it: about a request head of memory per request, kept for the life
+/// of the process. These bytes are built in the caller's region.
+fn sock_read(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
+    var code = 0
+    let b = net_read_bytes(fd, max) else |e| match e {
+        closed => {
+            code = 1
+            List[byte]()
+        },
+        timeout => {
+            code = 2
+            List[byte]()
+        },
+        io => {
+            code = 3
+            List[byte]()
+        },
+    }
+    if code == 1 {
+        return closed
+    }
+    if code == 2 {
+        return timeout
+    }
+    if code == 3 {
+        return io
+    }
+    if b.len == 0 {
+        return ""
+    }
+    str_from_utf8(b) else |_| {
+        return utf8
+    }
+}
+
 /// The self-pipe line a body proc wrote: (wcode, rt). (0, 0) when
 /// there is no pipe; (2, 0) when the pipe is silent (an error exit
 /// with nothing written reads as an io break). Total.
@@ -38,7 +80,7 @@ fn read_pipe(pipe_r: int, errored: bool) -> (int, int) {
         return (if errored { 2 } else { 0 }, 0)
     }
     net_deadline(pipe_r, 1000) else |_| {}
-    let line = net_read(pipe_r, 64) else |_| {
+    let line = sock_read(pipe_r, 64) else |_| {
         ""
     }
     let sp = line.find(" ") else -1

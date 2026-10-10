@@ -77,18 +77,63 @@ pub fn truncated(cn: Conn) -> bool {
     cn.sess.trunc
 }
 
+/// Read up to `max` bytes off the socket `fd` as a str, with
+/// `net_read`'s rows (`closed`, `timeout`, `utf8`, `io`) and its
+/// answer for every input, built from `net_read_bytes` and
+/// `str_from_utf8` (ws57, lobo#66). `net_read`'s own bytes are placed
+/// in the process root whatever region is open (wolf 0.2.26's
+/// runtime; wolf-lang#374), so a read made inside a region was never
+/// returned with it: about a request head of memory per request, kept
+/// for the life of the process. These bytes are built in the caller's
+/// region.
+/// (W0602 allowed: the row mirrors net_read exactly (closed/timeout/utf8/io).)
+#[allow(w0602)]
+pub fn sock_read(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
+    var code = 0
+    let b = net_read_bytes(fd, max) else |e| match e {
+        closed => {
+            code = 1
+            List[byte]()
+        },
+        timeout => {
+            code = 2
+            List[byte]()
+        },
+        io => {
+            code = 3
+            List[byte]()
+        },
+    }
+    if code == 1 {
+        return closed
+    }
+    if code == 2 {
+        return timeout
+    }
+    if code == 3 {
+        return io
+    }
+    if b.len == 0 {
+        return ""
+    }
+    str_from_utf8(b) else |_| {
+        return utf8
+    }
+}
+
 /// Read up to `max` bytes as a str, exactly as `net_read` would
 /// (same rows: `closed`, `timeout`, `utf8`, `io`). The TLS backend
 /// reads decrypted application bytes through the session and decodes
 /// them — a chunk that splits a UTF-8 code point is the `utf8` row,
 /// the same answer net_read gives (loopback HTTP is ASCII, so the
 /// split never fires; the byte path carries binary). The plaintext
-/// backend IS `net_read`.
+/// backend is `sock_read` (ws57: `net_read`'s rows, bytes in the
+/// caller's region).
 /// (W0602 allowed: the row mirrors net_read exactly (closed/timeout/utf8/io) so the seam is transparent.)
 #[allow(w0602)]
 pub fn conn_read(mut cn: Conn, max: int) -> str ! {closed, timeout, utf8, io} {
     if cn.kind == 0 {
-        net_read(cn.fd, max)?
+        sock_read(cn.fd, max)?
     } else {
         var code = 0
         let bytes = tls.sess_read(mut cn.sess, max) else |e| match e {
