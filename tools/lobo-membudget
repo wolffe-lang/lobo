@@ -39,6 +39,18 @@
 # the page compressor's shrink (below) can only help it, never trip
 # it.
 #
+# THE FILE MEMO (ws58, lobo#67). The plain server now keeps a small
+# file's bytes (at most 32 KiB a file, inside the memo region's
+# 1 MiB) and proves them with one stat a request, so a file that is
+# three seconds old is no longer read per response. Both paths are
+# gated, each on purpose rather than by the clock: the files age four
+# seconds before the server starts, so every row on small.html and
+# big.html (16 KiB) runs WITH the memo — the three flat rows above
+# and a fourth, 4,000 requests for the kept 16 KiB file; and round B,
+# the differential that proves a body dies with its response, drives
+# over.html, 48 KiB, which is over the memo's bound and so always
+# takes the per-response region.
+#
 # The capped server takes the first two through its proc, under a
 # wider bound, 4 MB, because the residue there is the runtime's and
 # not lobo's: every `spawn proc` that is monitored and joined leaves
@@ -122,6 +134,18 @@ while [ $i -lt 512 ]; do
     printf 'AUDIT-BODY-%05d-abcdefghijklmnopqr\n' "$i"
     i=$((i + 1))
 done > "$scratch/w/big.html"
+# over.html: 48 KiB — over the file memo's bound (ws58), under the
+# small path's 64 KiB: the per-response region's file on the plain
+# server.
+i=0
+while [ $i -lt 1536 ]; do
+    printf 'AUDIT-OVER-%05d-abcdefghijklmnopqr\n' "$i"
+    i=$((i + 1))
+done > "$scratch/w/over.html"
+# ws58: the memo admits a file once it is three seconds old; let the
+# files age so which path a row takes is the file's size, never the
+# clock.
+sleep 4
 
 red=0
 total=0
@@ -218,14 +242,14 @@ drive 100 /small.html "warmup: 100 keepalive requests on one connection"
 
 # rounds A and B, as one pair (re-driven once on a tripped
 # differential — the header's compressor note)
-pair() { # pair <label> — sets r0 r1 r2 ga gb diff
+pair() { # pair <label> <big-path> <big-name> <leak-kb> — sets r0 r1 r2 ga gb diff
     r0=$(rss_kb)
     # round A: 400 small-body requests over ONE connection
     drive 400 /small.html "round A$1: 400 keepalive requests, 16 B body, one connection"
     r1=$(rss_kb)
     # round B: 400 big-body requests over ONE connection — same head
     # shape, bodies 1000x larger; the region claim says SAME memory cost
-    drive 400 /big.html "round B$1: 400 keepalive requests, 16 KiB body, one connection"
+    drive 400 "$2" "round B$1: 400 keepalive requests, $3 body, one connection"
     r2=$(rss_kb)
     if [ -z "$r0" ] || [ -z "$r1" ] || [ -z "$r2" ]; then
         ga=""
@@ -234,18 +258,32 @@ pair() { # pair <label> — sets r0 r1 r2 ga gb diff
     ga=$((r1 - r0))
     gb=$((r2 - r1))
     diff=$((gb - ga))
-    say "growth$1: round A ${ga} KB, round B ${gb} KB, body-attributable difference ${diff} KB (a leaked 16 KiB body x 400 would be ~6400 KB)"
+    say "growth$1: round A ${ga} KB, round B ${gb} KB, body-attributable difference ${diff} KB (a leaked $3 body x 400 would be ~$4 KB)"
 }
-pair ""
+pair "" /over.html "48 KiB" 19200
 if [ -n "${ga:-}" ] && [ "$diff" -ge 3200 ]; then
     say "note — the differential tripped once (round A ${ga} KB against a ~10.6 MB steady reading is the compressor's signature, not a body leak); re-driving the pair on the same server"
-    pair " (re-drive)"
+    pair " (re-drive)" /over.html "48 KiB" 19200
 fi
 
 # ws57 (lobo#66): the hard gate, on the same server
 flat_requests "flat, requests"
 flat_connections "flat, connections"
 flat_idle "flat, idle"
+# ws58 (lobo#67): the kept 16 KiB file, asked for 4,000 times — one
+# copy in the memo, nothing per request
+flat_kept() { # flat_kept <label>
+    ok=0
+    quiet_drive 400 /big.html || ok=1
+    b=$(rss_kb)
+    i=0
+    while [ $i -lt 10 ]; do
+        quiet_drive 400 /big.html || ok=1
+        i=$((i + 1))
+    done
+    flat "$1" "$b" "$(rss_kb)" "$ok" "4,000 keepalive requests for a kept 16 KiB file"
+}
+flat_kept "flat, the file memo"
 
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
@@ -295,10 +333,10 @@ done
 hp="$hp2"
 
 drive 100 /small.html "cap warmup: 100 keepalive requests through the capped proc"
-pair " (cap)"
+pair " (cap)" /big.html "16 KiB" 6400
 if [ -n "${ga:-}" ] && [ "$diff" -ge 3200 ]; then
     say "note — the capped differential tripped once (the compressor's signature); re-driving the pair on the same server"
-    pair " (cap, re-drive)"
+    pair " (cap, re-drive)" /big.html "16 KiB" 6400
 fi
 # ws57 (lobo#66): the hard gate through the capped proc
 flat_requests "cap: flat, requests (one proc each)" 4096
