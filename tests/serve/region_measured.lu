@@ -109,7 +109,20 @@ fn drive(c: config.Conf, req: str) -> serve.ReqOut ! {io} {
     let rs = resolver.new()
     let ft = serve.file_kinds_new()
     var fu = serve.memo_upd_new()
-    let ro = serve.serve_request(conn, c, opts, lim, port, head, "", 0, rs, ft, mut fu)
+    let ro = serve.serve_request(
+        conn,
+        c,
+        opts,
+        lim,
+        port,
+        head,
+        "",
+        0,
+        rs,
+        ft,
+        mut fu,
+        time_unix_ms(),
+    )
     net_close(conn) else |_| {}
     let _reply = read_reply(cli)?
     net_close(cli) else |_| {}

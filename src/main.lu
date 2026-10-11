@@ -2771,6 +2771,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                             12,
                                             rs,
                                             ft,
+                                            now,
                                         )
                                     } else {
                                         serve.conn_step(
@@ -2784,6 +2785,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                             12,
                                             rs,
                                             ft,
+                                            now,
                                         )
                                     }
                                     // only what the loop needs leaves the region (`step_pack`)

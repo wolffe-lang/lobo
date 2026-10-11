@@ -2635,11 +2635,11 @@ fn serve_path(
     ft: FileKinds,
     mut fu: MemoUpd,
     fm_on: bool,
+    now_ms: int,
 ) -> (int, bool) ! {closed, io} {
     var state = 0
     var pre = List[int]()
     var hslot = -1
-    let now_ms = time_unix_ms()
     if fm_on {
         let mark = req_mark(path, tpath)
         fu.f_mark = mark
@@ -2771,6 +2771,7 @@ fn handle_request(
     mut chg: Charge,
     ft: FileKinds,
     mut fu: MemoUpd,
+    now_ms: int,
 ) -> bool ! {closed, io} {
     // method: GET and HEAD serve; anything else is 405 (the CVE
     // corpus's POSTs are already rejected at parse when they smuggle)
@@ -2870,6 +2871,7 @@ fn handle_request(
             ft,
             mut fu,
             fm_on,
+            now_ms,
         )?
         if sp.0 == 0 {
             return sp.1
@@ -2939,6 +2941,7 @@ fn handle_request(
             ft,
             mut fu,
             fm_on,
+            now_ms,
         )?
         if sp.0 == 0 {
             return sp.1
@@ -3300,6 +3303,7 @@ pub fn serve_conn_cn(
                 mut chg,
                 ft,
                 mut fu,
+                time_unix_ms(),
             ) else |_| {
                 conn.conn_close(mut cn)
                 return
@@ -3492,6 +3496,7 @@ pub fn serve_request(
     rs: resolver.Resolver,
     ft: FileKinds,
     mut fu: MemoUpd,
+    now: int,
 ) -> ReqOut {
     var cn = conn_mod_plain(conn)
     var acc = obs.access_new()
@@ -3548,7 +3553,7 @@ pub fn serve_request(
     // check is pure over the model and the cache, and it runs
     // before the body read on purpose: nothing consumed, nothing to
     // replay.
-    let need = proxy.resolve_need(c, req.path, rs, time_unix_ms())
+    let need = proxy.resolve_need(c, req.path, rs, now)
     if !need.host.is_empty() {
         return req_out_wait(take acc, chg, need)
     }
@@ -3702,6 +3707,7 @@ pub fn serve_request(
             mut chg,
             ft,
             mut fu,
+            now,
         ) else |_| {
             raised = true
             true
@@ -3989,12 +3995,26 @@ fn step_serve(
     served: int,
     rs: resolver.Resolver,
     ft: FileKinds,
+    now: int,
 ) -> ConnStep {
     let head = buf[0..cut.marker]
     let rest = buf[cut.marker + cut.mlen..buf.len]
     net_deadline(conn, opts.read_timeout_ms) else |_| {}
     var fu = memo_upd_new()
-    let ro = serve_request(conn, c, opts, limits, local_port, head, rest, served, rs, ft, mut fu)
+    let ro = serve_request(
+        conn,
+        c,
+        opts,
+        limits,
+        local_port,
+        head,
+        rest,
+        served,
+        rs,
+        ft,
+        mut fu,
+        now,
+    )
     if !ro.resolve.is_empty() {
         // ws13: parked — the WHOLE buffer rides back as the carry
         // (the head is unconsumed as far as the loop is concerned),
@@ -4057,11 +4077,12 @@ pub fn conn_step(
     poll_ms: int,
     rs: resolver.Resolver,
     ft: FileKinds,
+    now: int,
 ) -> ConnStep {
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, rs, ft)
+        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, rs, ft, now)
     }
     if buf.len > limits.max_header_total {
         // ws28: the conn seam is built in the arms that write through
@@ -4112,7 +4133,7 @@ pub fn conn_step(
     }
     let cut = head_cut(buf)
     if cut.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, rs, ft)
+        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, rs, ft, now)
     }
     step_out(true, false, buf, served, false, take obs.access_new())
 }
