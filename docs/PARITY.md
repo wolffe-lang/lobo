@@ -169,6 +169,40 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws61: the 0.1.3 release tree against 0.1.2's, TWO trees on one VM · **VALID** · close **MET** (1.020x), keepalive **MET** (0.921x); 0.1.3 ÷ 0.1.2 **1.099x / 1.261x**
+
+The release's own measurement. This side is the 0.1.3 release tree
+(`847882f`: trunk `b256d2e` with the version sites moved, so ws60's
+fix is in it), built with wolf 0.2.27; the reference is the `v0.1.2`
+tag (`8533cb5`), built with the toolchain its own pin file names,
+wolf 0.2.23, as that release was. workflow_dispatch, `parity=true`,
+`parity_n=4`, `ref_tree=v0.1.2`, run **38155999607**, load(1m) 1.78,
+five interleaved pairs, three fresh servers a pair.
+
+| cell | shape | 0.1.3 req/s | 0.1.2 req/s | nginx req/s | nginx ÷ 0.1.3 median [min, max] | nginx ÷ 0.1.2 | **0.1.3 ÷ 0.1.2** median [min, max] |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 47,521 | 43,274 | 48,403 | **1.020x** [1.016, 1.034] | 1.132x [1.114, 1.156] | **1.099x** [1.097, 1.120] |
+| N=4 c=32 | keepalive | 185,402 | 146,959 | 170,385 | **0.921x** [0.910, 0.932] | 1.161x [1.156, 1.170] | **1.261x** [1.247, 1.286] |
+| N=1 c=32 | close | 41,397 | 31,963 | 33,596 | 0.808x [0.801, 0.821] | 1.057x [1.037, 1.061] | 1.300x [1.287, 1.325] |
+| N=1 c=32 | keepalive | 85,177 | 63,764 | 71,181 | 0.820x [0.785, 0.847] | 1.099x [1.074, 1.132] | 1.333x [1.298, 1.442] |
+
+This VM was about twice as fast as ws58's four (nginx close 48,403
+req/s against 24,992 to 25,685), so the rows compare within the set
+only. ws59's set (run 38122969213, its head against trunk, one VM:
+close 1.030x, keepalive 0.913x at four workers) was reported in its
+pull request and is recorded here for the first time.
+
+The same day on kasumi, the two release-tier linux binaries beside
+each other (0.1.3 built on kasumi from `847882f`, 0.1.2 from its
+published archive), server and generators held to 8 of the 16 cpus,
+load(1m) 1.43 at the start and about 6 while it ran, a VALID set by
+the tool's rules: close **1.010x** [0.986, 1.105] (0.1.2: 1.087x),
+keepalive **1.108x** [1.072, 1.208] (0.1.2: 1.395x), 0.1.3 ÷ 0.1.2
+1.059x and 1.259x; at one worker 0.816x and 0.865x. The keepalive
+cell is outside the bar by 0.008 there. The 8-cpu hold is this
+lane's, not the bar's, and the box was not quiet, so the row is
+recorded and not counted against the runner's.
+
 ### 2026-10-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws58: wolf 0.2.27 and the file memo, TWO trees on one VM, FOUR VMs · **four VALID sets at four hands** · close **MET on four of four** (1.022x–1.038x), keepalive **MET on four of four** (0.914x–0.934x: lobo ahead of nginx); the memo moves the rate by **1.03x–1.04x / 1.18x–1.20x** over the pin alone
 
 ws58 does two things, measured apart. The pin moves lobo to wolf
