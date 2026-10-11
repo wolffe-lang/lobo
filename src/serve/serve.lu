@@ -2051,7 +2051,13 @@ pub fn file_kinds_new() -> FileKinds {
 // server is more than `file_memo_age_ms()` ahead of this host, or a
 // wall clock stepped back by more than that, reopens the same-tick
 // window), and on a filesystem that keeps a status-change time
-// (`have` says; one that does not is never admitted).
+// (`have` says; one that does not is never admitted). And one writer
+// the kernel itself reports late: a store through a shared writable
+// MAPPING moves a file's times when the page is first dirtied, not at
+// every store after it, so a file being rewritten through `mmap` can
+// be answered from bytes as old as the kernel's writeback interval.
+// (The old path read such a file half-written; neither is a way to
+// publish a file. Write beside it and rename.)
 // ------------------------------------------------------------------
 
 /// The largest file the memo keeps, in bytes. Total.

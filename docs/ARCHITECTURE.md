@@ -121,9 +121,11 @@ inside the memo region's 1 MiB; a path is admitted on its second miss
 in a row and displaces another at most once a second; the whole table
 goes when the region does and at every reload that takes. Only the
 plain shape is served from it: GET or HEAD, no Range, plaintext, no
-memory budget. The rules, and the two limits they lean on (one clock
-for the file's timestamps and the process; a filesystem that keeps a
-status-change time), are the block comment over `file_memo_max` in
+memory budget. The rules, and the three limits they lean on (one
+clock for the file's timestamps and the process; a filesystem that
+keeps a status-change time; a file rewritten through a shared `mmap`,
+whose times the kernel moves late), are the block comment over
+`file_memo_max` in
 `src/serve/serve.lu`; `tests/serve/file_memo.lu` holds the table's
 states and `tests/serve/file_memo_e2e.lu` seven ways a file changes
 between two requests, on both tiers, beside the oracle.
