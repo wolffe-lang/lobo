@@ -336,10 +336,10 @@ fn starts_with_fold(s: str, lower: str) -> bool {
     // answers `none` there instead of trapping, and a split is a
     // non-ASCII byte in the prefix, which can never equal the
     // already-lowercase ASCII literal — so `none` IS `false`.
-    let pre = s.get(0..lower.len) else {
+    if s.len < lower.len {
         return false
     }
-    eq_fold(pre, lower)
+    eq_fold(s[0..lower.len], lower)
 }
 
 /// `s` (ASCII — the caller checked) contains the already-lowercase
