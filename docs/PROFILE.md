@@ -628,7 +628,7 @@ instructions a keepalive request against the pin's 18,293 (+5 %):
 (6.3 % and 5.3 %), and the clock was read twice. Folding the URI
 instead (the short end of the path; the root joins as its length),
 once, and reading the clock once: 18,070. What is left between lobo
-and nginx on keepalive at one process is user space alone: 4,460
+and nginx on keepalive at one process is user space alone: 4,470
 instructions a request (18,070 against 13,599), with system time now
 UNDER nginx's (2.45 against 2.98 µs) because nginx makes six calls
 where lobo makes three. The largest self-time rows are unchanged
