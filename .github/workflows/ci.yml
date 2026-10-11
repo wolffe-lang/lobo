@@ -25,7 +25,7 @@ on:
         type: boolean
         default: false
       parity_n:
-        description: "ws58: worker_processes for the parity leg's gating cell — empty is the bar's own (this runner's cpu count, 4); 2 takes the two-hand cell. The N=1 cell is always taken beside it and never gates"
+        description: "ws58: worker_processes for the parity leg's gating cell — empty is the bar's own (this runner's cpu count, 4); a list (4,2) takes one set per count, one after the other on this VM. The N=1 cell is taken beside each and never gates"
         type: string
         default: ""
       ref_tree:
@@ -285,7 +285,10 @@ jobs:
           # ws58: the bar's own arguments (pairs, seconds, connections)
           # with the gating cell's hands named when parity_n is given
           if [ -n "$PARITY_N" ]; then
-            tools/lobo-parity 5 5 32 "$PARITY_N"
+            for n in $(echo "$PARITY_N" | tr ',' ' '); do
+              echo "=== parity set at N=$n"
+              tools/lobo-parity 5 5 32 "$n"
+            done
           else
             tools/lobo-parity
           fi
