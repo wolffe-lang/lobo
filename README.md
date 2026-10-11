@@ -74,19 +74,25 @@ the master binds the listeners and passes them to each worker, every
 worker accepts on the same socket, and the kernel distributes the
 connections.
 
-lobo is within ten percent of nginx on macOS. On linux the
-connection-per-request shape is at the line (inside it on two of
-three runner VMs on 2026-10-10) and keepalive is not there yet.
+lobo is within ten percent of nginx on macOS (measured 2026-10-02)
+and on linux (2026-10-11, four runner VMs): both shapes are inside
+the line there, and on keepalive lobo answers more requests than
+nginx does.
 [`docs/PARITY.md`](docs/PARITY.md) defines the comparison (it was
 written before the first measurement) as the ratio nginx ÷ lobo on one
 machine, with workers equal to cpus and 32 concurrent clients, over
 five interleaved runs; 1.10 or under is parity. The current ledger
 (nginx 1.30.4; the macOS row re-taken with wolf 0.2.20, the first four
-linux rows with wolf 0.2.26, the two below them with 0.2.25):
+linux rows with wolf 0.2.27, the four below them with 0.2.26, the two
+below those with 0.2.25):
 
 | host | measured | connection-per-request | keepalive |
 |---|---|---|---|
 | macOS arm64, 18 cpus (load 2.80, other work on the box) | 2026-10-02 | 1.031x | 1.037x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.83) | 2026-10-11 | 1.022x | 0.918x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.77) | 2026-10-11 | 1.031x | 0.934x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.64) | 2026-10-11 | 1.038x | 0.927x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.58) | 2026-10-11 | 1.027x | 0.914x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.82, a fast VM) | 2026-10-10 | 1.104x | 1.130x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.91) | 2026-10-10 | 1.062x | 1.082x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.68, a slow VM) | 2026-10-10 | 1.075x | 1.111x |
@@ -95,7 +101,16 @@ linux rows with wolf 0.2.26, the two below them with 0.2.25):
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.87, a fast VM) | 2026-10-08 | 1.166x | 1.185x |
 | linux x86-64, 16 cpus (kasumi, load 0.34–1.89, shared) | 2026-10-02 | no valid set: ~1.84x | no valid set: ~2.04x |
 
-The first three runner rows are ws57, on three VMs: a serving lobo
+The first four runner rows are ws58, on four VMs, with wolf 0.2.27: a
+small static file's bytes are kept and proved by one `stat` a request
+(the file is seen changed, replaced, deleted or made unreadable on
+the next request), where lobo and nginx each made four file calls.
+Both shapes are inside ten percent on all four, and on keepalive
+nginx is the slower of the two; two workers read 0.96x and
+0.82x–0.84x, one worker 0.70x–0.72x and 0.81x–0.89x. The pin alone,
+before the memo, read 1.06x–1.08x and 1.09x–1.11x on the same VMs.
+
+The three runner rows under them are ws57, on three VMs: a serving lobo
 no longer keeps the memory a request or a connection used (it kept
 2 KB and 10 KB, and the kernel's page faults for them were most of
 the gap), measured 5 to 10 % faster than the tree before it on each
@@ -165,6 +180,17 @@ serve linux aarch64.
   one gets its head and its body waits for a worker. lobo 0.1.2, built
   with wolf 0.2.23, wrote the small body without its proc from
   `cpus / 2 - 2` downloads on (wolf-lang#570, fixed in 0.2.24).
+- **Kept files.** A regular file of at most 32 KiB that has not
+  changed for three seconds is answered from bytes lobo keeps, after
+  one `stat` that must match the file's device, inode, size and both
+  times (plaintext, no `Range`, no `memory_budget`; everything else
+  is read per request as before). Three things it leans on: the
+  filesystem's clock and this host's are one clock (a network
+  filesystem more than three seconds ahead is not), the filesystem
+  keeps a status-change time, and files are published by writing
+  beside them and renaming: one being rewritten through a shared
+  `mmap` can be answered from bytes as old as the kernel's writeback
+  interval.
 - A range starting at byte N reads and drops N bytes first. Under
   `memory_budget` a `Range` is ignored. An `If-Range` date in RFC 850
   or asctime form is not parsed.

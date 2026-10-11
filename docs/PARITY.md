@@ -169,6 +169,82 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws58: wolf 0.2.27 and the file memo, TWO trees on one VM, FOUR VMs · **four VALID sets at four hands** · close **MET on four of four** (1.022x–1.038x), keepalive **MET on four of four** (0.914x–0.934x: lobo ahead of nginx); the memo moves the rate by **1.03x–1.04x / 1.18x–1.20x** over the pin alone
+
+ws58 does two things, measured apart. The pin moves lobo to wolf
+0.2.27 / lupin 0.1.50 with no source change (s222's arena: 7 % fewer
+user instructions a request). The file memo (lobo#67) keeps a small
+file's bytes beside the identity `fs_stat` answered for its path, so
+a request for a kept file makes one stat where it made an open, an
+fstat, a read and a close: three syscalls fewer than the tree before
+it and than nginx (`docs/PROFILE.md`, ws58's addendum). Each set
+below is a two-tree delta on ONE VM against ONE nginx: this side is
+ws58's branch (`c038dd5`, `c29e207`, and `ce02889` twice: one serving
+code, a comment and tests between them), the reference is the pin
+alone (`51089ef`), both at wolf 0.2.27; workflow_dispatch,
+`parity=true`, `ref_tree=51089ef`. The parity file is four seconds
+old before the first server starts (the memo admits nothing younger
+than three; a site's files are older than that).
+
+| run | load, nginx close req/s | shape | ws58 req/s | pin req/s | nginx req/s | nginx ÷ ws58 median [min, max] | nginx ÷ pin | **ws58 ÷ pin** median [min, max] |
+|---|---|---|---|---|---|---|---|---|
+| **38114237409** | 1.83, 24,992 | close | 24,595 | 23,637 | 24,992 | **1.022x** [1.014, 1.039] | 1.069x | **1.042x** [1.031, 1.052] |
+| | | keepalive | 93,777 | 77,858 | 85,845 | **0.918x** [0.913, 0.928] | 1.101x | **1.196x** [1.190, 1.218] |
+| **38115586226** | 1.77, 25,685 | close | 24,860 | 24,052 | 25,685 | **1.031x** [1.017, 1.064] | 1.075x | **1.034x** [1.018, 1.044] |
+| | | keepalive | 94,352 | 79,460 | 88,081 | **0.934x** [0.927, 0.953] | 1.113x | **1.186x** [1.161, 1.211] |
+| **38116620581** | 1.64, 25,402 | close | 24,693 | 23,878 | 25,402 | **1.038x** [1.027, 1.041] | 1.067x | **1.030x** [1.019, 1.039] |
+| | | keepalive | 93,359 | 79,528 | 86,046 | **0.927x** [0.918, 0.936] | 1.094x | **1.183x** [1.168, 1.188] |
+| **38116627609** | 1.58, 25,443 | close | 24,765 | 24,015 | 25,443 | **1.027x** [1.018, 1.056] | 1.060x | **1.031x** [1.026, 1.037] |
+| | | keepalive | 95,080 | 80,020 | 87,119 | **0.914x** [0.900, 0.939] | 1.097x | **1.188x** [1.176, 1.207] |
+
+(All rows N=4 c=32, the gating cell.) The pin alone against the
+0.2.26 tree, one more VM (run **38112700746**, load 1.73, VALID):
+close 1.062x [1.046, 1.090] against trunk's 1.076x, keepalive 1.090x
+[1.069, 1.116] against 1.173x; the pin moves the rate by 1.013x and
+1.078x. So at the pin alone keepalive reads 1.090x–1.113x on five
+VMs, on the bar and not inside it; with the memo it is under 1.00 on
+all four.
+
+**Two hands** (`parity_n=4,2`: a second set on the same VM, the N=2
+cell gating in the tool's sense; three sets asked for, two VALID,
+one REFUSED on the oracle's own spread, nginx max ÷ min 1.167 on
+keepalive, and so not a row):
+
+| run | load | shape | nginx ÷ ws58 median [min, max] | nginx ÷ pin | ws58 ÷ pin |
+|---|---|---|---|---|---|
+| **38115586226** | 2.11 | close | **0.964x** [0.954, 0.972] | 1.005x | 1.043x |
+| | | keepalive | **0.821x** [0.796, 0.847] | 1.079x | 1.319x |
+| **38116627609** | 2.00 | close | **0.965x** [0.954, 0.974] | 1.006x | 1.045x |
+| | | keepalive | **0.842x** [0.774, 0.868] | 1.076x | 1.315x |
+
+**One hand**, informative, taken beside every set above (six valid
+readings): close 0.702x to 0.723x (the pin 0.808x to 0.831x),
+keepalive 0.808x to 0.894x (the pin 1.004x to 1.072x).
+
+On kasumi (16 cpus, the server and the generators on four of them
+under `taskset -c 0-3`; other lanes were building on the box, load
+2.3 to 2.4 when each set began and 3.8 to 5.3 when it ended, the
+set's own eight processes included), three VALID sets and one
+REFUSED on the box's load (5.04 at its start; `par-k2.log`
+8e9ac2aa…): four hands **1.025x** [1.005, 1.033] keepalive and
+**1.026x** [1.010, 1.096] close (`par-k4.log` adf49b94…; the pin
+1.104x and 1.067x), and again on the head's own build **1.004x**
+[0.934, 1.013] and **1.015x** [0.977, 1.031] (`par-k4b.log`
+749e8e8d…; the pin 1.097x and 1.038x); two hands **0.955x** [0.937,
+0.958] and **0.969x** [0.949, 0.982] (`par-k2b.log` f122fac2…; the pin
+1.086x and 0.999x); one hand 0.895x–0.904x keepalive and
+0.806x–0.820x close. As at ws57, a 16-cpu box with other work on it
+is a further reading and not a row of the README's table.
+
+Read one row at a time, as the ledger reads everything: **both
+shapes are inside the bar at four hands on every VM and on kasumi,
+and keepalive, the shape that was outside it since the first linux
+set, has nginx behind lobo on the runner.** ws58 predicted
+0.99–1.07x keepalive and 0.98–1.05x close for the runner: the
+keepalive cell came in better than its band (the memo's saving is
+kernel time, and the runner's kernel calls cost more than kasumi's),
+the close cell inside it.
+
 ### 2026-10-10 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws57: the memory returned, TWO trees on one VM, THREE VMs · **three VALID sets** · close **MET on two of three** (1.062x, 1.075x; 1.104x), keepalive **MET on one of three** (1.082x; 1.111x, 1.130x); the head moves the rate by **1.06x–1.10x / 1.05x–1.09x**
 
 ws57 (lobo#66) scopes the serving loop: a pass and a connection step
