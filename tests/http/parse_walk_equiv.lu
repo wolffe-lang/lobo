@@ -1,0 +1,774 @@
+//! check: run(exit=0, stdout="value_and_target=ok keep=true body=none path=6 values= 1 5 5\nname=malformed\nconnection_close=ok keep=false body=none path=1 values= 1 9\nconnection_kelvin=ok keep=true body=none path=1 values= 12\nte_kelvin=ok keep=true body=chunked path=1 values= 1 9\ncases=92231 same=92231\nok=12030 malformed=63953 uri_too_long=2940 too_large=12810 unimplemented=498\n")
+//! phase: run
+//! lanes: native
+//! stage-src: http config
+//!
+//! ws59 (lobo#68): the parser became ONE WALK over the head's bytes.
+//! This file keeps the parser as it stood through ws58 (the split into
+//! lines, the per-line `find`s, the trims and folds: `ref_*` below,
+//! copied from trunk `bea04ee` and renamed, nothing else touched) and
+//! holds the walk to it: every seed of every class the checklist
+//! names, and each seed with one byte replaced, inserted or removed at
+//! EVERY place by each of fourteen bytes a head can turn on (CR, LF,
+//! SP, HTAB, the colon, `?`, `/`, `H`, `h`, `-`, `0`, two controls,
+//! DEL), under the default limits and under limits small enough that
+//! a seed crosses each. The two parsers must give the same row, or the
+//! same request field for field. The counts are the reference's: a
+//! request refused before is still refused, by the same name.
+//! `parse_walk_rows.lu` is the same comparison at every thirty-seventh
+//! place, on all three lanes.
+
+use http
+
+// ------------------------------------------------------------------
+// the parser through ws58 (trunk bea04ee), renamed `ref_*`
+// ------------------------------------------------------------------
+
+fn ref_empty() -> http.Request {
+    http.Request {
+        method: "",
+        target: "",
+        version: "",
+        host: "",
+        path: "",
+        query: "",
+        hnames: List[str](),
+        hvals: List[str](),
+        body_mode: "none",
+        content_length: 0,
+        keepalive: false,
+    }
+}
+
+fn ref_split_lines_strict(head: str) -> List[str] ! {malformed} {
+    var out = List[str]()
+    var start: int = 0
+    var i: int = 0
+    var prev_cr: int = -2
+    for b_raw in head.bytes() {
+        let b = b_raw as int
+        if b == 13 {
+            // CR — the next byte MUST be LF; remember our position
+            prev_cr = i
+        } else if b == 10 {
+            // LF — MUST be immediately preceded by CR at i-1
+            if prev_cr != i - 1 {
+                return malformed
+            }
+            let line = head[start..prev_cr]
+            (mut out).push(line)
+            start = i + 1
+        } else
+        // any other byte: a CR is only legal immediately before LF
+        if prev_cr == i - 1 {
+            return malformed
+        }
+        i = i + 1
+    }
+    // a trailing CR with no LF is a bare CR
+    if prev_cr == i - 1 {
+        return malformed
+    }
+    // the final segment (no trailing CRLF) is the last line
+    if start < head.len {
+        (mut out).push(head[start..head.len])
+    }
+    out
+}
+
+fn ref_trim_ows(s: str) -> str {
+    var lo: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b == 32 || b == 9 {
+            lo = lo + 1
+        } else {
+            break
+        }
+    }
+    var hi: int = s.len
+    while hi > lo {
+        let c = s[hi - 1..hi]
+        var last: int = 0
+        for b_raw in c.bytes() {
+            let b = b_raw as int
+            last = b
+        }
+        if last == 32 || last == 9 {
+            hi = hi - 1
+        } else {
+            break
+        }
+    }
+    if lo >= hi {
+        return ""
+    }
+    s[lo..hi]
+}
+
+fn ref_byte_at(s: str, i: int) -> int {
+    if i < 0 || i >= s.len {
+        return -1
+    }
+    for b_raw in s[i..i + 1].bytes() {
+        let b = b_raw as int
+        return b
+    }
+    -1
+}
+
+fn ref_fold_ascii(b: int) -> int {
+    if b >= 65 && b <= 90 {
+        return b + 32
+    }
+    b
+}
+
+fn ref_is_ascii(s: str) -> bool {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b >= 128 {
+            return false
+        }
+    }
+    true
+}
+
+fn ref_has_no_upper(s: str) -> bool {
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b >= 65 && b <= 90 {
+            return false
+        }
+    }
+    true
+}
+
+fn ref_eq_fold(s: str, lower: str) -> bool {
+    if s.len != lower.len {
+        return false
+    }
+    var i: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if ref_fold_ascii(b) != ref_byte_at(lower, i) {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn ref_starts_with_fold(s: str, lower: str) -> bool {
+    if s.len < lower.len {
+        return false
+    }
+    ref_eq_fold(s[0..lower.len], lower)
+}
+
+fn ref_contains_fold(s: str, needle: str) -> bool {
+    if needle.is_empty() {
+        return true
+    }
+    if s.len < needle.len {
+        return false
+    }
+    var at: int = 0
+    let last = s.len - needle.len
+    while at <= last {
+        if ref_eq_fold(s[at..at + needle.len], needle) {
+            return true
+        }
+        at = at + 1
+    }
+    false
+}
+
+fn ref_lower_token(name: str) -> str {
+    if ref_has_no_upper(name) {
+        return name
+    }
+    if ref_eq_fold(name, "host") {
+        return "host"
+    }
+    if ref_eq_fold(name, "user-agent") {
+        return "user-agent"
+    }
+    if ref_eq_fold(name, "accept") {
+        return "accept"
+    }
+    if ref_eq_fold(name, "connection") {
+        return "connection"
+    }
+    if ref_eq_fold(name, "content-length") {
+        return "content-length"
+    }
+    if ref_eq_fold(name, "transfer-encoding") {
+        return "transfer-encoding"
+    }
+    if ref_eq_fold(name, "if-modified-since") {
+        return "if-modified-since"
+    }
+    if ref_eq_fold(name, "accept-encoding") {
+        return "accept-encoding"
+    }
+    if ref_eq_fold(name, "cache-control") {
+        return "cache-control"
+    }
+    if ref_eq_fold(name, "pragma") {
+        return "pragma"
+    }
+    if ref_eq_fold(name, "range") {
+        return "range"
+    }
+    if ref_eq_fold(name, "if-none-match") {
+        return "if-none-match"
+    }
+    name.lower()
+}
+
+fn ref_eq_ci(s: str, lower: str) -> bool {
+    if ref_is_ascii(s) {
+        return ref_eq_fold(s, lower)
+    }
+    let d = s.lower()
+    d == lower
+}
+
+fn ref_parse_length(s: str, max: int) -> int ! {malformed, too_large} {
+    if s.is_empty() {
+        return malformed
+    }
+    var n: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if !http.is_digit(b) {
+            return malformed
+        }
+        n = n * 10 + b - 48
+        if n > max {
+            return too_large
+        }
+    }
+    n
+}
+
+fn ref_ci_contains(s: str, lower_needle: str) -> bool {
+    if ref_is_ascii(s) {
+        return ref_contains_fold(s, lower_needle)
+    }
+    let d = s.lower()
+    d.contains(lower_needle)
+}
+
+fn ref_split_authority(rem: str) -> (str, str) {
+    let slash = rem.find("/") else -1
+    if slash == -1 {
+        return (rem, "/")
+    }
+    (rem[0..slash], rem[slash..rem.len])
+}
+
+fn ref_parse_request(head: str, limits: http.Limits) -> http.Request ! {
+    malformed,
+    uri_too_long,
+    too_large,
+    unimplemented,
+} {
+    if head.len > limits.max_header_total {
+        return too_large
+    }
+    let lines = ref_split_lines_strict(head)?
+    if lines.is_empty() {
+        return malformed
+    }
+
+    var r = ref_empty()
+
+    // ---- request line (RFC 9112 §3) ----
+    let rl = lines[0]
+    if rl.len > limits.max_request_line {
+        return uri_too_long
+    }
+    let sp1 = rl.find(" ") else -1
+    if sp1 <= 0 {
+        return malformed
+    }
+    let method = rl[0..sp1]
+    let after1 = rl[sp1 + 1..rl.len]
+    let sp2 = after1.find(" ") else -1
+    if sp2 <= 0 {
+        // no second SP: HTTP/0.9-style or a truncated line. lobo
+        // requires the three-token line (delta: nginx serves 0.9).
+        return malformed
+    }
+    let target = after1[0..sp2]
+    let version = after1[sp2 + 1..after1.len]
+    if !http.is_token(method) {
+        return malformed
+    }
+    if version != "HTTP/1.1" && version != "HTTP/1.0" {
+        return malformed
+    }
+    if target.is_empty() {
+        return malformed
+    }
+    // whitespace / control anywhere in the target is a MUST-reject
+    // (RFC 9112 §3.2 — the smuggling-relevant no-WS-in-target rule);
+    // a second SP would already have landed here as part of `version`
+    for b_raw in target.bytes() {
+        let b = b_raw as int
+        if http.is_target_bad(b) {
+            return malformed
+        }
+    }
+    r.method = method
+    r.version = version
+    r.target = target
+
+    let is11 = version == "HTTP/1.1"
+
+    // ---- absolute-form: its authority WINS over Host (§3.2.2) ----
+    var host_target = ""
+    var origin = target
+    if ref_starts_with_fold(target, "http://") {
+        let rem = target[7..target.len]
+        let parts = ref_split_authority(rem)
+        host_target = parts.0
+        origin = parts.1
+    } else if ref_starts_with_fold(target, "https://") {
+        let rem = target[8..target.len]
+        let parts = ref_split_authority(rem)
+        host_target = parts.0
+        origin = parts.1
+    }
+    // split the origin-form target at the first '?'
+    let qmark = origin.find("?") else -1
+    if qmark == -1 {
+        r.path = origin
+        r.query = ""
+    } else {
+        r.path = origin[0..qmark]
+        r.query = origin[qmark + 1..origin.len]
+    }
+
+    // ---- header fields ----
+    var host_count: int = 0
+    var host_val = ""
+    var cl_count: int = 0
+    var cl_val = ""
+    var te_count: int = 0
+    var te_val = ""
+    var conn_val = ""
+    var idx: int = 0
+    for line in lines {
+        if idx == 0 {
+            idx = idx + 1
+            continue
+        }
+        idx = idx + 1
+        // a blank line terminates the header section: stop here and
+        // treat anything after it as body (defensive — serve/ strips
+        // the CRLFCRLF, but a caller that hands us a whole message
+        // must not trap on the empty line)
+        if line.is_empty() {
+            break
+        }
+        if line.len > limits.max_header_line {
+            return too_large
+        }
+        // obs-fold: a field line starting with SP/HTAB is a folded
+        // continuation — reject, never unfold (RFC 9112 §5.2)
+        let lead = line[0..1]
+        var leadb: int = 0
+        for b_raw in lead.bytes() {
+            let b = b_raw as int
+            leadb = b
+        }
+        if leadb == 32 || leadb == 9 {
+            return malformed
+        }
+        let colon = line.find(":") else -1
+        if colon <= 0 {
+            return malformed
+        }
+        let name = line[0..colon]
+        // a space before the colon lands INSIDE `name` and fails the
+        // token test — RFC 9112 §5.1 (no whitespace between field
+        // name and colon)
+        if !http.is_token(name) {
+            return malformed
+        }
+        let raw_val = line[colon + 1..line.len]
+        let value = ref_trim_ows(raw_val)
+        let lname = ref_lower_token(name)
+        (mut r.hnames).push(lname)
+        (mut r.hvals).push(value)
+        if r.hnames.len > limits.max_headers {
+            return too_large
+        }
+        if lname == "host" {
+            host_count = host_count + 1
+            host_val = value
+        } else if lname == "content-length" {
+            cl_count = cl_count + 1
+            cl_val = value
+        } else if lname == "transfer-encoding" {
+            te_count = te_count + 1
+            te_val = value
+        } else if lname == "connection" {
+            conn_val = value
+        }
+    }
+
+    // ---- Host (§3.2 / §5.4): exactly one on 1.1, absolute wins ----
+    if host_count > 1 {
+        return malformed
+    }
+    if !host_target.is_empty() {
+        r.host = host_target
+    } else if host_count == 1 {
+        r.host = host_val
+    } else {
+        if is11 {
+            return malformed
+        }
+        r.host = ""
+    }
+
+    // ---- body framing (RFC 9110 §8.6, RFC 9112 §6) ----
+    // CL + TE together is 400, full stop — the smuggling rule,
+    // stricter than "TE wins" (matches the pinned oracle).
+    if cl_count > 0 && te_count > 0 {
+        return malformed
+    }
+    if te_count > 0 {
+        if te_count > 1 {
+            return malformed
+        }
+        if ref_eq_ci(te_val, "chunked") {
+            r.body_mode = "chunked"
+        } else {
+            // any other Transfer-Encoding is unimplemented (501),
+            // matching the oracle's 501 for `Transfer-Encoding: gzip`
+            return unimplemented
+        }
+    } else if cl_count > 0 {
+        // a duplicate Content-Length is 400 even when the values
+        // agree — the oracle rejects it, and the smuggling posture
+        // prefers refusal to reconciliation (delta from RFC 9110's
+        // "combine identical", named in the corpus)
+        if cl_count > 1 {
+            return malformed
+        }
+        let n = ref_parse_length(cl_val, 999999999999999)?
+        r.content_length = n
+        r.body_mode = "length"
+    }
+
+    // ---- keepalive intent ----
+    var alive = is11
+    if !conn_val.is_empty() {
+        if ref_ci_contains(conn_val, "close") {
+            alive = false
+        } else if ref_ci_contains(conn_val, "keep-alive") {
+            alive = true
+        }
+    }
+    r.keepalive = alive
+
+    r
+}
+
+// ------------------------------------------------------------------
+// the comparison
+// ------------------------------------------------------------------
+
+/// One parse's whole answer as a line: the row's name, or every field
+/// of the request. Total.
+fn show(r: http.Request) -> str {
+    var hs = ""
+    var i: int = 0
+    for n in r.hnames {
+        hs = "{hs}<{n}={r.hvals[i]}>"
+        i = i + 1
+    }
+    "ok m[{r.method}] t[{r.target}] v[{r.version}] h[{r.host}] p[{r.path}] q[{r.query}] {hs} b[{r.body_mode}] n[{r.content_length}] k[{r.keepalive}]"
+}
+
+fn new_answer(head: str, lim: http.Limits) -> str {
+    let r = http.parse_request(head, lim) else |e| match e {
+        malformed => {
+            return "malformed"
+        },
+        uri_too_long => {
+            return "uri_too_long"
+        },
+        too_large => {
+            return "too_large"
+        },
+        unimplemented => {
+            return "unimplemented"
+        },
+    }
+    show(r)
+}
+
+fn ref_answer(head: str, lim: http.Limits) -> str {
+    let r = ref_parse_request(head, lim) else |e| match e {
+        malformed => {
+            return "malformed"
+        },
+        uri_too_long => {
+            return "uri_too_long"
+        },
+        too_large => {
+            return "too_large"
+        },
+        unimplemented => {
+            return "unimplemented"
+        },
+    }
+    show(r)
+}
+
+/// A head with its controls spelled, for a mismatch line. Total.
+fn spell(s: str) -> str {
+    let a = s.replace("\r", "<CR>")
+    let b = a.replace("\n", "<LF>")
+    b.replace("\t", "<HT>")
+}
+
+struct Tally {
+    cases: int,
+    same: int,
+    ok: int,
+    malformed: int,
+    uri_too_long: int,
+    too_large: int,
+    unimplemented: int,
+    shown: int,
+}
+
+fn one(mut t: Tally, head: str, lim: http.Limits) {
+    let want = ref_answer(head, lim)
+    let got = new_answer(head, lim)
+    t.cases = t.cases + 1
+    if want == got {
+        t.same = t.same + 1
+    } else if t.shown < 8 {
+        t.shown = t.shown + 1
+        print("DIFFER [{spell(head)}]")
+        print("  was {spell(want)}")
+        print("  is  {spell(got)}")
+    }
+    if want == "malformed" {
+        t.malformed = t.malformed + 1
+    } else if want == "uri_too_long" {
+        t.uri_too_long = t.uri_too_long + 1
+    } else if want == "too_large" {
+        t.too_large = t.too_large + 1
+    } else if want == "unimplemented" {
+        t.unimplemented = t.unimplemented + 1
+    } else {
+        t.ok = t.ok + 1
+    }
+}
+
+/// The limits a sweep runs under: the defaults, and a set small enough
+/// that a seed crosses each of them (a 24-byte request line, a 20-byte
+/// field, three fields, 120 bytes in all). Total.
+fn tight() -> http.Limits {
+    var l = http.default_limits()
+    l.max_request_line = 24
+    l.max_header_line = 20
+    l.max_headers = 3
+    l.max_header_total = 120
+    l
+}
+
+/// The seeds: one head of every class the checklist names, served and
+/// refused. ASCII only, so a mutation may cut anywhere. Total.
+fn seeds() -> List[str] {
+    var s = List[str]()
+    (mut s).push(
+        "GET /index.html HTTP/1.0\r\nConnection: Keep-Alive\r\nHost: 127.0.0.1:18630\r\nUser-Agent: ApacheBench/2.3\r\nAccept: */*",
+    )
+    (mut s).push("GET / HTTP/1.1\r\nHost: x")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\n")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\n\r\nbody: y\r\nmore")
+    (mut s).push("GET /a?b=c?d HTTP/1.1\r\nhost: x\r\nconnection: close")
+    (mut s).push("HEAD /a%20b HTTP/1.0")
+    (mut s).push("GET http://h.example/p?q HTTP/1.1\r\nHost: other")
+    (mut s).push("GET HTTPS://h.example HTTP/1.1")
+    (mut s).push("GET http://h?x=1 HTTP/1.0\r\nX: 1")
+    (mut s).push("GET hello HTTP/1.0")
+    (mut s).push("POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 12\r\nX-A:\r\nX-B: \t v \t ")
+    (mut s).push("POST /u HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked")
+    (mut s).push("POST /u HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: gzip")
+    (mut s).push("POST /u HTTP/1.1\r\nHost: x\r\nTRANSFER-ENCODING: Chunked\r\nContent-Length: 3")
+    (mut s).push("POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 3\r\nContent-Length: 3")
+    (mut s).push("POST /u HTTP/1.1\r\nHost: x\r\nContent-Length: 1x")
+    (mut s).push("GET / HTTP/1.1\r\nHost: a\r\nHost: b")
+    (mut s).push("GET / HTTP/1.1\r\nAccept: x")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\nConnection: Upgrade, Close")
+    (mut s).push("GET / HTTP/1.0\r\nConnection: x, keep-alive")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\nName : v")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\nX: a\r\n cont")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\n: v")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\nX: a\r\r\nY: b")
+    (mut s).push("GET / HTTP/1.1\r\r\nHost: x")
+    (mut s).push("GET  / HTTP/1.1\r\nHost: x")
+    (mut s).push("GET / HTTP/1.1 \r\nHost: x")
+    (mut s).push("GET / HTTP/2.0\r\nHost: x")
+    (mut s).push("G(T / HTTP/1.1\r\nHost: x")
+    (mut s).push("GET /a\tb HTTP/1.1\r\nHost: x")
+    (mut s).push("GET /")
+    (mut s).push("GET")
+    (mut s).push("\r\nGET / HTTP/1.1\r\nHost: x")
+    (mut s).push("GET / HTTP/1.1\nHost: x")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r")
+    (mut s).push("GET /a-long-request-target-here HTTP/1.1\r\nHost: x\r\nX: y\nZ")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\nX-Long-Header-Name: value\r\nBad Name: v")
+    (mut s).push("GET / HTTP/1.1\r\nHost: x\r\nA: 1\r\nB: 2\r\nC: 3\r\nBad Name: v\rx")
+    (mut s).push(
+        "GET / HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: z\r\nRange: bytes=0-1\r\nPragma: p\r\nCache-Control: c\r\nAccept-Encoding: e\r\nIf-None-Match: m\r\nX-Other-Name: o",
+    )
+    s
+}
+
+/// The bytes a mutation writes: the ones a place in a head can turn
+/// on. Total.
+fn alphabet() -> List[int] {
+    var a = List[int]()
+    (mut a).push(13)
+    (mut a).push(10)
+    (mut a).push(32)
+    (mut a).push(9)
+    (mut a).push(58)
+    (mut a).push(63)
+    (mut a).push(47)
+    (mut a).push(72)
+    (mut a).push(104)
+    (mut a).push(45)
+    (mut a).push(48)
+    (mut a).push(1)
+    (mut a).push(11)
+    (mut a).push(127)
+    a
+}
+
+fn one_byte(b: int) -> str {
+    var l = List[byte]()
+    (mut l).push(b as byte)
+    str_from_utf8(l) else |_| {
+        "?"
+    }
+}
+
+/// Every seed, as it is and with one byte replaced, inserted or
+/// removed at every `step`-th place, under both sets of limits. Total.
+fn sweep(mut t: Tally, step: int) {
+    let ss = seeds()
+    let al = alphabet()
+    let d = http.default_limits()
+    let tg = tight()
+    for s in ss {
+        one(mut t, s, d)
+        one(mut t, s, tg)
+        var p: int = 0
+        while p <= s.len {
+            let pre = s[0..p]
+            let post = s[p..s.len]
+            for a in al {
+                let ch = one_byte(a)
+                let ins = "{pre}{ch}{post}"
+                one(mut t, ins, d)
+                one(mut t, ins, tg)
+                if p < s.len {
+                    let rep = "{pre}{ch}{s[p + 1..s.len]}"
+                    one(mut t, rep, d)
+                    one(mut t, rep, tg)
+                }
+            }
+            if p < s.len {
+                let del = "{pre}{s[p + 1..s.len]}"
+                one(mut t, del, d)
+                one(mut t, del, tg)
+            }
+            p = p + step
+        }
+    }
+    one(mut t, "", d)
+}
+
+/// A head that is not ASCII, asked of the walk alone: its row, or
+/// `ok` with what the answer turns on (keep-alive, the body mode, the
+/// byte length of each value). Total.
+fn beyond_one(name: str, head: str) {
+    let r = http.parse_request(head, http.default_limits()) else |e| match e {
+        malformed => {
+            print("{name}=malformed")
+            return
+        },
+        uri_too_long => {
+            print("{name}=uri_too_long")
+            return
+        },
+        too_large => {
+            print("{name}=too_large")
+            return
+        },
+        unimplemented => {
+            print("{name}=unimplemented")
+            return
+        },
+    }
+    var lens = ""
+    for v in r.hvals {
+        lens = "{lens} {v.len}"
+    }
+    print("{name}=ok keep={r.keepalive} body={r.body_mode} path={r.path.len} values={lens}")
+}
+
+/// A value, a target and a `Connection` value that carry or end in a
+/// two-byte scalar are served as the bytes they are; a name that
+/// carries one is not a token; the Kelvin sign still lowercases to
+/// `k` in a `Connection` or `Transfer-Encoding` value. Total.
+fn beyond() {
+    beyond_one(
+        "value_and_target",
+        "GET /caf\u{e9} HTTP/1.1\r\nHost: x\r\nX-V: \u{e9}t\u{e9} \r\nX-W: caf\u{e9}",
+    )
+    beyond_one("name", "GET / HTTP/1.1\r\nHost: x\r\nX-\u{e9}: v")
+    beyond_one("connection_close", "GET / HTTP/1.1\r\nHost: x\r\nConnection: \u{e9}, CLOSE")
+    beyond_one("connection_kelvin", "GET / HTTP/1.0\r\nConnection: \u{212a}eep-alive")
+    beyond_one("te_kelvin", "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chun\u{212a}ed")
+}
+
+fn report(t: Tally) -> int {
+    print("cases={t.cases} same={t.same}")
+    print(
+        "ok={t.ok} malformed={t.malformed} uri_too_long={t.uri_too_long} too_large={t.too_large} unimplemented={t.unimplemented}",
+    )
+    if t.same == t.cases {
+        return 0
+    }
+    1
+}
+
+fn main() -> int {
+    var t = Tally {
+        cases: 0,
+        same: 0,
+        ok: 0,
+        malformed: 0,
+        uri_too_long: 0,
+        too_large: 0,
+        unimplemented: 0,
+        shown: 0,
+    }
+    sweep(mut t, 1)
+    beyond()
+    report(t)
+}

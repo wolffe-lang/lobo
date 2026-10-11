@@ -275,94 +275,16 @@ pub fn header_count(r: Request) -> int {
 // the parser: RFC 9112 as a checklist
 // ------------------------------------------------------------------
 
-/// Split a header block into lines on CRLF, STRICTLY: a bare CR (not
-/// followed by LF) and a bare LF (not preceded by CR) are each
-/// `malformed` (RFC 9112 §2.2 — a recipient MUST NOT recognise a
-/// lone CR or LF as a line terminator; the Class-B posture rejects
-/// rather than tolerates, the deliberate delta from nginx's lenient
-/// bare-LF acceptance). `head` is the bytes BEFORE the terminating
-/// blank line (serve/ finds the CRLFCRLF and hands us what precedes
-/// it). Offsets are computed at ASCII CR/LF positions, always code-
-/// point boundaries, so the slices never trap.
-fn split_lines_strict(head: str) -> List[str] ! {malformed} {
-    var out = List[str]()
-    var start: int = 0
-    var i: int = 0
-    var prev_cr: int = -2
-    for b_raw in head.bytes() {
-        let b = b_raw as int
-        if b == 13 {
-            // CR — the next byte MUST be LF; remember our position
-            prev_cr = i
-        } else if b == 10 {
-            // LF — MUST be immediately preceded by CR at i-1
-            if prev_cr != i - 1 {
-                return malformed
-            }
-            let line = head[start..prev_cr]
-            (mut out).push(line)
-            start = i + 1
-        } else
-        // any other byte: a CR is only legal immediately before LF
-        if prev_cr == i - 1 {
-            return malformed
-        }
-        i = i + 1
-    }
-    // a trailing CR with no LF is a bare CR
-    if prev_cr == i - 1 {
-        return malformed
-    }
-    // the final segment (no trailing CRLF) is the last line
-    if start < head.len {
-        (mut out).push(head[start..head.len])
-    }
-    out
-}
-
-/// Trim leading and trailing OWS (SP / HTAB) from a header value.
-/// Total; walks from both ends by ASCII bytes.
-fn trim_ows(s: str) -> str {
-    var lo: int = 0
-    for b_raw in s.bytes() {
-        let b = b_raw as int
-        if b == 32 || b == 9 {
-            lo = lo + 1
-        } else {
-            break
-        }
-    }
-    var hi: int = s.len
-    while hi > lo {
-        let c = s[hi - 1..hi]
-        var last: int = 0
-        for b_raw in c.bytes() {
-            let b = b_raw as int
-            last = b
-        }
-        if last == 32 || last == 9 {
-            hi = hi - 1
-        } else {
-            break
-        }
-    }
-    if lo >= hi {
-        return ""
-    }
-    s[lo..hi]
-}
-
-/// The byte at offset `i` of `s` (a one-byte slice read through a
-/// view — no materialization), or -1 past the end. Total.
+/// The byte at offset `i` of `s`, read through the string's byte view
+/// (nothing is built), or -1 past either end. For SHORT strings only
+/// (the literals `eq_fold` compares against): lupin answers an
+/// indexed view by walking to it, so a caller that would index a
+/// whole head walks it with `for` instead. Total.
 fn byte_at(s: str, i: int) -> int {
     if i < 0 || i >= s.len {
         return -1
     }
-    for b_raw in s[i..i + 1].bytes() {
-        let b = b_raw as int
-        return b
-    }
-    -1
+    s.bytes()[i] as int
 }
 
 /// One byte, ASCII-folded to lowercase (`A`..`Z` → `a`..`z`, every
@@ -382,19 +304,6 @@ fn is_ascii(s: str) -> bool {
     for b_raw in s.bytes() {
         let b = b_raw as int
         if b >= 128 {
-            return false
-        }
-    }
-    true
-}
-
-/// True when `s` has no `A`..`Z` byte — `lower()` would answer the
-/// receiver's own bytes, so the receiver serves as its own lowercase
-/// (an ASCII `s`; the caller guarantees that). Total.
-fn has_no_upper(s: str) -> bool {
-    for b_raw in s.bytes() {
-        let b = b_raw as int
-        if b >= 65 && b <= 90 {
             return false
         }
     }
@@ -448,19 +357,16 @@ fn contains_fold(s: str, needle: str) -> bool {
     false
 }
 
-/// The lowercase of a header NAME (an ASCII token — `is_token` held
-/// before this is called), answered WITHOUT materializing wherever
-/// the answer already exists: the name itself when it carries no
-/// uppercase byte, a literal for the names a static request carries
-/// (each a view into rodata), and `lower()` — the same bytes, built —
-/// only for an uppercase name outside that set. ws28: the parser
-/// materialized every name of every request (four arena allocations
-/// and four `String`s for `ab`'s four headers); the record then
-/// lowered them a second time. Total.
-fn lower_token(name: str) -> str {
-    if has_no_upper(name) {
-        return name
-    }
+/// The lowercase of a header NAME that carries an uppercase byte (an
+/// ASCII token: the walk in `parse_request` checked both), answered
+/// WITHOUT materializing for the names a static request carries (each
+/// a view into rodata), and by `lower()` (the same bytes, built) for
+/// any other. A name with no uppercase byte is its own lowercase and
+/// never comes here. ws28: the parser materialized every name of
+/// every request (four arena allocations and four `String`s for
+/// `ab`'s four headers); the record then lowered them a second time.
+/// Total.
+fn lower_known(name: str) -> str {
     if eq_fold(name, "host") {
         return "host"
     }
@@ -557,6 +463,176 @@ fn split_authority(rem: str) -> (str, str) {
     (rem[0..slash], rem[slash..rem.len])
 }
 
+/// What the walk in `parse_request` has learned that outlives a line.
+/// `pend` is an outcome that is decided but not yet returnable: 1
+/// `uri_too_long`, 2 `too_large` (see the walk's ordering note).
+/// `past` is true once no later line is read as a field: after the
+/// blank line, or once `pend` is set.
+struct Seen {
+    pend: int,
+    past: bool,
+    is11: bool,
+    host_target: str,
+    host_count: int,
+    host_val: str,
+    cl_count: int,
+    cl_val: str,
+    te_count: int,
+    te_val: str,
+    conn_val: str,
+}
+
+/// The request line `head[ls..le]` has ended (RFC 9112 §3). `st` is
+/// the walk's state at its end (2: both spaces were seen), `bad` a
+/// byte the walk refused (a non-token byte in the method, a control or
+/// an empty span), `sp1` and `sp2` the two spaces, `q` the first `?`
+/// of the target (-1: none), `t0` the target's first byte. False is
+/// `malformed`. Total.
+fn end_request_line(
+    mut r: Request,
+    mut sn: Seen,
+    head: str,
+    limits: Limits,
+    ls: int,
+    le: int,
+    st: int,
+    bad: bool,
+    sp1: int,
+    sp2: int,
+    q: int,
+    t0: int,
+) -> bool {
+    if le - ls > limits.max_request_line {
+        sn.pend = 1
+        sn.past = true
+        return true
+    }
+    // no second SP is HTTP/0.9-style or a truncated line: lobo
+    // requires the three-token line (delta: nginx serves 0.9)
+    if st != 2 || bad {
+        return false
+    }
+    let version = head[sp2 + 1..le]
+    if version == "HTTP/1.1" {
+        sn.is11 = true
+    } else if version != "HTTP/1.0" {
+        return false
+    }
+    let target = head[sp1 + 1..sp2]
+    r.method = head[ls..sp1]
+    r.version = version
+    r.target = target
+    // ---- absolute-form: its authority WINS over Host (§3.2.2) ----
+    // (asked only of a target that starts with `h` or `H`; an
+    // origin-form target starts with `/` and its `?` is the walk's)
+    if t0 == 104 || t0 == 72 {
+        var origin = target
+        var absolute = false
+        if starts_with_fold(target, "http://") {
+            let parts = split_authority(target[7..target.len])
+            sn.host_target = parts.0
+            origin = parts.1
+            absolute = true
+        } else if starts_with_fold(target, "https://") {
+            let parts = split_authority(target[8..target.len])
+            sn.host_target = parts.0
+            origin = parts.1
+            absolute = true
+        }
+        if absolute {
+            let qmark = origin.find("?") else -1
+            if qmark == -1 {
+                r.path = origin
+                r.query = ""
+            } else {
+                r.path = origin[0..qmark]
+                r.query = origin[qmark + 1..origin.len]
+            }
+            return true
+        }
+    }
+    // split the origin-form target at the first '?'
+    if q < 0 {
+        r.path = target
+        r.query = ""
+    } else {
+        r.path = head[sp1 + 1..q]
+        r.query = head[q + 1..sp2]
+    }
+    true
+}
+
+/// A header line `head[ls..le]` has ended (RFC 9112 §5). `st` is the
+/// walk's state at its end (4: the colon was seen), `bad` a byte the
+/// walk refused in the name (a non-token byte, which is also the
+/// space before the colon of §5.1 and the leading SP/HTAB of an
+/// obs-fold, §5.2: rejected, never unfolded) or an empty name,
+/// `colon` the colon, `up` whether the name carries an uppercase
+/// byte, `vlo..vhi` the value without its outer OWS (`vlo` -1: an
+/// empty value). False is `malformed`. Total.
+fn end_header_line(
+    mut r: Request,
+    mut sn: Seen,
+    head: str,
+    limits: Limits,
+    ls: int,
+    le: int,
+    st: int,
+    bad: bool,
+    colon: int,
+    up: bool,
+    vlo: int,
+    vhi: int,
+) -> bool {
+    // a blank line terminates the header section: nothing after it is
+    // a field (defensive — serve/ strips the CRLFCRLF, but a caller
+    // that hands us a whole message must not trap on the empty line)
+    if le == ls {
+        sn.past = true
+        return true
+    }
+    if le - ls > limits.max_header_line {
+        sn.pend = 2
+        sn.past = true
+        return true
+    }
+    if st != 4 || bad {
+        return false
+    }
+    let name = head[ls..colon]
+    let value = if vlo < 0 { "" } else { head[vlo..vhi] }
+    let lname = if up { lower_known(name) } else { name }
+    (mut r.hnames).push(lname)
+    (mut r.hvals).push(value)
+    if r.hnames.len > limits.max_headers {
+        sn.pend = 2
+        sn.past = true
+        return true
+    }
+    let n = lname.len
+    if n == 4 {
+        if lname == "host" {
+            sn.host_count = sn.host_count + 1
+            sn.host_val = value
+        }
+    } else if n == 10 {
+        if lname == "connection" {
+            sn.conn_val = value
+        }
+    } else if n == 14 {
+        if lname == "content-length" {
+            sn.cl_count = sn.cl_count + 1
+            sn.cl_val = value
+        }
+    } else if n == 17 {
+        if lname == "transfer-encoding" {
+            sn.te_count = sn.te_count + 1
+            sn.te_val = value
+        }
+    }
+    true
+}
+
 /// Parse a full request head (everything before the terminating
 /// blank line) into a `Request`, enforcing the RFC 9112/9110 MUST
 /// checklist. PURE — no socket, no clock. Rows, each a status the
@@ -571,6 +647,37 @@ fn split_authority(rem: str) -> (str, str) {
 /// The section citations live in the corpus tests that take each path.
 /// The four-tag row is deliberate (W0602 allowed): each tag is a
 /// distinct status the caller writes, and the doc above is its home.
+///
+/// ws59 (lobo#68): ONE WALK over the head's bytes. Through ws58 the
+/// head was split into a list of lines by one byte loop, and each line
+/// was then searched (`find` for the two spaces, the `?`, each colon),
+/// tested (`is_token`, the target's bytes), trimmed and folded by
+/// loops of its own: 30 % of a request's user instructions. The walk
+/// reads each byte once and knows where it is: the method (state 0),
+/// the target (1), the version (2), a field's name (3), its value (4),
+/// or bytes that are only held to the line discipline (5).
+///
+/// THE LINE DISCIPLINE (RFC 9112 §2.2: a recipient MUST NOT recognise
+/// a lone CR or LF as a line terminator; the Class-B posture rejects
+/// rather than tolerates, the deliberate delta from nginx's lenient
+/// bare-LF acceptance) is held over EVERY byte of the head, the bytes
+/// after a blank line included: an LF must follow a CR, and a CR must
+/// be followed by an LF or by another CR. A line is the bytes up to
+/// the CR that precedes its LF, and a head that does not end in CRLF
+/// ends in a last line. (A CR before that CR is therefore a byte of
+/// the line: it fails the method, the target, the version and a name,
+/// and it stays in a value. That is what the split did, and the walk
+/// does not change what is refused.)
+///
+/// THE ORDER OF REFUSALS is the split's order, kept: a break of the
+/// line discipline anywhere is `malformed` before any other answer
+/// (the split ran first), so a line over its limit does not return at
+/// once. It sets `pend`, the rest of the head is walked for the
+/// discipline alone, and the pending row is answered at the end. A
+/// line's own faults wait for its end, where its length is asked
+/// first, as it always was. Offsets are taken at ASCII bytes (SP, the
+/// colon, `?`, CR, HTAB) or beside them, always code-point boundaries,
+/// so the slices never trap.
 #[allow(w0602)]
 pub fn parse_request(head: str, limits: Limits) -> Request ! {
     malformed,
@@ -581,159 +688,217 @@ pub fn parse_request(head: str, limits: Limits) -> Request ! {
     if head.len > limits.max_header_total {
         return too_large
     }
-    let lines = split_lines_strict(head)?
-    if lines.is_empty() {
+    if head.is_empty() {
         return malformed
     }
 
     var r = empty_request()
+    var sn = Seen {
+        pend: 0,
+        past: false,
+        is11: false,
+        host_target: "",
+        host_count: 0,
+        host_val: "",
+        cl_count: 0,
+        cl_val: "",
+        te_count: 0,
+        te_val: "",
+        conn_val: "",
+    }
 
-    // ---- request line (RFC 9112 §3) ----
-    let rl = lines[0]
-    if rl.len > limits.max_request_line {
+    // the walk's place: byte `i`, on line `line`, which began at `ls`
+    var i: int = 0
+    var line: int = 0
+    var ls: int = 0
+    var st: int = 0
+    // the byte before this one was a CR
+    var cr = false
+    // this line holds a byte its place refuses
+    var bad = false
+    var sp1: int = -1
+    var sp2: int = -1
+    var q: int = -1
+    var t0: int = 0
+    var colon: int = -1
+    var up = false
+    var vlo: int = -1
+    var vhi: int = -1
+    for b_raw in head.bytes() {
+        let b = b_raw as int
+        if b > 13 {
+            // a CR is only legal immediately before LF (or another CR)
+            if cr {
+                return malformed
+            }
+            if st == 4 {
+                if b != 32 {
+                    if vlo < 0 {
+                        vlo = i
+                    }
+                    vhi = i + 1
+                }
+            } else if st == 3 {
+                if b == 58 {
+                    if i == ls {
+                        bad = true
+                    }
+                    colon = i
+                    st = 4
+                } else if b >= 65 && b <= 90 {
+                    up = true
+                } else if !is_tchar(b) {
+                    bad = true
+                }
+            } else if st == 1 {
+                // whitespace / control anywhere in the target is a
+                // MUST-reject (RFC 9112 §3.2 — the smuggling-relevant
+                // no-WS-in-target rule); a second SP ends the target,
+                // and a third lands in the version and fails it
+                if b == 32 {
+                    if i == sp1 + 1 {
+                        bad = true
+                    }
+                    sp2 = i
+                    st = 2
+                } else {
+                    if b < 32 || b == 127 {
+                        bad = true
+                    }
+                    if b == 63 && q < 0 {
+                        q = i
+                    }
+                    if i == sp1 + 1 {
+                        t0 = b
+                    }
+                }
+            } else if st == 0 {
+                if b == 32 {
+                    if i == ls {
+                        bad = true
+                    }
+                    sp1 = i
+                    st = 1
+                } else if !is_tchar(b) {
+                    bad = true
+                }
+            }
+        } else if b == 10 {
+            // LF — MUST be immediately preceded by CR
+            if !cr {
+                return malformed
+            }
+            if !sn.past {
+                let ok = if line == 0 {
+                    end_request_line(
+                        mut r,
+                        mut sn,
+                        head,
+                        limits,
+                        ls,
+                        i - 1,
+                        st,
+                        bad,
+                        sp1,
+                        sp2,
+                        q,
+                        t0,
+                    )
+                } else {
+                    end_header_line(
+                        mut r,
+                        mut sn,
+                        head,
+                        limits,
+                        ls,
+                        i - 1,
+                        st,
+                        bad,
+                        colon,
+                        up,
+                        vlo,
+                        vhi,
+                    )
+                }
+                if !ok {
+                    return malformed
+                }
+            }
+            line = line + 1
+            ls = i + 1
+            cr = false
+            st = if sn.past { 5 } else { 3 }
+            bad = false
+            colon = -1
+            up = false
+            vlo = -1
+            vhi = -1
+        } else if b == 13 {
+            if cr {
+                // the CR before this one is a byte of the line: kept
+                // in a value, read with the version, refused elsewhere
+                if st == 4 {
+                    if vlo < 0 {
+                        vlo = i - 1
+                    }
+                    vhi = i
+                } else if st != 2 && st != 5 {
+                    bad = true
+                }
+            }
+            cr = true
+        } else {
+            // a control below CR that is neither CR nor LF (HTAB among
+            // them): OWS in a value, refused in a method, a target or
+            // a name
+            if cr {
+                return malformed
+            }
+            if st == 4 {
+                if b != 9 {
+                    if vlo < 0 {
+                        vlo = i
+                    }
+                    vhi = i + 1
+                }
+            } else if st != 2 && st != 5 {
+                bad = true
+            }
+        }
+        i = i + 1
+    }
+    // a trailing CR with no LF is a bare CR
+    if cr {
+        return malformed
+    }
+    // the final segment (no trailing CRLF) is the last line
+    if ls < head.len && !sn.past {
+        let ok = if line == 0 {
+            end_request_line(mut r, mut sn, head, limits, ls, head.len, st, bad, sp1, sp2, q, t0)
+        } else {
+            end_header_line(mut r, mut sn, head, limits, ls, head.len, st, bad, colon, up, vlo, vhi)
+        }
+        if !ok {
+            return malformed
+        }
+    }
+    if sn.pend == 1 {
         return uri_too_long
     }
-    let sp1 = rl.find(" ") else -1
-    if sp1 <= 0 {
-        return malformed
-    }
-    let method = rl[0..sp1]
-    let after1 = rl[sp1 + 1..rl.len]
-    let sp2 = after1.find(" ") else -1
-    if sp2 <= 0 {
-        // no second SP: HTTP/0.9-style or a truncated line. lobo
-        // requires the three-token line (delta: nginx serves 0.9).
-        return malformed
-    }
-    let target = after1[0..sp2]
-    let version = after1[sp2 + 1..after1.len]
-    if !is_token(method) {
-        return malformed
-    }
-    if version != "HTTP/1.1" && version != "HTTP/1.0" {
-        return malformed
-    }
-    if target.is_empty() {
-        return malformed
-    }
-    // whitespace / control anywhere in the target is a MUST-reject
-    // (RFC 9112 §3.2 — the smuggling-relevant no-WS-in-target rule);
-    // a second SP would already have landed here as part of `version`
-    for b_raw in target.bytes() {
-        let b = b_raw as int
-        if is_target_bad(b) {
-            return malformed
-        }
-    }
-    r.method = method
-    r.version = version
-    r.target = target
-
-    let is11 = version == "HTTP/1.1"
-
-    // ---- absolute-form: its authority WINS over Host (§3.2.2) ----
-    var host_target = ""
-    var origin = target
-    if starts_with_fold(target, "http://") {
-        let rem = target[7..target.len]
-        let parts = split_authority(rem)
-        host_target = parts.0
-        origin = parts.1
-    } else if starts_with_fold(target, "https://") {
-        let rem = target[8..target.len]
-        let parts = split_authority(rem)
-        host_target = parts.0
-        origin = parts.1
-    }
-    // split the origin-form target at the first '?'
-    let qmark = origin.find("?") else -1
-    if qmark == -1 {
-        r.path = origin
-        r.query = ""
-    } else {
-        r.path = origin[0..qmark]
-        r.query = origin[qmark + 1..origin.len]
-    }
-
-    // ---- header fields ----
-    var host_count: int = 0
-    var host_val = ""
-    var cl_count: int = 0
-    var cl_val = ""
-    var te_count: int = 0
-    var te_val = ""
-    var conn_val = ""
-    var idx: int = 0
-    for line in lines {
-        if idx == 0 {
-            idx = idx + 1
-            continue
-        }
-        idx = idx + 1
-        // a blank line terminates the header section: stop here and
-        // treat anything after it as body (defensive — serve/ strips
-        // the CRLFCRLF, but a caller that hands us a whole message
-        // must not trap on the empty line)
-        if line.is_empty() {
-            break
-        }
-        if line.len > limits.max_header_line {
-            return too_large
-        }
-        // obs-fold: a field line starting with SP/HTAB is a folded
-        // continuation — reject, never unfold (RFC 9112 §5.2)
-        let lead = line[0..1]
-        var leadb: int = 0
-        for b_raw in lead.bytes() {
-            let b = b_raw as int
-            leadb = b
-        }
-        if leadb == 32 || leadb == 9 {
-            return malformed
-        }
-        let colon = line.find(":") else -1
-        if colon <= 0 {
-            return malformed
-        }
-        let name = line[0..colon]
-        // a space before the colon lands INSIDE `name` and fails the
-        // token test — RFC 9112 §5.1 (no whitespace between field
-        // name and colon)
-        if !is_token(name) {
-            return malformed
-        }
-        let raw_val = line[colon + 1..line.len]
-        let value = trim_ows(raw_val)
-        let lname = lower_token(name)
-        (mut r.hnames).push(lname)
-        (mut r.hvals).push(value)
-        if r.hnames.len > limits.max_headers {
-            return too_large
-        }
-        if lname == "host" {
-            host_count = host_count + 1
-            host_val = value
-        } else if lname == "content-length" {
-            cl_count = cl_count + 1
-            cl_val = value
-        } else if lname == "transfer-encoding" {
-            te_count = te_count + 1
-            te_val = value
-        } else if lname == "connection" {
-            conn_val = value
-        }
+    if sn.pend == 2 {
+        return too_large
     }
 
     // ---- Host (§3.2 / §5.4): exactly one on 1.1, absolute wins ----
-    if host_count > 1 {
+    if sn.host_count > 1 {
         return malformed
     }
-    if !host_target.is_empty() {
-        r.host = host_target
-    } else if host_count == 1 {
-        r.host = host_val
+    if !sn.host_target.is_empty() {
+        r.host = sn.host_target
+    } else if sn.host_count == 1 {
+        r.host = sn.host_val
     } else {
-        if is11 {
+        if sn.is11 {
             return malformed
         }
         r.host = ""
@@ -742,39 +907,45 @@ pub fn parse_request(head: str, limits: Limits) -> Request ! {
     // ---- body framing (RFC 9110 §8.6, RFC 9112 §6) ----
     // CL + TE together is 400, full stop — the smuggling rule,
     // stricter than "TE wins" (matches the pinned oracle).
-    if cl_count > 0 && te_count > 0 {
+    if sn.cl_count > 0 && sn.te_count > 0 {
         return malformed
     }
-    if te_count > 0 {
-        if te_count > 1 {
+    if sn.te_count > 0 {
+        if sn.te_count > 1 {
             return malformed
         }
-        if eq_ci(te_val, "chunked") {
+        if eq_ci(sn.te_val, "chunked") {
             r.body_mode = "chunked"
         } else {
             // any other Transfer-Encoding is unimplemented (501),
             // matching the oracle's 501 for `Transfer-Encoding: gzip`
             return unimplemented
         }
-    } else if cl_count > 0 {
+    } else if sn.cl_count > 0 {
         // a duplicate Content-Length is 400 even when the values
         // agree — the oracle rejects it, and the smuggling posture
         // prefers refusal to reconciliation (delta from RFC 9110's
         // "combine identical", named in the corpus)
-        if cl_count > 1 {
+        if sn.cl_count > 1 {
             return malformed
         }
-        let n = parse_length(cl_val, 999999999999999)?
+        let n = parse_length(sn.cl_val, 999999999999999)?
         r.content_length = n
         r.body_mode = "length"
     }
 
     // ---- keepalive intent ----
-    var alive = is11
-    if !conn_val.is_empty() {
-        if ci_contains(conn_val, "close") {
+    // (the two whole-value spellings first: a value that IS the token
+    // needs no scan, and neither holds the other)
+    var alive = sn.is11
+    if !sn.conn_val.is_empty() {
+        if eq_fold(sn.conn_val, "keep-alive") {
+            alive = true
+        } else if eq_fold(sn.conn_val, "close") {
             alive = false
-        } else if ci_contains(conn_val, "keep-alive") {
+        } else if ci_contains(sn.conn_val, "close") {
+            alive = false
+        } else if ci_contains(sn.conn_val, "keep-alive") {
             alive = true
         }
     }
