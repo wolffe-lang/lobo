@@ -1,0 +1,260 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws58 (lobo#67): THE FILE MEMO'S RULES, in process. The serving loop
+//! keeps a small file's bytes and proves them with one `fs_stat` a
+//! request; this is the table's own logic against a real filesystem,
+//! with no server in the way:
+//!
+//!   * off until turned on; a path's first miss costs no stat and
+//!     leaves a mark; a file younger than `file_memo_age_ms()` is not
+//!     admitted and is not asked about again for a second; an aged
+//!     file is admitted on its second miss and then HITS;
+//!   * a hit ends the moment the file is rewritten in place at the
+//!     same size, truncated, grown, replaced by a rename, deleted,
+//!     made unreadable, or swapped for a symlink to another file —
+//!     one file each, every one a hit a line earlier;
+//!   * two paths in one slot: the entry filled this second is not
+//!     displaced, a second later it is.
+//!
+//! The age rule is why the test sleeps once: a file written twice
+//! inside one timestamp tick has ONE stat record for two contents
+//! (row 0 shows a fresh file refused), so nothing here is admitted
+//! before it is three seconds old. tests/serve/file_memo_e2e.lu is
+//! the same list through the real server on both tiers, beside the
+//! oracle. Scratch under the working folder, cleared at start.
+
+use serve
+
+/// Store a `memo_look` note the way the serving loop does. Total.
+fn apply(mut ft: serve.FileKinds, fu: serve.MemoUpd) {
+    if fu.f_op == 1 || fu.f_op == 3 {
+        serve.file_memo_store(
+            mut ft,
+            fu.f_op,
+            fu.f_slot,
+            fu.f_mark,
+            fu.f_now,
+            "",
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            0,
+            take List[byte](),
+        )
+    }
+}
+
+/// Fill `p`'s slot from the record `pre`, as `serve_path` and the loop
+/// do between them: read, stat again, keep only an unchanged file.
+/// Answers whether it was kept. Rows: io.
+fn fill(mut ft: serve.FileKinds, p: str, pre: List[int], now_ms: int) -> bool ! {io} {
+    let body = fs_read_bytes(p) else |_| {
+        return io
+    }
+    let post = fs_stat(p) else |_| {
+        return io
+    }
+    if !serve.memo_same(pre, post) {
+        return false
+    }
+    let mark = serve.path_fold(p)
+    serve.file_memo_store(
+        mut ft,
+        2,
+        mark % 256,
+        mark,
+        now_ms,
+        p,
+        post[9],
+        post[10],
+        post[1],
+        post[2],
+        post[14],
+        post[15],
+        post[16],
+        post[17],
+        take body,
+    )
+    true
+}
+
+/// One look at `p`, its note stored: the state. Total.
+fn look(mut ft: serve.FileKinds, p: str, now_ms: int) -> int {
+    var fu = serve.memo_upd_new()
+    let lk = serve.memo_look(ft, mut fu, p, now_ms)
+    apply(mut ft, fu)
+    lk.state
+}
+
+/// Bring an aged file `p` from unknown to held: miss, admit, fill,
+/// hit. Asserts each step. Rows: io.
+fn warm(mut ft: serve.FileKinds, p: str, now_ms: int) -> () ! {io} {
+    var fu1 = serve.memo_upd_new()
+    let l1 = serve.memo_look(ft, mut fu1, p, now_ms)
+    assert(
+        l1.state == 0 && fu1.f_op == 1,
+        "{p}: a first miss leaves a mark (state {l1.state}, op {fu1.f_op})",
+    )
+    apply(mut ft, fu1)
+    var fu2 = serve.memo_upd_new()
+    let l2 = serve.memo_look(ft, mut fu2, p, now_ms)
+    assert(
+        l2.state == 2 && l2.pre.len == 20,
+        "{p}: an aged file is admitted on its second miss (state {l2.state})",
+    )
+    let kept = fill(mut ft, p, l2.pre, now_ms)?
+    assert(kept, "{p}: an unchanged file is kept")
+    var fu3 = serve.memo_upd_new()
+    let l3 = serve.memo_look(ft, mut fu3, p, now_ms)
+    assert(l3.state == 1 && fu3.f_op == 0, "{p}: then it hits (state {l3.state})")
+}
+
+/// Run a host tool and wait for it. Rows: io.
+fn tool(argv: List[str]) -> () ! {io} {
+    let ch = os_spawn(argv) else |_| {
+        return io
+    }
+    let code = os_wait(ch) else |_| -1
+    if code != 0 {
+        return io
+    }
+}
+
+fn main() -> !int {
+    let d = "ws58_fm_unit"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all(d)?
+    let names = ["same", "trunc", "grow", "repl", "gone", "mode", "link", "other"]
+    for n in names {
+        fs_write_text("{d}/{n}.txt", "FILE-{n}-ORIGINAL\n")?
+    }
+    fs_write_text("{d}/young.txt", "YOUNG\n")?
+    let t0 = time_unix_ms()
+
+    // row 0: off until on; a fresh file is not admissible, and the
+    // same record three seconds on would be
+    var ft = serve.file_kinds_new()
+    var fu0 = serve.memo_upd_new()
+    let l0 = serve.memo_look(ft, mut fu0, "{d}/young.txt", t0)
+    assert(l0.state == 0 && fu0.f_op == 0, "the memo is off until it is turned on")
+    serve.file_memo_on(mut ft)
+    let sty = fs_stat("{d}/young.txt")?
+    assert(sty.len == 20 && sty[0] == 0, "a twenty-word record of a regular file")
+    assert(!serve.memo_admissible(sty, t0), "a fresh file is not admitted")
+    assert(serve.memo_admissible(sty, t0 + 3100), "the same record is, three seconds on")
+    assert(serve.memo_same(sty, sty), "a record is itself")
+
+    // row 1: a young file — a mark, then a refusal that holds a second
+    let py = "{d}/young.txt"
+    var fa = serve.memo_upd_new()
+    let la = serve.memo_look(ft, mut fa, py, t0)
+    assert(la.state == 0 && fa.f_op == 1, "young: the first miss leaves a mark")
+    apply(mut ft, fa)
+    var fb = serve.memo_upd_new()
+    let lb = serve.memo_look(ft, mut fb, py, t0)
+    assert(
+        lb.state == 0 && fb.f_op == 3,
+        "young: refused on its second miss (state {lb.state}, op {fb.f_op})",
+    )
+    apply(mut ft, fb)
+    var fc = serve.memo_upd_new()
+    let lc = serve.memo_look(ft, mut fc, py, t0 + 10)
+    assert(lc.state == 0 && fc.f_op == 0, "young: not asked about again inside the second")
+
+    // every file below is three seconds old before it is admitted
+    time_sleep_ms(3200)
+    let t1 = time_unix_ms()
+    for n in names {
+        if n != "other" {
+            warm(mut ft, "{d}/{n}.txt", t1)?
+        }
+    }
+
+    // row 2: rewritten in place, the same size
+    fs_write_text("{d}/same.txt", "FILE-same-REPLACED\n")?
+    assert(fs_size("{d}/same.txt")? == 19, "same size (19)")
+    assert(
+        look(mut ft, "{d}/same.txt", time_unix_ms()) != 1,
+        "rewritten in place at one size: no hit",
+    )
+
+    // row 3: truncated
+    fs_write_text("{d}/trunc.txt", "T\n")?
+    assert(look(mut ft, "{d}/trunc.txt", time_unix_ms()) != 1, "truncated: no hit")
+
+    // row 4: grown
+    fs_write_text("{d}/grow.txt", "FILE-grow-ORIGINAL\nAND-MORE\n")?
+    assert(look(mut ft, "{d}/grow.txt", time_unix_ms()) != 1, "grown: no hit")
+
+    // row 5: replaced by a rename (a new inode, the same size)
+    fs_write_text("{d}/repl.new", "FILE-repl-REPLACED\n")?
+    fs_rename("{d}/repl.new", "{d}/repl.txt")?
+    assert(look(mut ft, "{d}/repl.txt", time_unix_ms()) != 1, "replaced by a rename: no hit")
+
+    // row 6: deleted — no hit, and the entry is dropped
+    fs_remove("{d}/gone.txt")?
+    var fg = serve.memo_upd_new()
+    let lg = serve.memo_look(ft, mut fg, "{d}/gone.txt", time_unix_ms())
+    assert(
+        lg.state == 0 && fg.f_op == 3,
+        "deleted: no hit, the entry dropped (state {lg.state}, op {fg.f_op})",
+    )
+
+    // row 7: made unreadable — the status-change time moved
+    tool(["chmod", "000", "{d}/mode.txt"])?
+    assert(look(mut ft, "{d}/mode.txt", time_unix_ms()) != 1, "made unreadable: no hit")
+    tool(["chmod", "644", "{d}/mode.txt"])?
+
+    // row 8: swapped for a symlink to another file
+    fs_remove("{d}/link.txt")?
+    tool(["ln", "-s", "other.txt", "{d}/link.txt"])?
+    let via = fs_read_text("{d}/link.txt")?
+    assert(via == "FILE-other-ORIGINAL\n", "the link reads the other file: {via}")
+    assert(look(mut ft, "{d}/link.txt", time_unix_ms()) != 1, "swapped for a symlink: no hit")
+
+    // row 9: two paths in one slot. The entry filled THIS second
+    // stands; a second later the other path takes the slot.
+    let pa = "{d}/other.txt"
+    let slot = serve.path_fold(pa) % 256
+    var pb = ""
+    var i: int = 0
+    while pb.is_empty() && i < 100000 {
+        let cand = "{d}/c{i}.txt"
+        if serve.path_fold(cand) % 256 == slot {
+            pb = cand
+        }
+        i = i + 1
+    }
+    assert(!pb.is_empty(), "a second path in other.txt's slot")
+    fs_write_text(pb, "COLLIDER\n")?
+    time_sleep_ms(3200)
+    let t2 = time_unix_ms()
+    warm(mut ft, pa, t2)?
+    var fd1 = serve.memo_upd_new()
+    let ld1 = serve.memo_look(ft, mut fd1, pb, t2)
+    assert(ld1.state == 0 && fd1.f_op == 1, "the collider's first miss leaves a mark")
+    apply(mut ft, fd1)
+    var fd2 = serve.memo_upd_new()
+    let ld2 = serve.memo_look(ft, mut fd2, pb, t2)
+    assert(
+        ld2.state == 0 && fd2.f_op == 0,
+        "an entry filled this second is not displaced (state {ld2.state})",
+    )
+    var fd3 = serve.memo_upd_new()
+    let ld3 = serve.memo_look(ft, mut fd3, pb, t2 + 1000)
+    assert(ld3.state == 2, "a second later the collider is admitted (state {ld3.state})")
+    let kept = fill(mut ft, pb, ld3.pre, t2 + 1000)?
+    assert(kept, "the collider is kept")
+    assert(look(mut ft, pb, t2 + 1001) == 1, "the collider hits")
+    assert(look(mut ft, pa, t2 + 1001) != 1, "and the displaced path no longer does")
+
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

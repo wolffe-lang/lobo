@@ -949,6 +949,13 @@ fn send_err(mut cn: conn.Conn, code: int, special: bool, token: str) {
 /// large file in bounded chunks (no whole-file-into-memory), and a
 /// mid-stream read error can only close (bytes are already on the
 /// wire — the ws02 pitfall). Returns should_close. Rows: net `io`.
+///
+/// ws58 (lobo#67): `mslot` says where the body is. -1: on the handle
+/// `fd`, as above. 0 or more: the file memo's slot of that number
+/// holds it (`memo_look` answered a hit) and there is NO handle (`fd`
+/// is -1). -2: `fu.f_body` holds it (`serve_path` read it for a fill)
+/// and there is no handle. With no handle only the plain shape
+/// arrives: no Range, no budget, plaintext, at most 64 KiB.
 fn serve_file(
     mut cn: conn.Conn,
     c: config.Conf,
@@ -967,6 +974,7 @@ fn serve_file(
     mut chg: Charge,
     ft: FileKinds,
     mut fu: MemoUpd,
+    mslot: int,
 ) -> bool ! {closed, io} {
     // ws30 (wolf-lang#289 consumed): the handle arrives OPEN from
     // `classify` — ONE `fs_open_mode(path, 5)`, the read open that
@@ -991,7 +999,9 @@ fn serve_file(
     if !ims.is_empty() && ims == http_date(secs) {
         let lm = http_date(secs)
         let etag = "\"{to_hex(secs)}-{to_hex(size)}\""
-        fs_close(fd) else |_| {}
+        if fd >= 0 {
+            fs_close(fd) else |_| {}
+        }
         acc.status = 304
         acc.body_bytes = 0
         var h304 = "HTTP/1.1 304 Not Modified\r\n"
@@ -1013,7 +1023,7 @@ fn serve_file(
     var plan = RangePlan { kind: 0, starts: List[int](), ends: List[int]() }
     if max_ranges == 0 {
         plan.kind = 3
-    } else if chg.limit == 0 {
+    } else if chg.limit == 0 && mslot == -1 {
         let rspec = http.header(req, "range") else ""
         if !rspec.is_empty() {
             let irange = http.header(req, "if-range") else ""
@@ -1110,8 +1120,44 @@ fn serve_file(
     }
 
     if is_head {
-        fs_close(fd) else |_| {}
+        if fd >= 0 {
+            fs_close(fd) else |_| {}
+        }
         write_all(mut cn, head)?
+        return !keep
+    }
+
+    // ws58 (lobo#67): the body is already in hand — the file memo's
+    // (a hit: no file call was made for this response but the stat
+    // that proved the entry) or the fill's. One gathered write, the
+    // bytes lent, nothing copied and nothing to close.
+    if mslot != -1 {
+        var mw = 0
+        if mslot >= 0 {
+            net_writev_head(conn.fd(cn), head, ft.fbody[mslot]) else |e| match e {
+                closed => {
+                    mw = 1
+                },
+                io => {
+                    mw = 2
+                },
+            }
+        } else {
+            net_writev_head(conn.fd(cn), head, fu.f_body) else |e| match e {
+                closed => {
+                    mw = 1
+                },
+                io => {
+                    mw = 2
+                },
+            }
+        }
+        if mw == 1 {
+            return closed
+        }
+        if mw == 2 {
+            return io
+        }
         return !keep
     }
 
@@ -1873,6 +1919,19 @@ pub struct FileKinds {
     date_secs: int,
     date_str: str,
     boundary: int,
+    fpath: List[str],
+    fdev: List[int],
+    fino: List[int],
+    fsize: List[int],
+    fmms: List[int],
+    fmts: List[int],
+    fmtn: List[int],
+    fcts: List[int],
+    fctn: List[int],
+    ffill: List[int],
+    fseen: List[int],
+    ftry: List[int],
+    fbody: List[List[List[byte]]],
 }
 
 /// An empty table: the head cache empty, the date cache unset. Total.
@@ -1906,6 +1965,299 @@ pub fn file_kinds_new() -> FileKinds {
         date_secs: -1,
         date_str: "",
         boundary: 0,
+        fpath: List[str](),
+        fdev: List[int](),
+        fino: List[int](),
+        fsize: List[int](),
+        fmms: List[int](),
+        fmts: List[int](),
+        fmtn: List[int](),
+        fcts: List[int](),
+        fctn: List[int](),
+        ffill: List[int](),
+        fseen: List[int](),
+        ftry: List[int](),
+        fbody: List[List[List[byte]]](),
+    }
+}
+
+// ------------------------------------------------------------------
+// ws58 (lobo#67): THE FILE MEMO. A static file cost four file calls a
+// request (open, fstat, read, close). The table below keeps a small
+// file's BYTES beside the identity `fs_stat` answered for its path,
+// and a request for a path the table holds makes ONE call: an
+// `fs_stat` by path. When every identity word matches, the body is
+// the table's and the response is one `writev`; anything else takes
+// the old path, unchanged.
+//
+// What a hit proves (`memo_same`): the path still names a regular
+// file with the same device and inode (not replaced by a rename, not
+// swapped for a link to another file, not deleted: the stat walks the
+// path and follows a link every request), the same size (not
+// truncated, not grown), the same modification time to the nanosecond
+// (not rewritten in place) and the same status-change time (not
+// chmod'ed, chown'ed or relinked: no `utimes` can set that one back,
+// so a file made unreadable is a miss, and the miss's open answers
+// 403).
+//
+// What a stat cannot see is a second write inside one timestamp tick:
+// one record, two contents. So a file is ADMITTED only when its
+// status-change time is `file_memo_age_ms()` older than the clock
+// (`memo_admissible`): any later write then moves the times. The fill
+// stats the path before the open and again after the read and keeps
+// the bytes only when the two records agree with each other and with
+// the descriptor's own size and mtime (`serve_path`).
+//
+// Bytes, not the open descriptor: a kept descriptor still needs the
+// path stat (a permission change, a rename and a deletion are
+// invisible through it) and then a read, two calls where the bytes
+// need one, and it pins a deleted file's blocks and a descriptor per
+// entry per hand.
+//
+// THE BOUND: `file_kinds_slots()` entries of at most
+// `file_memo_max()` bytes, inside the memo region's cap (main.lu's
+// `memo_cap`), at which the whole table is let go. THE EVICTION:
+// direct-mapped; a path is admitted on its second miss in a row for
+// its slot (`fseen`), so a cold walk over many files pays no extra
+// stat, and an entry is displaced by another path only when it was
+// filled in an earlier second (`ffill`), so two hot paths in one slot
+// trade places at most once a second. A refused admission is not
+// retried for a second (`ftry`).
+//
+// Only the plain shape is served from it: GET or HEAD, no Range,
+// plaintext, no memory budget (`serve_path` says so in code). The
+// standalone `serve_conn_cn` table has the memo off (its lists are
+// empty); the serving loop turns it on (`file_memo_on`) and drops the
+// table at a reload.
+//
+// Named limits: the admission rule leans on the file's timestamps and
+// this process's clock being one clock (a network filesystem whose
+// server is more than `file_memo_age_ms()` ahead of this host, or a
+// wall clock stepped back by more than that, reopens the same-tick
+// window), and on a filesystem that keeps a status-change time
+// (`have` says; one that does not is never admitted).
+// ------------------------------------------------------------------
+
+/// The largest file the memo keeps, in bytes. Total.
+pub fn file_memo_max() -> int {
+    32768
+}
+
+/// How much older than the clock a file's status-change time must be
+/// before the memo admits it, in milliseconds: longer than any
+/// filesystem's timestamp tick (2 s is the coarsest in common use).
+/// Total.
+pub fn file_memo_age_ms() -> int {
+    3000
+}
+
+/// Turn the file memo on for `ft`: one empty entry a slot. Allocates
+/// in the caller's region (the serving loop's memo region). Total.
+pub fn file_memo_on(mut ft: FileKinds) {
+    var i: int = ft.fpath.len
+    while i < file_kinds_slots() {
+        (mut ft.fpath).push("")
+        (mut ft.fdev).push(0)
+        (mut ft.fino).push(0)
+        (mut ft.fsize).push(-1)
+        (mut ft.fmms).push(0)
+        (mut ft.fmts).push(0)
+        (mut ft.fmtn).push(0)
+        (mut ft.fcts).push(0)
+        (mut ft.fctn).push(0)
+        (mut ft.ffill).push(-1)
+        (mut ft.fseen).push(-1)
+        (mut ft.ftry).push(0)
+        (mut ft.fbody).push(take List[List[byte]]())
+        i = i + 1
+    }
+}
+
+/// Whether the stat record `st` is one the memo may keep bytes for at
+/// clock `now_ms`: a regular file of at most `file_memo_max()` bytes
+/// whose host answered the identity and both times (`have`, words 9,
+/// 10 and 14–17) and whose status-change time is at least
+/// `file_memo_age_ms()` behind the clock. Total.
+pub fn memo_admissible(st: List[int], now_ms: int) -> bool {
+    if st.len < 18 || st[0] != 0 || st[1] < 0 || st[1] > file_memo_max() {
+        return false
+    }
+    // `have` bits 9, 10, 14, 15, 16, 17
+    if st[3] / 512 % 2 == 0 ||
+        st[3] / 1024 % 2 == 0 ||
+        st[3] / 16384 % 2 == 0 ||
+        st[3] / 32768 % 2 == 0 ||
+        st[3] / 65536 % 2 == 0 ||
+        st[3] / 131072 % 2 == 0 {
+        return false
+    }
+    let ct_ms = st[16] * 1000 + st[17] / 1000000
+    now_ms - ct_ms >= file_memo_age_ms()
+}
+
+/// Whether two stat records name one unchanged regular file: kind,
+/// size, device, inode, modification time and status-change time,
+/// word for word. Total.
+pub fn memo_same(a: List[int], b: List[int]) -> bool {
+    a.len >= 18 &&
+        b.len >= 18 &&
+        a[0] == 0 &&
+        b[0] == 0 &&
+        a[1] == b[1] &&
+        a[9] == b[9] &&
+        a[10] == b[10] &&
+        a[14] == b[14] &&
+        a[15] == b[15] &&
+        a[16] == b[16] &&
+        a[17] == b[17]
+}
+
+/// Whether slot `s` of `ft` holds exactly the file `st` describes
+/// (`memo_same`'s words against the entry's). Total.
+pub fn memo_holds(ft: FileKinds, s: int, st: List[int]) -> bool {
+    st.len >= 18 &&
+        st[0] == 0 &&
+        st[1] == ft.fsize[s] &&
+        st[9] == ft.fdev[s] &&
+        st[10] == ft.fino[s] &&
+        st[14] == ft.fmts[s] &&
+        st[15] == ft.fmtn[s] &&
+        st[16] == ft.fcts[s] &&
+        st[17] == ft.fctn[s]
+}
+
+/// What the file memo says about one request's path (`memo_look`).
+/// `state` 0: the old path, nothing more. 1: a HIT — slot `slot`
+/// holds this file, `size` and `mms` are this request's stat. 2:
+/// ADMIT — the old path's open, then the fill; `pre` is the record
+/// taken before the open. `slot` is the path's slot in every state.
+pub struct MemoLook {
+    state: int,
+    slot: int,
+    size: int,
+    mms: int,
+    pre: List[int],
+}
+
+/// Ask the file memo about `path` at clock `now_ms` (see the block
+/// above for the rules). Makes at most one `fs_stat`, and none on a
+/// path's first miss, on a slot whose entry is this second's, or
+/// inside a refused admission's second. Notes in `fu` what the
+/// table's owner must store: a seen mark (`f_op` 1) or a dropped
+/// entry and a retry time (`f_op` 3). With the memo off (`ft.fpath`
+/// empty) it answers state 0. Total.
+pub fn memo_look(ft: FileKinds, mut fu: MemoUpd, path: str, now_ms: int) -> MemoLook {
+    if ft.fpath.len == 0 {
+        return MemoLook { state: 0, slot: -1, size: 0, mms: 0, pre: List[int]() }
+    }
+    let mark = path_fold(path)
+    let s = mark % file_kinds_slots()
+    if ft.fpath[s] == path {
+        let st = fs_stat(path) else |_| {
+            // gone, or the walk was refused: the old path's open says
+            // which (404, 403). The entry no longer holds.
+            fu.f_op = 3
+            fu.f_slot = s
+            fu.f_mark = mark
+            fu.f_now = now_ms
+            return MemoLook { state: 0, slot: s, size: 0, mms: 0, pre: List[int]() }
+        }
+        if memo_holds(ft, s, st) {
+            return MemoLook { state: 1, slot: s, size: st[1], mms: st[2], pre: List[int]() }
+        }
+        if memo_admissible(st, now_ms) {
+            return MemoLook { state: 2, slot: s, size: 0, mms: 0, pre: st }
+        }
+        fu.f_op = 3
+        fu.f_slot = s
+        fu.f_mark = mark
+        fu.f_now = now_ms
+        return MemoLook { state: 0, slot: s, size: 0, mms: 0, pre: List[int]() }
+    }
+    if ft.fseen[s] != mark {
+        // a first miss: remember the path's mark and pay nothing
+        fu.f_op = 1
+        fu.f_slot = s
+        fu.f_mark = mark
+        fu.f_now = now_ms
+        return MemoLook { state: 0, slot: s, size: 0, mms: 0, pre: List[int]() }
+    }
+    if now_ms < ft.ftry[s] {
+        return MemoLook { state: 0, slot: s, size: 0, mms: 0, pre: List[int]() }
+    }
+    if !ft.fpath[s].is_empty() && ft.ffill[s] == now_ms / 1000 {
+        return MemoLook { state: 0, slot: s, size: 0, mms: 0, pre: List[int]() }
+    }
+    let st = fs_stat(path) else |_| {
+        return MemoLook { state: 0, slot: s, size: 0, mms: 0, pre: List[int]() }
+    }
+    if memo_admissible(st, now_ms) {
+        return MemoLook { state: 2, slot: s, size: 0, mms: 0, pre: st }
+    }
+    fu.f_op = 3
+    fu.f_slot = s
+    fu.f_mark = mark
+    fu.f_now = now_ms
+    MemoLook { state: 0, slot: s, size: 0, mms: 0, pre: List[int]() }
+}
+
+/// Store one request's file-memo note into the table (`MemoUpd`'s
+/// `f_op`). 1: the path's mark is the slot's last miss. 2: the slot
+/// now holds `path` with the identity given and `body` (moved in).
+/// 3: the slot's entry is dropped when its mark is this path's, and
+/// no admission is tried in the slot before `now_ms` + 1 s. `path`
+/// and `body` are kept as given, so THE CALLER builds them in the
+/// region the table lives in (the serving loop does, under `in
+/// memo`). Total.
+pub fn file_memo_store(
+    mut ft: FileKinds,
+    op: int,
+    s: int,
+    mark: int,
+    now_ms: int,
+    path: str,
+    dev: int,
+    ino: int,
+    size: int,
+    mms: int,
+    mts: int,
+    mtn: int,
+    cts: int,
+    ctn: int,
+    take body: List[byte],
+) {
+    if s < 0 || s >= ft.fpath.len {
+        return
+    }
+    if op == 1 {
+        ft.fseen[s] = mark
+        return
+    }
+    if op == 2 {
+        var parts = List[List[byte]]()
+        (mut parts).push(take body)
+        ft.fpath[s] = path
+        ft.fdev[s] = dev
+        ft.fino[s] = ino
+        ft.fsize[s] = size
+        ft.fmms[s] = mms
+        ft.fmts[s] = mts
+        ft.fmtn[s] = mtn
+        ft.fcts[s] = cts
+        ft.fctn[s] = ctn
+        ft.ffill[s] = now_ms / 1000
+        ft.fseen[s] = mark
+        ft.fbody[s] = take parts
+        return
+    }
+    if op == 3 {
+        if ft.fpath[s].is_empty() || path_fold(ft.fpath[s]) == mark {
+            ft.fpath[s] = ""
+            ft.fsize[s] = -1
+            ft.fbody[s] = take List[List[byte]]()
+        }
+        ft.fseen[s] = mark
+        ft.ftry[s] = now_ms + 1000
     }
 }
 
@@ -2020,6 +2372,13 @@ pub struct MemoUpd {
     hkeep: bool,
     htoken: str,
     hhead: str,
+    f_op: int,
+    f_slot: int,
+    f_mark: int,
+    f_now: int,
+    f_path: str,
+    f_id: List[int],
+    f_body: List[List[byte]],
 }
 
 /// A `MemoUpd` with nothing to store. Total.
@@ -2036,12 +2395,20 @@ pub fn memo_upd_new() -> MemoUpd {
         hkeep: false,
         htoken: "",
         hhead: "",
+        f_op: 0,
+        f_slot: -1,
+        f_mark: 0,
+        f_now: 0,
+        f_path: "",
+        f_id: List[int](),
+        f_body: List[List[byte]](),
     }
 }
 
-/// Whether `u` carries anything for `memo_store`. Total.
+/// Whether `u` carries anything for `memo_store` or
+/// `file_memo_store`. Total.
 pub fn memo_dirty(u: MemoUpd) -> bool {
-    u.h_set || u.date_secs >= 0 || u.bounds > 0
+    u.h_set || u.date_secs >= 0 || u.bounds > 0 || u.f_op != 0
 }
 
 /// Store one request's memo notes into the table: the Date string
@@ -2084,12 +2451,18 @@ pub fn memo_store(
 /// The slot a path hashes to in the memo table: a byte fold (the
 /// multiply-by-31 shape), bounded so it never overflows `int`. Total.
 fn kind_slot(path: str) -> int {
+    path_fold(path) % file_kinds_slots()
+}
+
+/// The 24-bit fold of a path that `kind_slot` reduces: the file
+/// memo's mark for a path (ws58). Total.
+pub fn path_fold(path: str) -> int {
     var h: int = 0
     for b_raw in path.bytes() {
         let b = b_raw as int
         h = (h * 31 + b) % 16777216
     }
-    h % file_kinds_slots()
+    h
 }
 
 /// What the router learned from ONE open and ONE fstat (`classify`).
@@ -2157,6 +2530,146 @@ pub fn classify(path: str) -> Classified {
         return not_a_file(st[0])
     }
     Classified { kind: 0, fd: fd, size: st[1], mtime_ms: st[2] }
+}
+
+/// Serve the file at `path` if it is one, through the file memo when
+/// `fm_on` (ws58, lobo#67) and by `classify`'s open otherwise.
+/// Answers (0, should_close) when a response was written, and
+/// (kind, false) with `classify`'s kind when `path` is not a regular
+/// file and the caller must answer. Rows: net `io`.
+///
+/// With the memo on: a HIT (`memo_look` state 1) is served with no
+/// open; an ADMIT (state 2) opens as before, and when the handle's
+/// size and mtime are the pre-open record's it reads the body, closes,
+/// stats the path again and notes the fill only when the two records
+/// are the same file unchanged (`memo_same`) — the response carries
+/// the bytes it read either way, exactly as the old path would have.
+/// A HEAD never fills.
+fn serve_path(
+    mut cn: conn.Conn,
+    c: config.Conf,
+    req: http.Request,
+    path: str,
+    tpath: str,
+    token: str,
+    keep: bool,
+    is_head: bool,
+    local_port: int,
+    max_ranges: int,
+    mut acc: obs.Access,
+    mut chg: Charge,
+    ft: FileKinds,
+    mut fu: MemoUpd,
+    fm_on: bool,
+) -> (int, bool) ! {closed, io} {
+    var state = 0
+    var pre = List[int]()
+    if fm_on {
+        let now_ms = time_unix_ms()
+        let lk = memo_look(ft, mut fu, path, now_ms)
+        if lk.state == 1 {
+            let done = serve_file(
+                mut cn,
+                c,
+                req,
+                path,
+                tpath,
+                -1,
+                lk.size,
+                lk.mms,
+                token,
+                keep,
+                is_head,
+                local_port,
+                max_ranges,
+                mut acc,
+                mut chg,
+                ft,
+                mut fu,
+                lk.slot,
+            )?
+            return (0, done)
+        }
+        if lk.state == 2 && !is_head {
+            state = 2
+            pre = lk.pre
+            fu.f_slot = lk.slot
+            fu.f_now = now_ms
+        }
+    }
+    let cl = classify(path)
+    if cl.kind != 0 {
+        return (cl.kind, false)
+    }
+    if state == 2 && cl.size == pre[1] && cl.mtime_ms == pre[2] {
+        var rd = true
+        let body = read_exact(cl.fd, cl.size) else |_| {
+            rd = false
+            List[byte]()
+        }
+        fs_close(cl.fd) else |_| {}
+        if !rd {
+            // the old path's answer to a failed read: a clean 500
+            acc.status = 500
+            acc.body_bytes = err_len(500, false, token)
+            send_err(mut cn, 500, false, token)
+            return (0, true)
+        }
+        let post = fs_stat(path) else |_| {
+            List[int]()
+        }
+        var parts = List[List[byte]]()
+        (mut parts).push(take body)
+        fu.f_body = parts
+        if memo_same(pre, post) {
+            fu.f_op = 2
+            fu.f_mark = path_fold(path)
+            fu.f_path = path
+            fu.f_id = post
+        }
+        let done = serve_file(
+            mut cn,
+            c,
+            req,
+            path,
+            tpath,
+            -1,
+            cl.size,
+            cl.mtime_ms,
+            token,
+            keep,
+            is_head,
+            local_port,
+            max_ranges,
+            mut acc,
+            mut chg,
+            ft,
+            mut fu,
+            -2,
+        )?
+        return (0, done)
+    }
+    let done = serve_file(
+        mut cn,
+        c,
+        req,
+        path,
+        tpath,
+        cl.fd,
+        cl.size,
+        cl.mtime_ms,
+        token,
+        keep,
+        is_head,
+        local_port,
+        max_ranges,
+        mut acc,
+        mut chg,
+        ft,
+        mut fu,
+        -1,
+    )?
+    (0, done)
 }
 
 /// Execute a routing decision against the fs: directory redirect,
@@ -2248,29 +2761,37 @@ fn handle_request(
     // candidates directly (nginx's index module opens the candidate,
     // never the directory) and stats the directory only when no index
     // served, to tell 403 from 404 — as before.
+    // ws58 (lobo#67): whether this request may be answered from the
+    // file memo, or fill it — the plain shape only (see the memo's
+    // block comment): the table is on, no budget, plaintext, ranges
+    // advertised and none asked for.
+    var fm_on = ft.fpath.len > 0 && chg.limit == 0 && d.max_ranges != 0 && !conn.is_tls(cn)
+    if fm_on {
+        let rq = http.header(req, "range") else ""
+        fm_on = rq.is_empty()
+    }
     if !norm_path.ends_with("/") {
-        let cl = classify(d.fs_path)
-        if cl.kind == 0 {
-            return serve_file(
-                mut cn,
-                c,
-                req,
-                d.fs_path,
-                norm_path,
-                cl.fd,
-                cl.size,
-                cl.mtime_ms,
-                token,
-                keep,
-                is_head,
-                local_port,
-                d.max_ranges,
-                mut acc,
-                mut chg,
-                ft,
-                mut fu,
-            )
+        let sp = serve_path(
+            mut cn,
+            c,
+            req,
+            d.fs_path,
+            norm_path,
+            token,
+            keep,
+            is_head,
+            local_port,
+            d.max_ranges,
+            mut acc,
+            mut chg,
+            ft,
+            mut fu,
+            fm_on,
+        )?
+        if sp.0 == 0 {
+            return sp.1
         }
+        let cl = not_a_file(sp.0)
         if cl.kind == 1 {
             // 301 to the trailing-slash form (nginx's dir redirect)
             let loc = "http://{hostport(req.host, local_port)}{norm_path}/"
@@ -2319,28 +2840,27 @@ fn handle_request(
     }
     for name in idxs {
         let cand = join_fs(d.fs_path, name)
-        let cl = classify(cand)
-        if cl.kind == 0 {
-            return serve_file(
-                mut cn,
-                c,
-                req,
-                cand,
-                cand,
-                cl.fd,
-                cl.size,
-                cl.mtime_ms,
-                token,
-                keep,
-                is_head,
-                local_port,
-                d.max_ranges,
-                mut acc,
-                mut chg,
-                ft,
-                mut fu,
-            )
+        let sp = serve_path(
+            mut cn,
+            c,
+            req,
+            cand,
+            cand,
+            token,
+            keep,
+            is_head,
+            local_port,
+            d.max_ranges,
+            mut acc,
+            mut chg,
+            ft,
+            mut fu,
+            fm_on,
+        )?
+        if sp.0 == 0 {
+            return sp.1
         }
+        let cl = not_a_file(sp.0)
         if cl.kind == 4 {
             // the candidate is there and its open was refused: 403 —
             // the answer `serve_file` gave when it opened it before
