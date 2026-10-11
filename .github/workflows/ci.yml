@@ -24,6 +24,10 @@ on:
         description: "ws22: run tools/lobo-parity (the W8 bar, docs/PARITY.md) INSTEAD of the gauntlet — a number on linux x86-64, never a gate; the table is the step's log"
         type: boolean
         default: false
+      parity_n:
+        description: "ws58: worker_processes for the parity leg's gating cell — empty is the bar's own (this runner's cpu count, 4); 2 takes the two-hand cell. The N=1 cell is always taken beside it and never gates"
+        type: string
+        default: ""
       ref_tree:
         description: "ws25 (lobo#6): a SECOND lobo ref (branch, tag or sha) built beside this one with the toolchain ITS OWN wolf-toolchain.toml pins (ws36, lobo#20: tools/lobo-stage-ref --from source); with parity=true the set is three fresh servers per pair on ONE VM and the table carries this ÷ ref against the VM's own nginx"
         type: string
@@ -262,6 +266,7 @@ jobs:
           LOBO_NAME: ${{ inputs.this_name }}
           LOBO_LISTEN_ARGS: ${{ inputs.listen_args }}
           LOBO_REF_LISTEN_ARGS: ${{ inputs.ref_listen_args }}
+          PARITY_N: ${{ inputs.parity_n }}
         run: |
           set -euo pipefail
           sudo apt-get install -y -qq apache2-utils
@@ -277,7 +282,13 @@ jobs:
           done
           nproc; uptime
           [ -z "$LOBO_REF" ] || echo "two trees: $LOBO_NAME = $PWD/target/lobo-release, $LOBO_REF_NAME = $LOBO_REF"
-          tools/lobo-parity
+          # ws58: the bar's own arguments (pairs, seconds, connections)
+          # with the gating cell's hands named when parity_n is given
+          if [ -n "$PARITY_N" ]; then
+            tools/lobo-parity 5 5 32 "$PARITY_N"
+          else
+            tools/lobo-parity
+          fi
 
       # ws25 (lobo#6): the profile leg. perf needs the kernel's own
       # linux-tools; the azure kernel's package is in the archive
