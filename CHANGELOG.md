@@ -21,15 +21,31 @@ stops. lobo 0.1.3 answers such a request with 400.
 1. Install 0.1.3 (below) or unpack the archive over a copy of your
    prefix. `lobo -v` must print `lobo/0.1.3`.
 2. Test your configuration with the new binary: `lobo -t -c
-   conf/lobo.conf`. No directive was removed or renamed and none
-   changed its arguments; a configuration 0.1.2 loads, 0.1.3 loads.
+   conf/lobo.conf`. No directive was removed or renamed, and every
+   configuration tried loads the same on both versions (below).
 3. Stop the old server and start the new one: `lobo -s stop -c
-   conf/lobo.conf`, then `lobo -c conf/lobo.conf serve`. `-s reload`
-   re-reads the configuration in the running master and does not
-   replace the binary, and lobo has no binary-swap verb yet
-   (`upgrade` answers that it is not implemented), so the listener is
-   closed between the stop and the start and a client that connects in
-   that gap is refused.
+   conf/lobo.conf`, then `lobo -c conf/lobo.conf serve`. A reload is
+   not enough. `-s reload` re-reads the configuration in the running
+   master and keeps the running binary: with the 0.1.3 file installed
+   over a running 0.1.2, the reload answered `reload complete` and
+   the server went on answering as `lobo/0.1.2`. lobo has no
+   binary-swap verb yet (`lobo control upgrade` says it is not
+   implemented and exits 1).
+
+Measured on linux x86-64 with 0.1.2's published binary and the
+release workflow's 0.1.3 binary, the stock configuration, and the
+start issued as soon as the stop returned, a client asking every
+20 ms: with one process, one request failed at the moment of the
+stop and 40 ms passed between the last answer from 0.1.2 and the
+first from 0.1.3; with `worker_processes 2`, none failed and 20 ms
+passed. The listener is closed between the two commands, so a slower
+start is a longer gap in which connections are refused. What a
+request in flight sees at the stop was not measured.
+
+All 45 configurations tried (0.1.2's stock file, the 40 of its test
+corpus, the two of its demo and the two whole configurations in its
+documents) gave the same exit code and the same `-t` text on both
+versions.
 
 Six behaviours differ from 0.1.2, each because 0.1.2 was wrong. Check
 the first if you start lobo with `-p`:
@@ -86,17 +102,23 @@ records it.
 ### What changed since 0.1.2
 
 - **A request whose bytes split a UTF-8 scalar is answered 400**
-  (ws60). See Security above. The connection is closed and the worker
-  keeps serving. A byte-level sweep of the request path
+  (ws60). See Security above. Where the request is malformed the
+  answer is 400 and the connection is closed; where it is well-formed
+  it is served as any other request. The worker keeps serving either
+  way. A byte-level sweep of the request path
   (`tests/http/scalar_fuzz.lu`, 1,881 runs on three machines) and an
   end-to-end survival test hold it in CI.
 - **A serving lobo's memory is flat** (ws57, lobo#66). 0.1.2 kept
   about 2 KB for every keepalive request it had answered and 10 KB
-  for every connection, and never returned them: 819 MB after 400,000
-  requests on the trunk before the fix. A pass of the serving loop
+  for every connection, and never returned them. A pass of the serving loop
   and a connection's step now run in regions that are freed when they
-  end; the same drive ends at 6 MB. `tools/lobo-membudget` is a gate
-  that fails on growth, where in 0.1.2 it printed a named skip.
+  end. Measured on 0.1.2's published binary and the release
+  workflow's 0.1.3 binary (linux x86-64, one process, four
+  generators of eight connections): after 400,000 keepalive requests
+  0.1.2 held 834 MB and 0.1.3 holds 4.3 MB; after 100,000 more
+  connections of one request each, 1.80 GB and 11.1 MB.
+  `tools/lobo-membudget` is a gate that fails on growth, where in
+  0.1.2 it printed a named skip.
 - **A small static file costs one file call a request** (ws58,
   lobo#67). A regular file of at most 32 KiB that has not changed for
   three seconds is answered from bytes each worker keeps, after one
@@ -153,23 +175,24 @@ records it.
 `docs/PARITY.md` defines the comparison: nginx ÷ lobo on one machine,
 32 concurrent clients, the median of five interleaved pairs; 1.10 or
 under is parity, and under 1.00 lobo answered more requests than
-nginx. The figures of record were taken on 2026-10-11 against nginx
-1.30.4, at four workers, on GitHub's hosted linux x86-64 runners (4
-vcpus), from the branch heads the lanes measured, built with wolf
-0.2.27:
+nginx. All rows are 2026-10-11, nginx 1.30.4, four workers, linux
+x86-64:
 
-| measured on | connection-per-request | keepalive |
-|---|---|---|
-| ws58's head, four runner VMs (runs 38114237409, 38115586226, 38116620581, 38116627609) | 1.022x to 1.038x | 0.914x to 0.934x |
-| ws59's head, one runner VM (run 38122969213) | 1.030x | 0.913x |
+| measured | what was measured | connection-per-request | keepalive |
+|---|---|---|---|
+| a GitHub hosted runner, 4 vcpus (run 38155999607) | this release's tree, with 0.1.2's tree beside it on the same VM | **1.020x** (0.1.2: 1.132x) | **0.921x** (0.1.2: 1.161x) |
+| kasumi, 8 of its 16 cpus, load 1.4 at the start and about 6 during | this release's tree built on kasumi, with 0.1.2's published binary beside it | 1.010x (0.1.2: 1.087x) | 1.108x (0.1.2: 1.395x) |
+| a hosted runner (run 38122969213) | ws59's head, before ws60's fix | 1.030x | 0.913x |
+| four hosted runners (runs 38114237409, 38115586226, 38116620581, 38116627609) | ws58's head | 1.022x to 1.038x | 0.914x to 0.934x |
 
-Both shapes are inside the bar on linux at four workers; 0.1.2's
-notes gave 1.151x and 1.240x there. Three things these rows are not: they are
-not a measurement of the 0.1.3 archive itself (ws60's fix landed
-after them and was not measured for speed); they are not a
-measurement at sixteen workers, where kasumi has never produced a
-valid set; and macOS has not been measured since 2026-10-02 (1.031x
-and 1.037x, built with wolf 0.2.20).
+On the hosted runners both shapes are inside the bar and on keepalive
+lobo answers more requests than nginx. On the same VM 0.1.3 answered
+1.099x the requests 0.1.2 did with a connection per request and
+1.261x on keepalive; on kasumi 1.059x and 1.259x. The kasumi
+keepalive cell is outside the bar by 0.008, on a box other work was
+loading while the set ran. Not measured: any host at more than four
+workers (kasumi has never produced a valid sixteen-worker set), and
+macOS since 2026-10-02 (1.031x and 1.037x, built with wolf 0.2.20).
 
 ### The hosts, and what is still known wrong or limited
 
@@ -198,9 +221,29 @@ and 1.037x, built with wolf 0.2.20).
   and files are published by writing beside them and renaming. A
   file rewritten through a shared `mmap` can be answered from bytes
   as old as the kernel's writeback interval.
+- **A proxied request holds its serving process.** `proxy_pass` asks
+  the upstream inside the serving loop, so while one upstream is
+  silent every other client of that process waits, up to
+  `proxy_read_timeout` (60 s by default; the proxied request then
+  answers 504). Measured with one process: one request to an upstream
+  that never answered, and 48 of 49 static GETs sent in that minute
+  timed out. With `worker_processes 2` the other worker answered all
+  of them. 0.1.2 behaves the same. Until this changes, run more than
+  one worker in front of an upstream and set `proxy_read_timeout` to
+  what the upstream needs.
 - **Downloads beside the loop.** Past `4·max(cpus, 2) - 1` downloads
-  parked on slow clients, a new one gets its head and its body waits
-  for a worker in the runtime's pool. TLS bodies are written inline.
+  parked on slow clients (7 measured on one cpu, 15 on four), a new
+  one gets its head and its body waits for a worker in the runtime's
+  pool. It completes when a parked one finishes, and the server
+  answers other requests meanwhile. TLS bodies are written inline.
+- **wolf-lang#713** (a wolf program that parks one task for each
+  connection stalls past about `max(16, 8 × cpus)` of them) was
+  reproduced on the release's toolchain with the issue's own program
+  and does not stall lobo in the configurations tried: the serving
+  loop polls its connections and parks no task for one. On one cpu
+  and on four, 256 idle keepalive connections, 256 half-sent requests
+  and 128 parked downloads each left a new request answered within
+  3 ms and `lobo status` within 50 ms.
 - A range starting at byte N reads and drops N bytes first. Under
   `memory_budget` a `Range` is ignored. An `If-Range` date in RFC 850
   or asctime form is not parsed.
@@ -564,6 +607,121 @@ still is (`src/config/table.lu`), a config naming it loads without it,
 and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
+
+## ws61 — 2026-10-11 — lobo 0.1.3: the release stamp, the entry derived from the commits, the release measured against 0.1.2
+
+- **The entry was derived from the commits.** Eleven pull requests
+  lie between `v0.1.2` and the release tree (#58 to #61, #63, #64,
+  #70, #71, #73 to #75). This file had a lane entry for ws51 to ws58
+  and none for ws59 or ws60, so the two below were written here from
+  their commits and pull requests, and `## 0.1.3` names all eleven.
+  The pin does not move: wolf 0.2.27 (`0ddda6b`), lupin 0.1.50
+  (`32b970d`), std `14f0ab2`, staged on kasumi from the release
+  archives by digest (`5e17eebe…`, `e2867a35…`, each read twice).
+- **The release stamp**: `src/wolf.pkg`, `release_version`, the wire
+  token and the four `version_text.lu` literals to 0.1.3 in one
+  commit (`847882f`), the channel `""`; the version lines in the
+  README and GETTING-STARTED. The README's known-issues line still
+  listed lobo#48 to #52 and #55, all fixed since ws52 and ws54; it now
+  lists what is open. The reel (`demo/reel/`) is left at its 0.1.2
+  rehearsal: its preflight needs `REEL_LOBO_VERSION=lobo/0.1.3` once
+  Homebrew serves 0.1.3.
+- **The gauntlet at the stamp** (`847882f`, kasumi): GREEN, exit 0,
+  338 corpus lane-runs, no skip line.
+- **The archive is the workflow's, not a dev box's.** The same tree
+  built on kasumi and on the release workflow's linux runner gives
+  two different binaries (text 1,694,252 and 1,689,698 bytes; the
+  archives 3,971,528 and 3,630,468): the release tier links with the
+  host's C toolchain (GCC 16 and LLD 23 on kasumi, Ubuntu's GCC 13 on
+  the runner). The gates below were run on the workflow's archives
+  from the rehearsal (run 38155997579, `847882f`: linux
+  `cb58f70e…`, 3,630,468 bytes; macOS `22427a80…`, 3,448,862 bytes;
+  0.1.2's were 3,328,968 and 3,240,415), and the release entry says
+  which binary each figure is from.
+- **The gates on the workflow's binaries.** linux (kasumi) and macOS
+  arm64 (nomad-1), each on the binary unpacked from its archive: the
+  dist smoke (`-v` against `BUILD`, `-t`, the stock page
+  byte-compared, the `Server` header, `-s stop`) green; the four
+  split-scalar shapes answered with every pid kept;
+  `tools/lobo-membudget` 23/23 on each. `tests/http/scalar_fuzz.lu`,
+  `split_scalar.lu` and `tests/serve/split_scalar_e2e.lu` are source
+  tests and ran from the tree on kasumi (seven lane-runs green); on
+  macOS they run in CI's gauntlet.
+- **Against 0.1.2, measured.** Memory, the upgrade, the 45
+  configurations and the parity set against the `v0.1.2` tree are in
+  `## 0.1.3` and `docs/PARITY.md`. The four request shapes of
+  `tests/serve/split_scalar_e2e.lu`, sent to the packed binaries: the
+  0.1.2 binary exits (status 134) with one process and replaces its
+  workers with two, on linux and on macOS; the 0.1.3 binary answers
+  400, 404, 400 and 400, keeps every pid and logs no worker exit.
+- **wolf-lang#713, measured.** The issue's program, built with the
+  pinned wolf on kasumi, times out at 8 connections on one cpu and at
+  16 on four, as the issue says. lobo held to one cpu and to four,
+  with one process, `worker_processes 1` and `worker_processes 2`:
+  idle keepalive connections and half-sent requests up to 256, and
+  parked downloads up to 128, each left a new request answered
+  within 3 ms and `lobo status` within 50 ms (84 rows, the kasumi
+  build of this tree). Parked downloads past
+  `4·max(cpus, 2) - 1` wait for a pool worker and then complete (16
+  opened on one cpu: 7 bodies started, the other 9 completed once
+  those were read).
+- **Found, not fixed, and not in an issue yet: a proxied request
+  holds its serving process.** One request to an upstream that
+  accepts and never answers held a one-process lobo for the whole
+  `proxy_read_timeout` (60.1 s at the default, 3.0 s when set to 3 s):
+  48 of 49 static GETs sent meanwhile timed out at a 1 s deadline,
+  and `-s stop` was not obeyed inside 10 s. With `worker_processes 2`
+  the other worker answered 12 of 12. 0.1.2 gives the same numbers.
+  It is named in `## 0.1.3` and in the README's limits.
+- **The prediction** (`dcee25a`): right on the sections, the
+  workflow needing no change, the memory figures, both speed ratios
+  and the upgrade path; wrong that a client would see refused
+  connections across a prompt stop and start (one failed request in
+  four runs, two on each build), that
+  `docs/CAPABILITIES.md` and the reel would move (a dated transcript
+  and a rehearsal record; left), and silent on the README's stale
+  known-issues line and on the proxy.
+
+## ws60 — 2026-10-11 — the request path slices client bytes only on code-point boundaries
+
+- **The fault.** lobo held a request's bytes as a `str` and sliced at
+  byte offsets it computed. A slice that lands inside a multi-byte
+  scalar faults (`[mem.str.get]`), and the fault ended the worker.
+  Six sites were fixed, four on the request path and two in the
+  proxy's upstream body readers (those two by inspection).
+- **The fix.** Each slice goes through `str.get` or a byte walk. An
+  input the grammar forbids is the 400 it always was meant to be,
+  with the connection closed; a well-formed request is served as
+  before. Commits `06bb735`, `5253aeb`, `9ad11c4`; the `.wolfi`
+  hashes in `b256d2e`.
+- **The tests** (`7cdd901`): `tests/http/split_scalar.lu` (the
+  shapes), `tests/http/scalar_fuzz.lu` (two-, three- and four-byte
+  scalars spliced at every offset of every seed, 1,881 runs, on
+  native, checked and lupin) and `tests/serve/split_scalar_e2e.lu`
+  (a server takes each shape and still answers a clean request).
+  Each traps at `20a952b` and passes at the fix.
+- Not a wolf defect: `str` slicing is defined to fault off a
+  boundary, and `str.get` is its recoverable twin.
+
+## ws59 — 2026-10-11 — the request parser in one walk (lobo#68)
+
+- **Three levers, each its own commit, measured alone** (user
+  instructions a keepalive request, one process, kasumi): the head
+  cut finds the blank line in one byte walk (`12ef27e`, 18,046 →
+  17,016); `parse_request` walks the head once with no line split
+  (`f769541`, → 16,207); the serving step takes the pass's clock
+  (`409f1d0`, `20a952b`, → 15,866). nginx: 13,598. System calls a
+  request are unchanged (3.04 keepalive, 6.08 a connection per
+  request).
+- **Two equivalence tests** hold the new parser to the old one
+  (`tests/http/parse_walk_equiv.lu`, `parse_walk_rows.lu`: 92,231
+  and 3,501 cases).
+- **Parity** at four workers on one runner VM (run 38122969213):
+  connection-per-request 1.030x, keepalive 0.913x.
+- **lobo#72** was not reproduced in 300 loaded rounds; its one
+  capture points at a stall in the runtime, not at a wait in lobo's
+  loop. An idle lobo makes 1,727 system calls a second against
+  nginx's 23, nearly all the runtime's (wolf-lang#710).
 
 ## ws58 — 2026-10-11 — the pin at 0.2.27; the file memo (lobo#67): one stat a request where there were four file calls; keepalive at four hands inside the bar on every host measured
 
