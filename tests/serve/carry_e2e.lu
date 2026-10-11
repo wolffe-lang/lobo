@@ -289,7 +289,21 @@ fn main() -> !int {
         round = round + 1
     }
 
-    let st = shell.control_send(ep, "status") else |_| ""
+    // ws58: a close is counted by the pass that reads it, and a status
+    // asked the instant after the last close can be answered by an
+    // earlier pass (red 1 run in 25 on a loaded box, at ws57's code
+    // too). Ask until the count settles, for at most two seconds.
+    var st = ""
+    var tries: int = 0
+    while tries < 40 {
+        st = shell.control_send(ep, "status") else |_| ""
+        if st.contains("live=0") {
+            tries = 40
+        } else {
+            time_sleep_ms(50)
+            tries = tries + 1
+        }
+    }
     assert(st.contains("live=0"), "every connection is closed and counted: {st}")
 
     let rq = shell.control_send(ep, "quit") else |_| {
