@@ -14,6 +14,55 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
+# wolf-lang at the **v0.2.27 RELEASE TAG** (0ddda6b, r32), the release
+# stamp `wolf 0.2.27 (wolfgang, pin 0ddda6b)`. Staged from the RELEASE
+# ARCHIVE by digest, NAMED MEMBERS ONLY (see the std note), as below:
+#   gh release download v0.2.27 -R wolffe-lang/wolf-lang \
+#       --pattern 'wolf-0.2.27-<host>.tar.gz'
+#   sha256 5e17eebed7ffbb3ee10bc669c653145903db7f591f250a096f791e4e6f377001
+#       (x86_64-unknown-linux-gnu, measured at ws58 on kasumi; the
+#        release asset's own digest, release 409367590)
+#   sha256 ea461a7668d98604493c2af49ed931f999d702dc70f163c40bac2ec5479e5c1c
+#       (aarch64-apple-darwin, the release asset's digest)
+# Members BY NAME (linux x86-64): `wolf` 272e0888… -> 6f5713a2…,
+# `libwolf_rt.a` 679d77e1… -> ab575b27…, `wolf-cimport-worker`
+# f05db3d1… -> 96f93227…, `libwolf_rt_none.a` 11708550… -> 46544be6….
+# Highest glibc symbol: GLIBC_2.34
+# (kasumi:~/lanes/ws58/toolchain-tc-0227.txt).
+#
+# WHAT THE BUMP CHANGES HERE (ws58; the CHANGELOG entry has the
+# numbers). 0.2.27 is nine compiler lanes. The two lobo takes: s222's
+# root arena (no lock per allocation; reads and gathered writes stop
+# asking the host allocator) and s218's `fs_stat` — one host call for
+# the full stat record (kind, size, device, inode, the times to the
+# nanosecond), which is what lobo#67's file memo validates against.
+# Nothing is refused: both tiers build with zero diagnostics at
+# --error-limit=0 and no name among the seventeen new prelude names is
+# declared here (W0304). The manifest does not move (lobo declares no
+# C, so s221's `ffi` line is not owed).
+#
+# **THE ARCHIVE NOW CARRIES `std/`** (wolf-std 87ba162, with
+# `std/STD-REV`), and that copy is the default std root beside an
+# unpacked `wolf`. lobo stages NAMED MEMBERS (`wolf`, `libwolf_rt.a`,
+# `wolf-cimport-worker`, `lupin`) into `.wolf-bin/` and then its own
+# [std] pin, and CI builds `wolf` from source (nothing beside it), so
+# no mixed tree arises. If you ever copy the whole archive into
+# `.wolf-bin/`, REMOVE `.wolf-bin/std` before unpacking [std] over it:
+# the two trees differ in six files and `lib-toolchain.sh` would read
+# the archive's STD-REV as drift.
+#
+# **KNOWN SOUNDNESS ISSUES this release shares with 0.2.26**
+# (wolf-lang#660, #665; neither fixed in it). #660: every `in life`
+# call here takes scalars or strings built inside the `in` block
+# (ws57's rule, main.lu). #665: lobo has no channel and no send; the
+# survey is in notes/ws58-contract.md.
+#
+# **NOT IN 0.2.27** (on wolf-lang trunk since, s228): `net_read`
+# copying into the ambient region, and the handle-table residue. The
+# `sock_read` workaround in serve.lu stays until the pin after this
+# one, and says so with a date.
+#
+# (ws55, the previous bump:)
 # wolf-lang at the **v0.2.26 RELEASE TAG** (89dc139, r31), the release
 # stamp `wolf 0.2.26 (wolfgang, pin 89dc139)`. Staged from the RELEASE
 # ARCHIVE by digest, the whole archive pair, as below:
@@ -481,10 +530,25 @@
 # both ways and docs/BUDGET.md and docs/PARITY.md following. The
 # shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "89dc139443da38078df6093568da87bc6d0ee6f9"
-version_line = "wolf 0.2.26 (wolfgang, pin 89dc139)"
+rev = "0ddda6b7ab9f899aeeea13a66b3427f8422b8a0f"
+version_line = "wolf 0.2.27 (wolfgang, pin 0ddda6b)"
 
 [lupin]
+# lupin at the **v0.1.50 RELEASE TAG** (32b970d, r32), staged from the
+# release archive by digest as [wolf] is:
+#   gh release download v0.1.50 -R wolffe-lang/wolf-interp \
+#       --pattern 'lupin-0.1.50-<host>.tar.gz'
+#   sha256 e2867a3515d4691f073f9ef30f4fe3e0fc6201f280bf24e87a42ce66562f1d93
+#       (x86_64-unknown-linux-gnu, measured at ws58; the release
+#        asset's digest, release 409303515)
+#   sha256 2cbd192d2f4fa8b994489196ad5f94ccc72c5d21d5dfe5b812045513feae626d
+#       (aarch64-apple-darwin, the release asset's digest)
+# `lupin` 6d057eb1… -> 3a476442… (linux x86-64). Pairing gap ZERO
+# (wolf@v0.2.27 declares 0.1.50). Its conformance pin stays 294d626 =
+# v0.2.24. It mirrors s218's four stat names, so the memo's pure
+# helpers run on the lupin lane.
+#
+# (ws55, the previous bump:)
 # lupin at the **v0.1.49 RELEASE TAG** (f516a5f, r31), staged from the
 # release archive by digest as [wolf] is:
 #   gh release download v0.1.49 -R wolffe-lang/wolf-interp \
@@ -664,10 +728,20 @@ version_line = "wolf 0.2.26 (wolfgang, pin 89dc139)"
 # not a calendar. Its conformance pin (2e4ca76) is information, not
 # this file's rev. Bumped together with [wolf] as always.
 repo = "wolffe-lang/wolf-interp"
-rev = "f516a5f4ea4341acd3a30f3e5cdd4327aede1912"
-version_line = "lupin 0.1.49 (wolf-interp, reference interpreter at pin 294d626)"
+rev = "32b970da7f3a50e0b82825985a39b52b74da59dc"
+version_line = "lupin 0.1.50 (wolf-interp, reference interpreter at pin 294d626)"
 
 [std]
+# wolf-std, STILL at **14f0ab2** (ws58, 2026-10-11), re-derived against
+# 0.2.27 BEFORE the bump (B151). The archive's own std is 87ba162
+# (sc57). Measured: trunk's lobo source (c9eff15) built at 0.2.27
+# against each tree, both tiers, exits 0 with zero diagnostics at
+# --error-limit=0, and the two trees give BYTE-IDENTICAL binaries
+# (debug 95dfc14b…, release a6e9d15c…;
+# kasumi:~/lanes/ws58/build-pin0.log, build-pin0-alt.log). The pin
+# holds.
+#
+# (ws55, the previous bump:)
 # wolf-std, STILL at **14f0ab2** (ws55, 2026-10-09), re-derived against
 # 0.2.26 BEFORE the bump (B151). wolf-std's trunk is now 0f74ec5 (sc55,
 # std at 0.2.25; sc57, std at 0.2.26, is in flight). Measured: trunk's
