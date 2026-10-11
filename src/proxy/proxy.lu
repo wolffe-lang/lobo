@@ -1273,7 +1273,15 @@ fn read_up_length(conn: int, carry: str, want: int) -> str ! {io} {
         }
         buf = "{buf}{piece}"
     }
-    buf[0..want]
+    // ws60: same split-scalar class as serve's body reader — a
+    // Content-Length from the upstream that falls mid-scalar would
+    // make `buf[0..want]` fault `bounds` (`[mem.str.get]`). `.get`
+    // closes the exchange cleanly (`io` → 502 at the caller) instead
+    // of killing the worker; str-only (D8) upstream bodies on code-
+    // point boundaries are unaffected.
+    buf.get(0..want) else {
+        return io
+    }
 }
 
 /// Read an upstream body to EOF (the 1.0-style close-delimited body),
@@ -1451,7 +1459,10 @@ fn tls_read_len(mut cli: tlsc.Client, carry: str, want: int) -> str ! {io} {
         }
         buf = "{buf}{piece}"
     }
-    buf[0..want]
+    // ws60: split-scalar guard (read_up_length's twin, same reasoning).
+    buf.get(0..want) else {
+        return io
+    }
 }
 
 /// Body to end-of-stream, bounded (read_up_close's twin — a TLS
