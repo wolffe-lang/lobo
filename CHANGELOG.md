@@ -358,6 +358,193 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws58 — 2026-10-11 — the pin at 0.2.27; the file memo (lobo#67): one stat a request where there were four file calls; keepalive at four hands inside the bar on every host measured
+
+- **The pin: wolf 0.2.27 (`0ddda6b`), lupin 0.1.50 (`32b970d`), std
+  holds at `14f0ab2`.** Archives by digest (`5e17eebe…`,
+  `e2867a35…`); nothing refused, zero diagnostics on both tiers, no
+  local name among the seventeen new prelude names, no manifest
+  change. 0.2.27's archive carries a `std/` of its own (wolf-std
+  `87ba162`): lobo stages named members and its own std pin, and CI
+  builds `wolf` from source, so no mixed tree arises
+  (`wolf-toolchain.toml` says what to do if that ever changes); lobo
+  built against either tree is byte-identical. The pin alone, same
+  source, on kasumi (`taskset -c 0-3`, 4 × `ab -c 8`, the parity
+  file; counts, so the box's load does not move them much):
+
+  | | wolf 0.2.26 | wolf 0.2.27 |
+  |---|---|---|
+  | user instructions a request, keepalive (1 process / 4 hands) | 19,677 / 21,431 | **18,290 / 19,867** |
+  | user instructions a request, connection-per-request | 19,590 / 21,819 | **18,271 / 20,417** |
+  | syscalls a request, keepalive / connection (1 process) | 6.05 / 9.08 | 6.05 / 9.09 |
+  | RSS growth a keepalive request / a connection | 4.9 / 70 B | 4.6 / 67 B |
+  | RSS after 400,000 keepalive requests | 6.1 MB | 6.0 MB |
+  | release binary (text) | 12,804,744 B (1,661,106) | 13,495,664 B (1,667,954) |
+
+  s222's arena is worth about 7 % of lobo's user instructions on
+  both shapes, not the 10–13 %
+  predicted (ws57's regions had already taken what the arena's lock
+  cost on this path). On a CI runner VM the pin alone reads nginx ÷
+  lobo **1.090x** keepalive and **1.062x** connection-per-request at
+  four hands, against 1.173x and 1.076x for the 0.2.26 tree beside it
+  (run 38112700746): keepalive inside the bar by a hair, on one VM.
+  The memory gate holds (22/22; 4 KB, 228 KB, 0).
+- **lobo#67: the file memo.** A static file cost four file calls a
+  request (open, fstat, read, close), as it does nginx. A small
+  file's bytes are now kept, per hand, beside the identity `fs_stat`
+  answered for its path, and a request for a kept file makes ONE
+  call, a stat by path: when the path still names a regular file with
+  the same device, inode, size, modification time and status-change
+  time (to the nanosecond), the body is the kept bytes and the
+  response is one `writev`. Anything else takes the old path,
+  unchanged. So a file replaced by a rename, truncated, grown,
+  rewritten in place, deleted, made unreadable (the status-change
+  time moves; the open then answers 403) or swapped for a symlink to
+  another file is seen on the next request, as nginx at its defaults
+  sees it. What one stat record cannot tell apart is two contents
+  written inside one timestamp tick, so a file is admitted only when
+  it has been unchanged for three seconds; the fill reads through a
+  descriptor between two stats that must agree. Bytes rather than an
+  open descriptor: a descriptor still needs the path stat (a
+  permission change, a rename and a deletion are invisible through
+  it) and then a read, and pins a deleted file's blocks.
+  - *The bound and the eviction.* 256 direct-mapped slots of at most
+    32 KiB a file, inside the memo region's 1 MiB, at which the whole
+    table is let go (as the head memo always was); dropped at every
+    reload that takes. A path is admitted on its second miss in a row
+    for its slot, so a cold walk over many files pays no extra stat,
+    and an entry is displaced at most once a second.
+  - *What is served from it.* GET and HEAD of a regular file of at
+    most 32 KiB with no `Range`, over plaintext, with no memory
+    budget. Ranges, TLS, budgeted locations and larger files take the
+    old path.
+  - *Named limits.* The admission rule needs the file's timestamps
+    and the process's clock to be one clock (a network filesystem
+    whose server runs more than three seconds ahead, or a wall clock
+    stepped back by more, reopens the same-tick window); a filesystem
+    with no status-change time is never admitted; and a file being
+    rewritten through a shared `mmap` moves its times when the kernel
+    first sees the page dirtied, not at every store, so it can be
+    answered from bytes as old as the writeback interval. Publish a
+    file by writing beside it and renaming.
+  - *Counted* (kasumi, one process and four hands, `strace -c` by
+    difference of two drives; the CI runner agrees: 3.24–3.27 against
+    nginx's 6.14 on keepalive, 7.37 against 10.13 on
+    connection-per-request, runs 38114237409 and 38115586226; the
+    box had other lanes building on it, so the microseconds are as
+    taken, one server after another):
+
+    | | the pin alone | ws58 | nginx |
+    |---|---|---|---|
+    | syscalls a keepalive request (1 / 4) | 6.05 / 6.31 | **3.04 / 3.25** | 6.03 / 6.16 |
+    | syscalls a connection-per-request request | 9.09 / 9.94 | **6.08 / 7.12** | 10.00 / 10.13 |
+    | user instructions a keepalive request | 18,290 / 19,867 | 18,070 / 19,717 | 13,599 / 13,672 |
+    | user instructions a connection-per-request request | 18,271 / 20,417 | 18,226 / 20,421 | 14,321 / 14,418 |
+    | CPU a keepalive request (user + system) | 4.67 / 5.62 µs | **3.83 / 4.85 µs** | 4.42 / 5.38 µs |
+    | CPU a connection-per-request request | 7.35 / 11.10 µs | **6.60 / 10.30 µs** | 8.65 / 10.50 µs |
+    | RSS growth a keepalive request | 4.6 / 5.4 B | **0.7 / 0.9 B** | 0 |
+    | RSS after 400,000 keepalive requests | 6.0 MB | **4.6 MB** | 3.7 MB |
+
+    Three syscalls fewer, as predicted. User instructions did NOT
+    fall the 8–14 % predicted: the four runtime calls the memo
+    removes were cheap in instructions and dear in kernel time, and
+    the one that replaces them, `fs_stat`, builds a twenty-word list
+    a push at a time (about 1,700 instructions, 9 % of a request;
+    wolf-lang#690). The first build of the memo cost 5 % MORE
+    instructions than the pin; folding the URI instead of the whole
+    path, once, and reading the clock once took that back
+    (`req_mark`, `head_warm_at`). The runtime's 4 bytes per `fs_open`
+    (wolf-lang#661) stop accruing on a kept file.
+  - *Held by* `tests/serve/file_memo.lu` (the table's states against
+    a real filesystem: off until on, a mark on the first miss, a
+    young file refused for a second, an aged one admitted and hit;
+    seven changes each ending a hit; two paths in one slot) and
+    `tests/serve/file_memo_e2e.lu` (the same seven changes between
+    two requests, two of them on one keep-alive connection, then
+    again three seconds on; HEAD and If-Modified-Since on a kept
+    file; a reload that moves `root`): one list of requests and
+    expected answers against the pinned nginx, lobo's debug tier and
+    lobo's release tier. A memo that skips the comparison is red in
+    both, on linux and macOS (run **38117753437**: the unit
+    test at its in-place rewrite, the server test at the same change
+    on its keep-alive connection).
+- **The memory gate takes both paths on purpose.**
+  `tools/lobo-membudget` ages its files four seconds, so the three
+  flat rows run with the memo (0 KB, 72 KB, 0 KB where the pin read
+  4, 228 and 0), gains a fourth (4,000 requests for a kept 16 KiB
+  file: 0 KB), and drives its body differential on a 48 KiB file,
+  over the memo's bound, so the per-response region is still what it
+  measures. 23/23.
+- **A body proc never outlives its join** (the lane's survey for
+  wolf-lang#665). lobo has no channel and no send (the two replay
+  tests send the literal `1` on a `channel[int]`), so #665's shape
+  is absent. Its neighbour is not: `budget.run_small` and
+  `run_stream` spawn a proc with a path and a head built in the
+  request's region and join it with a 600 s patience; on that arm
+  the helper returned with the proc alive, and wolf does not refuse
+  a `spawn proc` argument whose bytes live in a region the proc can
+  outlive (0.2.27 prints the freed bytes, with or without a helper:
+  filed as wolf-lang#678). Each write the proc makes is bounded by
+  the socket's 60 s budget, so the small body's proc cannot live
+  600 s, and the streamed body's reads its path only in its first
+  statement: no freed byte was reachable in practice, but that was
+  arithmetic and statement order, not a rule. Both helpers
+  now kill and JOIN the proc on that arm (`budget.end_body`). The
+  join is the point: on native and release a killed proc parked in a
+  read comes back and runs on to its next park (wolf-lang#683;
+  lupin runs nothing, as the spec says), which also corrects a
+  sentence in `stream_kill`. Witness
+  `tests/serve/body_join_kill.lu`. The other spawns take integers
+  (`sig_forwarder`, `stream_body`) or strings of the process's own
+  lifetime (`acme.daemon_start`). #660's shape: every `in life` and
+  `in memo` call takes scalars, bytes it copies and does not keep
+  (`carry_put`), or strings built inside the block; the memo's two
+  new blocks build the path and the body inside `in memo`.
+- **Parity (nginx ÷ lobo; 1.10 or under is the bar).** Keepalive at
+  four hands is inside the bar on every host measured, with the pin
+  alone beside it on the same box each time:
+
+  | host | hands | keepalive: ws58 (the pin alone) | connection-per-request: ws58 (the pin alone) |
+  |---|---|---|---|
+  | CI runner VM, run 38114237409, load 1.83 | 4 | **0.918x** (1.101x) | **1.022x** (1.069x) |
+  | CI runner VM, run 38115586226, load 1.77 | 4 | **0.934x** (1.113x) | **1.031x** (1.075x) |
+  | CI runner VM, run 38116620581, load 1.64 | 4 | **0.927x** (1.094x) | **1.038x** (1.067x) |
+  | CI runner VM, run 38116627609, load 1.58 | 4 | **0.914x** (1.097x) | **1.027x** (1.060x) |
+  | CI runner VM, runs 38115586226 and 38116627609 | 2 | **0.821x, 0.842x** (1.079x, 1.076x) | **0.964x, 0.965x** (1.005x, 1.006x) |
+  | CI runner VM, the six one-hand cells | 1 | 0.808x–0.894x (1.004x–1.072x) | 0.702x–0.723x (0.808x–0.831x) |
+  | kasumi, four of 16 cpus, load 2.4 and 2.3 at the start, other lanes building | 4 | **1.025x, 1.004x** (1.104x, 1.097x) | **1.026x, 1.015x** (1.067x, 1.038x) |
+  | kasumi, load 2.4 at the start | 2 | **0.955x** (1.086x) | **0.969x** (0.999x) |
+  | kasumi | 1 | 0.895x–0.904x (1.051x–1.053x) | 0.806x–0.820x (0.882x–0.895x) |
+
+  Every set is five interleaved pairs, three fresh servers a pair
+  (this branch, the pin alone, nginx) on one box. Two sets were
+  refused and are not rows: a two-hand set on one runner VM (the
+  oracle's own spread, 1.167) and a two-hand set on kasumi (the
+  box's load, 5.04). The pin alone, against the 0.2.26 tree on a
+  fifth VM (run 38112700746): 1.090x and 1.062x, where 0.2.26 read
+  1.173x and 1.076x. macOS was not measured (the gauntlet runs there
+  in CI; no parity set was taken).
+
+- `sock_read` stays: `net_read` copying into the caller's region is
+  on wolf-lang trunk (s228) and not in 0.2.27; `src/conn/conn.lu`
+  carries a dated note naming the pin that removes it.
+- Tools: the bench file ages four seconds before a drive
+  (`lobo-parity`, `lobo-syscalls`, `lobo-profile`,
+  `lobo-prefork-bench`), because a file written a moment ago is
+  served the old way; the CI parity leg takes `parity_n` (a list of
+  hand counts, one set each on one VM).
+- Found on the way: `tests/serve/carry_e2e.lu` (ws57's) is red about
+  one run in ten on a loaded box at ws57's code as at this head
+  (22 green of 25 at each): a `status` asked before the last close
+  is counted, fixed here by asking until it settles; and a server
+  that stops answering its control socket (one hang in 40 runs at
+  the pin, the test parked in `status`, the control connection never
+  accepted), not located and filed as lobo#72.
+- lobo#68 (parsing, the loop's bookkeeping, head and route) was not
+  taken: three rewrites, each with its own profile. What the memo
+  took from it on the way is `classify` on a kept file and most of
+  `head_warm`'s fold (6.1 % of user instructions → 2.7 %).
+
 ## ws57 — 2026-10-10 — the returned memory (lobo#66), one owner for the renewal daemon (lobo#69)
 
 - **lobo#66: a serving lobo's memory is flat.** Through ws56 the
