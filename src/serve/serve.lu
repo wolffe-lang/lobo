@@ -894,7 +894,7 @@ fn read_head(mut cn: conn.Conn, carry: str, limits: http.Limits) -> HeadRead ! {
 /// is a broken request → the caller closes, so they ride out as `io`.
 /// Read exactly `want` bytes of a fixed-length body, returning
 /// (body, leftover-after-body).
-fn take_length(mut cn: conn.Conn, carry: str, want: int) -> (str, str) ! {io} {
+fn take_length(mut cn: conn.Conn, carry: str, want: int) -> (str, str) ! {io, bad} {
     var buf = carry
     while buf.len < want {
         let piece = conn.conn_read(mut cn, 4096) else |_| {
@@ -902,7 +902,22 @@ fn take_length(mut cn: conn.Conn, carry: str, want: int) -> (str, str) ! {io} {
         }
         buf = "{buf}{piece}"
     }
-    (buf[0..want], buf[want..buf.len])
+    // ws60: `buf` is client bytes held as a `str`; a Content-Length
+    // that falls inside a multi-byte scalar would make `buf[0..want]`
+    // fault `bounds` (`[mem.str.get]`) — the split-body trap. `.get`
+    // answers `none` at a non-boundary; lobo is str-only on the body
+    // at this pin (a non-UTF-8 body is already a 400 through
+    // `read_head`'s `utf8` row), so a body boundary that splits a
+    // scalar is the `bad` row (400 + close) rather than a worker
+    // death. A legal request whose body sits on code-point boundaries
+    // is unaffected.
+    let body = buf.get(0..want) else {
+        return bad
+    }
+    let leftover = buf.get(want..buf.len) else {
+        return bad
+    }
+    (body, leftover)
 }
 
 // ------------------------------------------------------------------
@@ -3194,9 +3209,17 @@ pub fn serve_conn_cn(
                 conn.conn_close(mut cn)
                 return
             }
-            let taken = take_length(mut cn, rest, req.content_length) else |_| {
-                conn.conn_close(mut cn)
-                return
+            let taken = take_length(mut cn, rest, req.content_length) else |e| match e {
+                io => {
+                    conn.conn_close(mut cn)
+                    return
+                },
+                bad => {
+                    // ws60: a body splitting a UTF-8 scalar — 400, close
+                    send_err(mut cn, 400, false, opts.token)
+                    conn.conn_close(mut cn)
+                    return
+                },
             }
             body = taken.0
             rest = taken.1
@@ -3579,8 +3602,18 @@ pub fn serve_request(
             half_close_drain(mut cn)
             return req_out(true, "", take acc, chg)
         }
-        let taken = take_length(mut cn, rest, req.content_length) else |_| {
-            return req_out(true, "", take acc, chg)
+        let taken = take_length(mut cn, rest, req.content_length) else |e| match e {
+            io => {
+                return req_out(true, "", take acc, chg)
+            },
+            bad => {
+                // ws60: a fixed-length body whose bytes split a UTF-8
+                // scalar — a 400, connection closed
+                acc.status = 400
+                acc.body_bytes = err_len(400, false, opts.token)
+                send_err(mut cn, 400, false, opts.token)
+                return req_out(true, "", take acc, chg)
+            },
         }
         body = taken.0
         rest = taken.1
