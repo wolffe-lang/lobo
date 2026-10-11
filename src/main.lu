@@ -2809,6 +2809,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                             "{st.rare[0].memo.date_str}",
                                             st.rare[0].memo.bounds,
                                             st.rare[0].memo.h_set,
+                                            st.rare[0].memo.hslot,
                                             "{st.rare[0].memo.hpath}",
                                             st.rare[0].memo.hsize,
                                             st.rare[0].memo.hmtime,

@@ -88,7 +88,7 @@ fn fill(mut ft: serve.FileKinds, p: str, pre: List[int], now_ms: int) -> bool ! 
 /// One look at `p`, its note stored: the state. Total.
 fn look(mut ft: serve.FileKinds, p: str, now_ms: int) -> int {
     var fu = serve.memo_upd_new()
-    let lk = serve.memo_look(ft, mut fu, p, now_ms)
+    let lk = serve.memo_look(ft, mut fu, p, serve.path_fold(p), now_ms)
     apply(mut ft, fu)
     lk.state
 }
@@ -97,14 +97,14 @@ fn look(mut ft: serve.FileKinds, p: str, now_ms: int) -> int {
 /// hit. Asserts each step. Rows: io.
 fn warm(mut ft: serve.FileKinds, p: str, now_ms: int) -> () ! {io} {
     var fu1 = serve.memo_upd_new()
-    let l1 = serve.memo_look(ft, mut fu1, p, now_ms)
+    let l1 = serve.memo_look(ft, mut fu1, p, serve.path_fold(p), now_ms)
     assert(
         l1.state == 0 && fu1.f_op == 1,
         "{p}: a first miss leaves a mark (state {l1.state}, op {fu1.f_op})",
     )
     apply(mut ft, fu1)
     var fu2 = serve.memo_upd_new()
-    let l2 = serve.memo_look(ft, mut fu2, p, now_ms)
+    let l2 = serve.memo_look(ft, mut fu2, p, serve.path_fold(p), now_ms)
     assert(
         l2.state == 2 && l2.pre.len == 20,
         "{p}: an aged file is admitted on its second miss (state {l2.state})",
@@ -112,7 +112,7 @@ fn warm(mut ft: serve.FileKinds, p: str, now_ms: int) -> () ! {io} {
     let kept = fill(mut ft, p, l2.pre, now_ms)?
     assert(kept, "{p}: an unchanged file is kept")
     var fu3 = serve.memo_upd_new()
-    let l3 = serve.memo_look(ft, mut fu3, p, now_ms)
+    let l3 = serve.memo_look(ft, mut fu3, p, serve.path_fold(p), now_ms)
     assert(l3.state == 1 && fu3.f_op == 0, "{p}: then it hits (state {l3.state})")
 }
 
@@ -142,7 +142,7 @@ fn main() -> !int {
     // same record three seconds on would be
     var ft = serve.file_kinds_new()
     var fu0 = serve.memo_upd_new()
-    let l0 = serve.memo_look(ft, mut fu0, "{d}/young.txt", t0)
+    let l0 = serve.memo_look(ft, mut fu0, "{d}/young.txt", serve.path_fold("{d}/young.txt"), t0)
     assert(l0.state == 0 && fu0.f_op == 0, "the memo is off until it is turned on")
     serve.file_memo_on(mut ft)
     let sty = fs_stat("{d}/young.txt")?
@@ -154,18 +154,18 @@ fn main() -> !int {
     // row 1: a young file — a mark, then a refusal that holds a second
     let py = "{d}/young.txt"
     var fa = serve.memo_upd_new()
-    let la = serve.memo_look(ft, mut fa, py, t0)
+    let la = serve.memo_look(ft, mut fa, py, serve.path_fold(py), t0)
     assert(la.state == 0 && fa.f_op == 1, "young: the first miss leaves a mark")
     apply(mut ft, fa)
     var fb = serve.memo_upd_new()
-    let lb = serve.memo_look(ft, mut fb, py, t0)
+    let lb = serve.memo_look(ft, mut fb, py, serve.path_fold(py), t0)
     assert(
         lb.state == 0 && fb.f_op == 3,
         "young: refused on its second miss (state {lb.state}, op {fb.f_op})",
     )
     apply(mut ft, fb)
     var fc = serve.memo_upd_new()
-    let lc = serve.memo_look(ft, mut fc, py, t0 + 10)
+    let lc = serve.memo_look(ft, mut fc, py, serve.path_fold(py), t0 + 10)
     assert(lc.state == 0 && fc.f_op == 0, "young: not asked about again inside the second")
 
     // every file below is three seconds old before it is admitted
@@ -201,7 +201,13 @@ fn main() -> !int {
     // row 6: deleted — no hit, and the entry is dropped
     fs_remove("{d}/gone.txt")?
     var fg = serve.memo_upd_new()
-    let lg = serve.memo_look(ft, mut fg, "{d}/gone.txt", time_unix_ms())
+    let lg = serve.memo_look(
+        ft,
+        mut fg,
+        "{d}/gone.txt",
+        serve.path_fold("{d}/gone.txt"),
+        time_unix_ms(),
+    )
     assert(
         lg.state == 0 && fg.f_op == 3,
         "deleted: no hit, the entry dropped (state {lg.state}, op {fg.f_op})",
@@ -238,17 +244,17 @@ fn main() -> !int {
     let t2 = time_unix_ms()
     warm(mut ft, pa, t2)?
     var fd1 = serve.memo_upd_new()
-    let ld1 = serve.memo_look(ft, mut fd1, pb, t2)
+    let ld1 = serve.memo_look(ft, mut fd1, pb, serve.path_fold(pb), t2)
     assert(ld1.state == 0 && fd1.f_op == 1, "the collider's first miss leaves a mark")
     apply(mut ft, fd1)
     var fd2 = serve.memo_upd_new()
-    let ld2 = serve.memo_look(ft, mut fd2, pb, t2)
+    let ld2 = serve.memo_look(ft, mut fd2, pb, serve.path_fold(pb), t2)
     assert(
         ld2.state == 0 && fd2.f_op == 0,
         "an entry filled this second is not displaced (state {ld2.state})",
     )
     var fd3 = serve.memo_upd_new()
-    let ld3 = serve.memo_look(ft, mut fd3, pb, t2 + 1000)
+    let ld3 = serve.memo_look(ft, mut fd3, pb, serve.path_fold(pb), t2 + 1000)
     assert(ld3.state == 2, "a second later the collider is admitted (state {ld3.state})")
     let kept = fill(mut ft, pb, ld3.pre, t2 + 1000)?
     assert(kept, "the collider is kept")

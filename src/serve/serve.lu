@@ -955,7 +955,10 @@ fn send_err(mut cn: conn.Conn, code: int, special: bool, token: str) {
 /// holds it (`memo_look` answered a hit) and there is NO handle (`fd`
 /// is -1). -2: `fu.f_body` holds it (`serve_path` read it for a fill)
 /// and there is no handle. With no handle only the plain shape
-/// arrives: no Range, no budget, plaintext, at most 64 KiB.
+/// arrives: no Range, no budget, plaintext, at most 64 KiB. `hslot`
+/// is the path's slot in the memo table when the caller already
+/// folded the path (-1: fold it here), and `now_ms` the clock the
+/// caller read for this request.
 fn serve_file(
     mut cn: conn.Conn,
     c: config.Conf,
@@ -975,6 +978,8 @@ fn serve_file(
     ft: FileKinds,
     mut fu: MemoUpd,
     mslot: int,
+    hslot: int,
+    now_ms: int,
 ) -> bool ! {closed, io} {
     // ws30 (wolf-lang#289 consumed): the handle arrives OPEN from
     // `classify` — ONE `fs_open_mode(path, 5)`, the read open that
@@ -1078,7 +1083,7 @@ fn serve_file(
     // differential holds the wire, tests/serve/head_cache_e2e.lu the
     // freshness (a rewritten file answers its new length at once, a
     // new second its new Date).
-    let now_secs = time_unix_ms() / 1000
+    let now_secs = now_ms / 1000
     // ws41: `max_ranges 0` (kind 3) drops Accept-Ranges, so its head is
     // neither read from nor written to the memo, which holds the
     // advertised shape
@@ -1092,10 +1097,19 @@ fn serve_file(
     // the unconditional two-`extension` spelling at +800 user
     // instructions a request (notes/ws54-contract.md, the F0 row).
     let memo = plan.kind != 3 && (path.ends_with(tpath) || extension(tpath) == extension(path))
+    // ws58: the head's slot is the caller's when it folded the path
+    // already, and the same slot is noted for the store
+    let hs = if hslot >= 0 {
+        hslot
+    } else if memo {
+        kind_slot(path)
+    } else {
+        0
+    }
     var head = if !memo {
         ""
     } else {
-        head_warm(ft, path, size, mms, keep, now_secs, token)
+        head_warm_at(ft, hs, path, size, mms, keep, now_secs, token)
     }
     if head.is_empty() {
         let lm = http_date(secs)
@@ -1115,7 +1129,7 @@ fn serve_file(
         }
         head = "{head}\r\n"
         if memo {
-            head_remember(mut fu, path, size, mms, keep, now_secs, token, head)
+            head_remember(mut fu, hs, path, size, mms, keep, now_secs, token, head)
         }
     }
 
@@ -1929,6 +1943,7 @@ pub struct FileKinds {
     fcts: List[int],
     fctn: List[int],
     ffill: List[int],
+    fmark: List[int],
     fseen: List[int],
     ftry: List[int],
     fbody: List[List[List[byte]]],
@@ -1975,6 +1990,7 @@ pub fn file_kinds_new() -> FileKinds {
         fcts: List[int](),
         fctn: List[int](),
         ffill: List[int](),
+        fmark: List[int](),
         fseen: List[int](),
         ftry: List[int](),
         fbody: List[List[List[byte]]](),
@@ -2066,6 +2082,7 @@ pub fn file_memo_on(mut ft: FileKinds) {
         (mut ft.fcts).push(0)
         (mut ft.fctn).push(0)
         (mut ft.ffill).push(-1)
+        (mut ft.fmark).push(-1)
         (mut ft.fseen).push(-1)
         (mut ft.ftry).push(0)
         (mut ft.fbody).push(take List[List[byte]]())
@@ -2140,17 +2157,17 @@ pub struct MemoLook {
 }
 
 /// Ask the file memo about `path` at clock `now_ms` (see the block
-/// above for the rules). Makes at most one `fs_stat`, and none on a
+/// above for the rules). `mark` is the request's mark for the path
+/// (`req_mark`); its slot is the mark reduced. Makes at most one `fs_stat`, and none on a
 /// path's first miss, on a slot whose entry is this second's, or
 /// inside a refused admission's second. Notes in `fu` what the
 /// table's owner must store: a seen mark (`f_op` 1) or a dropped
 /// entry and a retry time (`f_op` 3). With the memo off (`ft.fpath`
 /// empty) it answers state 0. Total.
-pub fn memo_look(ft: FileKinds, mut fu: MemoUpd, path: str, now_ms: int) -> MemoLook {
-    if ft.fpath.len == 0 {
+pub fn memo_look(ft: FileKinds, mut fu: MemoUpd, path: str, mark: int, now_ms: int) -> MemoLook {
+    if ft.fpath.len == 0 || mark < 0 {
         return MemoLook { state: 0, slot: -1, size: 0, mms: 0, pre: List[int]() }
     }
-    let mark = path_fold(path)
     let s = mark % file_kinds_slots()
     if ft.fpath[s] == path {
         let st = fs_stat(path) else |_| {
@@ -2246,12 +2263,13 @@ pub fn file_memo_store(
         ft.fcts[s] = cts
         ft.fctn[s] = ctn
         ft.ffill[s] = now_ms / 1000
+        ft.fmark[s] = mark
         ft.fseen[s] = mark
         ft.fbody[s] = take parts
         return
     }
     if op == 3 {
-        if ft.fpath[s].is_empty() || path_fold(ft.fpath[s]) == mark {
+        if ft.fpath[s].is_empty() || ft.fmark[s] == mark {
             ft.fpath[s] = ""
             ft.fsize[s] = -1
             ft.fbody[s] = take List[List[byte]]()
@@ -2315,7 +2333,22 @@ pub fn head_warm(
     secs: int,
     token: str,
 ) -> str {
-    let s = kind_slot(path)
+    head_warm_at(ft, kind_slot(path), path, size, mtime_ms, keep, secs, token)
+}
+
+/// `head_warm` for a caller that already holds `path`'s slot `s`
+/// (ws58: the file memo's lookup folded the path once; this does not
+/// fold it again). Total.
+pub fn head_warm_at(
+    ft: FileKinds,
+    s: int,
+    path: str,
+    size: int,
+    mtime_ms: int,
+    keep: bool,
+    secs: int,
+    token: str,
+) -> str {
     let k = if keep { 1 } else { 0 }
     if ft.hsecs[s] == secs &&
         ft.hsize[s] == size &&
@@ -2333,6 +2366,7 @@ pub fn head_warm(
 /// `MemoUpd`, stored by whoever owns the table (`memo_store`). Total.
 pub fn head_remember(
     mut fu: MemoUpd,
+    slot: int,
     path: str,
     size: int,
     mtime_ms: int,
@@ -2342,6 +2376,7 @@ pub fn head_remember(
     head: str,
 ) {
     fu.h_set = true
+    fu.hslot = slot
     fu.hpath = path
     fu.hsize = size
     fu.hmtime = mtime_ms
@@ -2365,6 +2400,7 @@ pub struct MemoUpd {
     date_str: str,
     bounds: int,
     h_set: bool,
+    hslot: int,
     hpath: str,
     hsize: int,
     hmtime: int,
@@ -2388,6 +2424,7 @@ pub fn memo_upd_new() -> MemoUpd {
         date_str: "",
         bounds: 0,
         h_set: false,
+        hslot: 0,
         hpath: "",
         hsize: 0,
         hmtime: 0,
@@ -2412,7 +2449,8 @@ pub fn memo_dirty(u: MemoUpd) -> bool {
 }
 
 /// Store one request's memo notes into the table: the Date string
-/// when `date_secs` is not negative, the head when `h_set`, and
+/// when `date_secs` is not negative, the head when `h_set` (in slot
+/// `hslot`, the one the request looked in: ws58), and
 /// `bounds` more boundaries taken. The strings are stored as given,
 /// so THE CALLER builds them in the region the table lives in (the
 /// serving loop does, under `in memo`; `serve_conn_cn`'s table shares
@@ -2423,6 +2461,7 @@ pub fn memo_store(
     date: str,
     bounds: int,
     h_set: bool,
+    hslot: int,
     path: str,
     size: int,
     mtime_ms: int,
@@ -2436,8 +2475,8 @@ pub fn memo_store(
         ft.date_secs = date_secs
         ft.date_str = date
     }
-    if h_set {
-        let s = kind_slot(path)
+    if h_set && hslot >= 0 && hslot < ft.hpath.len {
+        let s = hslot
         ft.hpath[s] = path
         ft.hsize[s] = size
         ft.hmtime[s] = mtime_ms
@@ -2454,15 +2493,44 @@ fn kind_slot(path: str) -> int {
     path_fold(path) % file_kinds_slots()
 }
 
-/// The 24-bit fold of a path that `kind_slot` reduces: the file
-/// memo's mark for a path (ws58). Total.
+/// The 24-bit fold of a path that `kind_slot` reduces, and the file
+/// memo's mark for a path (ws58): the path's length and its LAST 32
+/// bytes, folded by 31. The tail and the length tell a site's paths
+/// apart as well as the whole string does (the names differ at the
+/// end), and a long document root costs a compare a byte instead of
+/// a multiply and a remainder: ws58 measured the whole-path fold at
+/// 1,100 user instructions a request on a 55-byte path, once in
+/// `head_warm` and once in `memo_look`. Two paths with one fold are a
+/// slot collision and nothing worse: every lookup compares the path
+/// itself. Total.
 pub fn path_fold(path: str) -> int {
-    var h: int = 0
+    let from = path.len - 32
+    var h: int = path.len % 16777216
+    var i: int = 0
     for b_raw in path.bytes() {
-        let b = b_raw as int
-        h = (h * 31 + b) % 16777216
+        if i >= from {
+            let b = b_raw as int
+            h = (h * 31 + b) % 16777216
+        }
+        i = i + 1
     }
     h
+}
+
+/// The mark of a request's file `path`, whose URI-side spelling is
+/// `tpath` (ws58). Under a `root` the file path ENDS with the URI, and
+/// the URI is the short end of it, so the fold runs over the URI and
+/// the document root joins as its length alone; a path that does not
+/// end with its `tpath` (an `alias`) folds itself. A mark only picks
+/// a slot: two paths with one mark share a slot and are told apart by
+/// the path compare every lookup makes, and one file reached by two
+/// URIs under two roots can hold two slots, each proved by its own
+/// stat. Total.
+pub fn req_mark(path: str, tpath: str) -> int {
+    if tpath.len > 0 && tpath.len < path.len && path.ends_with(tpath) {
+        return (path_fold(tpath) + path.len * 257) % 16777216
+    }
+    path_fold(path)
 }
 
 /// What the router learned from ONE open and ONE fstat (`classify`).
@@ -2564,9 +2632,13 @@ fn serve_path(
 ) -> (int, bool) ! {closed, io} {
     var state = 0
     var pre = List[int]()
+    var hslot = -1
+    let now_ms = time_unix_ms()
     if fm_on {
-        let now_ms = time_unix_ms()
-        let lk = memo_look(ft, mut fu, path, now_ms)
+        let mark = req_mark(path, tpath)
+        fu.f_mark = mark
+        let lk = memo_look(ft, mut fu, path, mark, now_ms)
+        hslot = lk.slot
         if lk.state == 1 {
             let done = serve_file(
                 mut cn,
@@ -2587,6 +2659,8 @@ fn serve_path(
                 ft,
                 mut fu,
                 lk.slot,
+                hslot,
+                now_ms,
             )?
             return (0, done)
         }
@@ -2623,7 +2697,6 @@ fn serve_path(
         fu.f_body = parts
         if memo_same(pre, post) {
             fu.f_op = 2
-            fu.f_mark = path_fold(path)
             fu.f_path = path
             fu.f_id = post
         }
@@ -2646,6 +2719,8 @@ fn serve_path(
             ft,
             mut fu,
             -2,
+            hslot,
+            now_ms,
         )?
         return (0, done)
     }
@@ -2668,6 +2743,8 @@ fn serve_path(
         ft,
         mut fu,
         -1,
+        hslot,
+        now_ms,
     )?
     (0, done)
 }
@@ -3228,6 +3305,7 @@ pub fn serve_conn_cn(
                     fu.date_str,
                     fu.bounds,
                     fu.h_set,
+                    fu.hslot,
                     fu.hpath,
                     fu.hsize,
                     fu.hmtime,
