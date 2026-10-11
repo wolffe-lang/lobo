@@ -97,6 +97,12 @@ scratch="$(pwd)/target/profile-$LABEL-$SHAPE-n$N-h$HANDS"
 rm -rf "$scratch"
 mkdir -p "$scratch/www"
 awk 'BEGIN { for (i = 0; i < 16; i++) printf "%063d\n", i }' > "$scratch/www/index.html"
+# ws58 (lobo#67): lobo's file memo admits a file only once it is three
+# seconds old (serve.lu's `file_memo_age_ms`). A site's files are that
+# old; one written a moment ago is not, and a drive begun inside those
+# seconds would measure the path a real site's hot files never take.
+# So the file ages before anything is started.
+sleep 4
 host="$(uname -sm)"
 SUDO=""
 [ "$(id -u)" = 0 ] || SUDO="sudo -n"
