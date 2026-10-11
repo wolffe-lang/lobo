@@ -531,6 +531,120 @@ kasumi's profile, and the herd's calls are the close cell's; both are
 wolf's to change, measured here so the change can be priced when it
 lands.
 
+### ws58's addendum — the file memo: three syscalls fewer a request, and where the instructions are (2026-10-11)
+
+Predicted in `notes/ws58-contract.md` §3 before the archives were
+unpacked. Two steps, measured apart: the pin (wolf 0.2.26 → 0.2.27,
+the same lobo source) and the file memo (lobo#67). Everything is on
+kasumi (linux x86-64, 16 cpus) with the server and the four
+`ab -c 8` generators under `taskset -c 0-3`, the parity file (1 KiB,
+aged past the memo's three seconds); other lanes were building on
+the box all day (load 5 to 9), so the COUNTS are the table and the
+microseconds are beside them as taken, one server after another in
+one session. "0.2.26" is trunk `c9eff15` (release 96553ee8…), "the
+pin" is `51089ef` (e7e467da…), "ws58" is `ce02889` (2c3729e9…).
+Artifacts are under `kasumi:~/lanes/ws58/`.
+
+**What a request costs** (`prof.sh`: `perf stat -e
+instructions:u,cycles:u` on every serving process and the /proc
+user and system split, the median of three drives of 400,000
+keepalive or 200,000 connection-per-request requests; `prof-trunk2.log`
+d56d630e…, `prof-pin2.log` 70cfda4d…, `prof-head2.log` b54c764c…,
+`prof-nginx2.log` bd32ab25…):
+
+| cell | server | user instructions | user µs | system µs | CPU µs a request |
+|---|---|---|---|---|---|
+| keepalive, 1 process | 0.2.26 | 19,677 | 1.75 | 3.25 | 4.97 |
+| | the pin | 18,290 | 1.55 | 3.10 | 4.67 |
+| | **ws58** | **18,070** | 1.38 | **2.45** | **3.83** |
+| | nginx | 13,599 | 1.48 | 2.98 | 4.42 |
+| connection-per-request, 1 process | 0.2.26 | 19,590 | 1.85 | 5.80 | 7.70 |
+| | the pin | 18,271 | 1.70 | 5.65 | 7.35 |
+| | **ws58** | **18,226** | 1.65 | **5.00** | **6.60** |
+| | nginx | 14,321 | 1.95 | 6.75 | 8.65 |
+| keepalive, 4 hands | 0.2.26 | 21,431 | 2.15 | 4.08 | 6.25 |
+| | the pin | 19,867 | 1.77 | 3.88 | 5.62 |
+| | **ws58** | **19,717** | 1.73 | **3.20** | **4.85** |
+| | nginx | 13,672 | 1.60 | 3.77 | 5.38 |
+| connection-per-request, 4 hands | 0.2.26 | 21,819 | 3.00 | 8.45 | 11.40 |
+| | the pin | 20,417 | 2.80 | 8.35 | 11.10 |
+| | **ws58** | **20,421** | 2.60 | **7.70** | **10.30** |
+| | nginx | 14,418 | 2.40 | 8.05 | 10.50 |
+
+The three lobos were taken one after another (06:23–06:26Z, load 3
+to 4); nginx half an hour before (05:51Z, load 6), and its
+instruction counts have been the same to within four in every
+session since ws56. The pin is worth 6.4 to 7.3 % of lobo's user
+instructions and no system time. The memo is worth nothing in
+instructions (−1.2 % to 0.0 %) and 0.6 to 0.7 µs of system time a
+request, which is the three calls: on keepalive lobo now spends less
+CPU a request than nginx at one process and at four hands.
+
+**Syscalls a request** (`sys.sh`: the server started under
+`strace -f -c`, driven twice, 20,000 and 60,000 requests, and the two
+summaries differenced, because this box refuses a ptrace attach;
+`sys-pin0.log` a62ddf1a…, `sys-pin0-n4.log` 9e7276ba…, `sys-head2.log`
+a31b1616…, `sys-head-n4.log` b9e63849…, `sys-nginx.log` a8956f19…,
+`sys-nginx-n4.log` 8929eae7…; 0.2.26 counts as the pin does, 6.05 and
+9.08, `sys-trunk2.log` dbde6c18…):
+
+| cell | the pin | ws58 | nginx | what went |
+|---|---|---|---|---|
+| keepalive, 1 process | 6.05 | **3.04** | 6.03 | `openat`, `read`, `close` 1.000 → 0; `statx` stays 1.000 (by path where it was by descriptor) |
+| keepalive, 4 hands | 6.31 | **3.25** | 6.16 | the same three; `poll` 0.28 → 0.22 |
+| connection-per-request, 1 process | 9.09 | **6.08** | 10.00 | the same three (`close` 2 → 1) |
+| connection-per-request, 4 hands | 9.94 | **7.12** | 10.13 | the same three |
+
+The CI runner counts the same (attached, `tools/lobo-syscalls`, four
+hands): 6.24 and 10.13 at the pin (run 38113500739), **3.24–3.27 and
+7.37** at ws58 (runs 38114237409, 38115586226), nginx 6.13–6.14 and
+10.13. nginx's four file calls (`openat`, `fstat`, `pread64`,
+`close`) are the four lobo made; lobo now makes one.
+
+**Memory** (`flt.sh`, `lin.sh`, `idle.sh`; `flt-pin.log` bcac5b3f…,
+`flt-head2.log` 19354ccf…, `lin-head-ka.log` 883a5722…,
+`idle-head.log` 18565346…): RSS growth a keepalive request
+4.6 → **0.7 B** at one process and 5.4 → **0.9 B** at four hands
+(the runtime's 4 bytes per `fs_open`, wolf-lang#661, no longer
+accrue on a kept file); a connection 66.5 → 64.2 B and 62.4 → 59.5 B
+(the socket table's residue, unchanged); RSS after 400,000 keepalive
+requests 6.0 → **4.6 MB**, and 5.3 MB after 1,600,000; idle growth 0
+with none and with 32 connections attached. The memo itself is one
+1 KiB body and a row.
+
+**Where the instructions are.** The prediction was a further 8–14 %
+off the user instructions; the measurement is 1 %. The four runtime
+calls the memo removes were 14.6 % of user CYCLES (ws56's number)
+and little of the instruction count: their cost was the kernel
+entries around them. And the call that replaces them is not cheap in
+user space: `perf record -e instructions:u --call-graph lbr` on one
+process (`cg-work3-keepalive-1.log` bfcae5bb…) puts
+`__wolf_rt_fs_stat_record` at 9.35 % inclusive, about 1,700
+instructions, of which the host's `stat` is 1.1 % and the rest is
+the twenty-word list built a push at a time (wolf-lang#690). The
+memo's own lookup is 2.6 % self. The first build measured 19,266
+instructions a keepalive request against the pin's 18,293 (+5 %):
+`head_warm` and `memo_look` each folded the whole 55-byte file path
+(6.3 % and 5.3 %), and the clock was read twice. Folding the URI
+instead (the short end of the path; the root joins as its length),
+once, and reading the clock once: 18,070. What is left between lobo
+and nginx on keepalive at one process is user space alone: 4,460
+instructions a request (18,070 against 13,599), with system time now
+UNDER nginx's (2.45 against 2.98 µs) because nginx makes six calls
+where lobo makes three. The largest self-time rows are unchanged
+from ws56 and are lobo#68's: `wolf_rt::str::str_find` 13.1 %
+(wolf-lang#654), `http.split_lines_strict` 8.0 %, `http.parse_request`
+6.8 %, the loop itself 6.1 %.
+
+**Predicted against measured** (§3 of the note has every row):
+syscalls a request, three fewer: held, to the hundredth. User
+instructions −8 to −14 %: missed (−1 %). RSS after 400,000 under
+6.7 MB: held (4.6 MB, better than the pin because of #661). The
+pin's own instructions −10 to −13 %: missed (−7 % keepalive,
+−6.5 % connection-per-request). The release binary within 2 %:
+missed on the file (+5.4 %, 12,804,744 → 13,495,664 B), held on the
+text (+0.4 %).
+
 ### ws57's addendum — the memory returned: what a request costs once nothing is kept (2026-10-10)
 
 Predicted in `notes/ws57-contract.md` §3 before the first change.
