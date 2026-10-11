@@ -1,7 +1,7 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.27 · edition v1
-  export_hash e43e0590ad01f28f570d00c8fee444e50b12c309fc7a824878c8ecf581969466
-  pkg_hash    e43e0590ad01f28f570d00c8fee444e50b12c309fc7a824878c8ecf581969466
+  export_hash 0556c84d92347949543e312c63beebb9311c5febbf9a5774680ab40c5a660a1d
+  pkg_hash    0556c84d92347949543e312c63beebb9311c5febbf9a5774680ab40c5a660a1d
   deps:
     budget  d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
     config  073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
@@ -29,45 +29,47 @@ module pkg :: serve
     [13] pub file_memo_max — fn file_memo_max() -> int
     [14] pub file_memo_on — fn file_memo_on(mut ft: self.FileKinds) · regions (ρ1) -> -
     [15] pub file_memo_store — fn file_memo_store(mut ft: self.FileKinds, op: int, s: int, mark: int, now_ms: int, path: str, dev: int, ino: int, size: int, mms: int, mts: int, mtn: int, cts: int, ctn: int, take body: prelude.List[byte]) · regions (ρ1, -, -, -, -, -, -, -, -, -, -, -, -, -, ρ2) -> -
-    [16] pub head_remember — fn head_remember(mut fu: self.MemoUpd, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str, head: str) · regions (ρ1, -, -, -, -, -, -, -) -> -
+    [16] pub head_remember — fn head_remember(mut fu: self.MemoUpd, slot: int, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str, head: str) · regions (ρ1, -, -, -, -, -, -, -, -) -> -
     [17] pub head_warm — fn head_warm(ft: self.FileKinds, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str) -> str · regions (ρ1, -, -, -, -, -, -) -> -
-    [18] pub header_too_large_body — fn header_too_large_body(server: str) -> str
-    [19] pub http_date — fn http_date(secs: int) -> str
-    [20] pub ledger_cap — fn ledger_cap(budget: int) -> int
-    [21] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
-    [22] pub listen_addr_plain — fn listen_addr_plain(c: config.Conf) -> str · regions (ρ1) -> -
-    [23] pub listen_reuseport — fn listen_reuseport(c: config.Conf) -> bool · regions (ρ1) -> -
-    [24] pub memo_admissible — fn memo_admissible(st: prelude.List[int], now_ms: int) -> bool · regions (ρ1, -) -> -
-    [25] pub memo_dirty — fn memo_dirty(u: self.MemoUpd) -> bool · regions (ρ1) -> -
-    [26] pub memo_holds — fn memo_holds(ft: self.FileKinds, s: int, st: prelude.List[int]) -> bool · regions (ρ1, -, ρ2) -> -
-    [27] pub memo_look — fn memo_look(ft: self.FileKinds, mut fu: self.MemoUpd, path: str, now_ms: int) -> self.MemoLook · regions (ρ1, ρ2, -, -) -> ρ_caller
-    [28] pub memo_same — fn memo_same(a: prelude.List[int], b: prelude.List[int]) -> bool · regions (ρ1, ρ2) -> -
-    [29] pub memo_store — fn memo_store(mut ft: self.FileKinds, date_secs: int, date: str, bounds: int, h_set: bool, path: str, size: int, mtime_ms: int, secs: int, keep: bool, token: str, head: str) · regions (ρ1, -, -, -, -, -, -, -, -, -, -, -) -> -
-    [30] pub memo_upd_new — fn memo_upd_new() -> self.MemoUpd · regions () -> ρ_caller
-    [31] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
-    [32] pub next_boundary — fn next_boundary(ft: self.FileKinds, mut fu: self.MemoUpd) -> str · regions (ρ1, ρ2) -> -
-    [33] pub open_self_pipe — fn open_self_pipe() -> (int, int) ! {io} · regions () -> ρ_caller
-    [34] pub path_fold — fn path_fold(path: str) -> int
-    [35] pub range_plan — fn range_plan(spec: str, if_range: str, etag: str, lm: str, size: int, max_ranges: int) -> self.RangePlan · regions (-, -, -, -, -, -) -> ρ_caller
-    [36] pub raw_line — fn raw_line(head: str) -> str
-    [37] pub resolve_limits — fn resolve_limits(c: config.Conf) -> http.Limits · regions (ρ1) -> ρ_caller
-    [38] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
-    [39] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, mut rs: resolver.Resolver) · regions (ρ1, ρ2, ρ3, ρ4, -, ρ5) -> -
-    [40] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int, rs: resolver.Resolver, ft: self.FileKinds, mut fu: self.MemoUpd) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5, ρ6) -> ρ_caller
-    [41] pub status_phrase — fn status_phrase(code: int) -> str
-    [42] pub step_pack — fn step_pack(take s: self.ConnStep, keep_acc: bool) -> self.StepOut · regions (ρ1, -) -> ρ_caller
-    [43] pub to_hex — fn to_hex(n: int) -> str
-    [44] pub version — fn version() -> str
-    [45] pub write_admin — fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io}
-    [46] pub write_admin_503 — fn write_admin_503(conn: int, token: str)
-    [47] pub Classified — struct Classified { kind: int, fd: int, size: int, mtime_ms: int }
-    [48] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int, has_head: bool, memo: self.MemoUpd, rs_rot: str, rs_new: prelude.List[resolver.Resolver] }
-    [49] pub FileKinds — struct FileKinds { hpath: prelude.List[str], hsize: prelude.List[int], hmtime: prelude.List[int], hsecs: prelude.List[int], hkeep: prelude.List[int], htoken: prelude.List[str], hhead: prelude.List[str], date_secs: int, date_str: str, boundary: int, fpath: prelude.List[str], fdev: prelude.List[int], fino: prelude.List[int], fsize: prelude.List[int], fmms: prelude.List[int], fmts: prelude.List[int], fmtn: prelude.List[int], fcts: prelude.List[int], fctn: prelude.List[int], ffill: prelude.List[int], fseen: prelude.List[int], ftry: prelude.List[int], fbody: prelude.List[prelude.List[prelude.List[byte]]] }
-    [50] pub MemoLook — struct MemoLook { state: int, slot: int, size: int, mms: int, pre: prelude.List[int] }
-    [51] pub MemoUpd — struct MemoUpd { date_secs: int, date_str: str, bounds: int, h_set: bool, hpath: str, hsize: int, hmtime: int, hsecs: int, hkeep: bool, htoken: str, hhead: str, f_op: int, f_slot: int, f_mark: int, f_now: int, f_path: str, f_id: prelude.List[int], f_body: prelude.List[prelude.List[byte]] }
-    [52] pub RangePlan — struct RangePlan { kind: int, starts: prelude.List[int], ends: prelude.List[int] }
-    [53] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int, rs_rot: str, rs_new: prelude.List[resolver.Resolver] }
-    [54] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int, stream_w: int, proc_room: bool }
-    [55] pub StepOut — struct StepOut { active: bool, close: bool, carry: str, served: int, logged: bool, status: int, body_bytes: int, proxied: bool, up_status: int, up_ms: int, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int, has_head: bool, rare: prelude.List[self.StepRare] }
-    [56] pub StepRare — struct StepRare { acc: obs.Access, bud_site: str, admin: str, resolve: str, resolve_addr: str, memo: self.MemoUpd, rs_rot: str, rs_new: prelude.List[resolver.Resolver] }
+    [18] pub head_warm_at — fn head_warm_at(ft: self.FileKinds, s: int, path: str, size: int, mtime_ms: int, keep: bool, secs: int, token: str) -> str · regions (ρ1, -, -, -, -, -, -, -) -> -
+    [19] pub header_too_large_body — fn header_too_large_body(server: str) -> str
+    [20] pub http_date — fn http_date(secs: int) -> str
+    [21] pub ledger_cap — fn ledger_cap(budget: int) -> int
+    [22] pub listen_addr — fn listen_addr(c: config.Conf) -> str · regions (ρ1) -> -
+    [23] pub listen_addr_plain — fn listen_addr_plain(c: config.Conf) -> str · regions (ρ1) -> -
+    [24] pub listen_reuseport — fn listen_reuseport(c: config.Conf) -> bool · regions (ρ1) -> -
+    [25] pub memo_admissible — fn memo_admissible(st: prelude.List[int], now_ms: int) -> bool · regions (ρ1, -) -> -
+    [26] pub memo_dirty — fn memo_dirty(u: self.MemoUpd) -> bool · regions (ρ1) -> -
+    [27] pub memo_holds — fn memo_holds(ft: self.FileKinds, s: int, st: prelude.List[int]) -> bool · regions (ρ1, -, ρ2) -> -
+    [28] pub memo_look — fn memo_look(ft: self.FileKinds, mut fu: self.MemoUpd, path: str, mark: int, now_ms: int) -> self.MemoLook · regions (ρ1, ρ2, -, -, -) -> ρ_caller
+    [29] pub memo_same — fn memo_same(a: prelude.List[int], b: prelude.List[int]) -> bool · regions (ρ1, ρ2) -> -
+    [30] pub memo_store — fn memo_store(mut ft: self.FileKinds, date_secs: int, date: str, bounds: int, h_set: bool, hslot: int, path: str, size: int, mtime_ms: int, secs: int, keep: bool, token: str, head: str) · regions (ρ1, -, -, -, -, -, -, -, -, -, -, -, -) -> -
+    [31] pub memo_upd_new — fn memo_upd_new() -> self.MemoUpd · regions () -> ρ_caller
+    [32] pub mime_for — fn mime_for(c: config.Conf, path: str) -> str · regions (ρ1, -) -> -
+    [33] pub next_boundary — fn next_boundary(ft: self.FileKinds, mut fu: self.MemoUpd) -> str · regions (ρ1, ρ2) -> -
+    [34] pub open_self_pipe — fn open_self_pipe() -> (int, int) ! {io} · regions () -> ρ_caller
+    [35] pub path_fold — fn path_fold(path: str) -> int
+    [36] pub range_plan — fn range_plan(spec: str, if_range: str, etag: str, lm: str, size: int, max_ranges: int) -> self.RangePlan · regions (-, -, -, -, -, -) -> ρ_caller
+    [37] pub raw_line — fn raw_line(head: str) -> str
+    [38] pub req_mark — fn req_mark(path: str, tpath: str) -> int
+    [39] pub resolve_limits — fn resolve_limits(c: config.Conf) -> http.Limits · regions (ρ1) -> ρ_caller
+    [40] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
+    [41] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, mut rs: resolver.Resolver) · regions (ρ1, ρ2, ρ3, ρ4, -, ρ5) -> -
+    [42] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int, rs: resolver.Resolver, ft: self.FileKinds, mut fu: self.MemoUpd) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5, ρ6) -> ρ_caller
+    [43] pub status_phrase — fn status_phrase(code: int) -> str
+    [44] pub step_pack — fn step_pack(take s: self.ConnStep, keep_acc: bool) -> self.StepOut · regions (ρ1, -) -> ρ_caller
+    [45] pub to_hex — fn to_hex(n: int) -> str
+    [46] pub version — fn version() -> str
+    [47] pub write_admin — fn write_admin(conn: int, body: str, ctype: str, token: str, keep: bool) -> int ! {closed, io}
+    [48] pub write_admin_503 — fn write_admin_503(conn: int, token: str)
+    [49] pub Classified — struct Classified { kind: int, fd: int, size: int, mtime_ms: int }
+    [50] pub ConnStep — struct ConnStep { active: bool, close: bool, carry: str, served: int, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int, has_head: bool, memo: self.MemoUpd, rs_rot: str, rs_new: prelude.List[resolver.Resolver] }
+    [51] pub FileKinds — struct FileKinds { hpath: prelude.List[str], hsize: prelude.List[int], hmtime: prelude.List[int], hsecs: prelude.List[int], hkeep: prelude.List[int], htoken: prelude.List[str], hhead: prelude.List[str], date_secs: int, date_str: str, boundary: int, fpath: prelude.List[str], fdev: prelude.List[int], fino: prelude.List[int], fsize: prelude.List[int], fmms: prelude.List[int], fmts: prelude.List[int], fmtn: prelude.List[int], fcts: prelude.List[int], fctn: prelude.List[int], ffill: prelude.List[int], fmark: prelude.List[int], fseen: prelude.List[int], ftry: prelude.List[int], fbody: prelude.List[prelude.List[prelude.List[byte]]] }
+    [52] pub MemoLook — struct MemoLook { state: int, slot: int, size: int, mms: int, pre: prelude.List[int] }
+    [53] pub MemoUpd — struct MemoUpd { date_secs: int, date_str: str, bounds: int, h_set: bool, hslot: int, hpath: str, hsize: int, hmtime: int, hsecs: int, hkeep: bool, htoken: str, hhead: str, f_op: int, f_slot: int, f_mark: int, f_now: int, f_path: str, f_id: prelude.List[int], f_body: prelude.List[prelude.List[byte]] }
+    [54] pub RangePlan — struct RangePlan { kind: int, starts: prelude.List[int], ends: prelude.List[int] }
+    [55] pub ReqOut — struct ReqOut { close: bool, carry: str, logged: bool, acc: obs.Access, bud_site: str, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, admin: str, resolve: str, resolve_addr: str, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int, rs_rot: str, rs_new: prelude.List[resolver.Resolver] }
+    [56] pub ServerOpts — struct ServerOpts { token: str, keepalive_timeout_ms: int, keepalive_requests: int, read_timeout_ms: int, challenge_dir: str, metrics_on: bool, pipe_w: int, pipe_r: int, stream_w: int, proc_room: bool }
+    [57] pub StepOut — struct StepOut { active: bool, close: bool, carry: str, served: int, logged: bool, status: int, body_bytes: int, proxied: bool, up_status: int, up_ms: int, bud_limit: int, bud_would: int, bud_cap: int, mem_hw: int, mem_rt: int, resolve_timeout_ms: int, resolve_valid_ms: int, streaming: bool, stream_fd: int, has_head: bool, rare: prelude.List[self.StepRare] }
+    [58] pub StepRare — struct StepRare { acc: obs.Access, bud_site: str, admin: str, resolve: str, resolve_addr: str, memo: self.MemoUpd, rs_rot: str, rs_new: prelude.List[resolver.Resolver] }
 
