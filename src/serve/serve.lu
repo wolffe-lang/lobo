@@ -3732,27 +3732,37 @@ struct HeadCut {
 }
 
 fn head_cut(buf: str) -> HeadCut {
-    // ws28: an empty buffer holds no head (the loop asks every
-    // connection every pass; a search builds a searcher first), and
-    // a bare LF-LF can only be the marker when it lies BEFORE the
-    // CRLFCRLF — a hit before it lies wholly before it (the byte at
-    // m1 is CR, so no LF-LF straddles it) — so it is searched for
-    // in those bytes alone
-    if buf.is_empty() {
-        return HeadCut { ready: false, marker: -1, mlen: 0 }
-    }
-    let m1 = buf.find("\r\n\r\n") else -1
-    var m2: int = -1
-    if m1 >= 0 {
-        m2 = buf[0..m1].find("\n\n") else -1
-    } else {
-        m2 = buf.find("\n\n") else -1
-    }
-    if m1 >= 0 && (m2 < 0 || m1 <= m2) {
-        return HeadCut { ready: true, marker: m1, mlen: 4 }
-    }
-    if m2 >= 0 {
-        return HeadCut { ready: true, marker: m2, mlen: 2 }
+    // ws59 (lobo#68): ONE walk over the bytes. Through ws58 this was
+    // `find("\r\n\r\n")` and then `find("\n\n")` over what lay before
+    // it: two passes of the runtime's byte-at-a-time search
+    // (wolf-lang#654), a tenth of a request's user instructions. The
+    // walk keeps how much of either marker the bytes just read spell
+    // (`run`: 1 after a CR, 2 after CRLF, 3 after CRLFCR, 5 after an
+    // LF that follows no CR) and answers at the LF that completes one.
+    // The earliest marker still wins: an LF-LF is seen at its second
+    // LF and a CRLFCRLF at its last, and of two markers the one that
+    // starts first also ends first (an LF-LF cannot start on the CR
+    // inside a CRLFCRLF).
+    var i: int = 0
+    var run: int = 0
+    for b_raw in buf.bytes() {
+        let b = b_raw as int
+        if b > 13 {
+            run = 0
+        } else if b == 10 {
+            if run == 2 || run == 5 {
+                return HeadCut { ready: true, marker: i - 1, mlen: 2 }
+            }
+            if run == 3 {
+                return HeadCut { ready: true, marker: i - 3, mlen: 4 }
+            }
+            run = if run == 1 { 2 } else { 5 }
+        } else if b == 13 {
+            run = if run == 2 { 3 } else { 1 }
+        } else {
+            run = 0
+        }
+        i = i + 1
     }
     HeadCut { ready: false, marker: -1, mlen: 0 }
 }
