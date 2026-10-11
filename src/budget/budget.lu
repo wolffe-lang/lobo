@@ -232,6 +232,38 @@ fn body_stream(sock: int, path: str, cap: int, pipe: int) -> int ! {io} {
     0
 }
 
+/// End a body proc that outlived its join's patience, and wait for it
+/// to be gone (ws58). The proc was spawned with strings built in the
+/// request's region (`path`, `head`), and that region is freed when
+/// the request's step returns: a proc still alive then would hold
+/// views of freed bytes. wolf does not refuse such a spawn (wolf
+/// 0.2.27 prints the freed bytes; wolf-lang#678, the spawn twin of
+/// #665), so the rule is kept here by hand: `run_small` and
+/// `run_stream` never return while their proc can still run. A kill
+/// reaches a write parked on a client that does not read. THE JOIN IS
+/// THE POINT: on native and release a killed proc comes back from its
+/// park and runs on to its next one before it is gone
+/// (wolf-lang#683), so it may read its arguments after the kill, and
+/// only the join's return says it no longer can. The witness is
+/// tests/serve/body_join_kill.lu. Total.
+fn end_body(w: Proc[int]) {
+    w.kill()
+    let _v = w.join() else |e| match e {
+        killed => {
+            0
+        },
+        cancelled => {
+            0
+        },
+        error => {
+            0
+        },
+        fault => {
+            0
+        },
+    }
+}
+
 /// Run a budgeted SMALL response's body inside a capped proc and
 /// join it. Total (every outcome is a value).
 pub fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r: int) -> Outcome {
@@ -253,6 +285,9 @@ pub fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r:
         timeout(600.s) => {
             cls = 4
         },
+    }
+    if cls == 4 {
+        end_body(w)
     }
     if cls >= 2 {
         return Outcome { cls: cls, wcode: 0, rt: 0 }
@@ -282,6 +317,9 @@ pub fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> O
         timeout(600.s) => {
             cls = 4
         },
+    }
+    if cls == 4 {
+        end_body(w)
     }
     if cls >= 2 {
         return Outcome { cls: cls, wcode: 0, rt: 0 }
@@ -475,9 +513,14 @@ pub fn stream_done(mut slots: List[StreamSlot], i: int) {
 /// generation's `worker_shutdown_timeout`): kill its proc and wait for
 /// it to be gone — a kill reaches a write parked on a client that
 /// reads slowly or not at all, which no budget armed afterwards does.
-/// `true`: the proc was ended here (or broke); it will write no line,
-/// the file is closed, the slot is free, and the socket is the
-/// caller's to close. `false`: the stream had already run to its end
+/// `true`: the proc was ended here (or broke); the file is closed,
+/// the slot is free, and the socket is the caller's to close. (ws58:
+/// "it will write no line" stood here. Not on native and release at
+/// wolf 0.2.27: a killed proc runs on to its next park,
+/// wolf-lang#683, so a stream killed in its write can still write
+/// its line before the join below returns. The line carries the
+/// stream's id and the slot is freed after the join, so the loop
+/// reads it as a line for a stream it no longer has and drops it.) `false`: the stream had already run to its end
 /// — its line is in the pipe, the slot stands, and the caller treats
 /// the row as any other that is waiting for its line. Total.
 pub fn stream_kill(mut slots: List[StreamSlot], i: int) -> bool {

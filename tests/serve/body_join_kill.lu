@@ -1,0 +1,131 @@
+//! check: run(exit=0, stdout="parked: joined false\nended: killed true gone true quiet-after-join true\nafter: ok true\n")
+//! phase: run
+//! lanes: native
+//! checked-refuses: structured concurrency in checked execution (C1 deferred)
+//! conforms: conc.proc.kill, conc.proc.join
+//!
+//! ws58: A BODY PROC NEVER OUTLIVES ITS JOIN, executable. lobo's
+//! budgeted responses run in a proc that is handed two strings built
+//! in the request's region (the path and the response head) and is
+//! joined with a patience (`budget.run_small`, `run_stream`). wolf
+//! does not refuse a `spawn proc` whose string argument lives in a
+//! region the proc can outlive (wolf 0.2.27 prints the freed bytes:
+//! wolf-lang#678, the spawn twin of #665), so the rule is kept by
+//! hand: when the patience runs out the proc is KILLED and JOINED
+//! before the helper returns (`budget.end_body`), and only then is
+//! the request's region freed. This is that shape with the patience
+//! shortened: a proc parked in a read that will never be answered,
+//! holding a string; the select times out; the kill reaches the
+//! parked read; the join returns `killed`; and AFTER THE JOIN the
+//! proc writes nothing more. Then a proc that runs to its end is
+//! joined as before.
+//!
+//! The join is the point, not the kill: on native and release a
+//! killed proc comes back from its parked read and runs on to its
+//! next park before it is gone (wolf-lang#683; [conc.proc.kill] says
+//! it runs nothing), so a line it writes on its way out may already
+//! be in the pipe when the join returns. This test reads that line
+//! off and then asks for silence. The lane is native: lupin's
+//! loopback read does not park the way the host's does (the proc
+//! ends on its own there before the patience runs out).
+//! Loopback only, port 0.
+
+/// Park in a read on `sock` (nobody writes), then say what was handed
+/// in on `pipe` — a line the killed proc must never write.
+fn parked(sock: int, s: str, pipe: int) -> int {
+    net_deadline(sock, 60000) else |_| {}
+    let got = net_read(sock, 64) else |_| {
+        ""
+    }
+    net_write(pipe, "woke {s} {got}\n") else |_| {}
+    0
+}
+
+/// A proc that ends on its own.
+fn brief(pipe: int) -> int {
+    net_write(pipe, "brief\n") else |_| {}
+    0
+}
+
+/// `budget.end_body`'s shape: kill, then wait for the proc to be gone.
+/// True when the join named the kill.
+fn end_body(w: Proc[int]) -> bool {
+    w.kill()
+    var killed = false
+    let _v = w.join() else |e| match e {
+        killed => {
+            killed = true
+            0
+        },
+        cancelled => {
+            0
+        },
+        error => {
+            0
+        },
+        fault => {
+            0
+        },
+    }
+    killed
+}
+
+fn main() -> !int {
+    let l = net_listen("127.0.0.1:0")?
+    let p = net_port(l)?
+    let cli = net_connect("127.0.0.1:{p}")?
+    let srv = net_accept(l)?
+    let pw = net_connect("127.0.0.1:{p}")?
+    let pr = net_accept(l)?
+
+    let held = "a-string-the-proc-holds"
+    let w = spawn proc parked(srv, held, pw)
+    let m = w.monitor()
+    var joined = false
+    select {
+        exit(reason) from m => {
+            joined = reason.is_normal() || true
+        },
+        timeout(300.ms) => {
+            joined = false
+        },
+    }
+    print("parked: joined {joined}")
+    let t0 = time_unix_ms()
+    let was_killed = end_body(w)
+    let gone = time_unix_ms() - t0 < 5000
+    // whatever the proc wrote on its way out (wolf-lang#683) is in the
+    // pipe by now; after the join there is nothing more
+    net_deadline(pr, 200) else |_| {}
+    let _out = net_read(pr, 64) else |_| {
+        ""
+    }
+    var quiet = false
+    let stray = net_read(pr, 64) else |_| {
+        quiet = true
+        ""
+    }
+    if stray.is_empty() {
+        quiet = true
+    }
+    print("ended: killed {was_killed} gone {gone} quiet-after-join {quiet}")
+
+    let w2 = spawn proc brief(pw)
+    let m2 = w2.monitor()
+    var ok2 = false
+    select {
+        exit(reason) from m2 => {
+            ok2 = reason.is_normal()
+        },
+        timeout(5.s) => {
+            ok2 = false
+        },
+    }
+    net_deadline(pr, 1000) else |_| {}
+    let line = net_read(pr, 64) else |_| {
+        ""
+    }
+    print("after: ok {ok2 && line.starts_with("brief")}")
+    net_close(cli) else |_| {}
+    0
+}
