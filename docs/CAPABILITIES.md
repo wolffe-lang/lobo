@@ -36,6 +36,14 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws58, 2026-10-11, wolf 0.2.27: the audit at this head reads net +160,
+fs +98, exec +10, env +3; at ws57's trunk it read fs +94. The census
+below is ws55's and was not re-taken by ws56 or ws57. Of ws58's four
+new fs call sites three are `fs_stat` in `serve/serve.lu` — the file
+memo's one stat a request by path, and the two stats around a fill,
+all on a path the router was about to open — and one is the fill's
+`fs_close`. No capability moves.)
+
 The audit's counts and this file's census agree: fs 87, exec 11, env 4
 calls; net 156 calls plus 6 import reaches (`acme/flow.lu` and
 `proxy/proxy.lu` import `std.net` and `std.x.tls.client`, which reaches
