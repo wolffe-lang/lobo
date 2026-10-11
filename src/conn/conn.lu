@@ -86,6 +86,13 @@ pub fn truncated(cn: Conn) -> bool {
 /// returned with it: about a request head of memory per request, kept
 /// for the life of the process. These bytes are built in the caller's
 /// region.
+///
+/// ws58, 2026-10-11: STILL NEEDED at wolf 0.2.27. The fix is on
+/// wolf-lang trunk (s228, `3d0a06b0`: `net_read` copies into the
+/// ambient region) and is not in 0.2.27; the pin after this one makes
+/// this function `net_read` again (s228 measured lobo's membudget row
+/// at 4 kB with `net_read` put back on that runtime). Remove it then,
+/// with the membudget gate as the witness.
 /// (W0602 allowed: the row mirrors net_read exactly (closed/timeout/utf8/io).)
 #[allow(w0602)]
 pub fn sock_read(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
