@@ -106,6 +106,28 @@ from inside a region into a table that outlives it is E1010.
 `docs/BUDGET.md` lists what may still grow and what bounds each;
 `tools/lobo-membudget` holds the result as three hard rows.
 
+ws58 (lobo#67) puts a second table in `memo`: the FILE MEMO. A static
+file cost four file calls a request (open, fstat, read, close); a
+small file's bytes are now kept beside the identity `fs_stat` answered
+for its path, and a request for a kept file makes one call, a stat by
+path, and answers from the table when every identity word matches
+(device, inode, size, modification time and status-change time to the
+nanosecond) and takes the old path otherwise. A file is admitted only
+when it has been unchanged for three seconds, because one stat record
+can stand for two contents written inside one timestamp tick; the
+fill reads through a descriptor between two stats that must agree.
+The table is direct-mapped, 256 slots of at most 32 KiB a file,
+inside the memo region's 1 MiB; a path is admitted on its second miss
+in a row and displaces another at most once a second; the whole table
+goes when the region does and at every reload that takes. Only the
+plain shape is served from it: GET or HEAD, no Range, plaintext, no
+memory budget. The rules, and the two limits they lean on (one clock
+for the file's timestamps and the process; a filesystem that keeps a
+status-change time), are the block comment over `file_memo_max` in
+`src/serve/serve.lu`; `tests/serve/file_memo.lu` holds the table's
+states and `tests/serve/file_memo_e2e.lu` seven ways a file changes
+between two requests, on both tiers, beside the oracle.
+
 ws57 (lobo#69) also gives the renewal daemon ONE owner: the single
 process, or hand 1 under `worker_processes N`. The other hands serve
 the http-01 challenge as before and take a new certificate up from

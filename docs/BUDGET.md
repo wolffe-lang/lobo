@@ -108,7 +108,10 @@ method:
 3. a per-request retention ratchet (< 64 KB/req under a padded-head
    shape) caught lobo-side structural regressions while the string
    half was open; since ws57 the three flat-memory rows below it are
-   the gate and the ratchet reads 0.
+   the gate and the ratchet reads 0. Since ws58 (the file memo,
+   lobo#67) the big body is 48 KiB, over the memo's 32 KiB bound, so
+   the differential still measures the per-response region and never
+   a kept file.
 
 Probes behind the fix (recorded 2026-08-31, pin addcd7f, macOS/arm64):
 a 20k-iteration `region`-wrapped List loop holds 1.5 MB where the bare
@@ -452,12 +455,22 @@ is no longer gated on anything upstream).
   with the pass's region removed the memo's region still frees a
   pass's work (the gate stays green, a megabyte more resident), and
   with both removed the first two rows read 21 MB and 12 MB.
+  Since ws58 the plain server's files are four seconds old before it
+  starts, so the three rows run WITH the file memo (lobo#67: a kept
+  file is not opened, and the runtime's 4 bytes per `fs_open` stop
+  accruing), and a fourth row holds the memo itself: under 512 KB over
+  4,000 keepalive requests for a kept 16 KiB file (it reads 0). What
+  the memo may hold is bounded twice: 256 entries of at most 32 KiB,
+  and the memo region's 1 MiB, at which the table is let go.
 - `tests/serve/carry_e2e.lu` (the carry as pooled bytes: a dripped
   head, pipelined requests, rows that move while they hold half a
   head, twelve partial heads at once) and
   `tests/serve/memo_rollover_e2e.lu` (the memo's region let go under
   4,500 misses, every answer checked, the multipart boundary counting
   on across it).
+- `tests/serve/file_memo.lu` and `tests/serve/file_memo_e2e.lu` (ws58,
+  lobo#67): what the file memo admits and what ends a hit, in process
+  and through the real server on both tiers beside the oracle.
 - `tests/serve/budget_shapes.lu`, pure: limit resolution from config
   (defaults, overrides, `0` semantics, buffer math), the 503 shape.
 - `tests/serve/budget_refusals.lu`, in-process round-trips: every
