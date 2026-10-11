@@ -183,24 +183,159 @@ Not small: three levers (parsing, bookkeeping, head and route), each a
 profile-and-rewrite of its own. I expect to take none of it and say so,
 unless the memo's hit path makes one of them a few lines.
 
+### §2, what the staging found (after the prediction was committed)
+
+- The archives match the release API's digests on kasumi
+  (`dl/digest-check.txt` 174ba404…). Members by name (linux x86-64):
+  `wolf` 6f5713a2…, `libwolf_rt.a` ab575b27…, `wolf-cimport-worker`
+  96f93227…, `lupin` 3a476442…, `libwolf_rt_none.a` 46544be6…
+  (`toolchain-tc-0227.txt` ba6933bf…).
+- The archive's `std/` is wolf-std `87ba162`, 55 files, and differs
+  from lobo's pin `14f0ab2` in six files and two licences
+  (`std-compare.txt`). lobo stages named members, and CI builds
+  `wolf` from source, so nothing needed removing; the two trees give
+  byte-identical lobo binaries at 0.2.27 (debug 95dfc14b…, release
+  a6e9d15c…; `build-pin0.log` 92afa18d…, `build-pin0-alt.log`
+  2dcec19b…). The pin holds at `14f0ab2`.
+- No declaration of any of the seventeen new prelude names in `src/`
+  or `tests/` (grep, 0 lines).
+- `fs_stat`'s record, read in the spec at the tag (`[os.fs.stat]`):
+  twenty words; kind 0, size 1, modified_ms 2, `have` 3, device 9,
+  inode 10, mtime 14–15 and ctime 16–17 as seconds and nanoseconds.
+
+### §3 against the measurement (written at the close, 2026-10-11)
+
+**The pin alone.**
+
+| | predicted | measured |
+|---|---|---|
+| source | nothing refused, no W0304, no manifest change | **held**: zero diagnostics on both tiers at `--error-limit=0`; gauntlet GREEN at `51089ef` on kasumi (`g-gpin.log` d101c296…, 0 SKIP lines) and in CI on linux and macOS (run 38112705120) |
+| the `.wolf-bin/std` removal | a guard, not a fix | **held**: not needed, said in `wolf-toolchain.toml` |
+| release binary | within 2 % | **missed on the file, held on the text**: 12,804,744 → 13,495,664 B (+5.4 %); text 1,661,106 → 1,667,954 (+0.4 %) |
+| RSS after 400,000 keepalive requests | 6.0 MB within 0.6 | **held**: 6.1 → 6.0 MB |
+| growth a keepalive request / a connection | 4–7 B / 55–75 B | **held**: 4.6 / 66.5 B (5.4 / 62.4 at four hands) |
+| the gate | every row keeps its verdict | **held**: 22/22 (4 KB, 228 KB, 0) |
+| user instructions | −10 to −13 % | **missed**: −7.0 % and −6.7 % (keepalive, connection-per-request, one process), −7.3 % and −6.4 % at four hands |
+| parity, the runner, keepalive N=4 | 1.05–1.11x | **held**: 1.090x (and 1.094x–1.113x on four more VMs as the reference tree) |
+| parity, the runner, close N=4 | 1.03–1.09x | **held**: 1.062x (1.060x–1.075x) |
+| parity, the runner, N=1 keepalive / close | 1.02–1.06x / 0.87–0.93x | **missed, better**: 1.001x / 0.824x |
+| parity, kasumi, keepalive N=4 | 1.07–1.11x | **held**: 1.104x, 1.097x |
+| parity, kasumi, close N=4 | 1.00–1.04x | **held once of twice**: 1.067x, 1.038x |
+| parity, kasumi, N=1 keepalive / close | 1.04–1.08x / 0.89–0.94x | **held**: 1.051x–1.053x / 0.882x–0.895x (one reading a hair under the band) |
+
+"Keepalive at four hands lands on the bar and is not safely inside
+it by the pin alone": held. Five VMs read 1.090x to 1.113x.
+
+**The memo.**
+
+| | predicted | measured |
+|---|---|---|
+| shape | a table in `region memo`, direct-mapped, 256 slots; the path, the stat identity, the bytes as a one-part gather; one `fs_stat` a request | **held**, as written |
+| what it checks | device, inode, size, mtime and ctime to the nanosecond; admitted only 3 s after its last status change; a fill between two equal stats; the plain shape only; dropped at a reload | **held**, and one limit the prediction did not name: a file rewritten through a shared `mmap` moves its times late (the kernel's, not the rule's) |
+| the bound and the eviction | 256 entries of at most 32 KiB inside the region's 1 MiB; admitted on the second miss in a row; displaced at most once a second | **held**; one rule added: a refused admission is not retried for a second |
+| syscalls a keepalive request | three fewer, about 6.4 → 3.4 | **held**: 6.05 → 3.04 (one process), 6.31 → 3.25 (four hands); the runner 6.24 → 3.24–3.27 |
+| syscalls a connection | about 12.4 → 9.4 | **held in the difference, the level was stale**: 9.09 → 6.08 and 9.94 → 7.12 (ws57 had already taken the level down; the note quoted ws27's) |
+| the gate's rows | move by under 64 KB | **held, the other way**: 4 → 0 KB, 228 → 72 KB, 0 → 0 (the runtime's 4 bytes per `fs_open` stop accruing); 23/23 |
+| RSS after 400,000 keepalive requests | under 6.7 MB | **held**: 4.6 MB |
+| user instructions | a further −8 to −14 % on keepalive | **missed**: −1.2 % and −0.8 %. The four calls were cheap in instructions and dear in kernel time; `fs_stat` costs about 1,700 (wolf-lang#690); the first build was +5 % until the path was folded once and by its short end |
+| parity, kasumi, keepalive N=4 | 1.00–1.06x: met | **held**: 1.025x, 1.004x |
+| parity, the runner, keepalive N=4 | 0.99–1.07x: met | **missed, better**: 0.914x–0.934x on four VMs |
+| parity, close N=4 | kasumi 0.96–1.02x, the runner 0.98–1.05x | kasumi **missed by a hair** (1.026x, 1.015x); the runner **held** (1.022x–1.038x) |
+| parity, N=1 | keepalive 0.96–1.03x, close 0.84–0.92x | **missed, better** on both hosts: keepalive 0.81–0.90x, close 0.70–0.82x |
+
+Not predicted at all: that a drive begun on a file written a moment
+ago measures the OLD path (the first strace difference came out
+negative for that reason), so every bench tool now ages its file
+four seconds and the memory gate takes each path on purpose.
+
+**The #665 survey: held, and the neighbour was not predicted.** No
+channel, no send and no `Mutex` in `src/`; the only sends in the
+repository are two replay tests' `closes.send(1)` and
+`deadline.send(1)` on a `channel[int]` (four lines, an integer
+literal: nothing that can name region bytes). Every `spawn proc`:
+
+| site | arguments | can the payload outlive its region? |
+|---|---|---|
+| `main.lu` ×2, `sig_forwarder(w, mask, probe)` | three ints | no bytes |
+| `budget.stream_open` ×2, `stream_body(sock, fd, out, id)` | four ints | no bytes |
+| `acme.daemon_start` → `daemon(store, names, contact, ca_url, ca_root, …)` | five strings from the configuration, built in `serve_main`'s own region before `life` is made | no: the process root outlives the proc |
+| `budget.run_small` → `body_small(sock, path, head, cap, pipe)` | `path` and `head` built in the request's step region | **it could, on one arm**: the join's `timeout(600.s)` returned with the proc alive. Each of the proc's writes is bounded by the socket's 60 s budget, so the arm was not reachable while the proc held the strings. Fixed anyway: the arm kills and joins (`end_body`) |
+| `budget.run_stream` → `body_stream(sock, path, cap, pipe)` | `path`, the same region | **it could**: a long stream to a slow reader can outlast 600 s, ten chunks at 60 s each. The proc reads `path` in its first statement only, so no freed byte was read. Fixed the same way |
+
+The compiler's part is wolf-lang#678: a `spawn proc` argument built
+in a region block is not refused, with or without a helper, and
+0.2.27 prints the freed bytes (`probe/s1_helper.lu`,
+`probe/s2_direct.lu`; `s12.log` d7c3dc84…; control `s3.log`
+0428e32c…). Writing the fix's witness found wolf-lang#683: a killed
+proc parked in `net_read` runs on to its next park on native and
+release (`probe/k1_kill.lu`, `k1.log` 2c4f08f3…), so the join, not
+the kill, is what makes the rule true. #660's shape: 28 `in life`
+and `in memo` blocks in `main.lu`, read one by one; each call takes
+scalars, a string built inside the block, or (`carry_put`, twice) a
+string whose bytes it copies into a byte buffer and does not keep.
+
+**lobo#68: not taken**, as predicted, and for the reason predicted.
+
+Corrections to §2: the level the note quoted for syscalls a request
+(12.4 a connection) was ws27's; at ws57's trunk it was 9.1 to 9.9.
+To §1: nothing touched outside `~/lanes/ws58/` on either box; one
+worktree was first made inside this lane's own clone on kasumi by a
+slip (`git -C lobo worktree add` with a relative path) and removed
+with `git worktree remove` a moment later; one throwaway branch
+(`ws58-plant`, the planted break) was pushed to lobo's origin for
+its CI run and deleted by this lane afterwards.
+
 ## 4. Evidence index
 
-Filled at the close.
+kasumi paths are under `~/lanes/ws58/`; nomad-1 paths under
+`~/lanes/ws58/`.
+
+| claim | artifact |
+|---|---|
+| the archives by digest, the members, the oracle | `dl/digest-check.txt` 174ba404…, `toolchain-tc-0227.txt` ba6933bf…, `nginx.sha256` (65595ac2…) |
+| the prediction before the archives | commit `d8108b5` (04:26:26Z; the staging began 04:27:19Z, `stage.STATUS`) |
+| std re-derived | `build-pin0.log` 92afa18d…, `build-pin0-alt.log` 2dcec19b…, `std-compare.txt` |
+| the pin green | kasumi `g-gpin.log` d101c296… at `51089ef` (exit 0, 0 SKIP lines, membudget 22/22); CI run **38112705120** (linux and macOS) |
+| instructions and CPU a request, three trees and the oracle | `prof-trunk2.log` d56d630e…, `prof-pin2.log` 70cfda4d…, `prof-head2.log` b54c764c…, `prof-nginx2.log` bd32ab25… |
+| syscalls a request by strace count, before and after | kasumi `sys-trunk2.log` dbde6c18…, `sys-pin0.log` a62ddf1a…, `sys-pin0-n4.log` 9e7276ba…, `sys-head2.log` a31b1616…, `sys-head-n4.log` b9e63849…, `sys-nginx.log` a8956f19…, `sys-nginx-n4.log` 8929eae7…; the runner: run **38113500739** at the pin, runs **38114237409** and **38115586226** at the memo (`nomad-1: ci-sys-pin-38113500739.log` 30db25fe…, `ci-parity-38114237409.log` 16d276bf…, `ci-parity-38115586226.log` 04f827f9…) |
+| where the instructions are | `cg-pin0-keepalive-1.log` c1d28f4d…, `cg-work1-keepalive-1.log` 9e0e851c… (the first build), `cg-work3-keepalive-1.log` bfcae5bb… (the head's serving code) |
+| growth, faults, idle | `flt-trunk.log` 532226a3…, `flt-pin.log` bcac5b3f…, `flt-head2.log` 19354ccf…, `lin-head-ka.log` 883a5722…, `lin-head-close.log` b046091d…, `idle-head.log` 18565346… |
+| the memory gate's rows | at the pin: `g-gpin.log` (22/22); at the head: `g-ghead2.log` 91190944… (23/23: 0 KB, 72 KB, 0 KB, the kept file 0 KB; the capped rows 1,208 and 784 KB); CI at the head in the PR body |
+| parity, the runner, the pin against 0.2.26 | run **38112700746** (`ci-parity-38112700746.log` 697074fe…) |
+| parity, the runner, the memo against the pin, four VMs | runs **38114237409**, **38115586226**, **38116620581** (its two-hand set REFUSED, so the run is red by the tool's exit 3), **38116627609**; logs 16d276bf…, 04f827f9…, 40eacbba…, 7daaf704… |
+| parity, kasumi | `par-k4.log` adf49b94… (`309255c`'s build), `par-k4b.log` 749e8e8d… and `par-k2b.log` f122fac2… (the head's build, 2c3729e9…); REFUSED on load: `par-k2.log` 8e9ac2aa…; the loads waited on: `chainP2.loads` |
+| the #665 survey's witnesses | `probe/s12.log` d7c3dc84…, `probe/s3.log` 0428e32c…, `probe/k1.log` 2c4f08f3…; wolf-lang#678, #683 |
+| the planted break (a memo that skips validation) red in CI | run **38117753437** at c8789c3 on the deleted branch `ws58-plant`, linux and macOS: `tests/serve/file_memo.lu` on both lanes (its in-place rewrite row) and `tests/serve/file_memo_e2e.lu` on both (the same change on the keep-alive connection; the native lane at its ceiling); 322 of 327 lane-runs green, nothing else red; `nomad-1: ci-plant-38117753437.log` 04b6e64d… |
+| gauntlet GREEN at the head, strict, the whole gauntlet under `taskset -c 0-3` | `g-ghead2.log` 91190944… at `ce02889`: exit 0; SigBlk 0x10000 / SigIgn 0x7; corpus 327/327, differential 24/24, control-differential 20/20, signal 21/21, prefork 38/38, membudget 23/23, resolver 9/9, acme GREEN; 0 SKIP lines |
+| the carry test's flake is not this lane's | `loop-wt-gpin-carry_e2e.log` 89397cb0… (the pin: 22 of 25), `loop-carry_e2e.log` af2d56eb… (this branch: 22 of 25), `dbg-wt-gpin.log` 8ac47573… (the hang's sockets); lobo#72 |
+| CI green at the head on linux and macOS | in the PR body |
+
+Seen red, each by its artifact: the first work-tree gauntlet
+(`g-gwork1.log`: `tests/proxy/gateway_502.lu` [checked] at the 60 s
+ceiling on a box at load 9, green alone and green at the pin and at
+the head); the gauntlet at `c038dd5` (`g-ghead1.log` and CI run
+38114233221: `tests/serve/range_plan.lu` did not compile, a caller
+of `memo_store` this lane had not updated; fixed in `309255c`; the
+same log holds one `carry_e2e` ceiling, lobo#72).
 
 ## 5. Done-when
 
-- [ ] Branch `ws58` on origin; PR open against `trunk`, unmerged, five
+- [x] Branch `ws58` on origin; PR open against `trunk`, unmerged, five
   sections by name, commit shas as bullets, a test checklist.
-- [ ] Item 1: the pin by digest in its own commit; parity and the
-  memory gate at the pin alone.
-- [ ] Item 2: the memo; a test for each of the six changes on both
-  tiers; the bound and the eviction named; memory inside the gate; no
-  memo across a reload.
-- [ ] Item 3: the #665 survey.
-- [ ] Item 4: parity at 1, 2 and 4 hands, both shapes, kasumi and
-  three runner VMs; the ablation if keepalive at four is over 1.10.
-- [ ] Item 5: lobo#68 taken or the reason not.
-- [ ] CI green at the head on linux and macOS; the planted break (a
-  memo that skips validation) red in CI by run id.
-- [ ] The audit run from the org directory, exit status read directly;
-  worktrees gone; outputs pruned; no orphans.
+- [x] Item 1: the pin by digest in its own commit; parity and the
+  memory gate at the pin alone, before any other change.
+- [x] Item 2: the memo; a test for each change on both tiers and
+  beside the oracle; the bound and the eviction named; memory inside
+  the gate; no memo across a reload.
+- [x] Item 3: the #665 survey, a fix for the one site found and two
+  compiler issues filed with witnesses.
+- [x] Item 4: parity at 1, 2 and 4 hands, both shapes, on kasumi and
+  on four runner VMs (two hands: two VMs valid, one refused).
+  Keepalive at four hands is under 1.10 on every host, so no ablation
+  table is owed; `docs/PROFILE.md` has the per-request table anyway.
+- [x] Item 5: lobo#68 not taken; why is in §3.
+- [x] The planted break red in CI by run id (38117753437).
+- [ ] CI green at the head on linux and macOS, and the audit run from
+  the org directory with its exit status read directly; worktrees
+  gone; outputs pruned; no orphans. These come after this file's
+  last commit and are recorded in the PR body.
