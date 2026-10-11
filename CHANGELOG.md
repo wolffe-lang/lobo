@@ -1,5 +1,212 @@
 # Changelog
 
+## 0.1.3 — 2026-10-11 — a request that could end a worker now answers 400; memory stays flat; inside ten percent of nginx on linux; built with wolf 0.2.27
+
+The fourth release, and a security release: read the first section
+and upgrade. Besides the fix, a serving lobo no longer grows with the
+requests it has answered, a small static file costs one file call a
+request, and both request shapes measure inside ten percent of nginx
+on linux at four workers. The binary is built with wolf 0.2.27. The
+command line and the configuration format are 0.1.2's.
+
+### Security
+
+lobo 0.1.2 and every earlier release can lose a worker process to one
+request from a client that has not authenticated: a request whose
+bytes split a UTF-8 scalar. With `worker_processes 1` the server
+stops. lobo 0.1.3 answers such a request with 400.
+
+### Upgrading from 0.1.2
+
+1. Install 0.1.3 (below) or unpack the archive over a copy of your
+   prefix. `lobo -v` must print `lobo/0.1.3`.
+2. Test your configuration with the new binary: `lobo -t -c
+   conf/lobo.conf`. No directive was removed or renamed and none
+   changed its arguments; a configuration 0.1.2 loads, 0.1.3 loads.
+3. Stop the old server and start the new one: `lobo -s stop -c
+   conf/lobo.conf`, then `lobo -c conf/lobo.conf serve`. `-s reload`
+   re-reads the configuration in the running master and does not
+   replace the binary, and lobo has no binary-swap verb yet
+   (`upgrade` answers that it is not implemented), so the listener is
+   closed between the stop and the start and a client that connects in
+   that gap is refused.
+
+Six behaviours differ from 0.1.2, each because 0.1.2 was wrong. Check
+the first if you start lobo with `-p`:
+
+- A relative `root` or `alias` now resolves against the `-p` prefix,
+  as nginx's does. 0.1.2 resolved it against the folder lobo was
+  started from. A server started from inside its own prefix, or
+  without `-p`, sees no change.
+- `location = /name { alias path/file; }` serves the file (0.1.2
+  answered 404), with the type nginx gives it.
+- `-t -q` prints nothing on success.
+- A reload that changes `worker_shutdown_timeout` applies the new
+  value to the generation it creates; the generation being drained
+  keeps the value it was loaded with. 0.1.2 kept the value read at
+  start for ever.
+- `/metrics` gains `lobo_drained_connections_total{outcome}` and
+  `lobo_generations_retired_total`. No series was removed or renamed.
+- On macOS, `user` in a configuration loaded by an unprivileged lobo
+  warns and loads, as on linux. 0.1.2 refused it.
+
+### Install
+
+```sh
+brew install wolffe-lang/wolf/lobo     # macOS arm64
+yay -S lobo-bin                        # Arch x86-64
+```
+
+or download the archive for your host, unpack it, and run it in place:
+
+```sh
+tar -xzf lobo-0.1.3-x86_64-unknown-linux-gnu.tar.gz   # macOS: lobo-0.1.3-aarch64-apple-darwin
+cd lobo-0.1.3-x86_64-unknown-linux-gnu
+./lobo -v
+./lobo -t -c conf/lobo.conf
+./lobo -c conf/lobo.conf serve      # then: curl -i http://127.0.0.1:8080/
+```
+
+`GETTING-STARTED.md` in the archive is the learner path. The release
+workflow's last job downloads the published archive with no
+credentials on a clean runner, checks its digest, runs `lobo -v`,
+serves the stock page and compares the bytes.
+
+### `lobo -v`
+
+```
+lobo version: lobo/0.1.3 (built with wolf 0.2.27, pin 0ddda6b)
+```
+
+`wolf-toolchain.toml` pins wolf 0.2.27 (`0ddda6b`), lupin 0.1.50
+(`32b970d`) and wolf-std `14f0ab2`; the release workflow builds that
+toolchain from source on each host, and the archive's `BUILD` file
+records it.
+
+### What changed since 0.1.2
+
+- **A request whose bytes split a UTF-8 scalar is answered 400**
+  (ws60). See Security above. The connection is closed and the worker
+  keeps serving. A byte-level sweep of the request path
+  (`tests/http/scalar_fuzz.lu`, 1,881 runs on three machines) and an
+  end-to-end survival test hold it in CI.
+- **A serving lobo's memory is flat** (ws57, lobo#66). 0.1.2 kept
+  about 2 KB for every keepalive request it had answered and 10 KB
+  for every connection, and never returned them: 819 MB after 400,000
+  requests on the trunk before the fix. A pass of the serving loop
+  and a connection's step now run in regions that are freed when they
+  end; the same drive ends at 6 MB. `tools/lobo-membudget` is a gate
+  that fails on growth, where in 0.1.2 it printed a named skip.
+- **A small static file costs one file call a request** (ws58,
+  lobo#67). A regular file of at most 32 KiB that has not changed for
+  three seconds is answered from bytes each worker keeps, after one
+  `stat` that must match the file's device, inode, size, modification
+  time and status-change time. A file that is replaced, truncated,
+  rewritten, deleted or made unreadable is seen on the next request.
+  Ranges, TLS, locations under `memory_budget` and larger files are
+  read per request as before. What this leans on is under "still
+  known wrong or limited" below.
+- **`worker_shutdown_timeout` ends a streamed download on time**
+  (ws56, lobo#62). With a 2 s timeout, a download to a client
+  reading 32 KB/s was ended after 26.8 s, and one to a client that
+  read nothing was never ended. Both are ended within 2.03 s now
+  (nginx: 2.15 s).
+- **An ACME transaction no longer holds the server** (ws56, lobo#65;
+  ws55). While `cert auto` waited on a certificate authority that did
+  not answer, a static GET waited 5 s; it answers in under 10 ms. The
+  renewal daemon also waits out the backoff it prints, where it
+  retried at once into a busy authority.
+- **One process owns certificate renewal** (ws57, lobo#69). With
+  `worker_processes N` every worker ran its own renewal and placed
+  its own order for the same certificate. Worker 1 renews; the others
+  take the new certificate up from the store within a second.
+- **A relative `root` or `alias` resolves against `-p`** (ws52,
+  lobo#55), as `pid`, the logs, the control socket and the
+  certificate paths already did.
+- **Five fixes against nginx's behaviour** (ws54): an exact location
+  aliased to a file serves it (lobo#48); `-t -q` prints nothing on
+  success (lobo#49); a draining generation keeps the
+  `worker_shutdown_timeout` it was loaded with and a reload's new
+  value governs the next one (lobo#50); a finished drain stays
+  counted in `/metrics` (lobo#51); `user` loads with nginx's warning
+  on macOS when lobo is unprivileged (lobo#52).
+- **More downloads stream beside the loop** (ws51). Built with wolf
+  0.2.23, 0.1.2 wrote a small body under `memory_budget` without its
+  capped proc as soon as `cpus / 2 - 2` downloads were parked on slow
+  clients. The room is `3·max(cpus, 2) - 2` now: 4 on one cpu, 10 on
+  four, 46 on sixteen.
+- **Fewer instructions a request** (ws58, ws59). The request parser
+  and the head cut each walk their input once, and the serving step
+  reads the clock once a pass: 18,046 user instructions a keepalive
+  request became 15,866 (nginx: 13,598), on top of what the kept
+  file and wolf 0.2.27's allocator saved. System calls a request:
+  3.04 on keepalive and 6.08 with a connection per request, where
+  nginx makes 6.03 and 10.00.
+- **Built with wolf 0.2.27** (ws51, ws53, ws55, ws58; 0.1.2 was built
+  with 0.2.23). The release tier is built with wolf's mid-end on
+  (ws52). lobo's manifest now lives beside its source and declares
+  the four capabilities the code reaches, `env`, `exec`, `fs` and
+  `net`; `docs/CAPABILITIES.md` argues each (ws55).
+
+### Against nginx
+
+`docs/PARITY.md` defines the comparison: nginx ÷ lobo on one machine,
+32 concurrent clients, the median of five interleaved pairs; 1.10 or
+under is parity, and under 1.00 lobo answered more requests than
+nginx. The figures of record were taken on 2026-10-11 against nginx
+1.30.4, at four workers, on GitHub's hosted linux x86-64 runners (4
+vcpus), from the branch heads the lanes measured, built with wolf
+0.2.27:
+
+| measured on | connection-per-request | keepalive |
+|---|---|---|
+| ws58's head, four runner VMs (runs 38114237409, 38115586226, 38116620581, 38116627609) | 1.022x to 1.038x | 0.914x to 0.934x |
+| ws59's head, one runner VM (run 38122969213) | 1.030x | 0.913x |
+
+Both shapes are inside the bar on linux at four workers; 0.1.2's
+notes gave 1.151x and 1.240x there. Three things these rows are not: they are
+not a measurement of the 0.1.3 archive itself (ws60's fix landed
+after them and was not measured for speed); they are not a
+measurement at sixteen workers, where kasumi has never produced a
+valid set; and macOS has not been measured since 2026-10-02 (1.031x
+and 1.037x, built with wolf 0.2.20).
+
+### The hosts, and what is still known wrong or limited
+
+| host | archive |
+|---|---|
+| `x86_64-unknown-linux-gnu` | yes |
+| `aarch64-apple-darwin` | yes |
+| `x86_64-pc-windows-msvc` | no: wolf's release tier refuses it by name |
+| `aarch64-unknown-linux-gnu` | no: not built or tested; `tools/lobo-dist` refuses it by name |
+
+- **Open issues.** The serving loop can stop accepting its control
+  socket after a burst of closes on a loaded host (lobo#72): seen
+  once in 40 runs of one test, not reproduced in 300 loaded rounds
+  since, and not located. lobo still spends about 2,300 more user
+  instructions a request than nginx (lobo#68).
+- **Memory that is the runtime's.** An accepted connection leaves
+  about 70 bytes behind and a response served under `memory_budget`
+  about 280 (wolf-lang#661, #662). Both are fixed in wolf after
+  0.2.27 and reach lobo with its next pin.
+- **An idle lobo is not quiet.** It makes about 1,700 system calls a
+  second with no client, where nginx makes 23: the runtime's pool
+  and allocator waking on timers (wolf-lang#710).
+- **Kept files** lean on three things: the filesystem's clock and
+  the host's are one clock (a network filesystem more than three
+  seconds ahead is not), the filesystem keeps a status-change time,
+  and files are published by writing beside them and renaming. A
+  file rewritten through a shared `mmap` can be answered from bytes
+  as old as the kernel's writeback interval.
+- **Downloads beside the loop.** Past `4·max(cpus, 2) - 1` downloads
+  parked on slow clients, a new one gets its head and its body waits
+  for a worker in the runtime's pool. TLS bodies are written inline.
+- A range starting at byte N reads and drops N bytes first. Under
+  `memory_budget` a `Range` is ignored. An `If-Range` date in RFC 850
+  or asctime form is not parsed.
+- The 25 directives refused by name are listed in
+  `docs/directives.md`.
+
 ## 0.1.2 — 2026-10-04 — a slow download no longer holds the server; byte ranges; built with wolf 0.2.23
 
 The third release. A slow client downloading a large file no longer
