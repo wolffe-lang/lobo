@@ -22,13 +22,18 @@ lobo -s stop -c conf/lobo.conf
 `lobo -v` prints the version and the compiler that built it:
 
 ```
-lobo version: lobo/0.1.2 (built with wolf 0.2.23, pin 8edac3e)
+lobo version: lobo/0.1.3 (built with wolf 0.2.27, pin 0ddda6b)
 ```
 
-> **Version 0.1.2.** Static serving, reverse proxy, TLS, ACME, prefork
+> **Version 0.1.3.** Static serving, reverse proxy, TLS, ACME, prefork
 > workers, reload with connection draining, structured logs and a
 > control socket all work and are tested. It has not carried anyone's
 > production traffic. Please file what breaks.
+>
+> **0.1.2 and earlier: upgrade.** One unauthenticated request whose
+> bytes split a UTF-8 scalar can end a worker there, and with
+> `worker_processes 1` the server stops. 0.1.3 answers it with 400.
+> [`CHANGELOG.md`](CHANGELOG.md) has the upgrade steps.
 
 ## Why another web server
 
@@ -82,13 +87,14 @@ nginx does.
 written before the first measurement) as the ratio nginx ÷ lobo on one
 machine, with workers equal to cpus and 32 concurrent clients, over
 five interleaved runs; 1.10 or under is parity. The current ledger
-(nginx 1.30.4; the macOS row re-taken with wolf 0.2.20, the first four
+(nginx 1.30.4; the macOS row re-taken with wolf 0.2.20, the first five
 linux rows with wolf 0.2.27, the four below them with 0.2.26, the two
 below those with 0.2.25):
 
 | host | measured | connection-per-request | keepalive |
 |---|---|---|---|
 | macOS arm64, 18 cpus (load 2.80, other work on the box) | 2026-10-02 | 1.031x | 1.037x |
+| linux x86-64, 4 cpus (GitHub Actions runner, load 1.78; 0.1.3's tree, 0.1.2's beside it read 1.132x and 1.161x) | 2026-10-11 | 1.020x | 0.921x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.83) | 2026-10-11 | 1.022x | 0.918x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.77) | 2026-10-11 | 1.031x | 0.934x |
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.64) | 2026-10-11 | 1.038x | 0.927x |
@@ -101,7 +107,11 @@ below those with 0.2.25):
 | linux x86-64, 4 cpus (GitHub Actions runner, load 1.87, a fast VM) | 2026-10-08 | 1.166x | 1.185x |
 | linux x86-64, 16 cpus (kasumi, load 0.34–1.89, shared) | 2026-10-02 | no valid set: ~1.84x | no valid set: ~2.04x |
 
-The first four runner rows are ws58, on four VMs, with wolf 0.2.27: a
+The first runner row is the 0.1.3 release tree with 0.1.2's tree
+built beside it on the same VM: 0.1.3 answered 1.099x the requests
+0.1.2 did with a connection per request and 1.261x on keepalive.
+
+The four runner rows under it are ws58, on four VMs, with wolf 0.2.27: a
 small static file's bytes are kept and proved by one `stat` a request
 (the file is seen changed, replaced, deleted or made unreadable on
 the next request), where lobo and nginx each made four file calls.
@@ -194,13 +204,26 @@ serve linux aarch64.
 - A range starting at byte N reads and drops N bytes first. Under
   `memory_budget` a `Range` is ignored. An `If-Range` date in RFC 850
   or asctime form is not parsed.
-- Known issues: a relative `root` or `alias` resolves against the
-  start folder, not `-p` (lobo#55); an exact location aliased to a
-  file answers 404 (lobo#48); `-t -q` still prints (lobo#49); a reload
-  ignores a changed `worker_shutdown_timeout` (lobo#50); a finished
-  drain's count leaves `/metrics` with its generation (lobo#51); on
-  macOS, which has no `/proc`, `user` is refused where nginx warns and
-  loads (lobo#52).
+- **A proxied request holds its serving process.** `proxy_pass` asks
+  the upstream inside the serving loop, so while one upstream is
+  silent every other client of that process waits, up to
+  `proxy_read_timeout` (60 s by default). Run more than one worker in
+  front of an upstream.
+- **Memory that is the runtime's.** A serving lobo's memory is flat
+  except for two things wolf 0.2.27's runtime keeps: about 70 bytes
+  for each accepted connection and about 280 for each response served
+  under `memory_budget` (wolf-lang#661, #662; both fixed in wolf
+  after 0.2.27).
+- **An idle lobo is not quiet.** It makes about 1,700 system calls a
+  second with no client, where nginx makes 23 (wolf-lang#710).
+- **No binary swap.** `-s reload` re-reads the configuration and
+  keeps the running binary; a new lobo is installed by stopping the
+  old one and starting the new.
+- Known issues: the serving loop can stop accepting its control
+  socket after a burst of closes on a loaded host (lobo#72, seen
+  once, not located); lobo spends about 2,300 more user instructions
+  a request than nginx (lobo#68). The issues 0.1.2 listed here
+  (lobo#48 to #52 and #55) are fixed in 0.1.3.
 
 ## Documentation
 
