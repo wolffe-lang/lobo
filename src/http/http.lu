@@ -330,10 +330,16 @@ fn eq_fold(s: str, lower: str) -> bool {
 /// `s` starts with the already-lowercase ASCII literal `lower` under
 /// an ASCII fold. Total.
 fn starts_with_fold(s: str, lower: str) -> bool {
-    if s.len < lower.len {
+    // ws60: `s` is client bytes (a request target) held as a `str`, so
+    // the fixed-offset prefix `s[0..lower.len]` could land inside a
+    // multi-byte scalar and fault `bounds` (`[mem.str.get]`). `.get`
+    // answers `none` there instead of trapping, and a split is a
+    // non-ASCII byte in the prefix, which can never equal the
+    // already-lowercase ASCII literal — so `none` IS `false`.
+    let pre = s.get(0..lower.len) else {
         return false
     }
-    eq_fold(s[0..lower.len], lower)
+    eq_fold(pre, lower)
 }
 
 /// `s` (ASCII — the caller checked) contains the already-lowercase
@@ -349,7 +355,13 @@ fn contains_fold(s: str, needle: str) -> bool {
     var at: int = 0
     let last = s.len - needle.len
     while at <= last {
-        if eq_fold(s[at..at + needle.len], needle) {
+        // ws60: an offset `at` into client bytes may split a scalar;
+        // `.get` answers `none` rather than faulting, and a window that
+        // is not a code-point boundary holds a non-ASCII byte, so it
+        // can never fold-equal the ASCII `needle` — skip it. (Callers
+        // already gate on `is_ascii`; this is the defence in depth.)
+        let win = s.get(at..at + needle.len) else ""
+        if eq_fold(win, needle) {
             return true
         }
         at = at + 1
@@ -1034,13 +1046,23 @@ pub fn decode_chunked(body: str, limits: Limits) -> str ! {malformed, too_large}
         if guard > 1000000 {
             return malformed
         }
-        // read the chunk-size line up to CRLF
-        let rest = body[pos..n]
+        // read the chunk-size line up to CRLF. ws60: `body` is client
+        // bytes held as a `str`; a chunk whose size splits a multi-byte
+        // scalar would make a fixed-offset slice fault `bounds`
+        // (`[mem.str.get]`). Every slice here is `.get`, and a `none`
+        // (an offset that is not a code-point boundary) is a framing
+        // error → `malformed` (400), the status this byte-stream earns
+        // at this str-only pin — never a trap.
+        let rest = body.get(pos..n) else {
+            return malformed
+        }
         let nl = rest.find("\r\n") else -1
         if nl == -1 {
             return malformed
         }
-        let size_line = rest[0..nl]
+        let size_line = rest.get(0..nl) else {
+            return malformed
+        }
         let size = parse_chunk_size(size_line, limits.max_chunk_digits)?
         pos = pos + nl + 2
         if size == 0 {
@@ -1055,11 +1077,15 @@ pub fn decode_chunked(body: str, limits: Limits) -> str ! {malformed, too_large}
         if pos + size + 2 > n {
             return malformed
         }
-        let chunk = body[pos..pos + size]
+        let chunk = body.get(pos..pos + size) else {
+            return malformed
+        }
         out = "{out}{chunk}"
         pos = pos + size
         // the CRLF after the chunk data
-        let sep = body[pos..pos + 2]
+        let sep = body.get(pos..pos + 2) else {
+            return malformed
+        }
         if sep != "\r\n" {
             return malformed
         }
@@ -1102,43 +1128,37 @@ pub fn percent_decode(s: str) -> str ! {malformed, invalid} {
     if !has_pct {
         return s
     }
+    // ws60: walk the BYTES, never index the `str`. A target may carry
+    // raw non-ASCII octets, so `s[i..i+1]` or the hex slices `s[i+1..
+    // i+2]` could land inside a multi-byte scalar and fault `bounds`
+    // (`[mem.str.get]`) — the `%`-escape trap. `%XX` is three ASCII
+    // bytes read by value; every other byte is emitted verbatim; and
+    // `str_from_utf8` validates the reassembled bytes exactly once, as
+    // before. Byte-identical output to the index walk on every input
+    // it did not trap on.
+    var src = List[byte]()
+    for b in s.bytes() {
+        (mut src).push(b)
+    }
     var raw = List[byte]()
-    let n = s.len
+    let n = src.len
     var i: int = 0
     while i < n {
-        let ch = s[i..i + 1]
-        var b: int = 0
-        for bb_raw in ch.bytes() {
-            let bb = bb_raw as int
-            b = bb
-        }
+        let b = src[i] as int
         if b == 37 {
             // `%` — need two hex digits following
             if i + 3 > n {
                 return malformed
             }
-            let h1 = s[i + 1..i + 2]
-            let h2 = s[i + 2..i + 3]
-            var d1: int = -1
-            var d2: int = -1
-            for bb_raw in h1.bytes() {
-                let bb = bb_raw as int
-                d1 = hex_val(bb)
-            }
-            for bb_raw in h2.bytes() {
-                let bb = bb_raw as int
-                d2 = hex_val(bb)
-            }
+            let d1 = hex_val(src[i + 1] as int)
+            let d2 = hex_val(src[i + 2] as int)
             if d1 < 0 || d2 < 0 {
                 return malformed
             }
             (mut raw).push((d1 * 16 + d2) as byte)
             i = i + 3
         } else {
-            // a multi-byte code point: push each of its bytes verbatim
-            for bb in ch.bytes() {
-                (mut raw).push(bb)
-            }
+            (mut raw).push(src[i])
             i = i + 1
         }
     }
