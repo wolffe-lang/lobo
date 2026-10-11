@@ -1,0 +1,138 @@
+//! check: run(exit=0, stdout="fuzz: no trap over 1881 request-path runs\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: http config
+//!
+//! ws60 (the split scalar) — THE GATE. A deterministic byte-level
+//! sweep over the request-path functions that slice client bytes. For
+//! every seed and every byte offset, a two-, three- and four-byte
+//! scalar is spliced in, so a slice the parser computes at that offset
+//! lands inside the scalar. The property under test is: NO INPUT
+//! TRAPS, and every input answers a well-formed row (a `Request` or a
+//! named status). Completing this program at all is the no-trap proof
+//! (a trap aborts the lane); the printed tally pins the coverage.
+//! Held on native, checked and lupin — the three run it identically
+//! (the functions are pure), so a divergence is a cross-machine bug.
+//!
+//! The parser's input is always valid UTF-8 (lobo's socket read gates
+//! on `str_from_utf8`), so the mutations here are whole scalars
+//! spliced at boundaries; the read-boundary / lone-byte dimension (a
+//! socket read that cuts a scalar) is the 400 at that gate and is
+//! covered by the e2e. The seeds exercise the absolute-form target
+//! probe, the percent-decoder and the chunk decoder — every slice the
+//! census named.
+
+use http
+
+fn lim() -> http.Limits {
+    http.default_limits()
+}
+
+// the three multi-byte scalars (2, 3, 4 bytes)
+fn scalars() -> List[str] {
+    var s = List[str]()
+    (mut s).push("\u{e9}")
+    (mut s).push("\u{20ac}")
+    (mut s).push("\u{1d11e}")
+    s
+}
+
+// splice `sc` in at byte offset `k` of an ASCII seed (every offset of
+// an ASCII seed is a code-point boundary, so the splice is well-formed
+// and the inserted scalar sits across offset `k`)
+fn splice(seed: str, k: int, sc: str) -> str {
+    let a = seed.get(0..k) else seed
+    let b = seed.get(k..seed.len) else ""
+    "{a}{sc}{b}"
+}
+
+fn head_ok(h: str) -> int {
+    let _r = http.parse_request(h, lim()) else |_| {
+        return 1
+    }
+    1
+}
+
+fn pd_ok(t: str) -> int {
+    let _d = http.percent_decode(t) else |_| {
+        return 1
+    }
+    1
+}
+
+fn dc_ok(b: str) -> int {
+    let _d = http.decode_chunked(b, lim()) else |_| {
+        return 1
+    }
+    1
+}
+
+fn main() {
+    let scs = scalars()
+
+    // heads for parse_request (the request line, the framing headers,
+    // the absolute-form target probe)
+    var heads = List[str]()
+    (mut heads).push("GET http://host/a/b HTTP/1.1\r\nHost: host\r\nConnection: keep-alive\r\n\r\n")
+    (mut heads).push("GET /a/b?q=1 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    (mut heads).push("POST /p HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
+    (mut heads).push("POST /p HTTP/1.1\r\nHost: x\r\nContent-Length: 4\r\n\r\n")
+    (mut heads).push("GET https://h:8080/x HTTP/1.0\r\nHost: h\r\n\r\n")
+
+    // targets for percent_decode
+    var tgts = List[str]()
+    (mut tgts).push("/a%41b/c%2f")
+    (mut tgts).push("/x/y/z")
+    (mut tgts).push("/%2e%2e/etc")
+
+    // bodies for decode_chunked
+    var bods = List[str]()
+    (mut bods).push("3\r\nabc\r\n0\r\n\r\n")
+    (mut bods).push("a\r\n0123456789\r\n0\r\n\r\n")
+
+    var runs: int = 0
+
+    for sc in scs {
+        for h in heads {
+            let n = h.len
+            var k: int = 0
+            while k <= n {
+                runs = runs + head_ok(splice(h, k, sc))
+                k = k + 1
+            }
+        }
+        for t in tgts {
+            let n = t.len
+            var k: int = 0
+            while k <= n {
+                runs = runs + pd_ok(splice(t, k, sc))
+                k = k + 1
+            }
+        }
+        for b in bods {
+            let n = b.len
+            var k: int = 0
+            while k <= n {
+                runs = runs + dc_ok(splice(b, k, sc))
+                k = k + 1
+            }
+        }
+    }
+
+    // truncation at every offset of each spliced head (a short head is
+    // a valid prefix str; the parser must still answer a row)
+    for sc in scs {
+        for h in heads {
+            let m = splice(h, 5, sc)
+            let n = m.len
+            var k: int = 0
+            while k <= n {
+                let t = m.get(0..k) else ""
+                runs = runs + head_ok(t)
+                k = k + 1
+            }
+        }
+    }
+
+    print("fuzz: no trap over {runs} request-path runs")
+}

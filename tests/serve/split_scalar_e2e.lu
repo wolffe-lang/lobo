@@ -1,0 +1,134 @@
+//! check: run(exit=0, stdout="s1=closed-or-4xx\ns2=closed-or-4xx\ns3=closed-or-4xx\ns4=closed-or-4xx\nsurvived=yes\n")
+//! phase: run
+//! lanes: native
+//! conforms: conc.task.spawn, err.union, err.propagate
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws60 (the split scalar) — the e2e survival check. A crafted request
+//! whose bytes split a UTF-8 scalar used to fault `bounds` and kill the
+//! serving task (in the real server, the worker process; the master
+//! then logs `worker-exited` and respawns). Here one `serve_conn` task
+//! handles a sequence of connections on one listener: each crafted
+//! shape must get a well-formed reply or a clean close (never a trap
+//! that takes the task down), and a plain request AFTER all four must
+//! still be served — the in-process analogue of "the worker's pid is
+//! unchanged." (The real-process pid-unchanged evidence is the lane's
+//! probe logs; a trap would end this task and the final request would
+//! never be answered.)
+
+use config
+use serve
+
+fn one(cli: int, req: List[byte]) -> str {
+    net_write_bytes(cli, req) else |_| {
+        return "write-failed"
+    }
+    var reply = ""
+    var more = true
+    while more {
+        let piece = net_read(cli, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        }
+        reply = "{reply}{piece}"
+    }
+    // a well-formed 4xx or a clean close (empty) are both "handled
+    // without a trap"; a trap would have killed the task and this
+    // connection would hang to the deadline instead
+    if reply.is_empty() {
+        return "closed-or-4xx"
+    }
+    let eol = reply.find("\r\n") else reply.len
+    let line = reply.get(0..eol) else ""
+    if line.contains("400") ||
+        line.contains("404") ||
+        line.contains("414") ||
+        line.contains("501") {
+        return "closed-or-4xx"
+    }
+    "unexpected:{line}"
+}
+
+// the crafted shapes as raw bytes (café-style valid scalars split by a
+// slice offset): an absolute-form target, a percent-escape path, a
+// content-length body, a chunked body
+fn shapes() -> List[List[byte]] {
+    var out = List[List[byte]]()
+    (mut out).push(bytes_of("GET hxxxxx\u{e9} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+    (mut out).push(bytes_of("GET /\u{e9}%41 HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"))
+    (mut out).push(
+        bytes_of(
+            "POST / HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nConnection: close\r\n\r\n\u{e9}",
+        ),
+    )
+    (mut out).push(
+        bytes_of(
+            "POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n1\r\n\u{e9}\r\n0\r\n\r\n",
+        ),
+    )
+    out
+}
+
+fn bytes_of(s: str) -> List[byte] {
+    var out = List[byte]()
+    for b in s.bytes() {
+        (mut out).push(b)
+    }
+    out
+}
+
+fn main() -> !int {
+    let root = "ws60_e2e"
+    fs_remove_dir_all(root) else |_| {}
+    fs_create_dir_all("{root}/www")?
+    fs_write_text("{root}/www/index.html", "ok\n")?
+    let src = "http {{\n  types {{ text/html html; }}\n  server {{ root ws60_e2e/www; index index.html; }}\n}}\n"
+    let c = config.parse_str(src, "t.conf")
+    let opts = serve.default_opts()
+    let lim = serve.resolve_limits(c)
+
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+
+    let shp = shapes()
+    // five connections: the four crafted shapes, then one clean request
+    scope s {
+        s.spawn(fn() {
+            var i: int = 0
+            while i < 5 {
+                let conn = net_accept(l) else |_| -1
+                if conn >= 0 {
+                    serve.serve_conn(conn, c, opts, lim, port)
+                }
+                i = i + 1
+            }
+        })
+        var idx: int = 0
+        for req in shp {
+            let cli = net_connect("127.0.0.1:{port}")?
+            net_deadline(cli, 3000)?
+            print("s{idx + 1}={one(cli, req)}")
+            net_close(cli) else |_| {}
+            idx = idx + 1
+        }
+        // the survivor: a clean request on a fresh connection
+        let cli = net_connect("127.0.0.1:{port}")?
+        net_deadline(cli, 3000)?
+        let r = one(
+            cli,
+            bytes_of("GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"),
+        )
+        var ok = "no"
+        if r == "unexpected:HTTP/1.1 200 OK" {
+            ok = "yes"
+        }
+        print("survived={ok}")
+        net_close(cli) else |_| {}
+    }
+    net_close(l) else |_| {}
+    fs_remove_dir_all(root) else |_| {}
+    0
+}

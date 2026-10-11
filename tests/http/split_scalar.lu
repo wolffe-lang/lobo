@@ -1,0 +1,98 @@
+//! check: run(exit=0, stdout="abs2=ok\nabs3=ok\nabsok=ok\npct2=ok:/éA\npct3=ok:/€A\npct4=ok:/𝄞A\npctraw=ok:/é\npctok=ok:/aAb\npctbad=malformed\nchunk2=malformed\nchunk3=malformed\nchunkok=ok\nconn=ok\nte=unimplemented\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: http config
+//!
+//! ws60 (the split scalar): a request whose bytes are valid UTF-8 but
+//! whose multi-byte scalar straddles a byte offset the request path
+//! slices at used to fault `bounds` and kill the worker. The parser
+//! holds client bytes as a `str` (valid UTF-8 by `sock_read`'s gate),
+//! so the inputs here are valid `str` values; the fault was a slice at
+//! a non-code-point-boundary (`[mem.str.get]`). Each case must now
+//! answer a NAMED row (never trap) and agree on all three lanes. The
+//! é below is U+00E9 (two bytes); € is U+20AC (three); 𝄞 is U+1D11E
+//! (four).
+
+use http
+
+fn lim() -> http.Limits {
+    http.default_limits()
+}
+
+/// parse_request's outcome as a tag, or "ok" for a parsed request.
+fn ph(h: str) -> str {
+    let _r = http.parse_request(h, lim()) else |e| match e {
+        malformed => {
+            return "malformed"
+        },
+        uri_too_long => {
+            return "uri_too_long"
+        },
+        too_large => {
+            return "too_large"
+        },
+        unimplemented => {
+            return "unimplemented"
+        },
+    }
+    "ok"
+}
+
+/// percent_decode's outcome as a tag, or the decoded value.
+fn pd(t: str) -> str {
+    let d = http.percent_decode(t) else |e| match e {
+        malformed => {
+            return "malformed"
+        },
+        invalid => {
+            return "invalid"
+        },
+    }
+    "ok:{d}"
+}
+
+/// decode_chunked's outcome as a tag, or "ok".
+fn dc(b: str) -> str {
+    let _d = http.decode_chunked(b, lim()) else |e| match e {
+        malformed => {
+            return "malformed"
+        },
+        too_large => {
+            return "too_large"
+        },
+    }
+    "ok"
+}
+
+fn main() {
+    // (1) the request target in absolute-form, a scalar straddling the
+    // fixed `http://` prefix offset — origin-form routing, parses
+    print("abs2={ph("GET hxxxxx\u{e9} HTTP/1.1\r\nHost: x\r\n\r\n")}")
+    print("abs3={ph("GET hxxxxx\u{20ac} HTTP/1.1\r\nHost: x\r\n\r\n")}")
+    // a real absolute-form request still parses
+    print("absok={ph("GET http://h/x HTTP/1.1\r\nHost: h\r\n\r\n")}")
+
+    // (2) a %-escape path with a raw scalar before the escape
+    print("pct2={pd("/\u{e9}%41")}")
+    print("pct3={pd("/\u{20ac}%41")}")
+    print("pct4={pd("/\u{1d11e}%41")}")
+    // a path with a raw scalar and no escape decodes to itself
+    print("pctraw={pd("/\u{e9}")}")
+    // a well-formed escape still decodes
+    print("pctok={pd("/a%41b")}")
+    // a truncated escape is still malformed
+    print("pctbad={pd("/a%4")}")
+
+    // (3) a chunked body whose chunk size falls inside a scalar: a
+    // 1-byte chunk over a two-byte scalar, a 2-byte chunk over a
+    // three-byte scalar — the data slice straddles the scalar
+    print("chunk2={dc("1\r\n\u{e9}\r\n0\r\n\r\n")}")
+    print("chunk3={dc("2\r\n\u{20ac}\r\n0\r\n\r\n")}")
+    // a well-formed single-byte-per-char chunk still decodes
+    print("chunkok={dc("3\r\nabc\r\n0\r\n\r\n")}")
+
+    // the framing-header whole-value compares over a non-ASCII value
+    // (Connection / Transfer-Encoding) — parse, never trap
+    print("conn={ph("GET / HTTP/1.1\r\nHost: x\r\nConnection: clos\u{e9}\r\n\r\n")}")
+    print("te={ph("POST / HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunke\u{e9}\r\n\r\n")}")
+}
