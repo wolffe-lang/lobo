@@ -98,7 +98,7 @@ fn main() -> !int {
     )
     assert(serve.next_boundary(ft, mut fu) == "00000000000000000002", "then counts")
     assert(fu.bounds == 2 && serve.memo_dirty(fu), "the request noted two boundaries")
-    serve.memo_store(mut ft, -1, "", fu.bounds, false, "", 0, 0, 0, false, "", "")
+    serve.memo_store(mut ft, -1, "", fu.bounds, false, 0, "", 0, 0, 0, false, "", "")
     var fu2 = serve.memo_upd_new()
     assert(
         serve.next_boundary(ft, mut fu2) == "00000000000000000003",
