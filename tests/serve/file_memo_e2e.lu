@@ -1,0 +1,401 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! ws58 (lobo#67): THE FILE MEMO, END TO END, ON BOTH TIERS, BESIDE
+//! THE ORACLE. lobo keeps a small static file's bytes and proves them
+//! with one `fs_stat` a request (src/serve/serve.lu's block comment).
+//! A memo is only as good as what it notices, so this test changes a
+//! file between two requests in every way a file can change and asks
+//! for it again AT ONCE:
+//!
+//!   rewritten in place at the same size · truncated · grown ·
+//!   replaced by a rename (same size, new inode) · deleted (404) ·
+//!   made unreadable (403) and readable again · swapped for a symlink
+//!   to another file
+//!
+//! and again three seconds later, when the new file is old enough to
+//! be kept (and then changed once more). The same list of requests and
+//! the same expected answers run against THREE servers: the pinned
+//! nginx (the oracle, at its defaults, which keeps nothing), lobo's
+//! debug tier and lobo's release tier. Two of the changes ride ONE
+//! keep-alive connection (lobo#67's own row: a file replaced between
+//! two requests on one connection). HEAD and a matching
+//! If-Modified-Since are asked of a kept file too (neither opens it).
+//! On the lobo tiers a reload that moves `root` to another tree with
+//! the same file names answers from the new tree at once.
+//!
+//! Every file is three seconds old before its first request, because
+//! the memo admits nothing younger (`file_memo_age_ms`); each file is
+//! then asked for three times — a miss that leaves a mark, the fill,
+//! a hit — before it is changed. tests/serve/file_memo.lu holds the
+//! table's states one by one. Loopback only, OS-chosen ports, scratch
+//! cleared at START, every server stopped and waited for.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Send `reqtext` on the open connection `c` and read until the reply
+/// carries `until` (or the peer closes). Rows: `io`.
+fn ask_on(c: int, reqtext: str, until: str) -> str ! {io} {
+    net_write(c, reqtext) else |_| {
+        return io
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+            if !until.is_empty() && buf.contains(until) {
+                reading = false
+            }
+        }
+    }
+    buf
+}
+
+/// One request on a connection of its own, read to the close.
+/// Rows: `io`.
+fn ask(port: int, reqtext: str) -> str ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return io
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    let r = ask_on(c, reqtext, "") else |_| {
+        net_close(c) else |_| {}
+        return io
+    }
+    net_close(c) else |_| {}
+    r
+}
+
+fn get(port: int, path: str) -> str ! {io} {
+    ask(port, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+}
+
+/// The value of header `name` in a reply ("" when absent). Total.
+fn hdr(reply: str, name: str) -> str {
+    let key = "\r\n{name}: "
+    let at = reply.find(key) else -1
+    if at < 0 {
+        return ""
+    }
+    let from = at + key.len
+    let rest = reply[from..reply.len]
+    let end = rest.find("\r\n") else -1
+    if end < 0 {
+        return rest
+    }
+    rest[0..end]
+}
+
+/// The body of a reply: everything after the blank line. Total.
+fn body_of(reply: str) -> str {
+    let at = reply.find("\r\n\r\n") else -1
+    if at < 0 {
+        return ""
+    }
+    reply[at + 4..reply.len]
+}
+
+/// Assert that GET `path` answers 200 with exactly `want`, `times`
+/// times over. Rows: `io`.
+fn want200(who: str, port: int, path: str, want: str, times: int, why: str) -> () ! {io} {
+    var i: int = 0
+    while i < times {
+        let r = get(port, path)?
+        assert(r.starts_with("HTTP/1.1 200 OK"), "{who}: {path} ({why}, ask {i}) is 200: {r}")
+        assert(body_of(r) == want, "{who}: {path} ({why}, ask {i}) body is the file's: {r}")
+        assert(
+            hdr(r, "Content-Length") == "{want.len}",
+            "{who}: {path} ({why}, ask {i}) length: {r}",
+        )
+        i = i + 1
+    }
+}
+
+/// Assert that GET `path` answers status `code`. Rows: `io`.
+fn want_status(who: str, port: int, path: str, code: str, why: str) -> () ! {io} {
+    let r = get(port, path)?
+    assert(r.starts_with("HTTP/1.1 {code}"), "{who}: {path} ({why}) is {code}: {r}")
+}
+
+/// Run a host tool and wait for it. Rows: io.
+fn tool(argv: List[str]) -> () ! {io} {
+    let ch = os_spawn(argv) else |_| {
+        return io
+    }
+    let code = os_wait(ch) else |_| -1
+    if code != 0 {
+        return io
+    }
+}
+
+/// Wait until `port` answers a request. Total.
+fn wait_port(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let r = get(port, "/other.html") else |_| ""
+        if r.starts_with("HTTP/1.1 ") {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// The file `n` as first written. Total.
+fn orig(n: str) -> str {
+    "FILE-{n}-ORIGINAL<END>\n"
+}
+
+/// The whole list against one server: `who` names it in a failure,
+/// `kind` 0 is the oracle and 1 a lobo, `bin` its binary. Rows: io.
+fn rows(who: str, kind: int, bin: str) -> () ! {io} {
+    let d = "ws58_fm_e2e_{who}"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w") else |_| {
+        return io
+    }
+    fs_create_dir_all("{d}/w2") else |_| {
+        return io
+    }
+    fs_create_dir_all("{d}/logs") else |_| {
+        return io
+    }
+    let names = ["same", "trunc", "grow", "repl", "gone", "mode", "link", "other", "again"]
+    for n in names {
+        fs_write_text("{d}/w/{n}.html", orig(n)) else |_| {
+            return io
+        }
+    }
+    fs_write_text("{d}/w2/same.html", "ROOT-TWO-same<END>\n") else |_| {
+        return io
+    }
+    let root = os_cwd() else |_| "."
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    var argv = List[str]()
+    (mut argv).push(bin)
+    if kind == 0 {
+        let conf = "daemon off;\nmaster_process off;\npid {root}/{d}/ng.pid;\nerror_log {root}/{d}/logs/ng.err;\nevents {{}}\nhttp {{\n  access_log off;\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}/{d}/w; }}\n}}\n"
+        fs_write_text("{d}/ng.conf", conf) else |_| {
+            return io
+        }
+        (mut argv).push("-p")
+        (mut argv).push("{root}/{d}/")
+        (mut argv).push("-c")
+        (mut argv).push("{root}/{d}/ng.conf")
+    } else {
+        let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+        fs_write_text("{d}/lobo.conf", conf) else |_| {
+            return io
+        }
+        (mut argv).push("serve")
+        (mut argv).push("-p")
+        (mut argv).push(".")
+        (mut argv).push("-c")
+        (mut argv).push("{d}/lobo.conf")
+    }
+    // the memo admits nothing younger than three seconds
+    time_sleep_ms(3300)
+    let child = os_spawn(argv) else |_| {
+        assert(false, "{who}: os_spawn failed — is {bin} there?")
+        0
+    }
+    if !wait_port(hp) {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        assert(false, "{who}: the server never answered")
+    }
+
+    // 0. every file three times: a miss, the fill, a hit
+    for n in names {
+        want200(who, hp, "/{n}.html", orig(n), 3, "first asks")?
+    }
+
+    // one keep-alive connection, held across two changes
+    let kc = net_connect("127.0.0.1:{hp}") else |_| {
+        return io
+    }
+    net_deadline(kc, 3000) else |_| {}
+    let k1 = ask_on(kc, "GET /same.html HTTP/1.1\r\nHost: x\r\n\r\n", "<END>\n")?
+    assert(body_of(k1) == orig("same"), "{who}: keep-alive, before the change: {k1}")
+
+    // a kept file answers HEAD and a matching If-Modified-Since with
+    // no body
+    let rh = ask(hp, "HEAD /other.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?
+    assert(rh.starts_with("HTTP/1.1 200 OK"), "{who}: HEAD is 200: {rh}")
+    assert(
+        hdr(rh, "Content-Length") == "{orig("other").len}",
+        "{who}: HEAD carries the length: {rh}",
+    )
+    assert(body_of(rh).is_empty(), "{who}: HEAD has no body: {rh}")
+    let lm = hdr(rh, "Last-Modified")
+    let ri = ask(
+        hp,
+        "GET /other.html HTTP/1.1\r\nHost: x\r\nIf-Modified-Since: {lm}\r\nConnection: close\r\n\r\n",
+    )?
+    assert(ri.starts_with("HTTP/1.1 304 Not Modified"), "{who}: a matching IMS is 304: {ri}")
+
+    // 1. rewritten in place at the same size — asked on the SAME
+    //    connection that was just answered from the old bytes
+    let same2 = "FILE-same-REPLACED<END>\n"
+    assert(same2.len == orig("same").len, "the rewrite keeps the size")
+    fs_write_text("{d}/w/same.html", same2) else |_| {
+        return io
+    }
+    let k2 = ask_on(kc, "GET /same.html HTTP/1.1\r\nHost: x\r\n\r\n", "<END>\n")?
+    assert(k2.starts_with("HTTP/1.1 200 OK"), "{who}: keep-alive after an in-place rewrite: {k2}")
+    assert(
+        body_of(k2) == same2,
+        "{who}: rewritten in place at one size, the new bytes at once: {k2}",
+    )
+    want200(who, hp, "/same.html", same2, 1, "rewritten in place")?
+
+    // 2. replaced by a rename: a new inode, the same size — on the
+    //    same connection again
+    let repl2 = "FILE-repl-RENAMED!<END>\n"
+    assert(repl2.len == orig("repl").len, "the replacement keeps the size")
+    let k3 = ask_on(kc, "GET /repl.html HTTP/1.1\r\nHost: x\r\n\r\n", "<END>\n")?
+    assert(body_of(k3) == orig("repl"), "{who}: keep-alive, repl before: {k3}")
+    fs_write_text("{d}/w/repl.new", repl2) else |_| {
+        return io
+    }
+    fs_rename("{d}/w/repl.new", "{d}/w/repl.html") else |_| {
+        return io
+    }
+    let k4 = ask_on(kc, "GET /repl.html HTTP/1.1\r\nHost: x\r\n\r\n", "<END>\n")?
+    assert(body_of(k4) == repl2, "{who}: replaced by a rename, the new bytes at once: {k4}")
+    net_close(kc) else |_| {}
+    want200(who, hp, "/repl.html", repl2, 1, "replaced")?
+
+    // 3. truncated
+    let trunc2 = "T<END>\n"
+    fs_write_text("{d}/w/trunc.html", trunc2) else |_| {
+        return io
+    }
+    want200(who, hp, "/trunc.html", trunc2, 1, "truncated")?
+
+    // 4. grown
+    let grow2 = "FILE-grow-ORIGINAL-AND-A-GOOD-DEAL-MORE<END>\n"
+    fs_write_text("{d}/w/grow.html", grow2) else |_| {
+        return io
+    }
+    want200(who, hp, "/grow.html", grow2, 1, "grown")?
+
+    // 5. deleted
+    fs_remove("{d}/w/gone.html") else |_| {
+        return io
+    }
+    want_status(who, hp, "/gone.html", "404", "deleted")?
+
+    // 6. made unreadable, then readable again
+    tool(["chmod", "000", "{d}/w/mode.html"])?
+    let probe = fs_read_text("{d}/w/mode.html") else |_| "refused"
+    assert(probe == "refused", "this test cannot run as a user who reads through mode 000")
+    want_status(who, hp, "/mode.html", "403", "made unreadable")?
+    tool(["chmod", "644", "{d}/w/mode.html"])?
+    want200(who, hp, "/mode.html", orig("mode"), 1, "readable again")?
+
+    // 7. swapped for a symlink to another file
+    fs_remove("{d}/w/link.html") else |_| {
+        return io
+    }
+    tool(["ln", "-s", "other.html", "{d}/w/link.html"])?
+    want200(who, hp, "/link.html", orig("other"), 1, "swapped for a symlink")?
+
+    // 8. three seconds on the changed files are old enough to be kept:
+    //    each answers its NEW truth three times over (a mark is there
+    //    already, so: the fill, a hit, a hit)
+    time_sleep_ms(3300)
+    want200(who, hp, "/same.html", same2, 3, "kept again")?
+    want200(who, hp, "/repl.html", repl2, 3, "kept again")?
+    want200(who, hp, "/trunc.html", trunc2, 3, "kept again")?
+    want200(who, hp, "/grow.html", grow2, 3, "kept again")?
+    want200(who, hp, "/mode.html", orig("mode"), 3, "kept again")?
+    want200(who, hp, "/link.html", orig("other"), 3, "kept again")?
+    want_status(who, hp, "/gone.html", "404", "still deleted")?
+
+    // 9. and a kept-again file that changes once more is seen once more
+    let same3 = "FILE-same-THIRD!!!<END>\n"
+    assert(same3.len == same2.len, "the third write keeps the size")
+    fs_write_text("{d}/w/same.html", same3) else |_| {
+        return io
+    }
+    want200(who, hp, "/same.html", same3, 2, "changed once more")?
+    // the link now points somewhere else
+    fs_remove("{d}/w/link.html") else |_| {
+        return io
+    }
+    tool(["ln", "-s", "again.html", "{d}/w/link.html"])?
+    want200(who, hp, "/link.html", orig("again"), 2, "the link re-pointed")?
+
+    if kind == 0 {
+        os_kill(child) else |_| {}
+        let _ = os_wait(child) else |_| 0
+        fs_remove_dir_all(d) else |_| {}
+        return
+    }
+
+    // 10. lobo only: a reload that moves `root` — the same name under
+    //     another tree answers from the new tree at once (the oracle's
+    //     reload is tools/lobo-control-differential's row 1)
+    let conf2 = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w2; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf2) else |_| {
+        return io
+    }
+    let rr = shell.control_send(ep, "reload") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "{who}: control reload failed")
+        ""
+    }
+    assert(!rr.is_empty(), "{who}: the reload answered")
+    want200(who, hp, "/same.html", "ROOT-TWO-same<END>\n", 3, "after a reload that moved root")?
+
+    let rq = shell.control_send(ep, "quit") else |_| {
+        os_kill(child) else |_| {}
+        assert(false, "{who}: control quit failed")
+        ""
+    }
+    assert(rq.contains("draining then exiting"), "{who}: quit announces: {rq}")
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "{who}: lobo exited 0 (got {code})")
+    fs_remove_dir_all(d) else |_| {}
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let oracle = "{root}/tests/differential/bin/nginx"
+    assert(
+        fs_exists(oracle),
+        "the pinned oracle is at tests/differential/bin/nginx (docs/DIFFERENTIAL.md)",
+    )
+    rows("nginx", 0, oracle)?
+    rows("debug", 1, "{root}/target/lobo-debug")?
+    rows("release", 1, "{root}/target/lobo-release")?
+    0
+}

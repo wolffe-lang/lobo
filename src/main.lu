@@ -1878,14 +1878,23 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
     // and the table starts empty, when it has grown past `memo_cap()`.
     // `pass` is one pass of the loop; everything a pass allocates dies
     // with it. A connection step has a region of its own inside it.
+    // ws58 (lobo#67): the memo table also holds the file memo — small
+    // files' bytes, each proved by one `fs_stat` a request
+    // (serve.lu's block comment has the rules). It lives and dies
+    // with `memo`: let go at the cap, and at a reload that took
+    // (`memo_drop`), so no entry outlives the configuration it was
+    // filled under.
     let life = region()
     var running = true
     var quitting = false
+    var memo_drop = false
     while running {
+        memo_drop = false
         region memo {
             var ft = serve.file_kinds_new()
             ft.boundary = bound_ctr
-            while running && region_bytes(memo) < memo_cap() {
+            serve.file_memo_on(mut ft)
+            while running && !memo_drop && region_bytes(memo) < memo_cap() {
                 region pass {
                     let now = time_unix_ms()
                     // this pass's ACME events off the stream pipe, oldest first
@@ -2268,6 +2277,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                 note = ng.note
                                 if ng.ok && ng.gen > curgen {
                                     took = true
+                                    memo_drop = true
                                     newgen = ng.gen
                                     let nhash = shell.conf_hash(ng.conf)
                                     newhash = nhash
@@ -2809,6 +2819,62 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                                         )
                                     }
                                     bound_ctr = bound_ctr + st.rare[0].memo.bounds
+                                }
+                                // ws58 (lobo#67): the file memo's note — a seen
+                                // mark, a fill or a drop. The path and the body's
+                                // bytes are built here, inside `in memo`, so the
+                                // table never holds a byte of the step's region
+                                // (wolf-lang#660: the checker would not refuse it)
+                                if rare && st.rare[0].memo.f_op != 0 {
+                                    let fop = st.rare[0].memo.f_op
+                                    let fill = fop == 2 &&
+                                        st.rare[0].memo.f_id.len >= 18 &&
+                                        st.rare[0].memo.f_body.len == 1
+                                    if fill {
+                                        in memo {
+                                            var fb = List[byte]()
+                                            for b in st.rare[0].memo.f_body[0] {
+                                                (mut fb).push(b)
+                                            }
+                                            serve.file_memo_store(
+                                                mut ft,
+                                                2,
+                                                st.rare[0].memo.f_slot,
+                                                st.rare[0].memo.f_mark,
+                                                st.rare[0].memo.f_now,
+                                                "{st.rare[0].memo.f_path}",
+                                                st.rare[0].memo.f_id[9],
+                                                st.rare[0].memo.f_id[10],
+                                                st.rare[0].memo.f_id[1],
+                                                st.rare[0].memo.f_id[2],
+                                                st.rare[0].memo.f_id[14],
+                                                st.rare[0].memo.f_id[15],
+                                                st.rare[0].memo.f_id[16],
+                                                st.rare[0].memo.f_id[17],
+                                                take fb,
+                                            )
+                                        }
+                                    } else if fop != 2 {
+                                        in memo {
+                                            serve.file_memo_store(
+                                                mut ft,
+                                                fop,
+                                                st.rare[0].memo.f_slot,
+                                                st.rare[0].memo.f_mark,
+                                                st.rare[0].memo.f_now,
+                                                "",
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                0,
+                                                take List[byte](),
+                                            )
+                                        }
+                                    }
                                 }
                                 // the resolver: a proxied step that had to resolve a
                                 // name itself hands its table back whole (one table
