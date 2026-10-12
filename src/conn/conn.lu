@@ -77,70 +77,20 @@ pub fn truncated(cn: Conn) -> bool {
     cn.sess.trunc
 }
 
-/// Read up to `max` bytes off the socket `fd` as a str, with
-/// `net_read`'s rows (`closed`, `timeout`, `utf8`, `io`) and its
-/// answer for every input, built from `net_read_bytes` and
-/// `str_from_utf8` (ws57, lobo#66). `net_read`'s own bytes are placed
-/// in the process root whatever region is open (wolf 0.2.26's
-/// runtime; wolf-lang#374), so a read made inside a region was never
-/// returned with it: about a request head of memory per request, kept
-/// for the life of the process. These bytes are built in the caller's
-/// region.
-///
-/// ws58, 2026-10-11: STILL NEEDED at wolf 0.2.27. The fix is on
-/// wolf-lang trunk (s228, `3d0a06b0`: `net_read` copies into the
-/// ambient region) and is not in 0.2.27; the pin after this one makes
-/// this function `net_read` again (s228 measured lobo's membudget row
-/// at 4 kB with `net_read` put back on that runtime). Remove it then,
-/// with the membudget gate as the witness.
-/// (W0602 allowed: the row mirrors net_read exactly (closed/timeout/utf8/io).)
-#[allow(w0602)]
-pub fn sock_read(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
-    var code = 0
-    let b = net_read_bytes(fd, max) else |e| match e {
-        closed => {
-            code = 1
-            List[byte]()
-        },
-        timeout => {
-            code = 2
-            List[byte]()
-        },
-        io => {
-            code = 3
-            List[byte]()
-        },
-    }
-    if code == 1 {
-        return closed
-    }
-    if code == 2 {
-        return timeout
-    }
-    if code == 3 {
-        return io
-    }
-    if b.len == 0 {
-        return ""
-    }
-    str_from_utf8(b) else |_| {
-        return utf8
-    }
-}
-
 /// Read up to `max` bytes as a str, exactly as `net_read` would
 /// (same rows: `closed`, `timeout`, `utf8`, `io`). The TLS backend
 /// reads decrypted application bytes through the session and decodes
 /// them — a chunk that splits a UTF-8 code point is the `utf8` row,
 /// the same answer net_read gives (loopback HTTP is ASCII, so the
 /// split never fires; the byte path carries binary). The plaintext
-/// backend is `sock_read` (ws57: `net_read`'s rows, bytes in the
-/// caller's region).
+/// backend is `net_read` itself: since wolf 0.2.28 (s228) it places
+/// its bytes in the caller's region, which is what ws57's `sock_read`
+/// did by hand (ws62 retired it).
 /// (W0602 allowed: the row mirrors net_read exactly (closed/timeout/utf8/io) so the seam is transparent.)
 #[allow(w0602)]
 pub fn conn_read(mut cn: Conn, max: int) -> str ! {closed, timeout, utf8, io} {
     if cn.kind == 0 {
-        sock_read(cn.fd, max)?
+        net_read(cn.fd, max)?
     } else {
         var code = 0
         let bytes = tls.sess_read(mut cn.sess, max) else |e| match e {
