@@ -608,6 +608,73 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws62 — 2026-10-12 — built with wolf 0.2.28; every server block served; a replaced worker at its generation; a flat master; a pid in the pid file
+
+Unreleased (trunk). lobo moves to wolf 0.2.28 / lupin 0.1.51 and
+fixes the four lobo findings px25 made running lobo on PAX, each
+reproduced on linux at trunk first and each under a test that is red
+at trunk (`944edc1` on its own pin). Contract and measurements:
+`notes/ws62-contract.md`.
+
+- **The pin.** wolf 0.2.28 (`f71ece8`), lupin 0.1.51 (`f72e78d`),
+  from the release archives by digest; std holds at `14f0ab2`
+  (byte-identical builds against the archive's `98e1b7b`). Zero
+  diagnostics on both tiers; none of 0.2.28's four new E1010 shapes is
+  in lobo. `conn.sock_read` and its three private twins are gone: the
+  reads are `net_read` again, which 0.2.28 places in the caller's
+  region (s228). The checked machine runs procs at 0.2.28 (s226):
+  `cap_shape.lu` declares it; `budget_cap.lu` (its ledger units differ)
+  and `body_join_kill.lu` (it met the runner's 60 s ceiling once) do
+  not, and say why.
+- **Every `server` block is served** (px25's finding (a)). Through
+  0.1.3 lobo bound the first plaintext and the first TLS `listen` of
+  the whole configuration and routed every request in the first
+  server. Now every distinct `listen` address of every server binds
+  (the master hands every one down; `--listeners` tells a worker which
+  descriptor is which), and a request is routed in the server nginx
+  would choose: at the address the connection arrived on, the host's
+  exact `server_name`, then the longest leading wildcard (`*.x`,
+  `.x`), then the longest trailing one (`x.*`), else that address's
+  `default_server`, else the first server there. Nine new
+  differential rows hold this byte for byte against the pinned nginx
+  (eight red at trunk); `vhost_e2e.lu` holds two ports and names on
+  one, a reload that moves a name, and two workers. The dry-run picks
+  the same server (`host-match`, `default-server`, `only-server`);
+  two corpus probes now name a different server than before, the one
+  nginx would. Named deltas: `client_max_body_size`,
+  `large_client_header_buffers`, `memory_budget`, `tcp_nodelay`,
+  `access_log` and `metrics` are still read from the first server only
+  (warned at `-t` and at start); a regular-expression `server_name`
+  never matches (warned); a reload opens no new address.
+- **A replaced worker starts at its master's generation** (px25's
+  finding (b)): `--generation`/`--generation-id`; trunk brought it
+  back at 1. If the file was edited without a reload since, the
+  replacement serves the file and says so in a `warn` line (nginx
+  hands it the master's copy: a named delta).
+- **The master stays flat** (px25's finding (c)): its pass runs in a
+  region and its worker table is stored in place. Four idle workers,
+  five minutes: +340 KB a minute at 0.2.27 and +259 at 0.2.28 before,
+  0 after. With a reload every 10 s it grows about 21 KB a reload
+  (trunk on 0.2.28: about 92), bounded by the reloads. A membudget row
+  holds it (392 KB in 60 s at trunk, 0 after).
+- **The pid file holds the pid** (px25's finding (d), wolf-lang#126):
+  `<pid>\n`, so `kill -HUP "$(cat logs/lobo.pid)"` works. 0.2.28 has
+  no `os_pid`; lobo reads `/proc/self/status` (linux, PAX) or asks a
+  child shell for `$PPID` (macOS). Clients derive the control endpoint
+  from the configuration; a `control` on port 0 rides a second line.
+  The master's status rows name each worker's `pid=`.
+
+Measured (kasumi, linux x86-64, 4 cpus of 16 under `taskset`, load
+2.2): parity at four workers, nginx ÷ lobo, close **1.026x**,
+keepalive **0.981x** (bar 1.10); lobo ÷ trunk 0.990x / 1.003x. One
+process after 400,000 keepalive requests: 4.98 MB resident. The
+gauntlet is green with 0 SKIP lines (`kasumi:~/lanes/ws62/g-ga10.log`).
+Runner-VM parity: see the PR.
+
+Not taken: lobo#68's remaining levers, lobo#72. Drafted for filing
+(the orchestrator's): a proxied request to a silent upstream holds its
+whole process for `proxy_read_timeout`.
+
 ## ws61 — 2026-10-11 — lobo 0.1.3: the release stamp, the entry derived from the commits, the release measured against 0.1.2
 
 - **The entry was derived from the commits.** Eleven pull requests
