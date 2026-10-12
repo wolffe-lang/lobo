@@ -163,6 +163,7 @@ pub struct Cli {
     inherit: int,
     generation: int,
     generation_id: str,
+    listeners: str,
 }
 
 /// True when `name` is one of nginx's four signal words. Total.
@@ -215,6 +216,7 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var inherit: int = 0
     var generation: int = 0
     var generation_id = ""
+    var listeners = ""
     var want = ""
     var want_kind = ""
     var err_msg = ""
@@ -266,10 +268,12 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 // `[os.proc.inherit]`'s contract, so the count is all
                 // that has to cross the argv. A third internal flag,
                 // never on the usage page.
+                // ws62 (px25's finding (a)): every listener of every
+                // server rides down, so the count is any number of them
                 inherit = digits_val(a)
-                if inherit < 0 || inherit > 2 {
+                if inherit < 0 || inherit > 64 {
                     errored = true
-                    err_msg = "option \"--inherit\" takes 0, 1 or 2 (internal: the master's flag)"
+                    err_msg = "option \"--inherit\" takes 0 to 64 (internal: the master's flag)"
                 }
             } else if want == "generation" {
                 // ws62 (px25's finding (b)): the generation the master
@@ -284,6 +288,13 @@ pub fn parse_cli(args: List[str]) -> Cli {
                 }
             } else if want == "generation-id" {
                 generation_id = a
+            } else if want == "listeners" {
+                // ws62 (px25's finding (a)): the addresses of the
+                // listeners the master handed down, in descriptor order
+                // — `P1,P2|T1,T2`, plaintext then TLS (`listen_set`) —
+                // so a hand adopts each as what it is, whatever the
+                // file on disk now says
+                listeners = a
             } else if want == "control" {
                 if control_verb_ok(a) {
                     mode = "control"
@@ -360,6 +371,9 @@ pub fn parse_cli(args: List[str]) -> Cli {
         } else if a == "--generation-id" {
             want = "generation-id"
             want_kind = "parameter"
+        } else if a == "--listeners" {
+            want = "listeners"
+            want_kind = "parameter"
         } else if a == "directives-md" {
             mode = "docs"
         } else if a == "logvars-md" {
@@ -432,6 +446,10 @@ pub fn parse_cli(args: List[str]) -> Cli {
         errored = true
         err_msg = "options \"--generation\"/\"--generation-id\" ride the master's worker flags (internal)"
     }
+    if !errored && !listeners.is_empty() && worker == 0 {
+        errored = true
+        err_msg = "option \"--listeners\" rides the master's worker flags (internal)"
+    }
     if !errored && (worker > 0 || !worker_control.is_empty()) {
         if mode != "serve" {
             errored = true
@@ -465,6 +483,7 @@ pub fn parse_cli(args: List[str]) -> Cli {
         inherit: inherit,
         generation: generation,
         generation_id: generation_id,
+        listeners: listeners,
     }
 }
 
@@ -1799,6 +1818,7 @@ pub fn worker_args(
     inherit: int,
     gen: int,
     gid: str,
+    lset: str,
 ) -> List[str] {
     var a = List[str]()
     (mut a).push("serve")
@@ -1818,7 +1838,46 @@ pub fn worker_args(
     (mut a).push("{gen}")
     (mut a).push("--generation-id")
     (mut a).push(gid)
+    // ws62 (px25 (a)): the listener set, in descriptor order
+    (mut a).push("--listeners")
+    (mut a).push(lset)
     a
+}
+
+/// ws62 (px25's finding (a)): the listener set a master hands its
+/// hands, `P1,P2|T1,T2` — the plaintext addresses, then the TLS ones,
+/// in the descriptor order of the inherit set. Pure and total.
+pub fn listen_set(plain: List[str], tls: List[str]) -> str {
+    var p = ""
+    for a in plain {
+        p = if p.is_empty() { a } else { "{p},{a}" }
+    }
+    var t = ""
+    for a in tls {
+        t = if t.is_empty() { a } else { "{t},{a}" }
+    }
+    "{p}|{t}"
+}
+
+/// One side of a `listen_set` (`tls` false the plaintext addresses,
+/// true the TLS ones), in order; empty for an empty side or a set with
+/// no `|`. Pure and total.
+pub fn listen_set_side(set: str, tls: bool) -> List[str] {
+    var out = List[str]()
+    let bar = set.find("|") else -1
+    if bar < 0 {
+        return out
+    }
+    let side = if tls { set[bar + 1..set.len] } else { set[0..bar] }
+    if side.is_empty() {
+        return out
+    }
+    for a in side.split(",") {
+        if !a.is_empty() {
+            (mut out).push(a)
+        }
+    }
+    out
 }
 
 /// `worker_args` with the executable at the head — the single-vector
@@ -1834,10 +1893,11 @@ pub fn worker_argv(
     inherit: int,
     gen: int,
     gid: str,
+    lset: str,
 ) -> List[str] {
     var a = List[str]()
     (mut a).push(exe)
-    for w in worker_args(prefix, conf, worker, ctrl, inherit, gen, gid) {
+    for w in worker_args(prefix, conf, worker, ctrl, inherit, gen, gid, lset) {
         (mut a).push(w)
     }
     a

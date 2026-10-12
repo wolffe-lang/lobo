@@ -22,8 +22,18 @@ fn main() -> !int {
     // hand could compute its accept turn, and the turn retired with
     // wolf-lang#242 — so the argv is two elements shorter than ws17's
     // and the last pair is `--inherit`.
-    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 5, "ab12")
-    assert(a.len == 16, "sixteen elements: {a.len}")
+    let a = shell.worker_argv(
+        "/opt/lobo",
+        "/etc/lobo",
+        "nginx.conf",
+        3,
+        "127.0.0.1:40001",
+        1,
+        5,
+        "ab12",
+        "127.0.0.1:8080|",
+    )
+    assert(a.len == 18, "eighteen elements: {a.len}")
     assert(a[0] == "/opt/lobo" && a[1] == "serve", "the executable, then serve")
     assert(a[2] == "-p" && a[3] == "/etc/lobo", "the prefix rides")
     assert(a[4] == "-c" && a[5] == "nginx.conf", "the config rides")
@@ -34,19 +44,40 @@ fn main() -> !int {
     // last, so a replacement starts where its siblings are
     assert(a[12] == "--generation" && a[13] == "5", "ws62: the master's generation")
     assert(a[14] == "--generation-id" && a[15] == "ab12", "ws62: that generation's config id")
+    // ws62 (px25 (a)): the listener set, plaintext|TLS, in descriptor order
+    assert(a[16] == "--listeners" && a[17] == "127.0.0.1:8080|", "ws62: the listener set")
     // ws17: `os_spawn_with` names the program APART from its
     // arguments, so the args builder is the one the master actually
     // uses and `worker_argv` is it with the exe spliced on for the
     // `os_spawn` fallback. The two agree element for element.
-    let ar = shell.worker_args("/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 5, "ab12")
-    assert(ar.len == 15, "fifteen arguments without the exe: {ar.len}")
+    let ar = shell.worker_args(
+        "/etc/lobo",
+        "nginx.conf",
+        3,
+        "127.0.0.1:40001",
+        1,
+        5,
+        "ab12",
+        "127.0.0.1:8080|",
+    )
+    assert(ar.len == 17, "seventeen arguments without the exe: {ar.len}")
     var ai: int = 0
     while ai < ar.len {
         assert(ar[ai] == a[ai + 1], "args[{ai}] is argv[{ai + 1}]: {ar[ai]} vs {a[ai + 1]}")
         ai = ai + 1
     }
     // a path with a space is ONE argument (no quoting layer exists)
-    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1", 0, 1, "")
+    let b = shell.worker_argv(
+        "/opt/my lobo",
+        "/etc/x y",
+        "a b.conf",
+        1,
+        "127.0.0.1:1",
+        0,
+        1,
+        "",
+        "|",
+    )
     assert(b[0] == "/opt/my lobo" && b[3] == "/etc/x y" && b[5] == "a b.conf", "spaces are bytes")
     assert(b[11] == "0", "no listeners handed: the fallback shape says so on the argv")
 
@@ -128,10 +159,36 @@ fn main() -> !int {
     assert(cp.generation == 0 && cp.generation_id.is_empty(), "plain serve: no generation flags")
     // ws62 (px25 (b)): the generation pair parses with the worker flags,
     // and refuses alone or as 0
-    let gargs = shell.worker_args("/etc/lobo", "nginx.conf", 2, "127.0.0.1:4242", 1, 7, "c0ffee")
+    let gargs = shell.worker_args(
+        "/etc/lobo",
+        "nginx.conf",
+        2,
+        "127.0.0.1:4242",
+        1,
+        7,
+        "c0ffee",
+        "127.0.0.1:1,127.0.0.1:2|127.0.0.1:3",
+    )
     let cg = shell.parse_cli(gargs)
     assert(cg.mode == "serve" && cg.worker == 2 && cg.inherit == 1, "the hand's argv parses whole")
-    assert(cg.generation == 7 && cg.generation_id == "c0ffee", "…with the master's generation and id")
+    assert(
+        cg.generation == 7 && cg.generation_id == "c0ffee",
+        "…with the master's generation and id",
+    )
+    assert(cg.listeners == "127.0.0.1:1,127.0.0.1:2|127.0.0.1:3", "…and its listener set")
+    // ws62 (px25 (a)): the set's two sides, in order
+    let lp = shell.listen_set_side(cg.listeners, false)
+    let lt = shell.listen_set_side(cg.listeners, true)
+    assert(lp.len == 2 && lp[0] == "127.0.0.1:1" && lp[1] == "127.0.0.1:2", "the plaintext side")
+    assert(lt.len == 1 && lt[0] == "127.0.0.1:3", "the TLS side")
+    assert(
+        shell.listen_set_side("|", false).is_empty() && shell.listen_set_side("", true).is_empty(),
+        "empty sides",
+    )
+    var lsp = List[str]()
+    (mut lsp).push("a:1")
+    let lst = List[str]()
+    assert(shell.listen_set(lsp, lst) == "a:1|", "the writer")
     var glone = List[str]()
     (mut glone).push("serve")
     (mut glone).push("--generation")
@@ -139,10 +196,11 @@ fn main() -> !int {
     let cgl = shell.parse_cli(glone)
     assert(cgl.mode == "error", "--generation without the worker flags is refused")
     assert(
-        cgl.err_msg == "options \"--generation\"/\"--generation-id\" ride the master's worker flags (internal)",
+        cgl.err_msg ==
+            "options \"--generation\"/\"--generation-id\" ride the master's worker flags (internal)",
         "…by name: {cgl.err_msg}",
     )
-    let gzero = shell.worker_args("/etc/lobo", "nginx.conf", 2, "127.0.0.1:4242", 1, 0, "")
+    let gzero = shell.worker_args("/etc/lobo", "nginx.conf", 2, "127.0.0.1:4242", 1, 0, "", "|")
     assert(shell.parse_cli(gzero).mode == "error", "generation 0 is no generation: refused")
 
     // ---- the vocabulary: two events appended (the tenth and eleventh)
@@ -171,14 +229,38 @@ fn main() -> !int {
 
     // ---- the master's stanza pieces
     assert(shell.status_workers_line(4) == "workers: 4\n", "the workers: line")
-    let row = shell.status_worker_text(2, "standby", "127.0.0.1:40002", 3, 0, 12, 4096, 1, 1, 77, 4242)
+    let row = shell.status_worker_text(
+        2,
+        "standby",
+        "127.0.0.1:40002",
+        3,
+        0,
+        12,
+        4096,
+        1,
+        1,
+        77,
+        4242,
+    )
     // ws62 (px25 (d)): `pid=` appended last, so every earlier prefix holds
     assert(
         row ==
             "worker 2: standby control=127.0.0.1:40002 generation=3 live=0 accepted=77 events=12 live-region-bytes=4096 budget-503s=1 restarts=1 pid=4242\n",
         "the worker row (text): {row}",
     )
-    let obj = shell.status_worker_json(1, "serving", "127.0.0.1:40001", 2, 5, 41, 65536, 0, 0, 77, 4241)
+    let obj = shell.status_worker_json(
+        1,
+        "serving",
+        "127.0.0.1:40001",
+        2,
+        5,
+        41,
+        65536,
+        0,
+        0,
+        77,
+        4241,
+    )
     assert(
         obj ==
             "{{\"worker\":1,\"state\":\"serving\",\"control\":\"127.0.0.1:40001\",\"generation\":2,\"live\":5,\"accepted\":77,\"events\":41,\"live_region_bytes\":65536,\"budget_503s\":0,\"restarts\":0,\"pid\":4241}}",
