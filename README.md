@@ -209,11 +209,20 @@ serve linux aarch64.
   silent every other client of that process waits, up to
   `proxy_read_timeout` (60 s by default). Run more than one worker in
   front of an upstream.
-- **Memory that is the runtime's.** A serving lobo's memory is flat
-  except for two things wolf 0.2.27's runtime keeps: about 70 bytes
-  for each accepted connection and about 280 for each response served
-  under `memory_budget` (wolf-lang#661, #662; both fixed in wolf
-  after 0.2.27).
+- **Memory.** Built with wolf 0.2.28 a serving lobo is flat over
+  requests and connections (0 KB over 4,000 keepalive requests and
+  over 2,000 connections in the gate), and so is a master supervising
+  idle workers (it grew about 260 KB a minute through 0.1.3). Under
+  `memory_budget` the runtime keeps one word for each finished
+  response proc (wolf-lang#671).
+- **Several server blocks.** Every `server` serves (through 0.1.3
+  only the first did), chosen by the address a connection arrived on
+  and its host's `server_name`. Still read from the first server
+  only: `client_max_body_size`, `large_client_header_buffers`,
+  `memory_budget`, `tcp_nodelay`, `access_log` and `metrics` (`-t`
+  warns when a later server sets one). A `server_name` regular
+  expression never matches. A reload re-routes among the addresses
+  bound at start and opens no new one.
 - **An idle lobo is not quiet.** It makes about 1,700 system calls a
   second with no client, where nginx makes 23 (wolf-lang#710).
 - **No binary swap.** `-s reload` re-reads the configuration and
