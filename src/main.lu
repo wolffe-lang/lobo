@@ -5000,8 +5000,8 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     wrest[j] + 1,
                     lfds,
                     ctrl_ep,
-                    mgen,
-                    shell.conf_hash(mconf),
+                    1,
+                    "",
                     lset,
                     mut elog,
                 )
