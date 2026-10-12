@@ -1237,7 +1237,15 @@ fn memo_cap() -> int {
     1048576
 }
 
-fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> int {
+fn serve_main(
+    prefix: str,
+    conf: str,
+    worker: int,
+    wctrl: str,
+    inherit: int,
+    gen0: int,
+    gid0: str,
+) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
         eprint("lobo: [emerg] configuration file {conf} test failed")
@@ -1737,12 +1745,28 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         )
     }
 
-    // generation 1 is current
+    // generation 1 is current — or, for a hand the master started
+    // after a reload (ws62, px25's finding (b): a REPLACEMENT came back
+    // at 1 while its siblings were at the master's generation), the
+    // generation the master named on the argv. The hand reads the
+    // file, as it always has; when that file is no longer what the
+    // master loaded as this generation (an edit with no reload since),
+    // the hand says so — nginx's master hands a new worker its own
+    // copy of the config, lobo's hands read the file (named delta,
+    // docs/WORKERS.md), and `reload` makes them one again.
     let h1 = shell.conf_hash(c0)
+    let g1 = if gen0 > 0 { gen0 } else { 1 }
+    if gen0 > 0 && !gid0.is_empty() && !(gid0 == h1) {
+        ev_log(
+            mut elog_st,
+            "warn",
+            "this replacement joins generation {g1}, but the configuration file now on disk (id {h1}) is not generation {g1}'s (id {gid0}): it serves the file it read until the next reload (nginx's master hands a new worker its own copy; lobo's hands read the file — docs/WORKERS.md)",
+        )
+    }
     var gens = List[GenRow]()
     (mut gens).push(take GenRow {
         conf: c0,
-        gen: 1,
+        gen: g1,
         live: 0,
         state: "current",
         loaded_ms: time_unix_ms(),
@@ -1756,8 +1780,8 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
         bud_hits: 0,
         shut_ms: shut1,
     })
-    ev_event(mut elog_st, "notice", shell.ev_generation_loaded(1, h1))
-    ev_event(mut elog_st, "notice", shell.ev_generation_activated(1))
+    ev_event(mut elog_st, "notice", shell.ev_generation_loaded(g1, h1))
+    ev_event(mut elog_st, "notice", shell.ev_generation_activated(g1))
 
     // the connection table: parallel primitive columns, one row per
     // open plaintext connection, rows [0, crows). ws57 (lobo#66): the
@@ -3924,6 +3948,8 @@ fn spawn_worker(
     restarts: int,
     lfds: List[int],
     mctrl: str,
+    gen: int,
+    gid: str,
     mut el: ELog,
 ) -> (int, str) {
     let ep = worker_endpoint(mctrl, i)
@@ -3937,7 +3963,7 @@ fn spawn_worker(
         var ok = true
         let hh = os_spawn_with(
             exe,
-            shell.worker_args(prefix, conf, i, ep, handed),
+            shell.worker_args(prefix, conf, i, ep, handed, gen, gid),
             lfds,
         ) else |e| match e {
             unsupported => {
@@ -3977,7 +4003,7 @@ fn spawn_worker(
         }
     }
     if h < 0 {
-        let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0)
+        let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0, gen, gid)
         h = os_spawn(argv) else |e| match e {
             not_found => {
                 ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
@@ -4343,7 +4369,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var wprobe = List[int]()
     var i: int = 0
     while i < n {
-        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, mut elog)
+        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, 1, "", mut elog)
         (mut wslot).push(s.0)
         (mut wctl).push(s.1)
         (mut wrest).push(0)
@@ -4500,6 +4526,8 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                         wrest[j],
                         lfds,
                         ctrl_ep,
+                        mgen,
+                        shell.conf_hash(mconf),
                         mut elog,
                     )
                     wslot = replace_int(wslot, j, s.0)
@@ -4542,7 +4570,20 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             if now - wup[j] < 1000 {
                 time_sleep_ms(250)
             }
-            let s = spawn_worker(exe, prefix, conf, j + 1, wrest[j] + 1, lfds, ctrl_ep, mut elog)
+            // ws62 (px25 (b)): the replacement starts at THIS
+            // generation, with its config id, not at 1
+            let s = spawn_worker(
+                exe,
+                prefix,
+                conf,
+                j + 1,
+                wrest[j] + 1,
+                lfds,
+                ctrl_ep,
+                mgen,
+                shell.conf_hash(mconf),
+                mut elog,
+            )
             wslot = replace_int(wslot, j, s.0)
             wctl = replace_str(wctl, j, s.1)
             wrest = replace_int(wrest, j, wrest[j] + 1)
@@ -5026,7 +5067,15 @@ fn main() -> int {
     }
     if cli.mode == "serve" {
         if cli.worker > 0 {
-            return serve_main(cli.prefix, cli.conf, cli.worker, cli.worker_control, cli.inherit)
+            return serve_main(
+                cli.prefix,
+                cli.conf,
+                cli.worker,
+                cli.worker_control,
+                cli.inherit,
+                cli.generation,
+                cli.generation_id,
+            )
         }
         // ws16/ws17: how many hands? `worker_processes` off the
         // config — 1 (the default) is today's one process; `auto`
@@ -5064,7 +5113,7 @@ fn main() -> int {
         if n > 1 {
             return master_main(cli.prefix, cli.conf, n)
         }
-        return serve_main(cli.prefix, cli.conf, 0, "", 0)
+        return serve_main(cli.prefix, cli.conf, 0, "", 0, 0, "")
     }
     banner()
     0

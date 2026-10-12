@@ -161,6 +161,8 @@ pub struct Cli {
     worker: int,
     worker_control: str,
     inherit: int,
+    generation: int,
+    generation_id: str,
 }
 
 /// True when `name` is one of nginx's four signal words. Total.
@@ -211,6 +213,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var worker: int = 0
     var worker_control = ""
     var inherit: int = 0
+    var generation: int = 0
+    var generation_id = ""
     var want = ""
     var want_kind = ""
     var err_msg = ""
@@ -267,6 +271,19 @@ pub fn parse_cli(args: List[str]) -> Cli {
                     errored = true
                     err_msg = "option \"--inherit\" takes 0, 1 or 2 (internal: the master's flag)"
                 }
+            } else if want == "generation" {
+                // ws62 (px25's finding (b)): the generation the master
+                // is at when it starts this hand, and that
+                // generation's config id — a replacement joins its
+                // siblings' generation instead of starting at 1. Two
+                // more internal flags, never on the usage page.
+                generation = digits_val(a)
+                if generation < 1 {
+                    errored = true
+                    err_msg = "option \"--generation\" requires a positive generation (internal: the master's flag)"
+                }
+            } else if want == "generation-id" {
+                generation_id = a
             } else if want == "control" {
                 if control_verb_ok(a) {
                     mode = "control"
@@ -337,6 +354,12 @@ pub fn parse_cli(args: List[str]) -> Cli {
         } else if a == "--inherit" {
             want = "inherit"
             want_kind = "parameter"
+        } else if a == "--generation" {
+            want = "generation"
+            want_kind = "parameter"
+        } else if a == "--generation-id" {
+            want = "generation-id"
+            want_kind = "parameter"
         } else if a == "directives-md" {
             mode = "docs"
         } else if a == "logvars-md" {
@@ -405,6 +428,10 @@ pub fn parse_cli(args: List[str]) -> Cli {
         errored = true
         err_msg = "option \"--inherit\" rides the master's worker flags (internal)"
     }
+    if !errored && (generation > 0 || !generation_id.is_empty()) && worker == 0 {
+        errored = true
+        err_msg = "options \"--generation\"/\"--generation-id\" ride the master's worker flags (internal)"
+    }
     if !errored && (worker > 0 || !worker_control.is_empty()) {
         if mode != "serve" {
             errored = true
@@ -436,6 +463,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
         worker: worker,
         worker_control: worker_control,
         inherit: inherit,
+        generation: generation,
+        generation_id: generation_id,
     }
 }
 
@@ -1613,7 +1642,15 @@ pub fn worker_processes(c: config.Conf) -> int {
 /// shape `os_spawn_with(exe, args, inherit)` wants — the executable is
 /// its own parameter there, so a master never splices its own path
 /// into a list it also builds options in. Pure and total.
-pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int) -> List[str] {
+pub fn worker_args(
+    prefix: str,
+    conf: str,
+    worker: int,
+    ctrl: str,
+    inherit: int,
+    gen: int,
+    gid: str,
+) -> List[str] {
     var a = List[str]()
     (mut a).push("serve")
     (mut a).push("-p")
@@ -1626,6 +1663,12 @@ pub fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int)
     (mut a).push(ctrl)
     (mut a).push("--inherit")
     (mut a).push("{inherit}")
+    // ws62 (px25 (b)): the master's generation and its config id, so a
+    // replacement starts where its siblings are
+    (mut a).push("--generation")
+    (mut a).push("{gen}")
+    (mut a).push("--generation-id")
+    (mut a).push(gid)
     a
 }
 
@@ -1640,10 +1683,12 @@ pub fn worker_argv(
     worker: int,
     ctrl: str,
     inherit: int,
+    gen: int,
+    gid: str,
 ) -> List[str] {
     var a = List[str]()
     (mut a).push(exe)
-    for w in worker_args(prefix, conf, worker, ctrl, inherit) {
+    for w in worker_args(prefix, conf, worker, ctrl, inherit, gen, gid) {
         (mut a).push(w)
     }
     a

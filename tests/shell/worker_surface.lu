@@ -22,27 +22,31 @@ fn main() -> !int {
     // hand could compute its accept turn, and the turn retired with
     // wolf-lang#242 — so the argv is two elements shorter than ws17's
     // and the last pair is `--inherit`.
-    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1)
-    assert(a.len == 12, "twelve elements: {a.len}")
+    let a = shell.worker_argv("/opt/lobo", "/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 5, "ab12")
+    assert(a.len == 16, "sixteen elements: {a.len}")
     assert(a[0] == "/opt/lobo" && a[1] == "serve", "the executable, then serve")
     assert(a[2] == "-p" && a[3] == "/etc/lobo", "the prefix rides")
     assert(a[4] == "-c" && a[5] == "nginx.conf", "the config rides")
     assert(a[6] == "--worker" && a[7] == "3", "the ordinal")
     assert(a[8] == "--worker-control" && a[9] == "127.0.0.1:40001", "the endpoint")
     assert(a[10] == "--inherit" && a[11] == "1", "ws17: how many listeners rode down")
+    // ws62 (px25 (b)): the master's generation and its config id ride
+    // last, so a replacement starts where its siblings are
+    assert(a[12] == "--generation" && a[13] == "5", "ws62: the master's generation")
+    assert(a[14] == "--generation-id" && a[15] == "ab12", "ws62: that generation's config id")
     // ws17: `os_spawn_with` names the program APART from its
     // arguments, so the args builder is the one the master actually
     // uses and `worker_argv` is it with the exe spliced on for the
     // `os_spawn` fallback. The two agree element for element.
-    let ar = shell.worker_args("/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1)
-    assert(ar.len == 11, "eleven arguments without the exe: {ar.len}")
+    let ar = shell.worker_args("/etc/lobo", "nginx.conf", 3, "127.0.0.1:40001", 1, 5, "ab12")
+    assert(ar.len == 15, "fifteen arguments without the exe: {ar.len}")
     var ai: int = 0
     while ai < ar.len {
         assert(ar[ai] == a[ai + 1], "args[{ai}] is argv[{ai + 1}]: {ar[ai]} vs {a[ai + 1]}")
         ai = ai + 1
     }
     // a path with a space is ONE argument (no quoting layer exists)
-    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1", 0)
+    let b = shell.worker_argv("/opt/my lobo", "/etc/x y", "a b.conf", 1, "127.0.0.1:1", 0, 1, "")
     assert(b[0] == "/opt/my lobo" && b[3] == "/etc/x y" && b[5] == "a b.conf", "spaces are bytes")
     assert(b[11] == "0", "no listeners handed: the fallback shape says so on the argv")
 
@@ -121,6 +125,25 @@ fn main() -> !int {
     (mut plain).push("serve")
     let cp = shell.parse_cli(plain)
     assert(cp.worker == 0 && cp.worker_control.is_empty(), "plain serve: no hand flags")
+    assert(cp.generation == 0 && cp.generation_id.is_empty(), "plain serve: no generation flags")
+    // ws62 (px25 (b)): the generation pair parses with the worker flags,
+    // and refuses alone or as 0
+    let gargs = shell.worker_args("/etc/lobo", "nginx.conf", 2, "127.0.0.1:4242", 1, 7, "c0ffee")
+    let cg = shell.parse_cli(gargs)
+    assert(cg.mode == "serve" && cg.worker == 2 && cg.inherit == 1, "the hand's argv parses whole")
+    assert(cg.generation == 7 && cg.generation_id == "c0ffee", "…with the master's generation and id")
+    var glone = List[str]()
+    (mut glone).push("serve")
+    (mut glone).push("--generation")
+    (mut glone).push("3")
+    let cgl = shell.parse_cli(glone)
+    assert(cgl.mode == "error", "--generation without the worker flags is refused")
+    assert(
+        cgl.err_msg == "options \"--generation\"/\"--generation-id\" ride the master's worker flags (internal)",
+        "…by name: {cgl.err_msg}",
+    )
+    let gzero = shell.worker_args("/etc/lobo", "nginx.conf", 2, "127.0.0.1:4242", 1, 0, "")
+    assert(shell.parse_cli(gzero).mode == "error", "generation 0 is no generation: refused")
 
     // ---- the vocabulary: two events appended (the tenth and eleventh)
     assert(
