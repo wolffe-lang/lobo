@@ -8,9 +8,9 @@ exit: 0
 --- expect
 == request: GET http://localhost/
 listener: 127.0.0.1:8083
-server: tests/config-corpus/crossplane-messy/nginx.conf:11 — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
-  candidate server tests/config-corpus/crossplane-messy/nginx.conf:15 — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
-  candidate server tests/config-corpus/crossplane-messy/nginx.conf:27 — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
+server: tests/config-corpus/crossplane-messy/nginx.conf:11 — no server_name at this listener matches the request's host, so the listener's default answers (default_server, else the first server listening there)
+  candidate server tests/config-corpus/crossplane-messy/nginx.conf:15 — lost: not chosen for this listener and host (another server block answers it)
+  candidate server tests/config-corpus/crossplane-messy/nginx.conf:27 — lost: not chosen for this listener and host (another server block answers it)
 location: (none matched — the server block's own directives apply)
   precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
 effective directives (the winning chain, with provenance):

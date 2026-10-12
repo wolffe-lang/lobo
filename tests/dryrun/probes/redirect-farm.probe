@@ -6,13 +6,16 @@ exit: 0
 --- expect
 == request: GET http://old.example.org/blog/post
 listener: 127.0.0.1:8080
-server: tests/config-corpus/redirect-farm/nginx.conf:10 [server_name example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
-  candidate server tests/config-corpus/redirect-farm/nginx.conf:16 [server_name old.example.org legacy.example.org] — lost: not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)
-location: (none matched — the server block's own directives apply)
+server: tests/config-corpus/redirect-farm/nginx.conf:16 [server_name old.example.org legacy.example.org] — its server_name matches the request's host (exact, then the longest leading wildcard, then the longest trailing one)
+  candidate server tests/config-corpus/redirect-farm/nginx.conf:10 [server_name example.org] — lost: not chosen for this listener and host (another server block answers it)
+location: / (tests/config-corpus/redirect-farm/nginx.conf:28)
   precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
+  candidate location /old-blog/ (tests/config-corpus/redirect-farm/nginx.conf:20) — lost: the path does not start with this prefix
+  candidate location = /promo (tests/config-corpus/redirect-farm/nginx.conf:24) — lost: the path is not exactly this location's `=` argument
+  candidate location / (tests/config-corpus/redirect-farm/nginx.conf:28) — won: the longest matching prefix wins (1 bytes)
 effective directives (the winning chain, with provenance):
-  listen 8080;  # from tests/config-corpus/redirect-farm/nginx.conf:11
-  server_name example.org;  # from tests/config-corpus/redirect-farm/nginx.conf:12
-  return 301 https://www.example.org$request_uri;  # from tests/config-corpus/redirect-farm/nginx.conf:13
-  note: parsed but not implemented at this pin, so they do not shape this decision: `server_name`, `return` (statuses: docs/directives.md)
+  listen 8080;  # from tests/config-corpus/redirect-farm/nginx.conf:17
+  server_name old.example.org legacy.example.org;  # from tests/config-corpus/redirect-farm/nginx.conf:18
+  rewrite ^(.*[^/])$ $1/ permanent;  # from tests/config-corpus/redirect-farm/nginx.conf:29
+  note: parsed but not implemented at this pin, so they do not shape this decision: `rewrite` (statuses: docs/directives.md)
 decision: would answer 404 — no root/alias maps this path to the filesystem — the live server answers 404

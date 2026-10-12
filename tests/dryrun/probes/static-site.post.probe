@@ -6,7 +6,7 @@ exit: 0
 --- expect
 == request: POST http://static.example.org/assets/app.css
 listener: 127.0.0.1:8080
-server: tests/config-corpus/static-site/nginx.conf:28 [server_name static.example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+server: tests/config-corpus/static-site/nginx.conf:28 [server_name static.example.org] — the config's only server block
 location: /assets/ (tests/config-corpus/static-site/nginx.conf:39)
   precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
   candidate location / (tests/config-corpus/static-site/nginx.conf:35) — lost: the prefix matches, but a longer prefix won (1 < 8)
@@ -35,5 +35,5 @@ effective directives (the winning chain, with provenance):
   expires 30d;  # from tests/config-corpus/static-site/nginx.conf:40
   add_header Cache-Control "public, immutable";  # from tests/config-corpus/static-site/nginx.conf:41
   access_log off;  # from tests/config-corpus/static-site/nginx.conf:42
-  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `tcp_nopush`, `keepalive_timeout`, `server_tokens`, `etag`, `charset`, `gzip`, `gzip_comp_level`, `gzip_min_length`, `gzip_vary`, `gzip_proxied`, `gzip_types`, `server_name`, `expires`, `add_header` (statuses: docs/directives.md)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `tcp_nopush`, `keepalive_timeout`, `server_tokens`, `etag`, `charset`, `gzip`, `gzip_comp_level`, `gzip_min_length`, `gzip_vary`, `gzip_proxied`, `gzip_types`, `expires`, `add_header` (statuses: docs/directives.md)
 decision: would answer 405 — method POST on a static location — the live server serves GET and HEAD only and answers 405

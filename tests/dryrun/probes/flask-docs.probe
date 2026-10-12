@@ -6,7 +6,7 @@ exit: 0
 --- expect
 == request: GET http://localhost/
 listener: 127.0.0.1:18080
-server: tests/config-corpus/flask-docs/conf.d/site.conf:1 [server_name _] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+server: tests/config-corpus/flask-docs/conf.d/site.conf:1 [server_name _] — the config's only server block
 location: / (tests/config-corpus/flask-docs/conf.d/site.conf:5)
   precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
   candidate location / (tests/config-corpus/flask-docs/conf.d/site.conf:5) — won: the longest matching prefix wins (1 bytes)
@@ -27,7 +27,7 @@ effective directives (the winning chain, with provenance):
   proxy_set_header X-Forwarded-Proto $scheme;  # from tests/config-corpus/flask-docs/conf.d/site.conf:8 (via tests/config-corpus/flask-docs/nginx.conf:34)
   proxy_set_header X-Forwarded-Host $host;  # from tests/config-corpus/flask-docs/conf.d/site.conf:9 (via tests/config-corpus/flask-docs/nginx.conf:34)
   proxy_set_header X-Forwarded-Prefix /;  # from tests/config-corpus/flask-docs/conf.d/site.conf:10 (via tests/config-corpus/flask-docs/nginx.conf:34)
-  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout`, `server_name` (statuses: docs/directives.md)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout` (statuses: docs/directives.md)
 proxy headers (sent upstream):
   X-Forwarded-For: $proxy_add_x_forwarded_for -> UNRESOLVED (depends on the inbound X-Forwarded-For header)
   X-Forwarded-Proto: $scheme -> UNRESOLVED (this variable is outside the dry-run's knowledge)

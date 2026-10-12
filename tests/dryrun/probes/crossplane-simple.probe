@@ -7,7 +7,7 @@ exit: 0
 --- expect
 == request: GET http://localhost/
 listener: 127.0.0.1:8080
-server: tests/config-corpus/crossplane-simple/nginx.conf:9 [server_name default_server] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+server: tests/config-corpus/crossplane-simple/nginx.conf:9 [server_name default_server] — the config's only server block
 location: / (tests/config-corpus/crossplane-simple/nginx.conf:12)
   precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
   candidate location / (tests/config-corpus/crossplane-simple/nginx.conf:12) — won: the longest matching prefix wins (1 bytes)
@@ -15,5 +15,5 @@ effective directives (the winning chain, with provenance):
   listen       127.0.0.1:8080;  # from tests/config-corpus/crossplane-simple/nginx.conf:10
   server_name  default_server;  # from tests/config-corpus/crossplane-simple/nginx.conf:11
   return 200 "foo bar baz";  # from tests/config-corpus/crossplane-simple/nginx.conf:13
-  note: parsed but not implemented at this pin, so they do not shape this decision: `server_name`, `return` (statuses: docs/directives.md)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `return` (statuses: docs/directives.md)
 decision: would answer 404 — no root/alias maps this path to the filesystem — the live server answers 404

@@ -45,7 +45,7 @@ fn main() -> int {
         "the one-line precedence summary",
     )
     // every code the classifier can emit has a sentence
-    let codes = "first-server not-first-server exact-match exact-miss longest-prefix shorter-prefix lost-to-exact prefix-miss regex-parse-only named-location tie-first-wins"
+    let codes = "first-server not-first-server only-server host-match default-server not-selected exact-match exact-miss longest-prefix shorter-prefix lost-to-exact prefix-miss regex-parse-only named-location tie-first-wins"
     for code in codes.words() {
         let prose = dryrun.why_prose(code)
         assert(!prose.is_empty(), "no prose at all for {code}")

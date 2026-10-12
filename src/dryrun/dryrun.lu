@@ -212,6 +212,50 @@ pub fn trace_won(tr: http.RouteTrace, kind: str) -> int {
     -1
 }
 
+/// The reason code the winning row of `kind` carries ("" when none
+/// won). ws62: the server's is the pick's (`host-match`,
+/// `default-server`, `only-server`). Total.
+pub fn trace_won_why(tr: http.RouteTrace, kind: str) -> str {
+    var i: int = 0
+    for k in tr.kinds {
+        if k == kind && tr.outcomes[i] == "won" {
+            return tr.whys[i]
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// ws62 (px25's finding (a)): the listener a probe connects to — the
+/// one of its scheme whose port the probe URL names (80 or 443 when it
+/// names none), else the first of its scheme (`plain_addr` or
+/// `ssl_addr`, the pre-ws62 answer). PURE. Total.
+pub fn probe_listener(c: config.Conf, p: Probe, plain_addr: str, ssl_addr: str) -> str {
+    let tls = p.scheme == "https"
+    let first = if tls { ssl_addr } else { plain_addr }
+    var port = if tls { "443" } else { "80" }
+    let at = p.target.find("://") else -1
+    if at >= 0 {
+        let rest = p.target[at + 3..p.target.len]
+        let slash = rest.find("/") else rest.len
+        let auth = rest[0..slash]
+        let colon = auth.rfind(":") else -1
+        let close = auth.rfind("]") else -1
+        if colon >= 0 && colon > close && colon + 1 < auth.len {
+            port = auth[colon + 1..auth.len]
+        }
+    }
+    var i: int = 0
+    while i < config.listener_count(c) {
+        let a = config.listener_addr(c, i)
+        if config.listener_ssl(c, i) == tls && a.ends_with(":{port}") {
+            return a
+        }
+        i = i + 1
+    }
+    first
+}
+
 /// Render an upstream pool's peer set: "host:port weight=N" rows,
 /// "backup" flagged, semicolon-joined. Pure; "" for an empty pool.
 fn peers_text(pool: proxy.UpPool) -> str {
@@ -268,8 +312,13 @@ pub fn decide(
         return v
     }
 
-    // ws02's one matcher, trace on
-    let d = http.route_traced(c, p.path, mut tr, true)
+    // ws02's one matcher, trace on. ws62 (px25's finding (a)): in the
+    // server the live loop would pick — the probe's listener, then its
+    // host (`config.server_pick`)
+    let laddr = probe_listener(c, p, plain_addr, ssl_addr)
+    let s = config.server_pick(c, laddr, p.host)
+    let why = config.server_pick_why(c, laddr, p.host, s)
+    let d = http.route_traced_at(c, s, why, p.path, mut tr, true)
     v.srv = trace_won(tr, "server")
     v.loc = trace_won(tr, "location")
     v.matched = d.matched
@@ -282,7 +331,7 @@ pub fn decide(
     }
 
     // ws03's proxy decision (same location precedence, same model)
-    let pl = proxy.plan(c, p.path)
+    let pl = proxy.plan_at(c, s, p.path)
     if pl.is_proxy {
         v.loc = pl.loc
         v.matched = pl.matched
@@ -355,10 +404,24 @@ pub fn decide(
 /// failure, not a silent blank).
 pub fn why_prose(code: str) -> str {
     if code == "first-server" {
-        return "the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)"
+        return "the first server block (the reader asked for no listener or host)"
     }
     if code == "not-first-server" {
-        return "not the first server block — server_name/Host selection is parse-only at this pin, so this block can never be chosen (a named delta)"
+        return "not the first server block (the reader asked for no listener or host)"
+    }
+    // ws62 (px25's finding (a)): the server a request is for — nginx's
+    // rule at the request's listener (config/vhost.lu)
+    if code == "only-server" {
+        return "the config's only server block"
+    }
+    if code == "host-match" {
+        return "its server_name matches the request's host (exact, then the longest leading wildcard, then the longest trailing one)"
+    }
+    if code == "default-server" {
+        return "no server_name at this listener matches the request's host, so the listener's default answers (default_server, else the first server listening there)"
+    }
+    if code == "not-selected" {
+        return "not chosen for this listener and host (another server block answers it)"
     }
     if code == "exact-match" {
         return "exact match — `location =` beats every prefix and regex"
@@ -773,7 +836,7 @@ pub fn stanza(
         if !sn.is_empty() {
             sn = " [server_name {sn}]"
         }
-        out = "{out}server: {at_of(c, v.srv)}{sn} — {why_prose("first-server")}\n"
+        out = "{out}server: {at_of(c, v.srv)}{sn} — {why_prose(trace_won_why(tr, "server"))}\n"
         // the losing servers, from the trace
         var i: int = 0
         for k in tr.kinds {

@@ -7,7 +7,7 @@ exit: 0
 --- expect
 == request: GET http://app.example.org/index.php
 listener: 127.0.0.1:8080
-server: tests/config-corpus/php-fpm/nginx.conf:13 [server_name php.example.org] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+server: tests/config-corpus/php-fpm/nginx.conf:13 [server_name php.example.org] — the config's only server block
 location: / (tests/config-corpus/php-fpm/nginx.conf:19)
   precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
   candidate location / (tests/config-corpus/php-fpm/nginx.conf:19) — won: the longest matching prefix wins (1 bytes)
@@ -21,5 +21,5 @@ effective directives (the winning chain, with provenance):
   root /srv/www/app/public;  # from tests/config-corpus/php-fpm/nginx.conf:16
   index index.php index.html;  # from tests/config-corpus/php-fpm/nginx.conf:17
   try_files $uri $uri/ /index.php?$query_string;  # from tests/config-corpus/php-fpm/nginx.conf:20
-  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `server_name`, `try_files` (statuses: docs/directives.md)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `try_files` (statuses: docs/directives.md)
 decision: would serve: /srv/www/app/public/index.php (not checked)

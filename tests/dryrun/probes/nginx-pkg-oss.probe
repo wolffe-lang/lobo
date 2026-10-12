@@ -6,7 +6,7 @@ exit: 0
 --- expect
 == request: GET http://localhost/
 listener: 127.0.0.1:18080
-server: tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:1 [server_name localhost] — the first server block wins — server_name/Host selection is parse-only at this pin (a named delta)
+server: tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:1 [server_name localhost] — the config's only server block
 location: / (tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:7)
   precedence: = exact > longest prefix (regex is parse-only at this pin and never wins)
   candidate location / (tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:7) — won: the longest matching prefix wins (1 bytes)
@@ -26,5 +26,5 @@ effective directives (the winning chain, with provenance):
   error_page   500 502 503 504  /50x.html;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:16 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
   root   /usr/share/nginx/html;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:8 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
   index  index.html index.htm;  # from tests/config-corpus/nginx-pkg-oss/conf.d/default.conf:9 (via tests/config-corpus/nginx-pkg-oss/nginx.conf:34)
-  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout`, `server_name`, `error_page` (statuses: docs/directives.md)
+  note: parsed but not implemented at this pin, so they do not shape this decision: `default_type`, `sendfile`, `keepalive_timeout`, `error_page` (statuses: docs/directives.md)
 decision: directory request — would map to /usr/share/nginx/html/ and try index files: index.html, index.htm (not checked; 403 if none exists)
