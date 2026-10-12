@@ -234,7 +234,12 @@ fn main() -> !int {
             tries = tries + 1
         }
     }
-    if w1.is_empty() || w2.is_empty() || w1 == "-1" || w2 == "-1" || w1 == w2 || w1 == "{pid2}" ||
+    if w1.is_empty() ||
+        w2.is_empty() ||
+        w1 == "-1" ||
+        w2 == "-1" ||
+        w1 == w2 ||
+        w1 == "{pid2}" ||
         w2 == "{pid2}" {
         let _ = stop(ep2, s2)
         assert(false, "each hand's row carries its own pid, not the master's {pid2}: {st}")
@@ -274,7 +279,10 @@ fn main() -> !int {
     }
     assert(wait_alive(ep3), "the recorded endpoint answers: {ep3}")
     let rs3 = client(root, "status", conf3, out)
-    assert(rs3 == 0, "`lobo status` reaches the port-0 control through the file's second line: {rs3}")
+    assert(
+        rs3 == 0,
+        "`lobo status` reaches the port-0 control through the file's second line: {rs3}",
+    )
     let x3 = stop(ep3, s3)
     assert(x3 == 0, "the port-0 server stops with 0: {x3}")
     assert(!fs_exists(pidp), "…and removes its pid file")

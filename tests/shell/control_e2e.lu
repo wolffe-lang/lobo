@@ -175,7 +175,10 @@ fn main() -> !int {
         ""
     }
     let spid = os_proc_pid(child) else |_| { -1 }
-    assert(spid > 0 && recorded == "{spid}", "the pid file holds the server's pid {spid}: [{recorded}]")
+    assert(
+        spid > 0 && recorded == "{spid}",
+        "the pid file holds the server's pid {spid}: [{recorded}]",
+    )
     assert(shell.endpoint_of(recorded, ep) == ep, "…and a reader derives the endpoint: {recorded}")
 
     // generation 1: routes into A

@@ -140,7 +140,10 @@ fn main() -> !int {
     }
     let up1 = wait_row(ep, 1, "0", "1")
     let up2 = wait_row(ep, 2, "0", "1")
-    assert(up1.contains(": serving ") && up2.contains(": serving "), "both hands serve: {up1} / {up2}")
+    assert(
+        up1.contains(": serving ") && up2.contains(": serving "),
+        "both hands serve: {up1} / {up2}",
+    )
 
     print("step 1: two reloads")
     let r2 = shell.control_send(ep, "reload") else |_| { "" }
@@ -165,7 +168,10 @@ fn main() -> !int {
             "the replacement starts at the master's generation 3, not 1 (px25 (b)): {seen}",
         )
     }
-    assert(row_field(worker_row(master_status(ep), 2), "generation") == "3", "its sibling is still at 3")
+    assert(
+        row_field(worker_row(master_status(ep), 2), "generation") == "3",
+        "its sibling is still at 3",
+    )
 
     print("step 3: the replacement moves with the next reload")
     let r4 = shell.control_send(ep, "reload") else |_| { "" }
