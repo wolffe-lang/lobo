@@ -735,6 +735,13 @@ fn timeout_ms(c: config.Conf, loc: int, srv: int, http_blk: int, name: str, defl
 /// false (static). Present → parses the target and the leg deadlines.
 /// Total.
 pub fn plan(c: config.Conf, path: str) -> Plan {
+    plan_at(c, 0, path)
+}
+
+/// `plan` in server ordinal `s` (ws62, px25's finding (a): the server
+/// `config.server_pick` chose; 0 is the first, all `plan` ever read).
+/// PURE. Total.
+pub fn plan_at(c: config.Conf, s: int, path: str) -> Plan {
     var pl = Plan {
         is_proxy: false,
         loc: -1,
@@ -757,11 +764,13 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
         resolver_valid_ms: 0,
         resolver_timeout_ms: 30000,
     }
-    let srv = config.first_server(c)
+    let srv = config.server_row(c, s)
     if srv < 0 {
         return pl
     }
     pl.srv = srv
+    let lat = config.loc_first(c, s)
+    let rat = config.route_first(c, s)
 
     // lobo#14: the candidates are the load-time location table — the
     // same rows, in the same ROW order, so first-match/longest-prefix/
@@ -774,22 +783,22 @@ pub fn plan(c: config.Conf, path: str) -> Plan {
     var exact_tbl: int = -1
     var best_tbl: int = -1
     var i: int = 0
-    let total = config.loc_count(c)
+    let total = config.loc_count_at(c, s)
     while i < total {
-        let modi = c.loc_mod[i]
-        let prefix = c.loc_prefix[i]
+        let modi = c.loc_mod[lat + i]
+        let prefix = c.loc_prefix[lat + i]
         if modi == "=" {
             if path == prefix {
-                exact_hit = c.loc_row[i]
-                exact_tbl = i
+                exact_hit = c.loc_row[lat + i]
+                exact_tbl = rat + i
                 exact_prefix = prefix
             }
         } else if modi == "" || modi == "^~" {
             if path.starts_with(prefix) {
                 if prefix.len > best_len {
                     best_len = prefix.len
-                    best = c.loc_row[i]
-                    best_tbl = i
+                    best = c.loc_row[lat + i]
+                    best_tbl = rat + i
                     best_prefix = prefix
                 }
             }
@@ -882,7 +891,7 @@ fn peer_resolver(c: config.Conf, row: int) -> (str, int, int) {
 /// not have fresh in `rs` — the loop PARKS the connection on it. A
 /// request whose path does not route to a proxy, or whose target is
 /// literal, or whose names are all fresh, needs nothing. Total.
-pub fn resolve_need(c: config.Conf, path: str, rs: resolver.Resolver, now: int) -> Need {
+pub fn resolve_need(c: config.Conf, s: int, path: str, rs: resolver.Resolver, now: int) -> Need {
     // ws54 (F1): a config whose resolved route rows carry no
     // `proxy_pass` has no upstream to resolve, so every request on it
     // was decoding, normalizing and planning its path here a second
@@ -905,7 +914,7 @@ pub fn resolve_need(c: config.Conf, path: str, rs: resolver.Resolver, now: int) 
     let norm = http.normalize_path(decoded) else {
         return no_need()
     }
-    let pl = plan(c, norm)
+    let pl = plan_at(c, s, norm)
     if !pl.is_proxy || !pl.pt.err.is_empty() {
         return no_need()
     }
