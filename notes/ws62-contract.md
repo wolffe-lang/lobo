@@ -182,3 +182,40 @@ Taken only after (a)–(d) are green. Expected not in reach: lobo#68's
 lever E and lobo#72 stay open with nothing new; the silent upstream is
 drafted for filing (the proxy runs inline in the loop; making it
 non-blocking is a lane of its own).
+
+## 3. The prediction against the measurement
+
+| item | predicted | measured |
+|---|---|---|
+| the pin | 0 diagnostics both tiers; gauntlet green with trunk's verdicts | 0 diagnostics (an input); gauntlet GREEN at the head, 0 SKIP (`kasumi:~/lanes/ws62/g-ga10.log`). **Not predicted:** the checked machine runs procs at 0.2.28 (s226), so the three `checked-refuses` files failed; `cap_shape.lu` declares `checked`, `budget_cap.lu` (ledger units per tier: `breach cls=0 rt=18`) and `body_join_kill.lu` (the runner's 60 s ceiling, once) declare native only (`kasumi:~/lanes/ws62/t-chk.log`) |
+| `net_read` back | membudget 23/23, ≤ 5 B a keepalive request, ≤ 100 B a connection | 24/24 (the new master row included): 0 KB over 4,000 keepalive requests and over 2,000 connections; 400,000 keepalive requests in one process end at 4.98 MB resident (ws58: 4.6 MB). User instructions a request were **not measured** |
+| (b) | red at trunk, the replacement at the master's generation; a warn on an edited file | red at trunk on both lanes (`red-b-trunk.log`: line 163, `generation=1`); green at head; the warn line seen by the test |
+| (d) | `<pid>\n`; red at trunk on both hosts; rows carry `pid=` | red at trunk on linux (`red-d-trunk.log`, line 195: the file was `127.0.0.1:N`); green at head on linux; a port-0 control rides a second line; `tools/lobo-signal` now sends its SIGHUP to the file's pid (22/22). macOS: CI only |
+| (c) | 60/20/20 shares; ≤ 4 kB a minute after; flat under a reload every 10 s | **0 kB** over 300 s idle at four hands (`rss-c1idle/`); the shares were not separated. **Wrong on reloads:** about 21 KB a reload (30 reloads: 4,572 → 5,208 kB), against about 92 at trunk on 0.2.28 (`rss-t28reload/`) — bounded by the reloads, as the hands' ws57 rule is; the hands grow about 27 KB a reload either way. Membudget's master row: 392 KB in 60 s at trunk on 0.2.27 (RED, `mb-t27.log`), 0 at head |
+| (a) | every server served; red at trunk; 0 differential differences | nine `vhost_*` differential rows byte-identical to the pinned nginx (33/33); eight red at trunk (`red-a-diff-trunk.log`; `vhost_default_first` is first-server either way); `vhost_e2e.lu` red at trunk at step 1 (line 202), green at head on native and checked; `server_pick.lu` on three lanes. **Not predicted:** a port-0 `listen` is a socket of its own, so two of them must not merge (the ACME rig's config: red in `g-ga7.log`, fixed by keying them `addr#n`); the dry-run's probe of `netbox` now names the plaintext server nginx would (it named the TLS one) |
+| parity | runner 0.90–0.94x keepalive, 1.01–1.05x close | kasumi (load 2.24, `par-k4.log`, exit 0): nginx ÷ ws62 close **1.026x**, keepalive **0.981x**; ws62 ÷ trunk 0.990x / 1.003x. Runner VMs: the PR names the run |
+| lobo#68, #72, the silent upstream | not in reach; drafted | not taken; the silent-upstream issue is drafted in the report |
+
+## 4. Evidence index
+
+kasumi `~/lanes/ws62/`: `toolchains.txt`, `dl/digest-check.txt`;
+`build-t27.log`, `build-t28.log`, `build-t28-alt.log`; `repro.sh` and
+`repro-t28/`; `rss-{t27,t28,c1}idle/`, `rss-{t28,c1}reload/`;
+`red-b-trunk.log`, `red-d-trunk.log`, `red-a-trunk.log`,
+`red-a-diff-trunk.log`, `mb-t27.log` (reds at trunk); `t-*.log`
+(lane runs); `g-gtrunk.log` (trunk's gauntlet, exit 0) and
+`g-ga10.log` (the head's, exit 0, 0 SKIP); `par-k4.log`;
+`r4-head/r4.txt` (400,000 requests). The plant: branch
+`ws62-plant` (a replacement at generation 1 again), its CI run named in
+the PR.
+
+## Not verified
+
+- The pid file on PAX (`/proc/self/status`'s `Tgid:` read there was
+  read from pax's own source, not run).
+- macOS beyond CI: the `$PPID` path, multi-listener hands.
+- User instructions a request after `net_read` came back.
+- The per-cause shares of the master's old growth.
+- TLS on a second distinct `listen … ssl` address beyond the unit
+  table (no TLS e2e row binds two TLS addresses).
+- Whether the checked machine's hang on `body_join_kill.lu` repeats.
