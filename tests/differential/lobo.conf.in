@@ -13,4 +13,5 @@ http {
     index index.html;
     @SERVER@
   }
+  @HTTP@
 }

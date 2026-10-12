@@ -126,13 +126,39 @@ server_extra() {
         }' "$1"
 }
 
-# render <template> <port> <root> <extrafile> <out> : substitute the
-# port and root, and splice the case's server directives at @SERVER@.
+# http_extra <casefile> : the case's optional `--- http` section (ws62,
+# px25's finding (a)) — more `server` blocks, spliced into BOTH
+# configs' `http {}` after the first server at the templates' `@HTTP@`
+# line, with @PORT@ and @ROOT@ substituted as the template's are; a
+# request that names a host picks among them (server_name,
+# default_server) exactly as the oracle does. Empty when absent.
+http_extra() {
+    awk '
+        {
+            probe = $0
+            sub(/\r$/, "", probe)
+            if (probe ~ /^--- /) { in_s = (probe == "--- http"); next }
+            if (in_s) print probe
+        }' "$1"
+}
+
+# render <template> <port> <root> <extrafile> <out> [httpfile] :
+# substitute the port and root, and splice the case's server directives
+# at @SERVER@ and its extra server blocks at @HTTP@.
 render() {
+    _hx=/dev/null
+    if [ -n "${6:-}" ]; then
+        sed -e "s|@PORT@|$2|g" -e "s|@ROOT@|$3|g" "$6" > "$6.r"
+        _hx="$6.r"
+    fi
     sed -e "s|@PORT@|$2|" -e "s|@ROOT@|$3|" "$1" |
-        awk -v extra="$4" '
+        awk -v extra="$4" -v hx="$_hx" '
             /^[ \t]*@SERVER@[ \t]*$/ {
                 while ((getline l < extra) > 0) print "    " l
+                next
+            }
+            /^[ \t]*@HTTP@[ \t]*$/ {
+                while ((getline l < hx) > 0) print "  " l
                 next
             }
             { print }' > "$5"
@@ -191,13 +217,14 @@ for case in "$DIFF_DIR"/cases/*.case; do
     section request "$case" > "$scratch/request.raw"
     section expect "$case" > "$scratch/expect.raw"
     server_extra "$case" > "$scratch/server.extra"
+    http_extra "$case" > "$scratch/http.extra"
     normalize < "$scratch/expect.raw" > "$scratch/expect.norm"
 
     # ---- the oracle side ----
     ng_ok=0
     for attempt in 1 2 3; do
         nport=$(free_port) || continue
-        render "$DIFF_DIR/nginx.conf.in" "$nport" "$(pwd)/$scratch" "$scratch/server.extra" "$scratch/nginx.conf"
+        render "$DIFF_DIR/nginx.conf.in" "$nport" "$(pwd)/$scratch" "$scratch/server.extra" "$scratch/nginx.conf" "$scratch/http.extra"
         "$BIN" -p "$(pwd)/$scratch" -c nginx.conf -e error.log &
         ngpid=$!
         if send "$nport" "$scratch/request.raw" "$scratch/nginx.actual"; then
@@ -212,7 +239,7 @@ for case in "$DIFF_DIR"/cases/*.case; do
     lobo_ok=0
     for attempt in 1 2 3; do
         wport=$(free_port) || continue
-        render "$DIFF_DIR/lobo.conf.in" "$wport" "$(pwd)/$scratch" "$scratch/server.extra" "$scratch/lobo.conf"
+        render "$DIFF_DIR/lobo.conf.in" "$wport" "$(pwd)/$scratch" "$scratch/server.extra" "$scratch/lobo.conf" "$scratch/http.extra"
         "$LOBO" serve -p "$(pwd)/$scratch" -c "$(pwd)/$scratch/lobo.conf" \
             2> "$scratch/lobo.err" &
         lobopid=$!

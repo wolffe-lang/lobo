@@ -1,0 +1,24 @@
+// vhost_wildcard — ws62 (px25's finding (a)): a leading wildcard server_name. The case's
+// `--- http` blocks join the template's http {} after its first
+// server (tools/lobo-differential). Expected reply generated against
+// the pinned nginx/1.30.4 with the corpus mtime 2026-01-01T00:00:00Z.
+--- http
+server { listen 127.0.0.1:@PORT@; server_name *.wild.test; root @ROOT@/www/w; }
+--- request
+GET /index.html HTTP/1.1
+Host: a.wild.test
+Connection: close
+
+--- expect
+HTTP/1.1 200 OK
+Server: <normalized>
+Date: <normalized>
+Content-Type: text/html
+Content-Length: 79
+Last-Modified: Thu, 01 Jan 2026 00:00:00 GMT
+Connection: close
+ETag: "6955b900-4f"
+Accept-Ranges: bytes
+
+<!doctype html>
+<html><body>lobo differential vhost: *.wild.test</body></html>
