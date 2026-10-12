@@ -1231,6 +1231,48 @@ fn level_lit(level: str) -> str {
     ""
 }
 
+/// ws62 (px25's finding (d)): the endpoint a reader derives from the
+/// configuration when the pid file records none — the `control`
+/// address as configured, else the plaintext listen address (what a
+/// master with no control channel records as its identity). Total.
+fn pid_derived(c: config.Conf) -> str {
+    let a = shell.control_addr(c)
+    if !a.is_empty() {
+        return a
+    }
+    serve.listen_addr_plain(c)
+}
+
+/// The running master's endpoint as a pid file at `pidp` and the
+/// configuration say it: the file's recorded endpoint (0.1.3's form,
+/// or ws62's second line), else the configuration's, resolved under
+/// the prefix; "" when there is no file. Total.
+fn pid_endpoint_of(pidp: str, c: config.Conf, prefix: str) -> str {
+    let raw = shell.pid_read(pidp) else |_| {
+        return ""
+    }
+    if raw.is_empty() {
+        return ""
+    }
+    shell.endpoint_under(shell.endpoint_of(raw, pid_derived(c)), prefix)
+}
+
+/// The pid file notice's tail: which pid the file holds and where the
+/// pid came from — wolf 0.2.28 has no `os_pid` (wolf-lang#126, s232),
+/// so the host is asked. "" for a hand (it writes no pid file). Total.
+fn pid_note(worker: int, pid: int, src: str) -> str {
+    if worker > 0 {
+        return ""
+    }
+    if pid <= 0 {
+        return " (no pid: this host answered neither /proc/self/status nor a child shell's $PPID, so the file records the control endpoint as 0.1.3 did — wolf-lang#126)"
+    }
+    if src == "proc" {
+        return " (pid {pid}, from /proc/self/status)"
+    }
+    " (pid {pid}, from a child shell's $PPID)"
+}
+
 /// The memo region's size limit, in ledger bytes: past it the loop
 /// lets the region go and starts the head-and-date memo empty. Total.
 fn memo_cap() -> int {
@@ -1274,11 +1316,9 @@ fn serve_main(
     // stale-pid detection: an existing pid file whose endpoint is
     // alive means a master is already running (refuse, nginx-shaped);
     // a dead endpoint is a stale file (replace with a warning).
-    let existing = if worker > 0 {
-        ""
-    } else {
-        shell.endpoint_under(shell.pid_read(pidp) else |_| "", prefix)
-    }
+    // ws62: the file holds a pid now; the endpoint is the one it
+    // records, else the configuration's (`pid_endpoint_of`)
+    let existing = if worker > 0 { "" } else { pid_endpoint_of(pidp, c0, prefix) }
     if !existing.is_empty() {
         if shell.control_alive(existing) {
             eprint("lobo: [emerg] a lobo master is already running (control {existing})")
@@ -1503,8 +1543,16 @@ fn serve_main(
         have_ctrl = true
     }
 
+    // ws62 (px25's finding (d)): the pid file holds this process's pid
+    // (`pid_note` says where it came from at this pin)
+    var self_pid: int = -1
+    var pid_src = ""
     if worker == 0 {
-        shell.pid_write(pidp, shell.pid_endpoint(ctrl_ep, c0)) else |_| {
+        let sp = shell.self_pid()
+        self_pid = sp.0
+        pid_src = sp.1
+        let text = shell.pid_text(self_pid, shell.pid_endpoint(ctrl_ep, c0), pid_derived(c0))
+        shell.pid_write(pidp, text) else |_| {
             eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
             return 1
         }
@@ -1694,7 +1742,7 @@ fn serve_main(
     ev_log(
         mut elog_st,
         "notice",
-        "serving on {where}, control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}",
+        "serving on {where}, control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}{pid_note(worker, self_pid, pid_src)}",
     )
 
     // signal reception (wsm01, s114 in the pin): register interest in
@@ -4087,6 +4135,7 @@ fn fan_out(verb: str, wctl: List[str], ctok: str) -> int {
 /// JSON (docs/DRAIN.md, docs/WORKERS.md). fs/net tier.
 fn master_stanza(
     n: int,
+    wslot: List[int],
     wctl: List[str],
     wrest: List[int],
     mgen: int,
@@ -4128,11 +4177,19 @@ fn master_stanza(
             }
         }
         sum_bytes = sum_bytes + lb
+        // ws62 (px25's finding (d)): the hand's pid, from its spawn
+        // handle (`os_proc_pid`, s219) — what an operator signals with
+        // `kill` where the master's `stop` will not do; -1 for an empty
+        // slot
+        var hpid: int = -1
+        if wslot[i] >= 0 {
+            hpid = os_proc_pid(wslot[i]) else |_| { -1 }
+        }
         if json {
             let sep = if first { "" } else { "," }
-            rows = "{rows}{sep}{shell.status_worker_json(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i], acc)}"
+            rows = "{rows}{sep}{shell.status_worker_json(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i], acc, hpid)}"
         } else {
-            rows = "{rows}{shell.status_worker_text(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i], acc)}"
+            rows = "{rows}{shell.status_worker_text(i + 1, state, ep, gen, live, ev, lb, b503, wrest[i], acc, hpid)}"
         }
         first = false
         i = i + 1
@@ -4177,7 +4234,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     // serve_main's; each hand's `.wN` sibling then lives there too
     let ctrl = shell.control_endpoint(c0, prefix)
     let pidp = shell.pid_path(c0, prefix)
-    let existing = shell.endpoint_under(shell.pid_read(pidp) else |_| "", prefix)
+    let existing = pid_endpoint_of(pidp, c0, prefix)
     if !existing.is_empty() {
         if shell.control_alive(existing) {
             eprint("lobo: [emerg] a lobo master is already running (control {existing})")
@@ -4224,7 +4281,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         ctrl_ep = cb.1
         have_ctrl = true
     }
-    shell.pid_write(pidp, shell.pid_endpoint(ctrl_ep, c0)) else |_| {
+    // ws62 (px25's finding (d)): the master's pid, nginx's format
+    let msp = shell.self_pid()
+    let mtext = shell.pid_text(msp.0, shell.pid_endpoint(ctrl_ep, c0), pid_derived(c0))
+    shell.pid_write(pidp, mtext) else |_| {
         eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
         return 1
     }
@@ -4301,7 +4361,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     ev_log(
         mut elog,
         "notice",
-        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}; accept distribution: {dist}",
+        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}{pid_note(0, msp.0, msp.1)}; accept distribution: {dist}",
     )
     let sprobe = shell.sig_probe()
     var sig_on = true
@@ -4450,10 +4510,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             } else if verb == "status" {
                 reply(
                     cc,
-                    "{master_stanza(n, wctl, wrest, mgen, quitting, false, elog.seq, ctok)}\n",
+                    "{master_stanza(n, wslot, wctl, wrest, mgen, quitting, false, elog.seq, ctok)}\n",
                 )
             } else if verb == "status json" {
-                reply(cc, "{master_stanza(n, wctl, wrest, mgen, quitting, true, elog.seq, ctok)}\n")
+                reply(cc, "{master_stanza(n, wslot, wctl, wrest, mgen, quitting, true, elog.seq, ctok)}\n")
             } else if verb == "stop" {
                 let k = fan_out("stop", wctl, ctok)
                 reply(cc, "stop: shutting down (generation {mgen}) workers={k}/{n}\n")
@@ -4667,7 +4727,7 @@ fn control_target(cli: shell.Cli) -> (str, str) {
         return ("", "")
     }
     let pidp = shell.pid_path(c, cli.prefix)
-    let ep0 = shell.pid_read(pidp) else |e| match e {
+    let raw = shell.pid_read(pidp) else |e| match e {
         none => {
             eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
             return ("", "")
@@ -4677,10 +4737,13 @@ fn control_target(cli: shell.Cli) -> (str, str) {
             return ("", "")
         },
     }
-    // ws49 (lobo#54): the pid file records a `unix:` control as
-    // configured; a relative path is the prefix's, so this client
+    // ws62 (px25's finding (d)): the file holds the master's pid; the
+    // endpoint is the one it records (0.1.3's file, or a port-0
+    // control's second line), else the configuration's `control`.
+    // ws49 (lobo#54): a `unix:` control is recorded and configured as
+    // written; a relative path is the prefix's, so this client
     // resolves it under its own `-p`, as the server did to bind it
-    let ep = shell.endpoint_under(ep0, cli.prefix)
+    let ep = shell.endpoint_under(shell.endpoint_of(raw, shell.control_addr(c)), cli.prefix)
     var tok = ""
     let tokp = shell.control_token_path(c, cli.prefix)
     if !tokp.is_empty() {

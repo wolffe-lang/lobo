@@ -168,11 +168,15 @@ fn main() -> !int {
         assert(false, "the spawned lobo never became alive on {ep}")
     }
 
-    // pid file records the control endpoint (this pin's delta)
+    // ws62 (px25 (d)): the pid file holds the server's pid (nginx's
+    // format); the endpoint is the configuration's, so a reader derives
+    // it — the file records none of its own
     let recorded = shell.pid_read("{scratch}/lobo.pid") else |_| {
         ""
     }
-    assert(recorded == ep, "pid file records the control endpoint: {recorded}")
+    let spid = os_proc_pid(child) else |_| { -1 }
+    assert(spid > 0 && recorded == "{spid}", "the pid file holds the server's pid {spid}: [{recorded}]")
+    assert(shell.endpoint_of(recorded, ep) == ep, "…and a reader derives the endpoint: {recorded}")
 
     // generation 1: routes into A
     let b1 = http_get(hp, "/index.html")?

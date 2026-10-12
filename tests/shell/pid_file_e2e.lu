@@ -1,0 +1,285 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! ws62 (px25's finding (d), wolf-lang#126): the pid file holds the
+//! running master's pid, nginx's `<pid>\n`, so `kill -HUP "$(cat
+//! lobo.pid)"` reaches it. Against the real binary (os_spawn + net +
+//! fs → native+checked; lupin declines the process trio). wolf 0.2.28
+//! has no `os_pid`; lobo reads its own from the host (`/proc/self/status`
+//! on linux, a child shell's `$PPID` on macOS), and this test reads the
+//! truth from the other side: `os_proc_pid` of the spawn handle.
+//!   1. one process, a TCP control: the file is exactly `<pid>\n`, and
+//!      `lobo -s reload` and `lobo status` still reach the server (they
+//!      derive the endpoint from the configuration);
+//!   2. `worker_processes 2`, a unix control: the file is the master's
+//!      pid, and the master's status rows carry each hand's pid
+//!      (`pid=`, the spawn handle's `os_proc_pid`) — two distinct
+//!      numbers, neither the master's;
+//!   3. `control 127.0.0.1:0`: the configuration cannot name the bound
+//!      port, so the file records it on a second line, and `status`
+//!      reaches it;
+//!   4. `stop` removes the file.
+//! (trunk at 944edc1: the file is the endpoint alone, `unix:…` or
+//! `127.0.0.1:N`, and the rows carry no pid.) Loopback only, OS-chosen
+//! ports. Idempotent: the scratch tree is cleared at the START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll an endpoint until it answers `ping`, up to ~15 s. Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 300 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Spawn `<root>/target/lobo-debug <args…>` with `-p . -c conf`
+/// appended, its stdout and stderr onto `out` (a file of this test's:
+/// a client's reply on this process's stdout would land inside the
+/// checked machine's record), or -1. Total.
+fn lobo(root: str, verb: List[str], conf: str, out: int) -> int {
+    var args = List[str]()
+    for v in verb {
+        (mut args).push(v)
+    }
+    (mut args).push("-p")
+    (mut args).push(".")
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    os_spawn_fds("{root}/target/lobo-debug", args, map) else |_| { -1 }
+}
+
+/// Run a client verb to its end and answer its exit code (-1 when it
+/// could not run). Total.
+fn client(root: str, verb: str, conf: str, out: int) -> int {
+    var v = List[str]()
+    for w in verb.words() {
+        (mut v).push(w)
+    }
+    let h = lobo(root, v, conf, out)
+    if h < 0 {
+        return -1
+    }
+    os_wait(h) else |_| { -1 }
+}
+
+/// Start a server and wait for its endpoint; -1 if it never answers
+/// (the child reaped). Total.
+fn start(root: str, conf: str, ep: str, out: int) -> int {
+    var sv = List[str]()
+    (mut sv).push("serve")
+    let h = lobo(root, sv, conf, out)
+    if h < 0 {
+        return -1
+    }
+    if !wait_alive(ep) {
+        os_kill(h) else |_| {}
+        let _ = os_wait(h) else |_| {
+            0
+        }
+        return -1
+    }
+    h
+}
+
+/// Stop a server over `ep` and reap it; answers its exit code. Total.
+fn stop(ep: str, h: int) -> int {
+    let _s = shell.control_send(ep, "stop") else |_| { "" }
+    os_wait(h) else |_| { -1 }
+}
+
+/// The pid file's first line as a number, or -1 (this file's own
+/// reader, so the test reads at trunk too, where `shell` has none).
+/// Total.
+fn first_pid(text: str) -> int {
+    for line in text.lines() {
+        let t = line.trim()
+        if t.is_empty() {
+            return -1
+        }
+        var n: int = 0
+        for b in t.bytes() {
+            let d = b as int
+            if d < 48 || d > 57 {
+                return -1
+            }
+            n = n * 10 + (d - 48)
+        }
+        return n
+    }
+    -1
+}
+
+/// The pid file's second line, trimmed, or "". Total.
+fn second_line(text: str) -> str {
+    var i: int = 0
+    for line in text.lines() {
+        if i == 1 {
+            return line.trim()
+        }
+        i = i + 1
+    }
+    ""
+}
+
+/// The line for `worker N:` in a master stanza, or "". Total.
+fn worker_row(st: str, n: int) -> str {
+    for line in st.lines() {
+        if line.starts_with("worker {n}: ") {
+            return line
+        }
+    }
+    ""
+}
+
+/// The `key=value` word's value on a row, or "". Total.
+fn row_field(row: str, key: str) -> str {
+    let probe = "{key}="
+    for w in row.words() {
+        if w.starts_with(probe) {
+            return w[probe.len..w.len]
+        }
+    }
+    ""
+}
+
+fn main() -> !int {
+    let scratch = "ws62_pid"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/w")?
+    fs_create_dir_all("{scratch}/logs")?
+    fs_write_text("{scratch}/w/index.html", "pid-file\n")?
+    let root = os_cwd() else |_| "."
+    let pidp = "{scratch}/lobo.pid"
+    let out = fs_create("{scratch}/children.out")?
+
+    print("step 1: one process, a TCP control")
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep1 = "127.0.0.1:{cp}"
+    let conf1 = "{scratch}/one.conf"
+    fs_write_text(
+        conf1,
+        "pid {pidp};\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {scratch}/w; }}\n}}\n",
+    )?
+    let s1 = start(root, conf1, ep1, out)
+    assert(s1 >= 0, "the single process started and answered on {ep1}")
+    let pid1 = os_proc_pid(s1) else |_| { -1 }
+    let t1 = fs_read_text(pidp) else |_| { "" }
+    if !(t1 == "{pid1}\n") {
+        let _ = stop(ep1, s1)
+        assert(false, "the pid file is exactly the server's pid {pid1} and a newline: [{t1}]")
+    }
+    let rr = client(root, "-s reload", conf1, out)
+    assert(rr == 0, "`lobo -s reload` reads the pid file and reaches the server: exit {rr}")
+    let rs = client(root, "status", conf1, out)
+    assert(rs == 0, "`lobo status` too: exit {rs}")
+    let x1 = stop(ep1, s1)
+    assert(x1 == 0, "the server stops with 0: {x1}")
+    assert(!fs_exists(pidp), "stop removes the pid file")
+
+    print("step 2: worker_processes 2, a unix control")
+    let hp2 = free_port()?
+    let conf2 = "{scratch}/two.conf"
+    let sock = "{scratch}/logs/c.sock"
+    let ep2 = "unix:{sock}"
+    fs_write_text(
+        conf2,
+        "worker_processes 2;\npid {pidp};\ncontrol unix:{sock};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp2}; root {scratch}/w; }}\n}}\n",
+    )?
+    let s2 = start(root, conf2, ep2, out)
+    assert(s2 >= 0, "the master started and answered on {ep2}")
+    let pid2 = os_proc_pid(s2) else |_| { -1 }
+    let t2 = fs_read_text(pidp) else |_| { "" }
+    if !(t2 == "{pid2}\n") {
+        let _ = stop(ep2, s2)
+        assert(false, "the pid file is exactly the master's pid {pid2}: [{t2}]")
+    }
+    var st = ""
+    var w1 = ""
+    var w2 = ""
+    var tries: int = 0
+    while tries < 300 {
+        st = shell.control_fetch(ep2, "status") else |_| { "" }
+        w1 = row_field(worker_row(st, 1), "pid")
+        w2 = row_field(worker_row(st, 2), "pid")
+        if !w1.is_empty() && !w2.is_empty() && !(w1 == "-1") && !(w2 == "-1") {
+            tries = 300
+        } else {
+            time_sleep_ms(50)
+            tries = tries + 1
+        }
+    }
+    if w1.is_empty() || w2.is_empty() || w1 == "-1" || w2 == "-1" || w1 == w2 || w1 == "{pid2}" ||
+        w2 == "{pid2}" {
+        let _ = stop(ep2, s2)
+        assert(false, "each hand's row carries its own pid, not the master's {pid2}: {st}")
+    }
+    let x2 = stop(ep2, s2)
+    assert(x2 == 0, "the master stops with 0: {x2}")
+    assert(!fs_exists(pidp), "stop removes the master's pid file")
+
+    print("step 3: a control on port 0")
+    let hp3 = free_port()?
+    let conf3 = "{scratch}/zero.conf"
+    fs_write_text(
+        conf3,
+        "pid {pidp};\ncontrol 127.0.0.1:0;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp3}; root {scratch}/w; }}\n}}\n",
+    )?
+    var sv = List[str]()
+    (mut sv).push("serve")
+    let s3 = lobo(root, sv, conf3, out)
+    assert(s3 >= 0, "the port-0 server spawned")
+    var t3 = ""
+    var k: int = 0
+    while k < 300 && first_pid(t3) <= 0 {
+        t3 = fs_read_text(pidp) else |_| { "" }
+        if first_pid(t3) <= 0 {
+            time_sleep_ms(50)
+        }
+        k = k + 1
+    }
+    let pid3 = os_proc_pid(s3) else |_| { -1 }
+    let ep3 = second_line(t3)
+    if !(first_pid(t3) == pid3) || !ep3.starts_with("127.0.0.1:") || ep3 == "127.0.0.1:0" {
+        os_kill(s3) else |_| {}
+        let _ = os_wait(s3) else |_| {
+            0
+        }
+        assert(false, "a port-0 control: the pid, then the bound endpoint on line two: [{t3}]")
+    }
+    assert(wait_alive(ep3), "the recorded endpoint answers: {ep3}")
+    let rs3 = client(root, "status", conf3, out)
+    assert(rs3 == 0, "`lobo status` reaches the port-0 control through the file's second line: {rs3}")
+    let x3 = stop(ep3, s3)
+    assert(x3 == 0, "the port-0 server stops with 0: {x3}")
+    assert(!fs_exists(pidp), "…and removes its pid file")
+
+    fs_close(out) else |_| {}
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

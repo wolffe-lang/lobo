@@ -11,8 +11,9 @@
 //! deferred the consumption; this is the witness that it arrived. What
 //! it drives:
 //!   1. `control unix:<path>` under `worker_processes 2` — the master
-//!      binds the socket, the pid file records the `unix:` address (not
-//!      a port), and EACH HAND gets a sibling socket `<path>.wN`, so a
+//!      binds the socket, the pid file holds the master's pid (ws62;
+//!      the `unix:` address is the configuration's, derived by every
+//!      reader), and EACH HAND gets a sibling socket `<path>.wN`, so a
 //!      hand's order desk is a uid boundary too (ws16 could only give
 //!      it a loopback port, which every local user can dial);
 //!   2. every verb still works over the new transport: `ping`, the
@@ -193,9 +194,12 @@ fn main() -> !int {
     if !fs_exists(sock) {
         bail(child, ep, "the master's socket file exists at {sock}")
     }
+    // ws62 (px25 (d)): the pid file holds the master's pid; the unix
+    // ADDRESS is the configuration's, which every reader derives
     let recorded = fs_read_text("{dir}/lobo.pid") else |_| { "" }
-    if recorded.trim() != ep {
-        bail(child, ep, "the pid file records the unix ADDRESS, not a port: [{recorded.trim()}]")
+    let mpid = os_proc_pid(child) else |_| { -1 }
+    if mpid <= 0 || recorded.trim() != "{mpid}" {
+        bail(child, ep, "the pid file holds the master's pid {mpid}: [{recorded.trim()}]")
     }
 
     // …and each hand gets a SIBLING socket, so its order desk is a uid

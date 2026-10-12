@@ -12,9 +12,10 @@
 //! elsewhere could not bind at all. nginx resolves every relative path
 //! against the prefix (tools/lobo-control-differential row 5 measures
 //! the pinned oracle's `pid` doing so); lobo already did for `pid` and
-//! the token file, and now does for the control socket too. The pid
-//! file records the address as configured, and every client resolves
-//! it under its own `-p`, as the server did to bind it.
+//! the token file, and now does for the control socket too. Every
+//! client reads the address as configured and resolves it under its
+//! own `-p`, as the server did to bind it (ws62: the pid file holds the
+//! server's pid, and the address comes from the configuration).
 //!
 //!   A. the demo reel's shape: the server started IN its prefix, every
 //!      verb typed from another folder with `-p P -c P/conf/…`;
@@ -111,11 +112,16 @@ fn one_case(name: str, lobo: str, p: str, scwd: str, ccwd: str, d: str) -> int {
         print("{name}: a socket was bound under the server's cwd {scwd}")
         bad = bad + 1
     }
+    // ws62 (px25 (d)): the pid file holds the server's pid; the
+    // configured `unix:logs/c.sock` is derived by every reader
     let pidf = fs_read_text("{p}/logs/lobo.pid") else |_| ""
-    if pidf.trim() != "unix:logs/c.sock" {
-        print(
-            "{name}: the pid file records [{pidf.trim()}], want the configured [unix:logs/c.sock]",
-        )
+    let spid = os_proc_pid(child) else |_| { -1 }
+    if spid <= 0 || pidf.trim() != "{spid}" {
+        print("{name}: the pid file records [{pidf.trim()}], want the server's pid [{spid}]")
+        bad = bad + 1
+    }
+    if shell.endpoint_of(pidf, "unix:logs/c.sock") != "unix:logs/c.sock" {
+        print("{name}: a reader derives [{shell.endpoint_of(pidf, "unix:logs/c.sock")}]")
         bad = bad + 1
     }
     let cfg = "-p {p} -c {p}/conf/nginx.conf"
