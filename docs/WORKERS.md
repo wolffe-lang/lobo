@@ -62,7 +62,8 @@ With N >= 2, the process that ran `lobo serve` is the master:
 - it loads and validates the config, refuses a second master (the
   stale-pid check), writes the pid file, binds the config's `control`
   endpoint, and arms signal reception;
-- it binds the http and TLS listeners (ws17), nginx's shape, and
+- it binds the http and TLS listeners (ws17; since ws62 every
+  distinct `listen` address of every server, not the first of each kind), nginx's shape, and
   reachable at this pin for the first time. It never ACCEPTS on them:
   they are not in its wait set. It holds them for its whole life,
   because a REPLACEMENT hand has to inherit the same socket;
@@ -77,7 +78,17 @@ With N >= 2, the process that ran `lobo serve` is the master:
   types any of them. (ws17 passed a fourth, `--hands N`, so a hand
   could compute its accept TURN; the turn retired at ws18 and the flag
   with it, since a free-for-all hand has no reason to know how many
-  siblings it has);
+  siblings it has). ws62 adds three more, for the same reasons:
+  `--generation G --generation-id H`, the master's generation and its
+  config id, so a REPLACEMENT starts at the generation its siblings are
+  at (px25's finding (b): through 0.1.3 it came back at 1), and says
+  so in a `warn` line when the file on disk is no longer generation
+  G's — nginx's master hands a new worker its own copy of the config,
+  lobo's hands read the file (a named delta; `reload` makes them one
+  again); and `--listeners P1,P2|T1,T2`, every listener of every
+  server in descriptor order (plaintext, then TLS), so a hand adopts
+  each as what it is whatever the file says by now (px25's finding
+  (a): through 0.1.3 the set was one plaintext and one TLS listener);
 - it supervises them (below) and fans every verb out.
 
 A hand is `serve_main`, today's one poll loop, with four
@@ -620,3 +631,20 @@ instead of on the round.
   (ws17 cannot assume; the kernel picks), the per-hand budget, the
   log shapes both ways, `kill -TERM` at the master stopping the tree.
 - `tools/lobo-prefork-bench`: the table above, re-runnable.
+
+## ws62 — what the master keeps, and what a hand is told
+
+- **The master's memory** (px25's finding (c)). Through 0.1.3 every
+  supervision pass rebuilt two lists per hand and built its wait set,
+  its probes' endpoints and its log lines in the master's root region,
+  never freed: +340 KB a minute at four idle hands on wolf 0.2.27,
+  +259 KB on 0.2.28 (`kasumi:~/lanes/ws62/rss-t2{7,8}idle/`). A pass
+  now runs in `region pass`, the hand table is stored in place (a
+  hand's endpoint kept as its port; a `unix:` sibling's path is
+  derived), and a reload's model and log output are built under
+  `in life`, bounded by the reloads, as the hands have done since ws57.
+  Measured: 0 KB over 300 s idle; `tools/lobo-membudget`'s master row
+  (60 s, bound 64 KB) read 392 KB at trunk and 0 after.
+- **A hand's pid.** The master's `status` rows carry `pid=` for each
+  hand (`os_proc_pid` of its spawn handle), and the pid file holds the
+  master's (docs/CONTROL.md).
