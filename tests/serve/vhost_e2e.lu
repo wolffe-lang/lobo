@@ -1,0 +1,232 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! ws62 (px25's finding (a)): every server block is served, against the
+//! real binary (os_spawn + net + fs → native+checked; lupin declines the
+//! process trio). Through 0.1.3 lobo bound the first plaintext `listen`
+//! of the whole config and routed every request in the first server:
+//! at trunk (944edc1) the second port refuses the connection and a
+//! name on the first port answers from the first server. The config:
+//!   A  127.0.0.1:P1                     root A   (P1's default: first)
+//!   B  127.0.0.1:P2                     root B
+//!   C  127.0.0.1:P1  server_name c.test root C
+//!   W  127.0.0.1:P1  server_name *.w.test  root W
+//! 1. one process: P1 answers A; P2 answers B; `Host: c.test` on P1
+//!    answers C, `Host: q.w.test` W, an unknown host A; P2 with
+//!    `Host: c.test` is still B (a name is chosen among the servers of
+//!    the listener the connection arrived on);
+//! 2. a reload that moves `c.test` to B's block and marks C's listen
+//!    `default_server`: on the same two sockets, `Host: c.test` on P2
+//!    answers B, and an unknown host on P1 answers C;
+//! 3. `worker_processes 2`: the master binds both listeners and hands
+//!    them down (`--inherit 2`, `--listeners`), and the same answers
+//!    come back from the hands;
+//! 4. stop.
+//! Loopback only, OS-chosen ports. Idempotent: the scratch tree is
+//! cleared at the START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// One GET of `/index.html` with `host`, Connection: close; the body's
+/// first line, or "" on any failure. Total.
+fn body_of(port: int, host: str) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return ""
+    }
+    net_deadline(c, 3000) else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    var buf = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    let cut = buf.find("\r\n\r\n") else -1
+    if cut < 0 || !buf.starts_with("HTTP/1.1 200") {
+        return ""
+    }
+    buf[cut + 4..buf.len].trim()
+}
+
+/// Poll until `port` with `host` answers `want`, up to ~15 s. Total.
+fn poll_body(port: int, host: str, want: str) -> bool {
+    var i: int = 0
+    while i < 300 {
+        if body_of(port, host) == want {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Poll an endpoint until it answers `ping`, up to ~15 s. Total.
+fn wait_alive(ep: str) -> bool {
+    var i: int = 0
+    while i < 300 {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn conf_text(n: int, cp: int, p1: int, p2: int, d: str, moved: bool) -> str {
+    let wp = if n > 1 { "worker_processes {n};\n" } else { "" }
+    let bname = if moved { " server_name c.test;" } else { "" }
+    let cname = if moved { "" } else { " server_name c.test;" }
+    let cdef = if moved { " default_server" } else { "" }
+    "{wp}pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{p1}; root {d}/A; }}\n  server {{ listen 127.0.0.1:{p2};{bname} root {d}/B; }}\n  server {{ listen 127.0.0.1:{p1}{cdef};{cname} root {d}/C; }}\n  server {{ listen 127.0.0.1:{p1}; server_name *.w.test; root {d}/W; }}\n}}\n"
+}
+
+/// Start a server on `conf`; -1 when it never answers on `ep`. Total.
+fn start(conf: str, ep: str) -> int {
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push(conf)
+    let h = os_spawn(argv) else |_| { -1 }
+    if h < 0 {
+        return -1
+    }
+    if !wait_alive(ep) {
+        os_kill(h) else |_| {}
+        let _ = os_wait(h) else |_| {
+            0
+        }
+        return -1
+    }
+    h
+}
+
+/// Stop over `ep` and reap; the exit code. Total.
+fn stop(ep: str, h: int) -> int {
+    let _s = shell.control_send(ep, "stop") else |_| { "" }
+    os_wait(h) else |_| { -1 }
+}
+
+/// The four answers of step 1 (or 2, `moved`), on ports p1/p2; "" when
+/// all hold, else the first that did not. Total.
+fn answers(p1: int, p2: int, moved: bool) -> str {
+    if !moved {
+        if !poll_body(p1, "127.0.0.1", "site-A") {
+            return "P1 with no name answers A: [{body_of(p1, "127.0.0.1")}]"
+        }
+        if !poll_body(p2, "127.0.0.1", "site-B") {
+            return "P2 answers B — the second listener is bound: [{body_of(p2, "127.0.0.1")}]"
+        }
+        if body_of(p1, "c.test") != "site-C" {
+            return "Host c.test on P1 answers C: [{body_of(p1, "c.test")}]"
+        }
+        if body_of(p1, "C.TEST:80") != "site-C" {
+            return "…in any case, with a port: [{body_of(p1, "C.TEST:80")}]"
+        }
+        if body_of(p1, "q.w.test") != "site-W" {
+            return "Host q.w.test on P1 answers W: [{body_of(p1, "q.w.test")}]"
+        }
+        if body_of(p1, "nobody.test") != "site-A" {
+            return "an unknown host on P1 answers its first server, A: [{body_of(p1, "nobody.test")}]"
+        }
+        if body_of(p2, "c.test") != "site-B" {
+            return "Host c.test on P2 answers B (C does not listen there): [{body_of(p2, "c.test")}]"
+        }
+        return ""
+    }
+    if !poll_body(p2, "c.test", "site-B") {
+        return "after the reload, Host c.test on P2 answers B: [{body_of(p2, "c.test")}]"
+    }
+    if body_of(p1, "nobody.test") != "site-C" {
+        return "after the reload, an unknown host on P1 answers C, its default_server: [{body_of(p1, "nobody.test")}]"
+    }
+    if body_of(p1, "c.test") != "site-C" {
+        return "…and so does c.test there (the default): [{body_of(p1, "c.test")}]"
+    }
+    ""
+}
+
+fn main() -> !int {
+    let d = "ws62_vhost"
+    fs_remove_dir_all(d) else |_| {}
+    for site in "A B C W".words() {
+        fs_create_dir_all("{d}/{site}")?
+        fs_write_text("{d}/{site}/index.html", "site-{site}\n")?
+    }
+    let p1 = free_port()?
+    let p2 = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "{d}/lobo.conf"
+
+    print("step 1: one process, two listeners, names on one")
+    fs_write_text(conf, conf_text(1, cp, p1, p2, d, false))?
+    let s1 = start(conf, ep)
+    assert(s1 >= 0, "the server started")
+    let e1 = answers(p1, p2, false)
+    if !e1.is_empty() {
+        let _ = stop(ep, s1)
+        assert(false, "one process: {e1}")
+    }
+
+    print("step 2: a reload moves a name and the default")
+    fs_write_text(conf, conf_text(1, cp, p1, p2, d, true))?
+    let rr = shell.control_send(ep, "reload") else |_| { "" }
+    assert(rr.starts_with("reload complete (generation 2)"), "the reload took: {rr}")
+    let e2 = answers(p1, p2, true)
+    if !e2.is_empty() {
+        let _ = stop(ep, s1)
+        assert(false, "after a reload: {e2}")
+    }
+    let x1 = stop(ep, s1)
+    assert(x1 == 0, "the server stops with 0: {x1}")
+
+    print("step 3: two hands")
+    fs_write_text(conf, conf_text(2, cp, p1, p2, d, false))?
+    let s3 = start(conf, ep)
+    assert(s3 >= 0, "the master started")
+    let e3 = answers(p1, p2, false)
+    if !e3.is_empty() {
+        let st = shell.control_fetch(ep, "status") else |_| { "" }
+        let _ = stop(ep, s3)
+        assert(false, "two hands: {e3}; status: {st}")
+    }
+    let x3 = stop(ep, s3)
+    assert(x3 == 0, "the master stops with 0: {x3}")
+
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

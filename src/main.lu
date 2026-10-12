@@ -1287,6 +1287,7 @@ fn serve_main(
     inherit: int,
     gen0: int,
     gid0: str,
+    lset: str,
 ) -> int {
     let c0 = config.load(prefix, conf)
     if !config.ok(c0) {
@@ -1304,6 +1305,13 @@ fn serve_main(
     }
     if worker == 0 && !config.user_gate(c0) {
         return 1
+    }
+    // ws62 (px25's finding (a)): the named deltas of a many-server
+    // config, once, by the process that answers for the config
+    if worker == 0 {
+        for line in config.vhost_notes(c0).lines() {
+            eprint("lobo: [warn] {line}")
+        }
     }
     // ws16: a HAND takes its control endpoint from the master's argv
     // (the config's `control` is the master's) and never touches the
@@ -1334,7 +1342,29 @@ fn serve_main(
     // TLS-only server). `hport` is the port a directory redirect's
     // absolute Location uses — the plaintext port when there is one,
     // else the TLS port (set below).
-    let addr = serve.listen_addr_plain(c0)
+    // ws62 (px25's finding (a)): EVERY listener of every server block
+    // is bound (through 0.1.3 only the first plaintext and the first
+    // TLS `listen` of the whole config were). The first of each kind
+    // keeps the primary's variables and postures below; the rest are
+    // the EXTRA listeners (`xls`, `xtls`), bound or adopted after it in
+    // the same order. A hand takes the set from its master's argv
+    // (`--listeners`), in the descriptor order it was handed, whatever
+    // the file on disk says by now.
+    let paddrs = if lset.is_empty() {
+        config.listen_plain_addrs(c0)
+    } else {
+        shell.listen_set_side(lset, false)
+    }
+    let taddrs = if lset.is_empty() {
+        config.listen_ssl_addrs(c0)
+    } else {
+        shell.listen_set_side(lset, true)
+    }
+    // `lkey` is the primary's listener KEY (what a request's server is
+    // picked by); `addr` the address it binds (a port-0 key's `#n`
+    // dropped: config/vhost.lu)
+    let lkey = if paddrs.is_empty() { "" } else { paddrs[0] }
+    let addr = config.listen_bind_addr(lkey)
     let want_http = !addr.is_empty()
     // ws32 (lobo#5): `listen … reuseport` — this process binds its OWN
     // member of a SO_REUSEPORT group rather than adopting the master's
@@ -1414,6 +1444,49 @@ fn serve_main(
         }
     }
 
+    // ws62 (px25's finding (a)): the EXTRA plaintext listeners, after
+    // the primary and before any TLS one (the master's descriptor
+    // order). Each is adopted or bound like the primary; a hand whose
+    // adopt or bind fails stands by on it and retries every pass (the
+    // primary's posture), the single process refuses to start.
+    var xls = List[int]()
+    var xaddr = List[str]()
+    var xport = List[int]()
+    var xi: int = 1
+    while xi < paddrs.len {
+        let xa = config.listen_bind_addr(paddrs[xi])
+        var xgot = true
+        var xc: int = -1
+        if adopting {
+            xc = net_adopt_listener(next_fd) else |_| {
+                xgot = false
+                -1
+            }
+            next_fd = next_fd + 1
+        } else {
+            let xb = bind_listener(xa, reuseport)
+            xc = xb.0
+            xgot = xb.1
+        }
+        var xp: int = 0
+        if xgot {
+            arm_accept(xc)
+            xp = net_port(xc) else |_| { 0 }
+        } else if worker > 0 {
+            eprint(
+                "lobo: [notice] worker {worker}: standing by on a bind of {xa} (adopt or bind refused; retrying each pass — docs/WORKERS.md)",
+            )
+            xc = -1
+        } else {
+            eprint("lobo: [emerg] bind() to {xa} failed")
+            return 1
+        }
+        (mut xls).push(xc)
+        (mut xaddr).push(paddrs[xi])
+        (mut xport).push(xp)
+        xi = xi + 1
+    }
+
     // ws05: the TLS listener. `listen ... ssl` opens a second socket;
     // the SslConf (certs, keys, SNI table) is resolved and FROZEN per
     // generation beside the Conf (the same freeze-and-swap the model
@@ -1431,7 +1504,8 @@ fn serve_main(
     var have_tls = false
     var tls_l: int = 0
     var ssl0 = config.ssl_resolve(c0, prefix)
-    let tls_addr = ssl_listen_addr(c0)
+    let tkey = if taddrs.is_empty() { "" } else { taddrs[0] }
+    let tls_addr = config.listen_bind_addr(tkey)
     let want_tls = !tls_addr.is_empty()
     var standby_tls = false
     if !tls_addr.is_empty() {
@@ -1498,6 +1572,47 @@ fn serve_main(
             eprint("lobo: [emerg] bind() to TLS {tls_addr} failed")
             return 1
         }
+    }
+
+    // ws62 (px25's finding (a)): the EXTRA TLS listeners, as the extra
+    // plaintext ones (the same SslConf, its SNI table, serves them all)
+    var xtls = List[int]()
+    var xtaddr = List[str]()
+    var xtport = List[int]()
+    var xti: int = 1
+    while xti < taddrs.len {
+        let xa = config.listen_bind_addr(taddrs[xti])
+        var xgot = true
+        var xc: int = -1
+        if adopting {
+            xc = net_adopt_listener(next_fd) else |_| {
+                xgot = false
+                -1
+            }
+            next_fd = next_fd + 1
+        } else {
+            let xb = bind_listener(xa, reuseport)
+            xc = xb.0
+            xgot = xb.1
+        }
+        var xp: int = 0
+        if xgot {
+            arm_accept(xc)
+            xp = net_port(xc) else |_| { 0 }
+            eprint("lobo: [notice] TLS serving on {xa} (port {xp}) too")
+        } else if worker > 0 {
+            eprint(
+                "lobo: [notice] worker {worker}: standing by on a bind of TLS {xa} (adopt or bind refused; retrying each pass — docs/WORKERS.md)",
+            )
+            xc = -1
+        } else {
+            eprint("lobo: [emerg] bind() to TLS {xa} failed")
+            return 1
+        }
+        (mut xtls).push(xc)
+        (mut xtaddr).push(taddrs[xti])
+        (mut xtport).push(xp)
+        xti = xti + 1
     }
 
     // the control endpoint is what the pid file records (so -s and the
@@ -1720,8 +1835,14 @@ fn serve_main(
     // which may carry :0) so a client — the ACME challenge dial-back
     // included — can find the http listener. The TLS notice already
     // prints its bound port.
+    var also = ""
+    var ai: int = 0
+    while ai < xls.len {
+        also = "{also}, 127.0.0.1:{xport[ai]} (port {xport[ai]})"
+        ai = ai + 1
+    }
     let where = if have_http {
-        "127.0.0.1:{hport} (port {hport})"
+        "127.0.0.1:{hport} (port {hport}){also}"
     } else if standby_http {
         "STANDBY for {addr} (held by another worker — retrying each pass; wolf-lang#234/#235, docs/WORKERS.md)"
     } else {
@@ -1870,6 +1991,11 @@ fn serve_main(
     var ccbuf = List[int]()
     var cclen = List[int]()
     var chead = List[int]()
+    // ws62 (px25's finding (a)): the plaintext listener a row was
+    // accepted on — 0 the primary, k the extra `xls[k - 1]` — whose
+    // address picks the request's server and whose port a redirect's
+    // Location names
+    var clst = List[int]()
     var crows: int = 0
     var cbufs = List[List[byte]]()
     var cbwas = List[int]()
@@ -2016,7 +2142,50 @@ fn serve_main(
                             )
                         }
                     }
-                    let listening = (!want_http || have_http) && (!want_tls || have_tls)
+                    // ws62 (px25 (a)): an extra listener a hand stands by on
+                    // is retried the same way
+                    var xok = true
+                    var xr: int = 0
+                    while xr < xls.len {
+                        if xls[xr] < 0 && running && !quitting && !adopting {
+                            let xb = bind_listener(config.listen_bind_addr(xaddr[xr]), reuseport)
+                            if xb.1 {
+                                arm_accept(xb.0)
+                                xls[xr] = xb.0
+                                xport[xr] = net_port(xb.0) else |_| { 0 }
+                                ev_log(
+                                    mut elog,
+                                    "notice",
+                                    "listener {config.listen_bind_addr(xaddr[xr])} acquired (port {xport[xr]}) — serving",
+                                )
+                            }
+                        }
+                        if xls[xr] < 0 {
+                            xok = false
+                        }
+                        xr = xr + 1
+                    }
+                    xr = 0
+                    while xr < xtls.len {
+                        if xtls[xr] < 0 && running && !quitting && !adopting {
+                            let xb = bind_listener(config.listen_bind_addr(xtaddr[xr]), reuseport)
+                            if xb.1 {
+                                arm_accept(xb.0)
+                                xtls[xr] = xb.0
+                                xtport[xr] = net_port(xb.0) else |_| { 0 }
+                                ev_log(
+                                    mut elog,
+                                    "notice",
+                                    "TLS listener {config.listen_bind_addr(xtaddr[xr])} acquired (port {xtport[xr]}) — serving",
+                                )
+                            }
+                        }
+                        if xtls[xr] < 0 {
+                            xok = false
+                        }
+                        xr = xr + 1
+                    }
+                    let listening = (!want_http || have_http) && (!want_tls || have_tls) && xok
 
                     // 0a2. ws17: THE WAIT. One `net_wait` over every socket this
                     // process owns — the control listener, the http listener, the
@@ -2055,6 +2224,19 @@ fn serve_main(
                     }
                     if have_tls && running && !quitting {
                         (mut wfds).push(tls_l)
+                    }
+                    // ws62 (px25 (a)): every extra listener too
+                    if running && !quitting {
+                        for xl in xls {
+                            if xl >= 0 {
+                                (mut wfds).push(xl)
+                            }
+                        }
+                        for xl in xtls {
+                            if xl >= 0 {
+                                (mut wfds).push(xl)
+                            }
+                        }
                     }
                     // ws49 (lobo#46): the stream pipe's read end — a finished
                     // stream's line wakes the loop the way a signal's byte does
@@ -2462,85 +2644,97 @@ fn serve_main(
 
                     // 2. accept a new http connection (unless winding down) — it is
                     // tagged with the CURRENT generation and bumps that counter
-                    if have_http && running && !quitting && ready_has(ready, hl) {
-                        // DRAIN the accept queue, bounded. One accept per pass
-                        // was ws16's shape and it is what held a
-                        // connection-per-request load to one accept per poll, so
-                        // the honest thing is to take what is there. Every accept
-                        // after the first is guarded by a ZERO-deadline
-                        // `net_wait` on the listener alone — the ask that cannot
-                        // block ([os.net.wait]) — which keeps the common case one
-                        // syscall wide. ws18: a sibling CAN now take the queue out
-                        // from under us between that ask and the take, because
-                        // readiness is not exclusivity — and that is exactly the
-                        // race `[os.net.accept]` bounds at the listener's own 5 ms
-                        // budget (arm_accept), so the loop pays a budget at worst
-                        // and never a park.
-                        var burst: int = 0
-                        var draining = true
-                        var probe = List[int]()
-                        (mut probe).push(hl)
-                        while draining && burst < 64 {
-                            if burst > 0 {
-                                let again = net_wait(probe, 0) else |_| {
-                                    List[int]()
+                    // ws62 (px25's finding (a)): every plaintext listener in
+                    // turn — 0 the primary (`hl`), k the extra `xls[k - 1]` — and
+                    // a new row remembers which (`clst`), so its requests are
+                    // routed in the servers that listen there
+                    var lsel: int = 0
+                    while lsel <= xls.len {
+                        let lh = if lsel == 0 { hl } else { xls[lsel - 1] }
+                        let lon = if lsel == 0 { have_http } else { lh >= 0 }
+                        if lon && running && !quitting && ready_has(ready, lh) {
+                            // DRAIN the accept queue, bounded. One accept per pass
+                            // was ws16's shape and it is what held a
+                            // connection-per-request load to one accept per poll, so
+                            // the honest thing is to take what is there. Every accept
+                            // after the first is guarded by a ZERO-deadline
+                            // `net_wait` on the listener alone — the ask that cannot
+                            // block ([os.net.wait]) — which keeps the common case one
+                            // syscall wide. ws18: a sibling CAN now take the queue out
+                            // from under us between that ask and the take, because
+                            // readiness is not exclusivity — and that is exactly the
+                            // race `[os.net.accept]` bounds at the listener's own 5 ms
+                            // budget (arm_accept), so the loop pays a budget at worst
+                            // and never a park.
+                            var burst: int = 0
+                            var draining = true
+                            var probe = List[int]()
+                            (mut probe).push(lh)
+                            while draining && burst < 64 {
+                                if burst > 0 {
+                                    let again = net_wait(probe, 0) else |_| {
+                                        List[int]()
+                                    }
+                                    if again.len == 0 {
+                                        draining = false
+                                        continue
+                                    }
                                 }
-                                if again.len == 0 {
+                                var got_conn = true
+                                let conn = net_accept(lh) else |_| {
+                                    got_conn = false
+                                    0
+                                }
+                                if !got_conn {
                                     draining = false
                                     continue
                                 }
-                            }
-                            var got_conn = true
-                            let conn = net_accept(hl) else |_| {
-                                got_conn = false
-                                0
-                            }
-                            if !got_conn {
-                                draining = false
-                                continue
-                            }
-                            let curgen = current_gen(gens)
-                            counters.accepted = counters.accepted + 1
-                            in life {
-                                gen_live_add(mut gens, curgen, 1)
-                            }
-                            // ws24: `tcp_nodelay off` is the one value that moves
-                            // anything — every accepted stream is already NODELAY
-                            // ([os.net.nodelay]); a host that declines is an
-                            // unchanged socket, which is what `on` means
-                            if !lim_for(gens, curgen).nodelay {
-                                net_nodelay(conn, false) else |_| {}
-                            }
-                            // ws57: the new row, in place when the table has been
-                            // this long before
-                            if crows < cfds.len {
-                                cfds[crows] = conn
-                                cgens[crows] = curgen
-                                cserved[crows] = 0
-                                cidle[crows] = now
-                                cstart[crows] = now
-                                cwait[crows] = -1
-                                cstream[crows] = 0
-                                ccbuf[crows] = -1
-                                cclen[crows] = 0
-                                chead[crows] = 0
-                            } else {
+                                let curgen = current_gen(gens)
+                                counters.accepted = counters.accepted + 1
                                 in life {
-                                    (mut cfds).push(conn)
-                                    (mut cgens).push(curgen)
-                                    (mut cserved).push(0)
-                                    (mut cidle).push(now)
-                                    (mut cstart).push(now)
-                                    (mut cwait).push(-1)
-                                    (mut cstream).push(0)
-                                    (mut ccbuf).push(-1)
-                                    (mut cclen).push(0)
-                                    (mut chead).push(0)
+                                    gen_live_add(mut gens, curgen, 1)
                                 }
+                                // ws24: `tcp_nodelay off` is the one value that moves
+                                // anything — every accepted stream is already NODELAY
+                                // ([os.net.nodelay]); a host that declines is an
+                                // unchanged socket, which is what `on` means
+                                if !lim_for(gens, curgen).nodelay {
+                                    net_nodelay(conn, false) else |_| {}
+                                }
+                                // ws57: the new row, in place when the table has been
+                                // this long before
+                                if crows < cfds.len {
+                                    cfds[crows] = conn
+                                    cgens[crows] = curgen
+                                    cserved[crows] = 0
+                                    cidle[crows] = now
+                                    cstart[crows] = now
+                                    cwait[crows] = -1
+                                    cstream[crows] = 0
+                                    ccbuf[crows] = -1
+                                    cclen[crows] = 0
+                                    chead[crows] = 0
+                                    clst[crows] = lsel
+                                } else {
+                                    in life {
+                                        (mut cfds).push(conn)
+                                        (mut cgens).push(curgen)
+                                        (mut cserved).push(0)
+                                        (mut cidle).push(now)
+                                        (mut cstart).push(now)
+                                        (mut cwait).push(-1)
+                                        (mut cstream).push(0)
+                                        (mut ccbuf).push(-1)
+                                        (mut cclen).push(0)
+                                        (mut chead).push(0)
+                                        (mut clst).push(lsel)
+                                    }
+                                }
+                                crows = crows + 1
+                                burst = burst + 1
                             }
-                            crows = crows + 1
-                            burst = burst + 1
                         }
+                        lsel = lsel + 1
                     }
 
                     // 2b. TLS: accept and serve BLOCKING to completion (ws05).
@@ -2553,68 +2747,85 @@ fn serve_main(
                     // the NAMED D24 rider (see the listener comment above). A
                     // stalled handshake is bounded by the read deadline, never a
                     // hang.
-                    if have_tls && running && !quitting && ready_has(ready, tls_l) {
-                        var got_tls = true
-                        let tconn = net_accept(tls_l) else |_| {
-                            got_tls = false
-                            0
+                    // ws62 (px25 (a)): every TLS listener in turn — 0 the
+                    // primary (`tls_l`), k the extra `xtls[k - 1]`
+                    var tsel: int = 0
+                    while tsel <= xtls.len {
+                        let th = if tsel == 0 { tls_l } else { xtls[tsel - 1] }
+                        let ton = if tsel == 0 { have_tls } else { th >= 0 }
+                        if ton && running && !quitting && ready_has(ready, th) {
+                            var got_tls = true
+                            let tconn = net_accept(th) else |_| {
+                                got_tls = false
+                                0
+                            }
+                            if got_tls {
+                                let tgen = current_gen(gens)
+                                in life {
+                                    gen_live_add(mut gens, tgen, 1)
+                                }
+                                let tci = conf_index(gens, tgen)
+                                var aborted_t = false
+                                counters.accepted = counters.accepted + 1
+                                if !lim_for(gens, tgen).nodelay {
+                                    net_nodelay(tconn, false) else |_| {}
+                                }
+                                var z = tls.accept(
+                                    tconn,
+                                    ssl0,
+                                    opts.read_timeout_ms,
+                                ) else |e| match e {
+                                    refused => {
+                                        aborted_t = true
+                                        counters.tls_refused = counters.tls_refused + 1
+                                        tls.no_sess()
+                                    },
+                                    timeout => {
+                                        aborted_t = true
+                                        counters.tls_timeout = counters.tls_timeout + 1
+                                        tls.no_sess()
+                                    },
+                                    io => {
+                                        aborted_t = true
+                                        counters.tls_io = counters.tls_io + 1
+                                        tls.no_sess()
+                                    },
+                                }
+                                if aborted_t {
+                                    net_close(tconn) else |_| {}
+                                } else {
+                                    counters.tls_ok = counters.tls_ok + 1
+                                    var tcn = conn.tls_conn(tconn, take z)
+                                    // ws57: a TLS connection never reaches the
+                                    // resolver (a proxy route on a TLS listener is the
+                                    // named 502), so it is handed an empty one of this
+                                    // pass's own; everything it allocates dies with the
+                                    // pass
+                                    var trs = resolver.new()
+                                    serve.serve_conn_cn(
+                                        mut tcn,
+                                        gens[tci].conf,
+                                        opts,
+                                        lim_for(gens, tgen),
+                                        if tsel == 0 { hport } else { xtport[tsel - 1] },
+                                        if tsel == 0 { tkey } else { xtaddr[tsel - 1] },
+                                        mut trs,
+                                    )
+                                }
+                                var tnl: int = -1
+                                in life {
+                                    tnl = conn_closed(mut gens, tgen, false)
+                                }
+                                if tnl >= 0 {
+                                    ev_event(
+                                        mut elog,
+                                        "notice",
+                                        shell.ev_connection_retired(tgen, tnl),
+                                    )
+                                }
+                            }
                         }
-                        if got_tls {
-                            let tgen = current_gen(gens)
-                            in life {
-                                gen_live_add(mut gens, tgen, 1)
-                            }
-                            let tci = conf_index(gens, tgen)
-                            var aborted_t = false
-                            counters.accepted = counters.accepted + 1
-                            if !lim_for(gens, tgen).nodelay {
-                                net_nodelay(tconn, false) else |_| {}
-                            }
-                            var z = tls.accept(tconn, ssl0, opts.read_timeout_ms) else |e| match e {
-                                refused => {
-                                    aborted_t = true
-                                    counters.tls_refused = counters.tls_refused + 1
-                                    tls.no_sess()
-                                },
-                                timeout => {
-                                    aborted_t = true
-                                    counters.tls_timeout = counters.tls_timeout + 1
-                                    tls.no_sess()
-                                },
-                                io => {
-                                    aborted_t = true
-                                    counters.tls_io = counters.tls_io + 1
-                                    tls.no_sess()
-                                },
-                            }
-                            if aborted_t {
-                                net_close(tconn) else |_| {}
-                            } else {
-                                counters.tls_ok = counters.tls_ok + 1
-                                var tcn = conn.tls_conn(tconn, take z)
-                                // ws57: a TLS connection never reaches the
-                                // resolver (a proxy route on a TLS listener is the
-                                // named 502), so it is handed an empty one of this
-                                // pass's own; everything it allocates dies with the
-                                // pass
-                                var trs = resolver.new()
-                                serve.serve_conn_cn(
-                                    mut tcn,
-                                    gens[tci].conf,
-                                    opts,
-                                    lim_for(gens, tgen),
-                                    hport,
-                                    mut trs,
-                                )
-                            }
-                            var tnl: int = -1
-                            in life {
-                                tnl = conn_closed(mut gens, tgen, false)
-                            }
-                            if tnl >= 0 {
-                                ev_event(mut elog, "notice", shell.ev_connection_retired(tgen, tnl))
-                            }
-                        }
+                        tsel = tsel + 1
                     }
 
                     // 3. give every open connection ONE short poll step. ws57
@@ -2667,6 +2878,7 @@ fn serve_main(
                         let cbuf0 = ccbuf[k]
                         let clen0 = cclen[k]
                         let hh0 = chead[k]
+                        let cl0 = clst[k]
                         // what the row becomes: stored at `w` when it stays
                         var keep = true
                         var n_served = sv
@@ -2823,13 +3035,17 @@ fn serve_main(
                                     } else {
                                         carry_str(cbufs[cbuf0], clen0)
                                     }
+                                    // ws62 (px25 (a)): the row's listener
+                                    let lport = if cl0 == 0 { hport } else { xport[cl0 - 1] }
+                                    let laddr = if cl0 == 0 { lkey } else { xaddr[cl0 - 1] }
                                     let full = if inflight < room {
                                         serve.conn_step(
                                             fd,
                                             gens[cci].conf,
                                             opts,
                                             lim_for(gens, cg),
-                                            hport,
+                                            lport,
+                                            laddr,
                                             car,
                                             sv,
                                             12,
@@ -2843,7 +3059,8 @@ fn serve_main(
                                             gens[cci].conf,
                                             crowded,
                                             lim_for(gens, cg),
-                                            hport,
+                                            lport,
+                                            laddr,
                                             car,
                                             sv,
                                             12,
@@ -3273,6 +3490,7 @@ fn serve_main(
                             ccbuf[w] = n_cbuf
                             cclen[w] = n_clen
                             chead[w] = n_head
+                            clst[w] = cl0
                             w = w + 1
                         }
                         k = k + 1
@@ -3474,6 +3692,16 @@ fn serve_main(
     }
     if have_tls {
         net_close(tls_l) else |_| {}
+    }
+    for xl in xls {
+        if xl >= 0 {
+            net_close(xl) else |_| {}
+        }
+    }
+    for xl in xtls {
+        if xl >= 0 {
+            net_close(xl) else |_| {}
+        }
     }
     if have_ctrl {
         net_close(cl) else |_| {}
@@ -3949,6 +4177,7 @@ fn spawn_worker(
     mctrl: str,
     gen: int,
     gid: str,
+    lset: str,
     mut el: ELog,
 ) -> (int, str) {
     let ep = worker_endpoint(mctrl, i)
@@ -3962,7 +4191,7 @@ fn spawn_worker(
         var ok = true
         let hh = os_spawn_with(
             exe,
-            shell.worker_args(prefix, conf, i, ep, handed, gen, gid),
+            shell.worker_args(prefix, conf, i, ep, handed, gen, gid, lset),
             lfds,
         ) else |e| match e {
             unsupported => {
@@ -4002,7 +4231,7 @@ fn spawn_worker(
         }
     }
     if h < 0 {
-        let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0, gen, gid)
+        let argv = shell.worker_argv(exe, prefix, conf, i, ep, 0, gen, gid, lset)
         h = os_spawn(argv) else |e| match e {
             not_found => {
                 ev_log(mut el, "error", "worker {i}: spawn failed — executable not found ({exe})")
@@ -4227,6 +4456,11 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     if !config.user_gate(c0) {
         return 1
     }
+    // ws62 (px25's finding (a)): the named deltas of a many-server
+    // config, once, by the master
+    for line in config.vhost_notes(c0).lines() {
+        eprint("lobo: [warn] {line}")
+    }
     let exe = os_exe() else |_| {
         eprint(
             "lobo: [emerg] cannot learn this executable's path (os_exe), so no worker can be started",
@@ -4315,8 +4549,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     // wait set. It holds them for its whole life because a REPLACEMENT
     // hand must inherit the same socket — a socket that closed with
     // its holder is the gap ws16's failover had to cover.
-    let maddr = serve.listen_addr_plain(c0)
-    let mtls = ssl_listen_addr(c0)
+    // ws62 (px25's finding (a)): every listener of every server — the
+    // plaintext ones, then the TLS ones, in the order the config names
+    // them; that order is the descriptor order a hand adopts in, and
+    // `lset` tells it which is which
+    let mpl = config.listen_plain_addrs(c0)
+    let mtl_addrs = config.listen_ssl_addrs(c0)
+    let lset = shell.listen_set(mpl, mtl_addrs)
     // ws32 (lobo#5): `listen … reuseport` is the OTHER shape, taken by
     // the operator's flag (nginx's grammar, nginx's default: off). The
     // master then binds NOTHING for the listeners: a group member that
@@ -4327,23 +4566,38 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     // the inherited socket in docs/PROFILE.md's ws32 addendum.
     let mreuse = serve.listen_reuseport(c0)
     var lfds = List[int]()
-    var mhl: int = -1
-    var mtl: int = -1
-    if !maddr.is_empty() && !mreuse {
-        mhl = net_listen(maddr) else |_| {
-            eprint("lobo: [emerg] bind() to {maddr} failed")
+    if !mreuse {
+        var bad = ""
+        for a in mpl {
+            if bad.is_empty() {
+                let l = net_listen(config.listen_bind_addr(a)) else |_| {
+                    bad = "bind() to {a} failed"
+                    -1
+                }
+                if l >= 0 {
+                    (mut lfds).push(l)
+                }
+            }
+        }
+        for a in mtl_addrs {
+            if bad.is_empty() {
+                let l = net_listen(config.listen_bind_addr(a)) else |_| {
+                    bad = "bind() to TLS {a} failed"
+                    -1
+                }
+                if l >= 0 {
+                    (mut lfds).push(l)
+                }
+            }
+        }
+        if !bad.is_empty() {
+            eprint("lobo: [emerg] {bad}")
+            for l in lfds {
+                net_close(l) else |_| {}
+            }
             shell.pid_remove(pidp) else |_| {}
             return 1
         }
-        (mut lfds).push(mhl)
-    }
-    if !mtls.is_empty() && !mreuse {
-        mtl = net_listen(mtls) else |_| {
-            eprint("lobo: [emerg] bind() to TLS {mtls} failed")
-            shell.pid_remove(pidp) else |_| {}
-            return 1
-        }
-        (mut lfds).push(mtl)
     }
 
     var elog_st = build_elog(c0, prefix, 0, 0)
@@ -4439,7 +4693,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var wprobe = List[int]()
     var i: int = 0
     while i < n {
-        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, 1, "", mut elog_st)
+        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, 1, "", lset, mut elog_st)
         (mut wslot).push(s.0)
         (mut wport).push(ep_port(s.1))
         (mut wrest).push(0)
@@ -4693,6 +4947,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                             ctrl_ep,
                             mgen,
                             shell.conf_hash(mconf),
+                            lset,
                             mut elog,
                         )
                         wslot[j] = s.0
@@ -4747,6 +5002,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     ctrl_ep,
                     mgen,
                     shell.conf_hash(mconf),
+                    lset,
                     mut elog,
                 )
                 wslot[j] = s.0
@@ -4813,11 +5069,8 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     // its own descriptor for the same socket, so these closes are the
     // master's copies and nothing else's ([os.proc.inherit]'s
     // ownership clause). The hands are already gone by here.
-    if mhl >= 0 {
-        net_close(mhl) else |_| {}
-    }
-    if mtl >= 0 {
-        net_close(mtl) else |_| {}
+    for l in lfds {
+        net_close(l) else |_| {}
     }
     shell.pid_remove(pidp) else |_| {}
     0
@@ -5157,10 +5410,8 @@ fn dryrun_main(cli: shell.Cli) -> int {
             return 1
         }
         var tr = http.trace_new()
-        var listener = plain_addr
-        if p.scheme == "https" {
-            listener = tls_addr
-        }
+        // ws62 (px25's finding (a)): the listener the probe's port names
+        let listener = dryrun.probe_listener(c, p, plain_addr, tls_addr)
         let v = dryrun.decide(c, p, plain_addr, tls_addr, mut tr)
         var tls_line = ""
         if p.scheme == "https" && !tls_addr.is_empty() {
@@ -5264,6 +5515,7 @@ fn main() -> int {
                 cli.inherit,
                 cli.generation,
                 cli.generation_id,
+                cli.listeners,
             )
         }
         // ws16/ws17: how many hands? `worker_processes` off the
@@ -5302,7 +5554,7 @@ fn main() -> int {
         if n > 1 {
             return master_main(cli.prefix, cli.conf, n)
         }
-        return serve_main(cli.prefix, cli.conf, 0, "", 0, 0, "")
+        return serve_main(cli.prefix, cli.conf, 0, "", 0, 0, "", "")
     }
     banner()
     0
