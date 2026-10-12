@@ -123,7 +123,7 @@ fn read_command(conn: int) -> str {
         if buf.len > 4096 {
             return buf.trim()
         }
-        let piece = sock_line(conn, 512) else |_| {
+        let piece = net_read(conn, 512) else |_| {
             reading = false
             ""
         }
@@ -1060,14 +1060,6 @@ fn carry_str(h: List[byte], len: int) -> str {
     }
     let tail = str_from_utf8(h[skip..len]) else |_| { "" }
     "{lead}{tail}"
-}
-
-/// `conn.sock_read` under a name of this file's own (`conn` is a
-/// local name in the loop and a parameter in `read_command`): up to
-/// `max` bytes off `fd` as a str, `net_read`'s rows, the bytes in the
-/// caller's region.
-fn sock_line(fd: int, max: int) -> str ! {closed, timeout, utf8, io} {
-    conn.sock_read(fd, max)?
 }
 
 /// The index of `name` in `names`, or -1. Pure and total.
@@ -2067,7 +2059,7 @@ fn serve_main(prefix: str, conf: str, worker: int, wctrl: str, inherit: int) -> 
                     var sdone = List[int]()
                     var sline = List[str]()
                     if stream_r >= 0 && ready_has(ready, stream_r) {
-                        let piece = sock_line(stream_r, 4096) else |_| { "" }
+                        let piece = net_read(stream_r, 4096) else |_| { "" }
                         var sbuf = if spart_n == 0 {
                             piece
                         } else {
