@@ -3844,55 +3844,6 @@ fn held_of(gens: List[GenRow], gen: int) -> int {
 // orderly path: TERMINATE is `stop`, and `stop` fans out first.
 // ------------------------------------------------------------------
 
-/// Rebuild `xs` with element `i` replaced by `v` (index assignment is
-/// a one-lane shape; a worker table holds a handful of rows). Total.
-fn replace_int(xs: List[int], i: int, v: int) -> List[int] {
-    var out = List[int]()
-    var k: int = 0
-    let n = xs.len
-    while k < n {
-        if k == i {
-            (mut out).push(v)
-        } else {
-            (mut out).push(xs[k])
-        }
-        k = k + 1
-    }
-    out
-}
-
-/// The `List[str]` twin of `replace_int`. Total.
-fn replace_str(xs: List[str], i: int, v: str) -> List[str] {
-    var out = List[str]()
-    var k: int = 0
-    let n = xs.len
-    while k < n {
-        if k == i {
-            (mut out).push(v)
-        } else {
-            (mut out).push(xs[k])
-        }
-        k = k + 1
-    }
-    out
-}
-
-/// The `List[bool]` twin of `replace_int`. Total.
-fn replace_bool(xs: List[bool], i: int, v: bool) -> List[bool] {
-    var out = List[bool]()
-    var k: int = 0
-    let n = xs.len
-    while k < n {
-        if k == i {
-            (mut out).push(v)
-        } else {
-            (mut out).push(xs[k])
-        }
-        k = k + 1
-    }
-    out
-}
-
 /// The endpoint a hand's control listener will bind, given the
 /// MASTER's own address and the hand's ordinal.
 ///
@@ -4099,6 +4050,58 @@ fn reap_worker(h: int, i: int, reason: str, mut el: ELog) -> int {
     }
     ev_event(mut el, "notice", shell.ev_worker_exited(i, r, code))
     code
+}
+
+/// ws62 (px25's finding (c)): the port a hand's control endpoint
+/// rides on, as the master's table keeps it — 0 for a `unix:` sibling
+/// (its path is derived), the TCP port otherwise, -1 for none (a spawn
+/// that found no endpoint). Pure and total.
+fn ep_port(ep: str) -> int {
+    if ep.is_empty() {
+        return -1
+    }
+    if shell.is_unix_addr(ep) {
+        return 0
+    }
+    let colon = ep.rfind(":") else -1
+    if colon < 0 {
+        return -1
+    }
+    var v: int = 0
+    for b in ep[colon + 1..ep.len].bytes() {
+        let d = b as int
+        if d < 48 || d > 57 {
+            return -1
+        }
+        v = v * 10 + (d - 48)
+    }
+    v
+}
+
+/// Hand `j`'s (0-based) control endpoint rebuilt from the table: the
+/// master's own `unix:` path plus `.wN` (`worker_endpoint`'s rule),
+/// or the loopback port; "" for none. Total.
+fn hand_ep(ctrl_ep: str, j: int, wport: List[int]) -> str {
+    let p = wport[j]
+    if p < 0 {
+        return ""
+    }
+    if shell.is_unix_addr(ctrl_ep) {
+        return shell.unix_worker_addr(ctrl_ep, j + 1)
+    }
+    "127.0.0.1:{p}"
+}
+
+/// Every hand's endpoint, in ordinal order (`hand_ep`), for a pass that
+/// fans a verb out or folds the hands' stanzas. Total.
+fn hand_eps(ctrl_ep: str, wport: List[int]) -> List[str] {
+    var out = List[str]()
+    var j: int = 0
+    while j < wport.len {
+        (mut out).push(hand_ep(ctrl_ep, j, wport))
+        j = j + 1
+    }
+    out
 }
 
 /// Send `verb` to every reachable hand, in order (a `reload` is
@@ -4343,7 +4346,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         (mut lfds).push(mtl)
     }
 
-    var elog = build_elog(c0, prefix, 0, 0)
+    var elog_st = build_elog(c0, prefix, 0, 0)
     let ctrl_auth = if !have_ctrl {
         "off"
     } else if shell.is_unix_addr(ctrl_ep) {
@@ -4359,7 +4362,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         "{lfds.len} listener(s) bound here and handed down (os_spawn_with + net_adopt_listener) — every hand accepts on the same socket (docs/WORKERS.md)"
     }
     ev_log(
-        mut elog,
+        mut elog_st,
         "notice",
         "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}{pid_note(0, msp.0, msp.1)}; accept distribution: {dist}",
     )
@@ -4386,27 +4389,34 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     }
     if sig_on {
         ev_log(
-            mut elog,
+            mut elog_st,
             "notice",
             "signal reception armed by meaning (reload, terminate=stop, quit): every meaning fans out to the workers",
         )
     } else {
         ev_log(
-            mut elog,
+            mut elog_st,
             "notice",
             "signal reception unavailable on this platform; the control channel is the trigger",
         )
     }
     var mgen = 1
     var mconf = copy c0
-    ev_event(mut elog, "notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)))
-    ev_event(mut elog, "notice", shell.ev_generation_activated(1))
+    ev_event(mut elog_st, "notice", shell.ev_generation_loaded(1, shell.conf_hash(c0)))
+    ev_event(mut elog_st, "notice", shell.ev_generation_activated(1))
 
-    // the worker table (parallel primitive lists, rebuilt on change):
-    // child handle (-1 = none yet), control endpoint, replacements,
-    // start time, consecutive unreachable passes, reaped-under-quit
+    // the worker table (parallel primitive lists): child handle (-1 =
+    // none yet), control endpoint's port, replacements, start time,
+    // consecutive unreachable passes, reaped-under-quit. ws62 (px25's
+    // finding (c)): the columns are stored IN PLACE by index and never
+    // rebuilt — `replace_int` built a new list per column per hand per
+    // pass in the master's root region, never freed (+259 kB a minute
+    // at four hands idle, 0.2.28). A hand's endpoint is kept as its
+    // PORT (`wport`: 0 for a `unix:` sibling, whose path is the
+    // master's own plus `.wN`; -1 for none), so no string has to be
+    // stored in a table that outlives a pass; `hand_ep` rebuilds it.
     var wslot = List[int]()
-    var wctl = List[str]()
+    var wport = List[int]()
     var wrest = List[int]()
     var wup = List[int]()
     var wfail = List[int]()
@@ -4429,9 +4439,9 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var wprobe = List[int]()
     var i: int = 0
     while i < n {
-        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, 1, "", mut elog)
+        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, 1, "", mut elog_st)
         (mut wslot).push(s.0)
-        (mut wctl).push(s.1)
+        (mut wport).push(ep_port(s.1))
         (mut wrest).push(0)
         (mut wup).push(time_unix_ms())
         (mut wfail).push(0)
@@ -4442,219 +4452,334 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
 
     var running = true
     var quitting = false
+    // the wait set, built once (it was two lists a pass)
+    var cwf = List[int]()
+    if have_ctrl {
+        (mut cwf).push(cl)
+        if sig_on {
+            (mut cwf).push(sig_r)
+        }
+    }
+    // ws62 (px25's finding (c)): THE REGIONS, as the hands have them
+    // since ws57. `life` is where what the master keeps across passes
+    // is built — a reload's frozen model and log output, bounded by the
+    // reloads; a pass runs in `region pass` and everything it allocates
+    // (the wait's answer, the probes' endpoints, a command line, a
+    // reply, a status stanza, the pass's own log lines) dies with it.
+    // The error log is the hands' shape: `elog_st` keeps the
+    // descriptor, the open flag, the drop total and the event sequence;
+    // a pass writes its lines into a pass-local `elog` and they are
+    // flushed at the pass's end.
+    elog_st = flush_elog(elog_st)
+    let life = region()
     while running {
-        let now = time_unix_ms()
-        // 1. one trigger — the serve loop's collection, verbatim
-        var verb = ""
-        var cc = -1
-        var denied = false
-        var cready = List[int]()
-        if have_ctrl {
-            // ws17: the master waits on its ONE socket the same way a
-            // hand waits on its set ([os.net.wait]); the supervision
-            // pass below is this loop's timer work
-            var cwf = List[int]()
-            (mut cwf).push(cl)
-            if sig_on {
-                (mut cwf).push(sig_r)
+        region pass {
+            let now = time_unix_ms()
+            var elog = ELog {
+                s: obs.sink_new("", elog_st.s.cap),
+                have: elog_st.have,
+                json: elog_st.json,
+                level: level_lit(elog_st.level),
+                seq: elog_st.seq,
+                worker: 0,
             }
-            cready = net_wait(cwf, wait_budget(false)) else |_| {
-                List[int]()
-            }
-            var got_ctrl = ready_has(cready, cl)
-            if got_ctrl {
-                let cand = net_accept(cl) else |_| {
-                    got_ctrl = false
-                    0
+            // 1. one trigger — the serve loop's collection, verbatim
+            var verb = ""
+            var cc = -1
+            var denied = false
+            var cready = List[int]()
+            if have_ctrl {
+                // ws17: the master waits on its ONE socket the same way a
+                // hand waits on its set ([os.net.wait]); the supervision
+                // pass below is this loop's timer work
+                cready = net_wait(cwf, wait_budget(false)) else |_| {
+                    List[int]()
                 }
+                var got_ctrl = ready_has(cready, cl)
                 if got_ctrl {
-                    cc = cand
-                    net_deadline(cc, 2000) else |_| {}
-                    let line = read_command(cc)
-                    if shell.control_authorized(line, ctok) {
-                        verb = shell.control_verb_of(line, ctok)
-                    } else {
-                        denied = true
+                    let cand = net_accept(cl) else |_| {
+                        got_ctrl = false
+                        0
+                    }
+                    if got_ctrl {
+                        cc = cand
+                        net_deadline(cc, 2000) else |_| {}
+                        let line = read_command(cc)
+                        if shell.control_authorized(line, ctok) {
+                            verb = shell.control_verb_of(line, ctok)
+                        } else {
+                            denied = true
+                        }
                     }
                 }
             }
-        }
-        if denied {
-            ev_log(mut elog, "warn", "control: unauthorized command rejected")
-            reply(cc, "unauthorized\n")
-            net_close(cc) else |_| {}
-            cc = -1
-        }
-        if sig_on && cc < 0 && ready_has(cready, sig_r) {
-            // ws29 (lobo#8): the forwarder's byte, read only on the
-            // pass a signal actually arrived
-            let b = net_read(sig_r, 1) else |_| { "" }
-            let m = sig_meaning_of(b)
-            if m > 0 {
-                verb = shell.signal_verb(m)
-            }
-        }
-        if !have_ctrl && !sig_on {
-            // nothing can ever reach this master: park a little so the
-            // supervision pass below does not spin
-            time_sleep_ms(25)
-        }
-        if cc >= 0 || !verb.is_empty() {
-            let mtrig = shell.signal_meaning(verb)
-            if mtrig > 0 {
-                let src = if cc >= 0 { "control" } else { "signal" }
-                ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
-            }
-            if verb == "ping" {
-                reply(cc, "pong\n")
-            } else if verb == "status" {
-                reply(
-                    cc,
-                    "{master_stanza(n, wslot, wctl, wrest, mgen, quitting, false, elog.seq, ctok)}\n",
-                )
-            } else if verb == "status json" {
-                reply(cc, "{master_stanza(n, wslot, wctl, wrest, mgen, quitting, true, elog.seq, ctok)}\n")
-            } else if verb == "stop" {
-                let k = fan_out("stop", wctl, ctok)
-                reply(cc, "stop: shutting down (generation {mgen}) workers={k}/{n}\n")
-                running = false
-            } else if verb == "quit" {
-                let k = fan_out("quit", wctl, ctok)
-                reply(cc, "quit: draining then exiting (generation {mgen}) workers={k}/{n}\n")
-                quitting = true
-            } else if verb == "reopen" {
-                let k = fan_out("reopen", wctl, ctok)
-                elog = reopen_elog(elog)
-                ev_log(mut elog, "notice", "reopening log files")
-                reply(cc, "reopen: log outputs cycled (generation {mgen}) workers={k}/{n}\n")
-            } else if verb == "reload" {
-                // the master parses FIRST (D2: the verdict is answered on
-                // the wire, and a rejected config reaches no hand), then
-                // rolls the verb through the hands one at a time
-                let prev = shell.Gen { conf: copy mconf, gen: mgen, ok: true, note: "" }
-                let ng = shell.reload(prefix, conf, take prev)
-                if ng.ok && ng.gen > mgen {
-                    let nhash = shell.conf_hash(ng.conf)
-                    ev_event(mut elog, "notice", shell.ev_generation_draining(mgen, 0))
-                    ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
-                    ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
-                    ev_event(mut elog, "notice", shell.ev_generation_retired(mgen, 0, 0, 0))
-                    mgen = ng.gen
-                    mconf = copy ng.conf
-                    elog = reopen_elog(elog)
-                    elog = build_elog(ng.conf, prefix, elog.seq, 0)
-                    let k = fan_out("reload", wctl, ctok)
-                    reply(cc, "reload complete (generation {mgen}) workers={k}/{n}\n")
-                } else {
-                    reply(cc, "{ng.note}\n")
-                }
-            } else if verb == "upgrade" {
-                reply(
-                    cc,
-                    "upgrade: not implemented at this pin — the binary-swap verb is unclaimed on every platform; when it lands it lands HERE, on the control endpoint (docs/CONTROL.md)\n",
-                )
-            } else {
-                reply(cc, "unknown verb \"{verb}\"\n")
-            }
-            if cc >= 0 {
+            if denied {
+                ev_log(mut elog, "warn", "control: unauthorized command rejected")
+                reply(cc, "unauthorized\n")
                 net_close(cc) else |_| {}
+                cc = -1
             }
-        }
-
-        // 2. supervise: probe every hand's endpoint (a connect, never a
-        // round trip — a busy hand still answers from its backlog);
-        // three silent passes after a 3 s start grace is "gone" — reap
-        // and replace (a hand that dies inside a second of starting is
-        // replaced after a 250 ms pause, so a broken config cannot
-        // spin the master). Under a quit a gone hand is reaped and
-        // NOT replaced; the master exits once every hand is gone.
-        var alldone = quitting
-        var j: int = 0
-        while j < n {
-            if wgone[j] {
-                j = j + 1
-                continue
-            }
-            alldone = false
-            if wslot[j] < 0 {
-                if !quitting {
-                    let s = spawn_worker(
-                        exe,
-                        prefix,
-                        conf,
-                        j + 1,
-                        wrest[j],
-                        lfds,
-                        ctrl_ep,
-                        mgen,
-                        shell.conf_hash(mconf),
-                        mut elog,
-                    )
-                    wslot = replace_int(wslot, j, s.0)
-                    wctl = replace_str(wctl, j, s.1)
-                    wup = replace_int(wup, j, now)
-                    wfail = replace_int(wfail, j, 0)
-                    wprobe = replace_int(wprobe, j, now)
+            if sig_on && cc < 0 && ready_has(cready, sig_r) {
+                // ws29 (lobo#8): the forwarder's byte, read only on the
+                // pass a signal actually arrived
+                let b = net_read(sig_r, 1) else |_| { "" }
+                let m = sig_meaning_of(b)
+                if m > 0 {
+                    verb = shell.signal_verb(m)
                 }
+            }
+            if !have_ctrl && !sig_on {
+                // nothing can ever reach this master: park a little so the
+                // supervision pass below does not spin
+                time_sleep_ms(25)
+            }
+            if cc >= 0 || !verb.is_empty() {
+                let mtrig = shell.signal_meaning(verb)
+                if mtrig > 0 {
+                    let src = if cc >= 0 { "control" } else { "signal" }
+                    ev_event(mut elog, "notice", shell.ev_signal_received(mtrig, src))
+                }
+                let wctl = hand_eps(ctrl_ep, wport)
+                if verb == "ping" {
+                    reply(cc, "pong\n")
+                } else if verb == "status" {
+                    reply(
+                        cc,
+                        "{master_stanza(n, wslot, wctl, wrest, mgen, quitting, false, elog.seq, ctok)}\n",
+                    )
+                } else if verb == "status json" {
+                    reply(
+                        cc,
+                        "{master_stanza(n, wslot, wctl, wrest, mgen, quitting, true, elog.seq, ctok)}\n",
+                    )
+                } else if verb == "stop" {
+                    let k = fan_out("stop", wctl, ctok)
+                    reply(cc, "stop: shutting down (generation {mgen}) workers={k}/{n}\n")
+                    running = false
+                } else if verb == "quit" {
+                    let k = fan_out("quit", wctl, ctok)
+                    reply(cc, "quit: draining then exiting (generation {mgen}) workers={k}/{n}\n")
+                    quitting = true
+                } else if verb == "reopen" {
+                    let k = fan_out("reopen", wctl, ctok)
+                    // the error log's pending lines go to the file they
+                    // were meant for, then the file is closed so the next
+                    // flush reopens it at its configured path (the hands'
+                    // reopen, ws57)
+                    if elog.have {
+                        let fl = sink_flush_lines(
+                            elog_st.s.path,
+                            elog.s.buf,
+                            elog.s.dropped,
+                            elog_st.s.dropped_total,
+                            elog_st.s.cap,
+                            elog_st.s.fd,
+                            elog_st.s.is_open,
+                        )
+                        if !fl.note.is_empty() {
+                            eprint("lobo: [warn] {fl.note}")
+                        }
+                        elog.s.buf = ""
+                        elog.s.dropped = 0
+                        elog_st.s.dropped_total = fl.dropped_total
+                        elog_st.s.fd = fl.fd
+                        elog_st.s.is_open = fl.is_open
+                        if elog_st.s.is_open {
+                            fs_close(elog_st.s.fd) else |_| {}
+                            elog_st.s.is_open = false
+                        }
+                    }
+                    ev_log(mut elog, "notice", "reopening log files")
+                    reply(cc, "reopen: log outputs cycled (generation {mgen}) workers={k}/{n}\n")
+                } else if verb == "reload" {
+                    // the master parses FIRST (D2: the verdict is answered on
+                    // the wire, and a rejected config reaches no hand), then
+                    // rolls the verb through the hands one at a time. ws62:
+                    // what a reload keeps — the new frozen model, the log
+                    // output it names, the four events' bodies — is built
+                    // under `in life` (the parse in a region of its own), as
+                    // the hands do it: bounded by the reloads.
+                    var took = false
+                    var note = ""
+                    in life {
+                        let ng = copy region rload {
+                            let prev = shell.Gen { conf: copy mconf, gen: mgen, ok: true, note: "" }
+                            shell.reload(prefix, conf, take prev)
+                        }
+                        note = ng.note
+                        if ng.ok && ng.gen > mgen {
+                            took = true
+                            let nhash = shell.conf_hash(ng.conf)
+                            ev_event(mut elog, "notice", shell.ev_generation_draining(mgen, 0))
+                            ev_event(mut elog, "notice", shell.ev_generation_loaded(ng.gen, nhash))
+                            ev_event(mut elog, "notice", shell.ev_generation_activated(ng.gen))
+                            ev_event(mut elog, "notice", shell.ev_generation_retired(mgen, 0, 0, 0))
+                            mgen = ng.gen
+                            mconf = copy ng.conf
+                            // the old generation's log takes its pending
+                            // lines and closes; the new one opens at its
+                            // first flush
+                            if elog.have {
+                                let fl = sink_flush_lines(
+                                    elog_st.s.path,
+                                    elog.s.buf,
+                                    elog.s.dropped,
+                                    elog_st.s.dropped_total,
+                                    elog_st.s.cap,
+                                    elog_st.s.fd,
+                                    elog_st.s.is_open,
+                                )
+                                if !fl.note.is_empty() {
+                                    eprint("lobo: [warn] {fl.note}")
+                                }
+                                elog.s.buf = ""
+                                elog.s.dropped = 0
+                                if fl.is_open {
+                                    fs_close(fl.fd) else |_| {}
+                                }
+                            } else if elog_st.s.is_open {
+                                fs_close(elog_st.s.fd) else |_| {}
+                            }
+                            elog_st = build_elog(mconf, prefix, elog.seq, 0)
+                            elog.have = elog_st.have
+                            elog.json = elog_st.json
+                            elog.level = level_lit(elog_st.level)
+                        }
+                    }
+                    if took {
+                        let k = fan_out("reload", wctl, ctok)
+                        reply(cc, "reload complete (generation {mgen}) workers={k}/{n}\n")
+                    } else {
+                        reply(cc, "{note}\n")
+                    }
+                } else if verb == "upgrade" {
+                    reply(
+                        cc,
+                        "upgrade: not implemented at this pin — the binary-swap verb is unclaimed on every platform; when it lands it lands HERE, on the control endpoint (docs/CONTROL.md)\n",
+                    )
+                } else {
+                    reply(cc, "unknown verb \"{verb}\"\n")
+                }
+                if cc >= 0 {
+                    net_close(cc) else |_| {}
+                }
+            }
+
+            // 2. supervise: probe every hand's endpoint (a connect, never a
+            // round trip — a busy hand still answers from its backlog);
+            // three silent passes after a 3 s start grace is "gone" — reap
+            // and replace (a hand that dies inside a second of starting is
+            // replaced after a 250 ms pause, so a broken config cannot
+            // spin the master). Under a quit a gone hand is reaped and
+            // NOT replaced; the master exits once every hand is gone.
+            // ws62: every column is stored in place.
+            var alldone = quitting
+            var j: int = 0
+            while j < n {
+                if wgone[j] {
+                    j = j + 1
+                    continue
+                }
+                alldone = false
+                if wslot[j] < 0 {
+                    if !quitting {
+                        let s = spawn_worker(
+                            exe,
+                            prefix,
+                            conf,
+                            j + 1,
+                            wrest[j],
+                            lfds,
+                            ctrl_ep,
+                            mgen,
+                            shell.conf_hash(mconf),
+                            mut elog,
+                        )
+                        wslot[j] = s.0
+                        wport[j] = ep_port(s.1)
+                        wup[j] = now
+                        wfail[j] = 0
+                        wprobe[j] = now
+                    }
+                    j = j + 1
+                    continue
+                }
+                if now - wprobe[j] < 200 {
+                    j = j + 1
+                    continue
+                }
+                wprobe[j] = now
+                let ep = hand_ep(ctrl_ep, j, wport)
+                if shell.control_reachable(ep) {
+                    wfail[j] = 0
+                    j = j + 1
+                    continue
+                }
+                // grace: a hand gets 3 s to come up; past that, three silent
+                // passes is gone
+                let fails = wfail[j] + 1
+                wfail[j] = fails
+                if now - wup[j] < 3000 || fails < 3 {
+                    j = j + 1
+                    continue
+                }
+                let reason = if quitting { "" } else { "unreachable" }
+                let _code = reap_worker(wslot[j], j + 1, reason, mut elog)
+                forget_endpoint(ep)
+                if quitting {
+                    wgone[j] = true
+                    wslot[j] = -1
+                    j = j + 1
+                    continue
+                }
+                if now - wup[j] < 1000 {
+                    time_sleep_ms(250)
+                }
+                // ws62 (px25 (b)): the replacement starts at THIS
+                // generation, with its config id, not at 1
+                let s = spawn_worker(
+                    exe,
+                    prefix,
+                    conf,
+                    j + 1,
+                    wrest[j] + 1,
+                    lfds,
+                    ctrl_ep,
+                    mgen,
+                    shell.conf_hash(mconf),
+                    mut elog,
+                )
+                wslot[j] = s.0
+                wport[j] = ep_port(s.1)
+                wrest[j] = wrest[j] + 1
+                wup[j] = time_unix_ms()
+                wfail[j] = 0
+                wprobe[j] = time_unix_ms()
                 j = j + 1
-                continue
             }
-            if now - wprobe[j] < 200 {
-                j = j + 1
-                continue
+            if alldone {
+                running = false
             }
-            wprobe = replace_int(wprobe, j, now)
-            let ep = wctl[j]
-            if shell.control_reachable(ep) {
-                wfail = replace_int(wfail, j, 0)
-                j = j + 1
-                continue
+
+            // the pass's log lines, flushed at its end (the hands' shape)
+            if elog.have && (!elog.s.buf.is_empty() || elog.s.dropped > 0) {
+                let fl = sink_flush_lines(
+                    elog_st.s.path,
+                    elog.s.buf,
+                    elog.s.dropped,
+                    elog_st.s.dropped_total,
+                    elog_st.s.cap,
+                    elog_st.s.fd,
+                    elog_st.s.is_open,
+                )
+                if !fl.note.is_empty() {
+                    eprint("lobo: [warn] {fl.note}")
+                }
+                elog_st.s.fd = fl.fd
+                elog_st.s.is_open = fl.is_open
+                elog_st.s.dropped_total = fl.dropped_total
             }
-            // grace: a hand gets 3 s to come up; past that, three silent
-            // passes is gone
-            let fails = wfail[j] + 1
-            wfail = replace_int(wfail, j, fails)
-            if now - wup[j] < 3000 || fails < 3 {
-                j = j + 1
-                continue
-            }
-            let reason = if quitting { "" } else { "unreachable" }
-            let _code = reap_worker(wslot[j], j + 1, reason, mut elog)
-            forget_endpoint(ep)
-            if quitting {
-                wgone = replace_bool(wgone, j, true)
-                wslot = replace_int(wslot, j, -1)
-                j = j + 1
-                continue
-            }
-            if now - wup[j] < 1000 {
-                time_sleep_ms(250)
-            }
-            // ws62 (px25 (b)): the replacement starts at THIS
-            // generation, with its config id, not at 1
-            let s = spawn_worker(
-                exe,
-                prefix,
-                conf,
-                j + 1,
-                wrest[j] + 1,
-                lfds,
-                ctrl_ep,
-                mgen,
-                shell.conf_hash(mconf),
-                mut elog,
-            )
-            wslot = replace_int(wslot, j, s.0)
-            wctl = replace_str(wctl, j, s.1)
-            wrest = replace_int(wrest, j, wrest[j] + 1)
-            wup = replace_int(wup, j, time_unix_ms())
-            wfail = replace_int(wfail, j, 0)
-            wprobe = replace_int(wprobe, j, time_unix_ms())
-            j = j + 1
-        }
-        elog = flush_elog(elog)
-        if alldone {
-            running = false
+            elog_st.seq = elog.seq
         }
     }
 
@@ -4665,12 +4790,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     while k < n {
         if !wgone[k] && wslot[k] >= 0 {
             var waited: int = 0
-            while waited < 20 && shell.control_reachable(wctl[k]) {
+            let kep = hand_ep(ctrl_ep, k, wport)
+            while waited < 20 && shell.control_reachable(kep) {
                 time_sleep_ms(50)
                 waited = waited + 1
             }
-            let _c = reap_worker(wslot[k], k + 1, "", mut elog)
-            forget_endpoint(wctl[k])
+            let _c = reap_worker(wslot[k], k + 1, "", mut elog_st)
+            forget_endpoint(kep)
         }
         k = k + 1
     }
@@ -4679,7 +4805,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         os_signal_raise(sprobe) else |_| {}
         net_close(sig_r) else |_| {}
     }
-    elog = reopen_elog(elog)
+    elog_st = reopen_elog(elog_st)
     if have_ctrl {
         net_close(cl) else |_| {}
     }
