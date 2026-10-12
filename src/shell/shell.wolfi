@@ -1,7 +1,7 @@
 module pkg :: shell
   wolfi v0 · toolchain 0.2.28 · edition v1
-  export_hash d3d71955b37eeef80ead3075de77e608e407bb07aed03c4eed5ff33d695d7bef
-  pkg_hash    d3d71955b37eeef80ead3075de77e608e407bb07aed03c4eed5ff33d695d7bef
+  export_hash 194c98802634bcdab8c6dc078f2e64d3ca627e14dd6b8147ef05578fc18240c0
+  pkg_hash    194c98802634bcdab8c6dc078f2e64d3ca627e14dd6b8147ef05578fc18240c0
   deps:
     config  073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
@@ -85,9 +85,9 @@ module pkg :: shell
     [76] pub version_report — fn version_report() -> str
     [77] pub version_token — fn version_token() -> str
     [78] pub version_verbose — fn version_verbose() -> str
-    [79] pub worker_args — fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int) -> prelude.List[str] · regions (-, -, -, -, -) -> ρ_caller
-    [80] pub worker_argv — fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str, inherit: int) -> prelude.List[str] · regions (-, -, -, -, -, -) -> ρ_caller
+    [79] pub worker_args — fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int, gen: int, gid: str) -> prelude.List[str] · regions (-, -, -, -, -, -, -) -> ρ_caller
+    [80] pub worker_argv — fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str, inherit: int, gen: int, gid: str) -> prelude.List[str] · regions (-, -, -, -, -, -, -, -) -> ρ_caller
     [81] pub worker_processes — fn worker_processes(c: config.Conf) -> int · regions (ρ1) -> -
-    [82] pub Cli — struct Cli { mode: str, signal: str, prefix: str, conf: str, errlog: str, globals: str, quiet: bool, err_msg: str, exit_code: int, format: str, requests: prelude.List[str], sni: str, client: str, stat: bool, worker: int, worker_control: str, inherit: int }
+    [82] pub Cli — struct Cli { mode: str, signal: str, prefix: str, conf: str, errlog: str, globals: str, quiet: bool, err_msg: str, exit_code: int, format: str, requests: prelude.List[str], sni: str, client: str, stat: bool, worker: int, worker_control: str, inherit: int, generation: int, generation_id: str }
     [83] pub Gen — struct Gen { conf: config.Conf, gen: int, ok: bool, note: str }
 
