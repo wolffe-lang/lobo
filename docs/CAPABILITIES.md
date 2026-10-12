@@ -36,6 +36,14 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws62, 2026-10-12, wolf 0.2.28: the audit reads net +173, fs +106,
+exec +14, env +3. No capability moves. The new exec calls are the pid
+file's: `os_pipe`, `os_spawn_fds` and `os_wait` for the child shell
+that reports `$PPID` where there is no `/proc`, and `os_proc_pid` for a
+hand's pid in the master's status; the new fs calls are
+`fs_read_text("/proc/self/status")`, the pipe's `fs_read`/`fs_close`,
+and the net reads that went back from `sock_read` to `net_read`.)
+
 (ws58, 2026-10-11, wolf 0.2.27: the audit at this head reads net +160,
 fs +98, exec +10, env +3; at ws57's trunk it read fs +94. The census
 below is ws55's and was not re-taken by ws56 or ws57. Of ws58's four
