@@ -2776,6 +2776,7 @@ fn serve_path(
 fn handle_request(
     mut cn: conn.Conn,
     c: config.Conf,
+    srv: int,
     req: http.Request,
     norm_path: str,
     token: str,
@@ -2838,7 +2839,9 @@ fn handle_request(
         }
     }
 
-    let d = http.route(c, norm_path)
+    // ws62 (px25's finding (a)): routed in the server this request is
+    // for (`config.server_pick`, by its listener and host)
+    let d = http.route_at(c, srv, norm_path)
     if d.fs_path.is_empty() {
         acc.status = 404
         acc.body_bytes = err_len(404, false, token)
@@ -3089,7 +3092,9 @@ pub fn serve_conn(
     // there is no loop here to park on; the rig and the differential
     // dial literals, so this cache stays empty in every gauntlet run
     var rs0 = resolver.new()
-    serve_conn_cn(mut cn, c, opts, limits, local_port, mut rs0)
+    // ws62: the blocking driver names no listener — every server is a
+    // candidate, the first the default (`config.server_pick`)
+    serve_conn_cn(mut cn, c, opts, limits, local_port, "", mut rs0)
 }
 
 /// A plaintext Conn over `fd` (the wrapper avoids importing `conn` as
@@ -3112,6 +3117,7 @@ pub fn serve_conn_cn(
     opts: ServerOpts,
     limits: http.Limits,
     local_port: int,
+    laddr: str,
     mut rs: resolver.Resolver,
 ) {
     var carry = ""
@@ -3271,7 +3277,10 @@ pub fn serve_conn_cn(
         // raw socket (that would write the response IN THE CLEAR), so a
         // proxy route on a TLS conn is a NAMED 502 — proxy-over-TLS-
         // downstream is ws05 residue (proxy/ threaded through this seam).
-        let pplan = proxy.plan(c, norm)
+        // ws62 (px25's finding (a)): the server this request is for, at
+        // the listener it arrived on, by its host
+        let srv = config.server_pick(c, laddr, req.host)
+        let pplan = proxy.plan_at(c, srv, norm)
         if pplan.is_proxy {
             if conn.is_tls(cn) {
                 eprint(
@@ -3307,6 +3316,7 @@ pub fn serve_conn_cn(
             should_close = handle_request(
                 mut cn,
                 c,
+                srv,
                 req,
                 norm,
                 opts.token,
@@ -3504,6 +3514,7 @@ pub fn serve_request(
     opts: ServerOpts,
     limits: http.Limits,
     local_port: int,
+    laddr: str,
     head: str,
     rest0: str,
     served: int,
@@ -3545,6 +3556,10 @@ pub fn serve_request(
         },
     }
     fill_req_acc(mut acc, req)
+    // ws62 (px25's finding (a)): the server this request is for — the
+    // listener it arrived on (`laddr`), then its host; a one-server
+    // config answers 0 with no compare
+    let srv = config.server_pick(c, laddr, req.host)
 
     // ws10, the `head` site: the fences above (414/400) fire first;
     // the budget rules what they admitted (docs/BUDGET.md's order).
@@ -3567,7 +3582,7 @@ pub fn serve_request(
     // check is pure over the model and the cache, and it runs
     // before the body read on purpose: nothing consumed, nothing to
     // replay.
-    let need = proxy.resolve_need(c, req.path, rs, now)
+    let need = proxy.resolve_need(c, srv, req.path, rs, now)
     if !need.host.is_empty() {
         return req_out_wait(take acc, chg, need)
     }
@@ -3679,7 +3694,7 @@ pub fn serve_request(
     }
 
     var should_close = false
-    let pplan = proxy.plan(c, norm)
+    let pplan = proxy.plan_at(c, srv, norm)
     if pplan.is_proxy {
         var pacc = proxy.run_acc()
         var raised = false
@@ -3721,6 +3736,7 @@ pub fn serve_request(
         should_close = handle_request(
             mut cn,
             c,
+            srv,
             req,
             norm,
             opts.token,
@@ -4014,6 +4030,7 @@ fn step_serve(
     opts: ServerOpts,
     limits: http.Limits,
     local_port: int,
+    laddr: str,
     buf: str,
     cut: HeadCut,
     served: int,
@@ -4031,6 +4048,7 @@ fn step_serve(
         opts,
         limits,
         local_port,
+        laddr,
         head,
         rest,
         served,
@@ -4096,6 +4114,7 @@ pub fn conn_step(
     opts: ServerOpts,
     limits: http.Limits,
     local_port: int,
+    laddr: str,
     carry: str,
     served: int,
     poll_ms: int,
@@ -4106,7 +4125,7 @@ pub fn conn_step(
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, pre, served, rs, ft, now)
+        return step_serve(conn, c, opts, limits, local_port, laddr, buf, pre, served, rs, ft, now)
     }
     if buf.len > limits.max_header_total {
         // ws28: the conn seam is built in the arms that write through
@@ -4157,7 +4176,7 @@ pub fn conn_step(
     }
     let cut = head_cut(buf)
     if cut.ready {
-        return step_serve(conn, c, opts, limits, local_port, buf, cut, served, rs, ft, now)
+        return step_serve(conn, c, opts, limits, local_port, laddr, buf, cut, served, rs, ft, now)
     }
     step_out(true, false, buf, served, false, take obs.access_new())
 }
