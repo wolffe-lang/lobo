@@ -171,16 +171,17 @@ fn main() -> !int {
 
     // ---- the master's stanza pieces
     assert(shell.status_workers_line(4) == "workers: 4\n", "the workers: line")
-    let row = shell.status_worker_text(2, "standby", "127.0.0.1:40002", 3, 0, 12, 4096, 1, 1, 77)
+    let row = shell.status_worker_text(2, "standby", "127.0.0.1:40002", 3, 0, 12, 4096, 1, 1, 77, 4242)
+    // ws62 (px25 (d)): `pid=` appended last, so every earlier prefix holds
     assert(
         row ==
-            "worker 2: standby control=127.0.0.1:40002 generation=3 live=0 accepted=77 events=12 live-region-bytes=4096 budget-503s=1 restarts=1\n",
+            "worker 2: standby control=127.0.0.1:40002 generation=3 live=0 accepted=77 events=12 live-region-bytes=4096 budget-503s=1 restarts=1 pid=4242\n",
         "the worker row (text): {row}",
     )
-    let obj = shell.status_worker_json(1, "serving", "127.0.0.1:40001", 2, 5, 41, 65536, 0, 0, 77)
+    let obj = shell.status_worker_json(1, "serving", "127.0.0.1:40001", 2, 5, 41, 65536, 0, 0, 77, 4241)
     assert(
         obj ==
-            "{{\"worker\":1,\"state\":\"serving\",\"control\":\"127.0.0.1:40001\",\"generation\":2,\"live\":5,\"accepted\":77,\"events\":41,\"live_region_bytes\":65536,\"budget_503s\":0,\"restarts\":0}}",
+            "{{\"worker\":1,\"state\":\"serving\",\"control\":\"127.0.0.1:40001\",\"generation\":2,\"live\":5,\"accepted\":77,\"events\":41,\"live_region_bytes\":65536,\"budget_503s\":0,\"restarts\":0,\"pid\":4241}}",
         "the worker object (json): {obj}",
     )
     let mo = shell.status_json_master_open(2, false, 9, 70000, 3)

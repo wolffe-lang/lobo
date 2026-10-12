@@ -524,13 +524,160 @@ pub fn usage_text() -> str {
 }
 
 // ------------------------------------------------------------------
-// the pid file — the running master's rendezvous. At this pin the
-// content is the CONTROL ENDPOINT (a loopback address), not an os pid
-// (no getpid; #126): `-s` and stale-detection reach the master by
-// CONNECTING to it, which is a liveness probe the pin can express and
-// a real signal is not. Write-rename so a reader never sees a torn
-// file (contract pitfall). Flips to the os pid when #126 lands.
+// the pid file — the running master's rendezvous. Through 0.1.3 the
+// content was the CONTROL ENDPOINT, not an os pid (no getpid;
+// wolf-lang#126). ws62 (px25's finding (d)): it holds the master's
+// pid, `<pid>\n`, nginx's format, so `kill -HUP "$(cat lobo.pid)"`
+// reaches it — read from the host, because wolf 0.2.28 has no
+// `os_pid` (s232's, after the tag): `Tgid:` of `/proc/self/status` on
+// linux and PAX, a child shell's `$PPID` where there is no `/proc`
+// (macOS). `-s`, `status` and stale-detection still reach the master
+// by CONNECTING to its endpoint, which they now derive from the
+// configuration they already read; only an endpoint the config cannot
+// name (a TCP control on port 0) rides a second line. A host that
+// answers neither keeps 0.1.3's form, the endpoint alone. Write-rename
+// so a reader never sees a torn file (contract pitfall).
 // ------------------------------------------------------------------
+
+/// This process's id from `/proc/self/status`'s `Tgid:` line (the
+/// process, where `Pid:` is the reading thread's on PAX), or -1 when
+/// the host has no such file or line. wolf 0.2.28 has no `os_pid`
+/// (s232's `os_pid` is on wolf-lang trunk after the tag): this is the
+/// host's own answer, read. fs tier. Total.
+pub fn proc_self_pid() -> int {
+    let t = fs_read_text("/proc/self/status") else |_| {
+        return -1
+    }
+    for line in t.lines() {
+        if line.starts_with("Tgid:") {
+            let v = line["Tgid:".len..line.len].trim()
+            if v.is_empty() || !all_digits(v) {
+                return -1
+            }
+            return digits_val(v)
+        }
+    }
+    -1
+}
+
+/// This process's id as a child `/bin/sh` reports its parent (`$PPID`,
+/// which POSIX defines as the shell's parent: the process that spawned
+/// it, this one), or -1 when there is no `/bin/sh`, no pipe, or an
+/// answer that is not a number. The fallback where `/proc` is absent
+/// (macOS) at a pin with no `os_pid`; one fork and exec, once, at
+/// start. exec + fs tiers. Total.
+pub fn sh_parent_pid() -> int {
+    let pp = os_pipe() else |_| {
+        return -1
+    }
+    var args = List[str]()
+    (mut args).push("-c")
+    (mut args).push("echo $PPID")
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(pp.1)
+    var ok = true
+    let h = os_spawn_fds("/bin/sh", args, map) else |_| {
+        ok = false
+        -1
+    }
+    fs_close(pp.1) else |_| {}
+    if !ok {
+        fs_close(pp.0) else |_| {}
+        return -1
+    }
+    var out = ""
+    var reading = true
+    var rounds: int = 0
+    while reading && rounds < 16 {
+        let piece = fs_read(pp.0, 64) else |_| {
+            reading = false
+            ""
+        }
+        out = "{out}{piece}"
+        rounds = rounds + 1
+    }
+    fs_close(pp.0) else |_| {}
+    let _ = os_wait(h) else |_| {
+        0
+    }
+    let v = out.trim()
+    if v.is_empty() || !all_digits(v) {
+        return -1
+    }
+    digits_val(v)
+}
+
+/// This process's id and where it came from: (`pid`, "proc") from
+/// `/proc/self/status`, (`pid`, "sh") from a child shell's `$PPID`,
+/// (-1, "") when the host answers neither. Total.
+pub fn self_pid() -> (int, str) {
+    let p = proc_self_pid()
+    if p > 0 {
+        return (p, "proc")
+    }
+    let q = sh_parent_pid()
+    if q > 0 {
+        return (q, "sh")
+    }
+    (-1, "")
+}
+
+/// True when `s` is one or more ASCII digits. Pure and total.
+fn all_digits(s: str) -> bool {
+    if s.is_empty() {
+        return false
+    }
+    for b in s.bytes() {
+        let x = b as int
+        if x < 48 || x > 57 {
+            return false
+        }
+    }
+    true
+}
+
+/// The pid file's text (ws62): `<pid>\n` when the pid is known and a
+/// reader can derive the endpoint from the configuration (`recorded`
+/// equals `derived`); `<pid>\n<recorded>\n` when it cannot (a TCP
+/// control on port 0: the bound port is the OS's answer); 0.1.3's
+/// `<recorded>\n` alone when no pid is known. Pure and total.
+pub fn pid_text(pid: int, recorded: str, derived: str) -> str {
+    if pid <= 0 {
+        return "{recorded}\n"
+    }
+    if recorded == derived {
+        return "{pid}\n"
+    }
+    "{pid}\n{recorded}\n"
+}
+
+/// The pid a pid file's text names (its first line, all digits), or
+/// -1 (0.1.3's endpoint-only file, or an empty one). Pure and total.
+pub fn pid_of(text: str) -> int {
+    for line in text.lines() {
+        let t = line.trim()
+        if all_digits(t) {
+            return digits_val(t)
+        }
+        return -1
+    }
+    -1
+}
+
+/// The endpoint a pid file's text records — its first line that is not
+/// a pid — or `derived` (the configuration's) when it records none.
+/// Reads 0.1.3's endpoint-only file and ws62's pid file alike. Pure
+/// and total.
+pub fn endpoint_of(text: str, derived: str) -> str {
+    for line in text.lines() {
+        let t = line.trim()
+        if !t.is_empty() && !all_digits(t) {
+            return t
+        }
+    }
+    derived
+}
 
 /// The pid file path: the `pid` directive's argument resolved under
 /// `prefix`, else nginx's default "logs/nginx.pid" under the prefix.
@@ -551,20 +698,21 @@ pub fn pid_path(c: config.Conf, prefix: str) -> str {
     "{prefix}/logs/nginx.pid"
 }
 
-/// Write `endpoint` to the pid file atomically: create the parent
+/// Write `text` (`pid_text`'s) to the pid file atomically: create the parent
 /// directory if absent (lobo owns its runtime dirs — nginx's logs/ is
 /// there by its install), write a sibling temp file, then rename over
 /// the target, so a concurrent reader sees either the old file or the
 /// whole new one, never a partial write. Rows: fs `io` (a write or
 /// rename that failed). Total otherwise.
-pub fn pid_write(path: str, endpoint: str) -> () ! {io} {
+pub fn pid_write(path: str, text: str) -> () ! {io} {
     let slash = path.rfind("/") else -1
     if slash > 0 {
         let dir = path[0..slash]
         fs_create_dir_all(dir) else |_| {}
     }
     let tmp = "{path}.new"
-    fs_write_text(tmp, "{endpoint}\n") else |_| {
+    let body = if text.ends_with("\n") { text } else { "{text}\n" }
+    fs_write_text(tmp, body) else |_| {
         return io
     }
     fs_rename(tmp, path) else |_| {
@@ -572,7 +720,8 @@ pub fn pid_write(path: str, endpoint: str) -> () ! {io} {
     }
 }
 
-/// Read the pid file's endpoint (the first line, trimmed). Rows:
+/// Read the pid file's text, trimmed (`pid_of` and `endpoint_of` read
+/// it; ws62 — through 0.1.3 the whole of it was the endpoint). Rows:
 /// `none` when the file does not exist (nginx's "No such file or
 /// directory" on `-s` with no master), `io` on a read failure — two
 /// tags a caller acts on differently (allow w0602: the row is
@@ -1751,8 +1900,9 @@ pub fn status_worker_text(
     budget_503s: int,
     restarts: int,
     accepted: int,
+    pid: int,
 ) -> str {
-    "worker {worker}: {state} control={ctrl} generation={gen} live={live} accepted={accepted} events={events} live-region-bytes={live_bytes} budget-503s={budget_503s} restarts={restarts}\n"
+    "worker {worker}: {state} control={ctrl} generation={gen} live={live} accepted={accepted} events={events} live-region-bytes={live_bytes} budget-503s={budget_503s} restarts={restarts} pid={pid}\n"
 }
 
 /// One worker as a JSON object in the master's stanza (no leading
@@ -1770,8 +1920,9 @@ pub fn status_worker_json(
     budget_503s: int,
     restarts: int,
     accepted: int,
+    pid: int,
 ) -> str {
-    "{{\"worker\":{worker},\"state\":\"{state}\",\"control\":\"{ctrl}\",\"generation\":{gen},\"live\":{live},\"accepted\":{accepted},\"events\":{events},\"live_region_bytes\":{live_bytes},\"budget_503s\":{budget_503s},\"restarts\":{restarts}}}"
+    "{{\"worker\":{worker},\"state\":\"{state}\",\"control\":\"{ctrl}\",\"generation\":{gen},\"live\":{live},\"accepted\":{accepted},\"events\":{events},\"live_region_bytes\":{live_bytes},\"budget_503s\":{budget_503s},\"restarts\":{restarts},\"pid\":{pid}}}"
 }
 
 /// The MASTER's JSON stanza open: schema 1's members with the master's

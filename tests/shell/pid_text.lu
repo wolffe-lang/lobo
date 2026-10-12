@@ -1,0 +1,54 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! ws62 (px25's finding (d), wolf-lang#126): the pid file's text, PURE,
+//! on all three lanes. The writer's rule (`pid_text`): `<pid>\n`,
+//! nginx's format, when the pid is known and a reader can derive the
+//! endpoint from the configuration; the pid and the recorded endpoint
+//! on a second line when it cannot (a TCP control on port 0); 0.1.3's
+//! endpoint alone when no pid is known. The readers (`pid_of`,
+//! `endpoint_of`) take both ws62's file and 0.1.3's. The live half —
+//! the file equal to the server's `os_proc_pid` — is `pid_file_e2e.lu`.
+
+use shell
+
+fn main() -> !int {
+    // the writer
+    assert(shell.pid_text(4242, "127.0.0.1:9001", "127.0.0.1:9001") == "4242\n", "pid alone")
+    assert(
+        shell.pid_text(4242, "unix:logs/c.sock", "unix:logs/c.sock") == "4242\n",
+        "a unix control is derivable: pid alone",
+    )
+    assert(
+        shell.pid_text(4242, "127.0.0.1:41234", "127.0.0.1:0") == "4242\n127.0.0.1:41234\n",
+        "a port-0 control: the bound endpoint rides line two",
+    )
+    assert(
+        shell.pid_text(-1, "unix:logs/c.sock", "unix:logs/c.sock") == "unix:logs/c.sock\n",
+        "no pid known: 0.1.3's endpoint-only file",
+    )
+
+    // the readers, on ws62's files
+    assert(shell.pid_of("4242") == 4242, "the pid of a pid file")
+    assert(shell.pid_of("4242\n127.0.0.1:41234") == 4242, "…with an endpoint line")
+    assert(shell.endpoint_of("4242", "unix:logs/c.sock") == "unix:logs/c.sock", "derived")
+    assert(
+        shell.endpoint_of("4242\n127.0.0.1:41234", "127.0.0.1:0") == "127.0.0.1:41234",
+        "the recorded endpoint wins over the configuration's",
+    )
+    // …and on 0.1.3's
+    assert(shell.pid_of("unix:logs/c.sock") == -1, "0.1.3's file names no pid")
+    assert(shell.pid_of("127.0.0.1:9001") == -1, "…nor does a TCP endpoint")
+    assert(
+        shell.endpoint_of("unix:logs/c.sock", "unix:other.sock") == "unix:logs/c.sock",
+        "0.1.3's recorded endpoint is read as before",
+    )
+    // the empty and the odd
+    assert(shell.pid_of("") == -1, "an empty file names no pid")
+    assert(shell.endpoint_of("", "x:1") == "x:1", "an empty file records no endpoint")
+    assert(shell.pid_of("12a") == -1, "digits only")
+    assert(shell.pid_of("0") == 0, "0 reads as 0 (never written: pid_text needs > 0)")
+    0
+}
