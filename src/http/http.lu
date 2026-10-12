@@ -1333,14 +1333,6 @@ fn location_key(c: config.Conf, i: int) -> (str, str) {
     ("", "")
 }
 
-/// Find the index of the FIRST `server` block (kind "b") in context
-/// "http", or -1. v0 serves the first server; virtual-host selection
-/// by `server_name`/Host is a later sprint's matching (the table row
-/// says host matching lands ws02 as parse; routing by it is ws03+).
-fn first_server(c: config.Conf) -> int {
-    config.first_server(c)
-}
-
 /// The route trace (ws07): every candidate the matcher CONSIDERED,
 /// with the reason it won or lost — the operator's real question.
 /// Parallel primitive lists on purpose: a List of a bool-mixing
@@ -1429,7 +1421,14 @@ pub fn route(c: config.Conf, path: str) -> Decision {
     // ws28: the serving path builds NO trace — the first cut delegated
     // to `route_traced` with a fresh collector, which was seven empty
     // lists per request for a trace nobody read
-    decide(c, path, match_location(c, path))
+    decide(c, path, match_location(c, 0, path))
+}
+
+/// `route` in server `s` (ws62, px25's finding (a): the ordinal
+/// `config.server_pick` chose for the request; 0 is the first server,
+/// which is all `route` ever read). PURE. Total.
+pub fn route_at(c: config.Conf, s: int, path: str) -> Decision {
+    decide(c, path, match_location(c, s, path))
 }
 
 /// What the location matcher found: the server block, the exact hit
@@ -1448,19 +1447,23 @@ struct LocMatch {
 
 /// The location matcher: `=` exact takes precedence, else the longest
 /// plain (or `^~`) prefix; regex modifiers are parse-only at this pin
-/// and never win. Allocation-free. Total.
-fn match_location(c: config.Conf, path: str) -> LocMatch {
+/// and never win. Allocation-free. ws62: in server ordinal `s` (its
+/// window of the location table and of the route rows). Total.
+fn match_location(c: config.Conf, s: int, path: str) -> LocMatch {
     // lobo#18: `tbl` is the resolved route row this match reads its
     // alias/root/index off. It defaults to the trailing row — the
     // server's own answer — which is exactly the block `loc` names
     // when no location matches.
+    let lat = config.loc_first(c, s)
+    let total = config.loc_count_at(c, s)
+    let rat = config.route_first(c, s)
     var m = LocMatch {
-        srv: first_server(c),
+        srv: config.server_row(c, s),
         best: -1,
         exact_hit: -1,
         loc: -1,
         matched: "",
-        tbl: config.loc_count(c),
+        tbl: rat + total,
     }
     if m.srv < 0 {
         return m
@@ -1472,15 +1475,16 @@ fn match_location(c: config.Conf, path: str) -> LocMatch {
     var best_tbl: int = -1
     var i: int = 0
     // lobo#14: the load-time location table — the same rows in the
-    // same ROW order, so precedence is untouched
-    let total = config.loc_count(c)
+    // same ROW order, so precedence is untouched (ws62: this server's
+    // window of it; `i` counts within the window, so `rat + i` is the
+    // location's route row)
     while i < total {
-        let modi = c.loc_mod[i]
-        let prefix = c.loc_prefix[i]
+        let modi = c.loc_mod[lat + i]
+        let prefix = c.loc_prefix[lat + i]
         if modi == "=" {
             if path == prefix {
-                m.exact_hit = c.loc_row[i]
-                exact_tbl = i
+                m.exact_hit = c.loc_row[lat + i]
+                exact_tbl = rat + i
                 best_prefix = prefix
             }
         } else if modi == "" || modi == "^~" {
@@ -1489,8 +1493,8 @@ fn match_location(c: config.Conf, path: str) -> LocMatch {
             if path.starts_with(prefix) {
                 if prefix.len > best_len {
                     best_len = prefix.len
-                    m.best = c.loc_row[i]
-                    best_tbl = i
+                    m.best = c.loc_row[lat + i]
+                    best_tbl = rat + i
                     best_prefix = prefix
                 }
             }
@@ -1573,7 +1577,22 @@ fn decide(c: config.Conf, path: str, m: LocMatch) -> Decision {
 /// precedence implementation, never a parallel re-derivation of the
 /// winner.
 pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -> Decision {
-    let m = match_location(c, path)
+    route_traced_at(c, 0, "first-server", path, mut tr, want)
+}
+
+/// `route_traced` in server `s` (ws62), with `why` the reason
+/// `config.server_pick` chose it (`host-match`, `default-server`,
+/// `only-server`; `first-server` is `route_traced`'s own): the winner's
+/// trace row carries it, every other server is `not-selected`. PURE.
+pub fn route_traced_at(
+    c: config.Conf,
+    s: int,
+    why: str,
+    path: str,
+    mut tr: RouteTrace,
+    want: bool,
+) -> Decision {
+    let m = match_location(c, s, path)
     let d = decide(c, path, m)
     let srv = m.srv
     let loc = m.loc
@@ -1586,16 +1605,18 @@ pub fn route_traced(c: config.Conf, path: str, mut tr: RouteTrace, want: bool) -
     // relative to the decision ABOVE — the winner is the matcher's,
     // never re-derived here. Skipped entirely on the serving path.
     if want && srv >= 0 {
-        // server candidates: the first server block wins at this pin
-        // (server_name/Host selection is parse-only — a named delta)
+        // server candidates (ws62): the one the caller's pick chose
+        // wins, with its reason; every other is not selected
         var si: int = 0
         while si < total {
             if c.names[si] == "server" && c.kinds[si] == "b" && c.ctx[si] == "http" {
                 let names = server_names_join(c, si)
                 if si == srv {
-                    trace_push(mut tr, "server", si, "", names, "won", "first-server", "")
-                } else {
+                    trace_push(mut tr, "server", si, "", names, "won", why, "")
+                } else if why == "first-server" {
                     trace_push(mut tr, "server", si, "", names, "lost", "not-first-server", "")
+                } else {
+                    trace_push(mut tr, "server", si, "", names, "lost", "not-selected", "")
                 }
             }
             si = si + 1
