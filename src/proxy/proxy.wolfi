@@ -1,10 +1,10 @@
 module pkg :: proxy
   wolfi v0 · toolchain 0.2.28 · edition v1
-  export_hash ed02261b0dc6617f3affa864e0eda21d76f3e65ec8e7f9bbc563593fee50367d
-  pkg_hash    ed02261b0dc6617f3affa864e0eda21d76f3e65ec8e7f9bbc563593fee50367d
+  export_hash 2f704761db149fc16656c7c925497e837683f041dc87df6abbbf6bca6d3148f6
+  pkg_hash    2f704761db149fc16656c7c925497e837683f041dc87df6abbbf6bca6d3148f6
   deps:
-    config  073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
-    http  2c53859788c2fd021519a3f1d6d8c56f46769c847d2fdf755d32207944c60277
+    config  9fcc7048f0a1baccb10edbaa0c9bf2c0b73308b13c71d69d25695358869f2114
+    http  0ba5458a5189c0568f629795a11e75488b49ffdd41470434e0cbc6992ccf3aff
     resolver  937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
     std.net  269ddedc6318256e361259f5783fece6c53702158b8a1282fbb1b035092fc56f
@@ -20,23 +20,24 @@ module pkg :: proxy
     [5] pub peer_count — fn peer_count(p: self.UpPool) -> int · regions (ρ1) -> -
     [6] pub peer_down — fn peer_down(fails: int, last_fail_ms: int, max_fails: int, fail_ms: int, now_ms: int) -> bool
     [7] pub plan — fn plan(c: config.Conf, path: str) -> self.Plan · regions (ρ1, -) -> ρ_caller
-    [8] pub pool_named — fn pool_named(c: config.Conf, name: str) -> self.UpPool · regions (ρ1, -) -> ρ_caller
-    [9] pub relay_response — fn relay_response(up: self.UpResponse, body: str, token: str, date: str, keep: bool) -> str · regions (ρ1, -, -, -, -) -> -
-    [10] pub resolve_need — fn resolve_need(c: config.Conf, path: str, rs: resolver.Resolver, now: int) -> self.Need · regions (ρ1, -, ρ2, -) -> ρ_caller
-    [11] pub rewrite_target — fn rewrite_target(matched: str, has_uri: bool, uri: str, path: str, query: str) -> str
-    [12] pub run — fn run(client: int, c: config.Conf, req: http.Request, body: str, pl: self.Plan, remote_addr: str, token: str, date: str, keep: bool, mut rs: resolver.Resolver, mut acc: self.RunAcc) -> bool ! {closed, io} · regions (-, ρ1, ρ2, -, ρ3, -, -, -, -, ρ4, ρ5) -> -
-    [13] pub run_acc — fn run_acc() -> self.RunAcc · regions () -> ρ_caller
-    [14] pub set_headers — fn set_headers(c: config.Conf, loc: int, srv: int, http_blk: int) -> (prelude.List[str], prelude.List[str]) · regions (ρ1, -, -, -) -> ρ_caller
-    [15] pub status_code — fn status_code(status_line: str) -> int
-    [16] pub status_code_of — fn status_code_of(status_line: str) -> int
-    [17] pub swrr_new — fn swrr_new(n: int) -> self.Swrr · regions (-) -> ρ_caller
-    [18] pub swrr_pick — fn swrr_pick(mut s: self.Swrr, weights: prelude.List[int], up: prelude.List[bool]) -> int · regions (ρ1, ρ2, ρ3) -> -
-    [19] pub version — fn version() -> str
-    [20] pub Need — struct Need { host: str, addr: str, timeout_ms: int, valid_ms: int }
-    [21] pub PassTarget — struct PassTarget { scheme: str, authority: str, is_pool: bool, has_uri: bool, uri: str, err: str }
-    [22] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int, trust_path: str, ssl_name: str, resolver: str, resolver_valid_ms: int, resolver_timeout_ms: int }
-    [23] pub RunAcc — struct RunAcc { addr: str, status: int, body_bytes: int, up_ms: int }
-    [24] pub Swrr — struct Swrr { current: prelude.List[int] }
-    [25] pub UpPool — struct UpPool { name: str, hosts: prelude.List[str], ports: prelude.List[int], weights: prelude.List[int], max_fails: prelude.List[int], fail_ms: prelude.List[int], backup: prelude.List[bool], rows: prelude.List[int] }
-    [26] pub UpResponse — struct UpResponse { status_line: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int }
+    [8] pub plan_at — fn plan_at(c: config.Conf, s: int, path: str) -> self.Plan · regions (ρ1, -, -) -> ρ_caller
+    [9] pub pool_named — fn pool_named(c: config.Conf, name: str) -> self.UpPool · regions (ρ1, -) -> ρ_caller
+    [10] pub relay_response — fn relay_response(up: self.UpResponse, body: str, token: str, date: str, keep: bool) -> str · regions (ρ1, -, -, -, -) -> -
+    [11] pub resolve_need — fn resolve_need(c: config.Conf, s: int, path: str, rs: resolver.Resolver, now: int) -> self.Need · regions (ρ1, -, -, ρ2, -) -> ρ_caller
+    [12] pub rewrite_target — fn rewrite_target(matched: str, has_uri: bool, uri: str, path: str, query: str) -> str
+    [13] pub run — fn run(client: int, c: config.Conf, req: http.Request, body: str, pl: self.Plan, remote_addr: str, token: str, date: str, keep: bool, mut rs: resolver.Resolver, mut acc: self.RunAcc) -> bool ! {closed, io} · regions (-, ρ1, ρ2, -, ρ3, -, -, -, -, ρ4, ρ5) -> -
+    [14] pub run_acc — fn run_acc() -> self.RunAcc · regions () -> ρ_caller
+    [15] pub set_headers — fn set_headers(c: config.Conf, loc: int, srv: int, http_blk: int) -> (prelude.List[str], prelude.List[str]) · regions (ρ1, -, -, -) -> ρ_caller
+    [16] pub status_code — fn status_code(status_line: str) -> int
+    [17] pub status_code_of — fn status_code_of(status_line: str) -> int
+    [18] pub swrr_new — fn swrr_new(n: int) -> self.Swrr · regions (-) -> ρ_caller
+    [19] pub swrr_pick — fn swrr_pick(mut s: self.Swrr, weights: prelude.List[int], up: prelude.List[bool]) -> int · regions (ρ1, ρ2, ρ3) -> -
+    [20] pub version — fn version() -> str
+    [21] pub Need — struct Need { host: str, addr: str, timeout_ms: int, valid_ms: int }
+    [22] pub PassTarget — struct PassTarget { scheme: str, authority: str, is_pool: bool, has_uri: bool, uri: str, err: str }
+    [23] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int, trust_path: str, ssl_name: str, resolver: str, resolver_valid_ms: int, resolver_timeout_ms: int }
+    [24] pub RunAcc — struct RunAcc { addr: str, status: int, body_bytes: int, up_ms: int }
+    [25] pub Swrr — struct Swrr { current: prelude.List[int] }
+    [26] pub UpPool — struct UpPool { name: str, hosts: prelude.List[str], ports: prelude.List[int], weights: prelude.List[int], max_fails: prelude.List[int], fail_ms: prelude.List[int], backup: prelude.List[bool], rows: prelude.List[int] }
+    [27] pub UpResponse — struct UpResponse { status_line: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int }
 

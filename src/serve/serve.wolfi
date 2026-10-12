@@ -1,15 +1,15 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.28 · edition v1
-  export_hash c507a9aec137d08c1fda1cd98b109a66d75cd54e51c7e90e7df75b5f266346d8
-  pkg_hash    c507a9aec137d08c1fda1cd98b109a66d75cd54e51c7e90e7df75b5f266346d8
+  export_hash e88534ae2c077bdedfb8dacfa261ef44d07b6644cb2ddff3559e5fc6cc510d55
+  pkg_hash    e88534ae2c077bdedfb8dacfa261ef44d07b6644cb2ddff3559e5fc6cc510d55
   deps:
     budget  d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
-    config  073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
-    conn  bef157cb41fac0431870c12dcc851fa1804760a291b5d6f821312aa769715436
-    http  2c53859788c2fd021519a3f1d6d8c56f46769c847d2fdf755d32207944c60277
+    config  9fcc7048f0a1baccb10edbaa0c9bf2c0b73308b13c71d69d25695358869f2114
+    conn  47061d8a3d01d24f77b27fcb95931c32776d3deb55ceefc4eeec9253a09e97a0
+    http  0ba5458a5189c0568f629795a11e75488b49ffdd41470434e0cbc6992ccf3aff
     metrics  d7876b1d15ed33fdcab7ea69533f1c19ce89efde7c2fb1ac340b777fed472ea1
     obs  f1404aeee2cc681b8063c87ce5083327b1c70d50a99255aeac7314f2d833d0aa
-    proxy  ed02261b0dc6617f3affa864e0eda21d76f3e65ec8e7f9bbc563593fee50367d
+    proxy  2f704761db149fc16656c7c925497e837683f041dc87df6abbbf6bca6d3148f6
     resolver  937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
@@ -20,7 +20,7 @@ module pkg :: serve
     [3] pub carry_has_head — fn carry_has_head(carry: str) -> bool
     [4] pub classify — fn classify(path: str) -> self.Classified · regions (-) -> ρ_caller
     [5] pub conn_idle — fn conn_idle(carry: str, served: int) -> self.ConnStep · regions (-, -) -> ρ_caller
-    [6] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, carry: str, served: int, poll_ms: int, rs: resolver.Resolver, ft: self.FileKinds, now: int) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5, -) -> ρ_caller
+    [6] pub conn_step — fn conn_step(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, laddr: str, carry: str, served: int, poll_ms: int, rs: resolver.Resolver, ft: self.FileKinds, now: int) -> self.ConnStep · regions (-, ρ1, ρ2, ρ3, -, -, -, -, -, ρ4, ρ5, -) -> ρ_caller
     [7] pub date_str — fn date_str(ft: self.FileKinds, mut fu: self.MemoUpd, secs: int) -> str · regions (ρ1, ρ2, -) -> -
     [8] pub default_opts — fn default_opts() -> self.ServerOpts · regions () -> ρ_caller
     [9] pub error_body — fn error_body(code: int, server: str) -> str
@@ -55,8 +55,8 @@ module pkg :: serve
     [38] pub req_mark — fn req_mark(path: str, tpath: str) -> int
     [39] pub resolve_limits — fn resolve_limits(c: config.Conf) -> http.Limits · regions (ρ1) -> ρ_caller
     [40] pub serve_conn — fn serve_conn(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int) · regions (-, ρ1, ρ2, ρ3, -) -> -
-    [41] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, mut rs: resolver.Resolver) · regions (ρ1, ρ2, ρ3, ρ4, -, ρ5) -> -
-    [42] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, head: str, rest0: str, served: int, rs: resolver.Resolver, ft: self.FileKinds, mut fu: self.MemoUpd, now: int) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -, ρ4, ρ5, ρ6, -) -> ρ_caller
+    [41] pub serve_conn_cn — fn serve_conn_cn(mut cn: conn.Conn, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, laddr: str, mut rs: resolver.Resolver) · regions (ρ1, ρ2, ρ3, ρ4, -, -, ρ5) -> -
+    [42] pub serve_request — fn serve_request(conn: int, c: config.Conf, opts: self.ServerOpts, limits: http.Limits, local_port: int, laddr: str, head: str, rest0: str, served: int, rs: resolver.Resolver, ft: self.FileKinds, mut fu: self.MemoUpd, now: int) -> self.ReqOut · regions (-, ρ1, ρ2, ρ3, -, -, -, -, -, ρ4, ρ5, ρ6, -) -> ρ_caller
     [43] pub status_phrase — fn status_phrase(code: int) -> str
     [44] pub step_pack — fn step_pack(take s: self.ConnStep, keep_acc: bool) -> self.StepOut · regions (ρ1, -) -> ρ_caller
     [45] pub to_hex — fn to_hex(n: int) -> str

@@ -1,11 +1,11 @@
 module pkg :: dryrun
   wolfi v0 · toolchain 0.2.28 · edition v1
-  export_hash 107f7572fda8ab20ae04af6422dd460da769f9347e8b728afc25637221099cb2
-  pkg_hash    107f7572fda8ab20ae04af6422dd460da769f9347e8b728afc25637221099cb2
+  export_hash 11c57bf5218564de39e5d04508d51dc26babd1e12a1eb8905bf6f953531250ec
+  pkg_hash    11c57bf5218564de39e5d04508d51dc26babd1e12a1eb8905bf6f953531250ec
   deps:
-    config  073631961fb53798deab95bb7956a6a8dec0ae2e9a1745935da0a28b9e45b8bb
-    http  2c53859788c2fd021519a3f1d6d8c56f46769c847d2fdf755d32207944c60277
-    proxy  ed02261b0dc6617f3affa864e0eda21d76f3e65ec8e7f9bbc563593fee50367d
+    config  9fcc7048f0a1baccb10edbaa0c9bf2c0b73308b13c71d69d25695358869f2114
+    http  0ba5458a5189c0568f629795a11e75488b49ffdd41470434e0cbc6992ccf3aff
+    proxy  2f704761db149fc16656c7c925497e837683f041dc87df6abbbf6bca6d3148f6
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:
     [0] pub chain_notes — fn chain_notes(c: config.Conf, loc: int) -> str · regions (ρ1, -) -> -
@@ -15,15 +15,17 @@ module pkg :: dryrun
     [4] pub json_close — fn json_close() -> str
     [5] pub json_open — fn json_open() -> str
     [6] pub precedence_prose — fn precedence_prose() -> str
-    [7] pub probe_request — fn probe_request(spec: str) -> self.Probe · regions (-) -> ρ_caller
-    [8] pub schema — fn schema() -> int
-    [9] pub stanza — fn stanza(c: config.Conf, p: self.Probe, tr: http.RouteTrace, v: self.Verdict, listener: str, tls_line: str, stat_line: str, client: str) -> str · regions (ρ1, ρ2, ρ3, ρ4, -, -, -, -) -> -
-    [10] pub stanza_json — fn stanza_json(c: config.Conf, p: self.Probe, tr: http.RouteTrace, v: self.Verdict, listener: str, tls_line: str, stat_line: str, client: str) -> str · regions (ρ1, ρ2, ρ3, ρ4, -, -, -, -) -> -
-    [11] pub stat_note — fn stat_note(v: self.Verdict, req_path: str) -> str · regions (ρ1, -) -> -
-    [12] pub tls_note — fn tls_note(s: config.SslConf, sni: str) -> str · regions (ρ1, -) -> -
-    [13] pub trace_won — fn trace_won(tr: http.RouteTrace, kind: str) -> int · regions (ρ1, -) -> -
-    [14] pub version — fn version() -> str
-    [15] pub why_prose — fn why_prose(code: str) -> str
-    [16] pub Probe — struct Probe { input_err: str, refuse_status: int, refuse_why: str, method: str, scheme: str, host: str, target: str, path: str, query: str }
-    [17] pub Verdict — struct Verdict { kind: str, status: int, fs_path: str, is_alias: bool, index: prelude.List[str], matched: str, srv: int, loc: int, upstream: str, pool: str, peers: str, http_blk: int, note: str }
+    [7] pub probe_listener — fn probe_listener(c: config.Conf, p: self.Probe, plain_addr: str, ssl_addr: str) -> str · regions (ρ1, ρ2, -, -) -> -
+    [8] pub probe_request — fn probe_request(spec: str) -> self.Probe · regions (-) -> ρ_caller
+    [9] pub schema — fn schema() -> int
+    [10] pub stanza — fn stanza(c: config.Conf, p: self.Probe, tr: http.RouteTrace, v: self.Verdict, listener: str, tls_line: str, stat_line: str, client: str) -> str · regions (ρ1, ρ2, ρ3, ρ4, -, -, -, -) -> -
+    [11] pub stanza_json — fn stanza_json(c: config.Conf, p: self.Probe, tr: http.RouteTrace, v: self.Verdict, listener: str, tls_line: str, stat_line: str, client: str) -> str · regions (ρ1, ρ2, ρ3, ρ4, -, -, -, -) -> -
+    [12] pub stat_note — fn stat_note(v: self.Verdict, req_path: str) -> str · regions (ρ1, -) -> -
+    [13] pub tls_note — fn tls_note(s: config.SslConf, sni: str) -> str · regions (ρ1, -) -> -
+    [14] pub trace_won — fn trace_won(tr: http.RouteTrace, kind: str) -> int · regions (ρ1, -) -> -
+    [15] pub trace_won_why — fn trace_won_why(tr: http.RouteTrace, kind: str) -> str · regions (ρ1, -) -> -
+    [16] pub version — fn version() -> str
+    [17] pub why_prose — fn why_prose(code: str) -> str
+    [18] pub Probe — struct Probe { input_err: str, refuse_status: int, refuse_why: str, method: str, scheme: str, host: str, target: str, path: str, query: str }
+    [19] pub Verdict — struct Verdict { kind: str, status: int, fs_path: str, is_alias: bool, index: prelude.List[str], matched: str, srv: int, loc: int, upstream: str, pool: str, peers: str, http_blk: int, note: str }
 
