@@ -99,7 +99,7 @@ pub fn table() -> Table {
         0,
         0,
         "implemented",
-        "virtual-server block; serving lands ws02",
+        "virtual-server block; serving lands ws02. Every one serves (ws62, px25's finding (a)): a request is routed in the server its listener and host choose (server_name, else the listener's default). Delta, named: client_max_body_size, large_client_header_buffers, memory_budget, tcp_nodelay, access_log and metrics are read from the first server block (and http) only — a later server's are warned at -t and at start",
     )
     row(
         mut t,
@@ -152,9 +152,18 @@ pub fn table() -> Table {
         1,
         -1,
         "implemented",
-        "bind address/port; `ssl` flag serves TLS (ws05); `reuseport` flag (ws32, lobo#5) is nginx's: each hand binds its own SO_REUSEPORT member and the master binds nothing, so the kernel wakes one hand per connection — off by default as in nginx; linux distributes by hash, macOS delivers to the newest member, a host that refuses the option by name binds without it and stands by (docs/WORKERS.md). Delta, named: ONE plain + ONE ssl listener bind at this pin — additional listen directives parse but do not bind",
+        "bind address/port; `ssl` flag serves TLS (ws05); `reuseport` flag (ws32, lobo#5) is nginx's: each hand binds its own SO_REUSEPORT member and the master binds nothing, so the kernel wakes one hand per connection — off by default as in nginx; linux distributes by hash, macOS delivers to the newest member, a host that refuses the option by name binds without it and stands by (docs/WORKERS.md). Every distinct address of every server binds (ws62, px25's finding (a); through 0.1.3 only the first plain and the first ssl one did), a bare port as a loopback bind; `default_server` marks the address's default server, else the first there. Delta, named: the listener set is the start's — a reload re-routes among the bound addresses and opens or closes none",
     )
-    row(mut t, "server_name", "server", "", 1, -1, "planned(ws02)", "host matching")
+    row(
+        mut t,
+        "server_name",
+        "server",
+        "",
+        1,
+        -1,
+        "implemented",
+        "host matching (ws62, px25's finding (a)): at the connection's listener, the request's host (Host, or an absolute-form target's authority; lower-cased, port and trailing dot dropped) against exact names, then the longest leading wildcard (`*.x`, and `.x` for x too), then the longest trailing wildcard (`x.*`); no match is the listener's default. Delta, named: a regular-expression name (`~…`) parses and never matches (warned at -t)",
+    )
     row(
         mut t,
         "root",

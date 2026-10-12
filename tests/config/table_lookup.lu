@@ -40,8 +40,8 @@ fn main() -> int {
         "listen implemented (status flipped at ws07 — sockets bind since ws02, ssl since ws05; the dry-run chain notes surfaced the stale row)",
     )
     assert(
-        config.spec_at(t, config.find(t, "server_name", "server")).status == "planned(ws02)",
-        "server_name stays planned: host matching is parse-only (what the ws07 trace explains)",
+        config.spec_at(t, config.find(t, "server_name", "server")).status == "implemented",
+        "server_name implemented at ws62 (px25's finding (a)): a request's host picks its server at its listener",
     )
     assert(
         config.spec_at(t, config.find(t, "ssl_certificate", "server")).status == "implemented",
