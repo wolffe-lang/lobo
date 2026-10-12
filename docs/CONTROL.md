@@ -30,9 +30,28 @@ with a keyword and no file, or a keyword that is not `token`, is a
 named `-t` error (`config.control_check`), never a silently ignored
 one.
 
-The pid file records the endpoint (the #126 residue leaves no os pid
-to record), so `lobo -s`, `lobo status`, `lobo control` and the next
-start's stale-pid check all find it without being told.
+The pid file holds the master's pid, `<pid>\n`, nginx's own format
+(ws62, px25's finding (d)), so `kill -HUP "$(cat logs/lobo.pid)"`
+reaches a running lobo as it reaches nginx. wolf 0.2.28 has no
+`os_pid` (wolf-lang#126's last half is s232's `os_pid`, on wolf-lang
+trunk after that release), so lobo asks the host: the `Tgid:` line of
+`/proc/self/status` on linux and on PAX, and where there is no `/proc`
+(macOS) a child `/bin/sh` that echoes `$PPID`, which POSIX defines as
+the shell's parent: lobo. The start notice names the pid and its
+source. A host that answers neither keeps 0.1.3's file, the endpoint
+alone, and the notice says so. `lobo -s`, `lobo status`, `lobo
+control` and the next start's stale-pid check still CONNECT to the
+endpoint; they derive it from the configuration they already read (the
+`control` address, resolved under `-p`), so only an endpoint the
+configuration cannot name — `control 127.0.0.1:0`, whose port is the
+kernel's — rides a second line of the file. Every reader also takes
+0.1.3's endpoint-only file. Through 0.1.3 the file held the endpoint
+and no pid, so a signal needed the pid from the shell that started
+lobo (`$!`).
+
+The master's `status` rows carry each worker's pid (`pid=`, from the
+spawn handle: `os_proc_pid`, wolf 0.2.27), for an operator who signals
+one worker.
 
 **A relative `unix:` path lives under the prefix** (ws49, lobo#54), as
 every relative path nginx reads does (`pid`, the logs, `-c`; the
@@ -40,8 +59,9 @@ pinned oracle's `pid` is measured doing so in the differential's row
 5) and as lobo's `pid` and token file always did. `control
 unix:logs/control.sock;` under `-p /srv/site` binds
 `/srv/site/logs/control.sock`, whatever folder lobo was started from.
-The pid file records the address as CONFIGURED (`unix:logs/control.sock`)
-and every client resolves it under its own `-p`, exactly as the server
+Every client reads the address as CONFIGURED (`unix:logs/control.sock`,
+from the configuration since ws62; from the pid file before)
+and resolves it under its own `-p`, exactly as the server
 did to bind it, so `lobo -p /srv/site -c /srv/site/conf/nginx.conf
 status` answers from any folder — including against a server started
 in its prefix with the default `-p .`. Until ws49 the path was bound
