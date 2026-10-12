@@ -98,6 +98,16 @@ poll() { # poll <desc> <grep-pattern> — up to ~8s
 
 poll "server up, generation 1 current" "generation 1: current"
 
+# ws62 (px25's finding (d), wolf-lang#126): the pid file holds the
+# server's pid, nginx's format — the SIGHUP below is sent to what the
+# file says, as an operator's `kill -HUP "$(cat lobo.pid)"` would
+filepid=$(cat "$scratch/lobo.pid" 2>/dev/null)
+if [ "$filepid" = "$pid" ]; then
+    check "the pid file holds the server's pid ($pid)" 0
+else
+    check "the pid file holds the server's pid ($pid; it holds: $filepid)" 1
+fi
+
 # 1. hold a keepalive connection on generation 1
 "$WOLF" run "$rig_root"/tests/rig/holdconn.lu "$hp" 4000 > "$scratch/hold.out" 2> "$scratch/hold.err" &
 holder=$!
@@ -106,7 +116,7 @@ poll "held connection counted (gen 1 live=1)" "generation 1: current live=1"
 # 2. REAL SIGHUP — the reload trigger. Swap the root first so the new
 # generation is observably different.
 render "$scratch/B"
-kill -HUP "$pid"
+kill -HUP "$(cat "$scratch/lobo.pid")"
 poll "SIGHUP drains gen 1 (draining live=1)" "generation 1: draining live=1"
 poll "generation 2 current while gen 1 drains" "generation 2: current"
 
