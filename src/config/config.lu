@@ -187,6 +187,15 @@ pub fn check(prefix: str, conf_rel: str, dump: bool, quiet: bool) -> int {
             eprint("lobo: [warn] {line}")
         }
     }
+    // ws62 (px25's finding (a)): every server block serves now; what
+    // lobo still reads from the first one only, and a server_name it
+    // never matches, are named here (config/vhost.lu)
+    if ok(c) {
+        let vn = vhost_notes(c)
+        for line in vn.lines() {
+            eprint("lobo: [warn] {line}")
+        }
+    }
     if !sslw.is_empty() {
         for line in sslw.lines() {
             eprint("lobo: [warn] {line}")

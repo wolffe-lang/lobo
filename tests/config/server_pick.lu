@@ -1,0 +1,128 @@
+//! check: run(exit=0, stdout="vhost ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: http config
+//!
+//! ws62 (px25's finding (a)): every `server` block, and which one a
+//! request is for — PURE, on all three lanes. Through 0.1.3 lobo routed
+//! the first server only (`route` read its locations, `first-server` in
+//! the dry-run's trace). Here: the server and listener tables a load
+//! derives (config/vhost.lu), nginx's pick at a listener (exact name,
+//! longest leading wildcard, `.name`, longest trailing wildcard, else
+//! `default_server`, else the first there), the host as names compare
+//! it (lower-cased, port and trailing dot dropped), and `route_at`
+//! answering from the chosen server's own locations and root. The live
+//! half — two ports and names on one, under one process and under
+//! hands — is tests/serve/vhost_e2e.lu; the byte-level half against
+//! the pinned nginx is the differential's `vhost_*` cases.
+
+use config
+use http
+
+fn main() -> !int {
+    let src = "http {{\n  server {{ listen 8080; root /srv/a; location /api/ {{ root /srv/a-api; }} }}\n  server {{ listen 8081; root /srv/b; }}\n  server {{ listen 127.0.0.1:8080; server_name c.test www.c.test; root /srv/c; }}\n  server {{ listen 8080; server_name *.wild.test; root /srv/w; }}\n  server {{ listen 8080; server_name x.wild.test; root /srv/x; }}\n  server {{ listen 8080; server_name www.t.*; root /srv/t; }}\n  server {{ listen 8080; server_name .dot.test; root /srv/d; }}\n  server {{ listen 8082 default_server; server_name n.test; root /srv/n; }}\n  server {{ listen 8082; server_name m.test; root /srv/m; }}\n  server {{ listen 8443 ssl; server_name s.test; root /srv/s; }}\n}}\n"
+    let c = config.parse_str(src, "v.conf")
+
+    // the server table: ten blocks, row order
+    assert(config.server_count(c) == 10, "ten servers: {config.server_count(c)}")
+    assert(config.server_row(c, 0) == config.first_server(c), "ordinal 0 is the first server")
+    assert(config.server_names_at(c, 2) == "c.test www.c.test", "names, in order")
+
+    // the listener table: 8080 (a bare port and its 127.0.0.1 spelling
+    // are ONE listener), 8081, 8082, 8443 ssl — in first-seen order
+    assert(config.listener_count(c) == 4, "four listeners: {config.listener_count(c)}")
+    assert(config.listener_addr(c, 0) == "127.0.0.1:8080", "listener 0")
+    assert(config.listener_addr(c, 1) == "127.0.0.1:8081", "listener 1")
+    assert(config.listener_addr(c, 2) == "127.0.0.1:8082", "listener 2")
+    assert(config.listener_ssl(c, 3) && !config.listener_ssl(c, 0), "8443 serves TLS, 8080 not")
+    assert(config.listener_default(c, 0) == 0, "8080's default: the first server there")
+    assert(config.listener_default(c, 2) == 7, "8082's default: its default_server, not the first")
+    let plain = config.listen_plain_addrs(c)
+    assert(plain.len == 3 && plain[2] == "127.0.0.1:8082", "three plaintext addresses")
+    assert(config.listen_ssl_addrs(c).len == 1, "one TLS address")
+
+    // the host as names compare it
+    assert(config.host_key("C.Test") == "c.test", "lower-cased")
+    assert(config.host_key("c.test:8080") == "c.test", "the port dropped")
+    assert(config.host_key("c.test.") == "c.test", "a trailing dot dropped")
+    assert(config.host_key("[::1]:8080") == "[::1]", "an IPv6 literal keeps its brackets")
+
+    // the pick at 8080
+    let a = "127.0.0.1:8080"
+    assert(config.server_pick(c, a, "c.test") == 2, "an exact name")
+    assert(
+        config.server_pick(c, a, "WWW.C.TEST:8080") == 2,
+        "…its second name, any case, with a port",
+    )
+    assert(config.server_pick(c, a, "y.wild.test") == 3, "a leading wildcard")
+    assert(config.server_pick(c, a, "x.wild.test") == 4, "an exact name beats the wildcard")
+    assert(config.server_pick(c, a, "wild.test") == 0, "`*.wild.test` does not match the bare name")
+    assert(config.server_pick(c, a, "www.t.example") == 5, "a trailing wildcard")
+    assert(config.server_pick(c, a, "dot.test") == 6, "`.dot.test` matches the bare name")
+    assert(config.server_pick(c, a, "a.dot.test") == 6, "…and a subdomain")
+    assert(config.server_pick(c, a, "nobody.test") == 0, "no name: the first server at 8080")
+    assert(config.server_pick(c, a, "") == 0, "no host at all: the default")
+    // at another listener, only its own servers are candidates
+    assert(config.server_pick(c, "127.0.0.1:8081", "c.test") == 1, "8081 has one server")
+    assert(config.server_pick(c, "127.0.0.1:8082", "m.test") == 8, "8082 by name")
+    assert(config.server_pick(c, "127.0.0.1:8082", "c.test") == 7, "8082's default_server")
+    // no listener named: every server is a candidate, the first the default
+    assert(config.server_pick(c, "", "s.test") == 9, "any listener: by name")
+    assert(config.server_pick(c, "", "nobody") == 0, "any listener: the first")
+    assert(config.server_pick_why(c, a, "c.test", 2) == "host-match", "why: a name")
+    assert(config.server_pick_why(c, a, "nobody", 0) == "default-server", "why: the default")
+
+    // routing in the chosen server: its own locations and root
+    assert(http.route_at(c, 0, "/x.html").fs_path == "/srv/a/x.html", "server 0's root")
+    assert(http.route_at(c, 0, "/api/v").fs_path == "/srv/a-api/api/v", "server 0's location")
+    assert(
+        http.route_at(c, 2, "/api/v").fs_path == "/srv/c/api/v",
+        "server 2 has no /api/ location",
+    )
+    assert(http.route_at(c, 1, "/x.html").fs_path == "/srv/b/x.html", "server 1's root")
+    assert(http.route_at(c, 9, "/x.html").fs_path == "/srv/s/x.html", "the TLS server's root")
+    assert(http.route(c, "/x.html").fs_path == "/srv/a/x.html", "`route` is server 0, as ever")
+    assert(config.loc_count(c) == 1 && config.loc_count_at(c, 2) == 0, "location windows")
+
+    // one server: no compare, ordinal 0 whatever the host
+    let one = config.parse_str(
+        "http {{\n  server {{ listen 8080; server_name only.test; root /o; }}\n}}\n",
+        "o.conf",
+    )
+    assert(config.server_pick(one, "127.0.0.1:8080", "else.test") == 0, "one server")
+    assert(config.server_pick_why(one, "", "x", 0) == "only-server", "why: the only one")
+    // no server: -1, and the one empty trailing route row as before
+    let none = config.parse_str("http {{\n}}\n", "n.conf")
+    assert(config.server_pick(none, "", "x") == -1, "no server")
+    assert(config.route_count(none) == 1, "the one trailing row")
+
+    // a port-0 `listen` is a socket of its own each time (the kernel
+    // picks the port), so two of them are two listeners, keyed apart
+    let zero = config.parse_str(
+        "http {{\n  server {{ listen 127.0.0.1:0 ssl; root /s; }}\n  server {{ listen 127.0.0.1:0; root /p; }}\n}}\n",
+        "z.conf",
+    )
+    assert(config.listener_count(zero) == 2, "two port-0 listeners: {config.listener_count(zero)}")
+    assert(config.listener_ssl(zero, 0) && !config.listener_ssl(zero, 1), "one TLS, one plain")
+    let zp = config.listen_plain_addrs(zero)
+    assert(zp.len == 1 && config.listen_bind_addr(zp[0]) == "127.0.0.1:0", "the plain one binds :0")
+    assert(config.server_pick(zero, zp[0], "") == 1, "its key picks its own server")
+    assert(config.listen_bind_addr("127.0.0.1:8080") == "127.0.0.1:8080", "a key with no #n")
+
+    // the named deltas (-t and start print them)
+    let notes = config.vhost_notes(
+        config.parse_str(
+            "http {{\n  server {{ listen 8080; }}\n  server {{ listen 8081; client_max_body_size 1m; server_name ~^w; }}\n}}\n",
+            "d.conf",
+        ),
+    )
+    assert(
+        notes.contains("\"client_max_body_size\" in the server block at d.conf:3 is not applied"),
+        "a first-server-only directive: {notes}",
+    )
+    assert(notes.contains("server_name \"~^w\""), "a regex name: {notes}")
+    assert(config.vhost_notes(c).is_empty(), "the table config names none")
+    print("vhost ok")
+    0
+}

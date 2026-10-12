@@ -1,0 +1,516 @@
+//! member: true
+//! config/vhost — every `server` block, and which one a request is
+//! for (ws62, px25's finding (a): through 0.1.3 lobo served the first
+//! `server` under `http` only, and bound the first plaintext and the
+//! first TLS `listen` of the whole config).
+//!
+//! What is derived here, once per load (`build_vhosts`, called by
+//! `build_index`): the server table (`srv_rows`, every `server` block
+//! under `http` in row order; ordinal 0 is the first, the block every
+//! one-server reader still means), each server's `server_name`s
+//! (lower-cased), and the LISTENER table — every distinct `listen`
+//! address in the order it first appears, whether it serves TLS, the
+//! servers that listen on it in row order, and its default server
+//! (`default_server`, else the first of them), nginx's rule.
+//!
+//! Which server a request is for is nginx's, at the listener the
+//! connection arrived on: the request's host (`Host`, or the authority
+//! of an absolute-form target), lower-cased, its port and a trailing
+//! dot removed, against the candidates' names — an exact name first,
+//! then the longest leading wildcard (`*.example.com`, and
+//! `.example.com`, which also matches `example.com`), then the longest
+//! trailing wildcard (`www.*`). A regular-expression name (`~…`)
+//! never matches here (named at load by `vhost_notes`). No match is
+//! the listener's default. A config with one server never compares a
+//! string: `server_pick` answers 0.
+
+/// The ordinal (0-based, row order) of every `server` block under
+/// `http`; the first is `first_server`'s row. Total.
+pub fn server_count(c: Conf) -> int {
+    c.srv_rows.len
+}
+
+/// The row of server ordinal `s`, or -1 out of range. Total.
+pub fn server_row(c: Conf, s: int) -> int {
+    if s < 0 || s >= c.srv_rows.len {
+        return -1
+    }
+    c.srv_rows[s]
+}
+
+/// The ordinal of the server whose block is row `row`, or -1. Total.
+pub fn server_of_row(c: Conf, row: int) -> int {
+    var s: int = 0
+    while s < c.srv_rows.len {
+        if c.srv_rows[s] == row {
+            return s
+        }
+        s = s + 1
+    }
+    -1
+}
+
+/// The first location-table index of server `s` (the window
+/// `[loc_first, loc_first + loc_count_at)` of `loc_row`/`loc_mod`/
+/// `loc_prefix`), 0 out of range. Total.
+pub fn loc_first(c: Conf, s: int) -> int {
+    if s < 0 || s >= c.srv_loc_at.len {
+        return 0
+    }
+    c.srv_loc_at[s]
+}
+
+/// The number of `location` blocks directly under server `s`, 0 out of
+/// range. Total.
+pub fn loc_count_at(c: Conf, s: int) -> int {
+    if s < 0 || s >= c.srv_loc_n.len {
+        return 0
+    }
+    c.srv_loc_n[s]
+}
+
+/// The first resolved route row of server `s` (its locations' rows,
+/// then its own "no location matched" row), 0 out of range. Total.
+pub fn route_first(c: Conf, s: int) -> int {
+    if s < 0 || s >= c.srv_rr_at.len {
+        return 0
+    }
+    c.srv_rr_at[s]
+}
+
+/// The space-joined lower-cased `server_name`s of server `s` ("" when
+/// it declares none). Total.
+pub fn server_names_at(c: Conf, s: int) -> str {
+    if s < 0 || s >= c.srv_name_at.len {
+        return ""
+    }
+    let at = c.srv_name_at[s]
+    let n = c.srv_name_n[s]
+    var out = ""
+    var j: int = 0
+    while j < n {
+        out = if out.is_empty() { c.srv_names[at + j] } else { "{out} {c.srv_names[at + j]}" }
+        j = j + 1
+    }
+    out
+}
+
+/// The number of listeners (distinct `listen` addresses). Total.
+pub fn listener_count(c: Conf) -> int {
+    c.lst_addr.len
+}
+
+/// Listener `i`'s KEY — its address as lobo binds it (a bare port is a
+/// loopback bind), with `#n` after a port-0 address
+/// (`listen_bind_addr`) — "" out of range. Total.
+pub fn listener_addr(c: Conf, i: int) -> str {
+    if i < 0 || i >= c.lst_addr.len {
+        return ""
+    }
+    c.lst_addr[i]
+}
+
+/// Whether listener `i` serves TLS (some `listen` of its address
+/// carries `ssl`). Total.
+pub fn listener_ssl(c: Conf, i: int) -> bool {
+    if i < 0 || i >= c.lst_ssl.len {
+        return false
+    }
+    c.lst_ssl[i]
+}
+
+/// Listener `i`'s default server ordinal, -1 out of range. Total.
+pub fn listener_default(c: Conf, i: int) -> int {
+    if i < 0 || i >= c.lst_def.len {
+        return -1
+    }
+    c.lst_def[i]
+}
+
+/// The index of the listener bound at `addr`, or -1. Total.
+pub fn listener_index(c: Conf, addr: str) -> int {
+    var i: int = 0
+    while i < c.lst_addr.len {
+        if c.lst_addr[i] == addr {
+            return i
+        }
+        i = i + 1
+    }
+    -1
+}
+
+/// The plaintext listener addresses, in table order. Total.
+pub fn listen_plain_addrs(c: Conf) -> List[str] {
+    var out = List[str]()
+    var i: int = 0
+    while i < c.lst_addr.len {
+        if !c.lst_ssl[i] {
+            (mut out).push(c.lst_addr[i])
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// The TLS listener addresses, in table order. Total.
+pub fn listen_ssl_addrs(c: Conf) -> List[str] {
+    var out = List[str]()
+    var i: int = 0
+    while i < c.lst_addr.len {
+        if c.lst_ssl[i] {
+            (mut out).push(c.lst_addr[i])
+        }
+        i = i + 1
+    }
+    out
+}
+
+/// A `listen` argument as lobo binds it: a bare port is a loopback
+/// bind (loopback-only, forever), anything with a `:` as written.
+/// Pure and total.
+pub fn listen_norm(a: str) -> str {
+    if a.contains(":") {
+        return a
+    }
+    "127.0.0.1:{a}"
+}
+
+/// The address a listener KEY binds: the key itself, or — for a port-0
+/// `listen`, which the table keeps apart as `<addr>#<n>` because every
+/// one of them is a socket of its own (the kernel picks each port) —
+/// the address without its `#n`. Pure and total.
+pub fn listen_bind_addr(key: str) -> str {
+    let h = key.find("#") else -1
+    if h < 0 {
+        return key
+    }
+    key[0..h]
+}
+
+/// The host a request names, as server names are compared: lower-cased,
+/// a port and a trailing dot removed (`Example.COM.:8080` is
+/// `example.com`; a bracketed IPv6 literal keeps its brackets). Pure
+/// and total.
+pub fn host_key(host: str) -> str {
+    var h = host.trim()
+    if h.starts_with("[") {
+        let close = h.find("]") else -1
+        if close > 0 {
+            h = h[0..close + 1]
+        }
+    } else {
+        let colon = h.find(":") else -1
+        if colon >= 0 {
+            h = h[0..colon]
+        }
+    }
+    while h.ends_with(".") {
+        h = h[0..h.len - 1]
+    }
+    h.lower()
+}
+
+/// How server `s`'s names match `key` (a `host_key`): 3 an exact name,
+/// 2 a leading wildcard, 1 a trailing wildcard, 0 none; the second
+/// value is the matched name's length (the longest wildcard wins).
+/// Total.
+fn name_match(c: Conf, s: int, key: str) -> (int, int) {
+    let at = c.srv_name_at[s]
+    let n = c.srv_name_n[s]
+    var kind: int = 0
+    var len: int = 0
+    var j: int = 0
+    while j < n {
+        let nm = c.srv_names[at + j]
+        if nm == key {
+            return (3, nm.len)
+        }
+        if nm.starts_with("*.") {
+            let tail = nm[1..nm.len]
+            if key.ends_with(tail) && key.len > tail.len {
+                if kind < 2 || kind == 2 && nm.len > len {
+                    kind = 2
+                    len = nm.len
+                }
+            }
+        } else if nm.starts_with(".") && nm.len > 1 {
+            if key == nm[1..nm.len] || key.ends_with(nm) {
+                if kind < 2 || kind == 2 && nm.len > len {
+                    kind = 2
+                    len = nm.len
+                }
+            }
+        } else if nm.ends_with(".*") && nm.len > 2 {
+            let head = nm[0..nm.len - 1]
+            if key.starts_with(head) && key.len > head.len {
+                if kind < 1 || kind == 1 && nm.len > len {
+                    kind = 1
+                    len = nm.len
+                }
+            }
+        }
+        j = j + 1
+    }
+    (kind, len)
+}
+
+/// The server a request is for: its listener's address `laddr` (""
+/// = every server is a candidate and the first is the default, the
+/// shape of the blocking driver and of a dry-run probe that names no
+/// port) and its host. Answers the server ordinal, -1 when the config
+/// has no server. A one-server config answers 0 with no compare.
+/// Total.
+pub fn server_pick(c: Conf, laddr: str, host: str) -> int {
+    let ns = c.srv_rows.len
+    if ns <= 1 {
+        return ns - 1
+    }
+    var at: int = 0
+    var n: int = ns
+    var dflt: int = 0
+    var all = true
+    if !laddr.is_empty() {
+        let li = listener_index(c, laddr)
+        if li >= 0 {
+            at = c.lst_srv_at[li]
+            n = c.lst_srv_n[li]
+            dflt = c.lst_def[li]
+            all = false
+        }
+    }
+    if n <= 1 {
+        return if all { 0 } else { c.lst_srv[at] }
+    }
+    let key = host_key(host)
+    if key.is_empty() {
+        return dflt
+    }
+    var best: int = -1
+    var best_kind: int = 0
+    var best_len: int = 0
+    var j: int = 0
+    while j < n {
+        let s = if all { j } else { c.lst_srv[at + j] }
+        let m = name_match(c, s, key)
+        if m.0 > best_kind || m.0 == best_kind && m.0 > 0 && m.0 < 3 && m.1 > best_len {
+            best = s
+            best_kind = m.0
+            best_len = m.1
+        }
+        if best_kind == 3 {
+            return best
+        }
+        j = j + 1
+    }
+    if best >= 0 {
+        return best
+    }
+    dflt
+}
+
+/// Why `server_pick` chose `s` for (`laddr`, `host`): "host-match"
+/// (a name matched), "default-server" (none did, or one candidate),
+/// "only-server" (the config has one). For the dry-run's trace. Total.
+pub fn server_pick_why(c: Conf, laddr: str, host: str, s: int) -> str {
+    if c.srv_rows.len <= 1 {
+        return "only-server"
+    }
+    let key = host_key(host)
+    if key.is_empty() || s < 0 {
+        return "default-server"
+    }
+    let m = name_match(c, s, key)
+    if m.0 > 0 {
+        return "host-match"
+    }
+    "default-server"
+}
+
+/// Whether server `s` listens at `laddr` ("" = any). Total.
+pub fn server_listens_at(c: Conf, s: int, laddr: str) -> bool {
+    if laddr.is_empty() {
+        return true
+    }
+    let li = listener_index(c, laddr)
+    if li < 0 {
+        return true
+    }
+    let at = c.lst_srv_at[li]
+    let n = c.lst_srv_n[li]
+    var j: int = 0
+    while j < n {
+        if c.lst_srv[at + j] == s {
+            return true
+        }
+        j = j + 1
+    }
+    false
+}
+
+/// ws62: the named deltas of a config with more than one server, one
+/// line each ("" when there are none): what lobo still reads from the
+/// FIRST server only (its limits, access and error logs, `metrics`),
+/// and a `server_name` lobo never matches (a regular expression). Read
+/// by `-t` and at start. Total.
+pub fn vhost_notes(c: Conf) -> str {
+    var out = ""
+    let ns = c.srv_rows.len
+    var s: int = 1
+    while s < ns {
+        let srv = c.srv_rows[s]
+        let at = c.kid_at[srv + 1]
+        let n = c.kid_n[srv + 1]
+        var j: int = 0
+        while j < n {
+            let r = c.kids[at + j]
+            let nm = c.names[r]
+            if first_server_only(nm) {
+                out = "{out}\"{nm}\" in the server block at {c.files[r]}:{c.lines[r]} is not applied: lobo reads it from the first server block (and http) only — a named delta (docs/directives.md)\n"
+            }
+            j = j + 1
+        }
+        s = s + 1
+    }
+    s = 0
+    while s < ns {
+        let at = c.srv_name_at[s]
+        let n = c.srv_name_n[s]
+        var j: int = 0
+        while j < n {
+            let nm = c.srv_names[at + j]
+            if nm.starts_with("~") {
+                let r = c.srv_rows[s]
+                out = "{out}server_name \"{nm}\" in {c.files[r]}:{c.lines[r]} is a regular expression, which lobo does not match — requests reach this server only as its listener's default (a named delta)\n"
+            }
+            j = j + 1
+        }
+        s = s + 1
+    }
+    out
+}
+
+/// The server-level directives lobo resolves from the first server
+/// block only (`limitsconf`'s effective rows, `logconf`'s access
+/// outputs, `metricsconf`'s switch). Pure and total.
+fn first_server_only(name: str) -> bool {
+    name == "client_max_body_size" ||
+        name == "large_client_header_buffers" ||
+        name == "memory_budget" ||
+        name == "tcp_nodelay" ||
+        name == "access_log" ||
+        name == "metrics"
+}
+
+/// Derive the server, name and listener tables (`build_index`'s third
+/// pass; after the child buckets, which it reads). Total.
+fn build_vhosts(mut c: Conf) {
+    let total = c.names.len
+    var i: int = 0
+    while i < total {
+        if c.kinds[i] == "b" && c.names[i] == "server" && c.ctx[i] == "http" {
+            (mut c.srv_rows).push(i)
+        }
+        i = i + 1
+    }
+    var s: int = 0
+    while s < c.srv_rows.len {
+        let srv = c.srv_rows[s]
+        let at = c.kid_at[srv + 1]
+        let n = c.kid_n[srv + 1]
+        (mut c.srv_name_at).push(c.srv_names.len)
+        var names_n: int = 0
+        var j: int = 0
+        while j < n {
+            let r = c.kids[at + j]
+            if c.names[r] == "server_name" {
+                let aat = c.args_at[r]
+                var q: int = 0
+                while q < c.args_n[r] {
+                    (mut c.srv_names).push(c.argp[aat + q].lower())
+                    names_n = names_n + 1
+                    q = q + 1
+                }
+            } else if c.names[r] == "listen" && c.args_n[r] >= 1 {
+                let aat = c.args_at[r]
+                let addr = listen_norm(c.argp[aat])
+                var ssl = false
+                var dflt = false
+                var q: int = 1
+                while q < c.args_n[r] {
+                    let a = c.argp[aat + q]
+                    if a == "ssl" {
+                        ssl = true
+                    } else if a == "default_server" || a == "default" {
+                        dflt = true
+                    }
+                    q = q + 1
+                }
+                lst_join(mut c, addr, ssl, s, dflt)
+            }
+            j = j + 1
+        }
+        (mut c.srv_name_n).push(names_n)
+        s = s + 1
+    }
+    // the listener's servers, flattened in table order (a server joined
+    // each of its listeners above, in row order)
+    var li: int = 0
+    while li < c.lst_addr.len {
+        (mut c.lst_srv_at).push(c.lst_srv.len)
+        var cnt: int = 0
+        var k: int = 0
+        while k < c.lst_pair_l.len {
+            if c.lst_pair_l[k] == li {
+                (mut c.lst_srv).push(c.lst_pair_s[k])
+                cnt = cnt + 1
+            }
+            k = k + 1
+        }
+        (mut c.lst_srv_n).push(cnt)
+        li = li + 1
+    }
+}
+
+/// Record that server `s` listens at `addr` (`ssl` and `default_server`
+/// as its `listen` says): a new listener the first time an address is
+/// met, its TLS flag the OR of every `listen` of it, its default the
+/// first `default_server` (else the first server). Total.
+fn lst_join(mut c: Conf, addr: str, ssl: bool, s: int, dflt: bool) {
+    var li: int = -1
+    // a port-0 `listen` is a socket of its own (the kernel picks its
+    // port), so it never joins another: its key carries its ordinal
+    let any_port = addr.ends_with(":0")
+    var i: int = 0
+    while i < c.lst_addr.len && !any_port {
+        if c.lst_addr[i] == addr {
+            li = i
+        }
+        i = i + 1
+    }
+    if li < 0 {
+        let key = if any_port { "{addr}#{c.lst_addr.len}" } else { addr }
+        (mut c.lst_addr).push(key)
+        (mut c.lst_ssl).push(ssl)
+        (mut c.lst_def).push(s)
+        (mut c.lst_def_set).push(dflt)
+        li = c.lst_addr.len - 1
+    } else {
+        if ssl {
+            c.lst_ssl[li] = true
+        }
+        if dflt && !c.lst_def_set[li] {
+            c.lst_def[li] = s
+            c.lst_def_set[li] = true
+        }
+    }
+    // one membership per (listener, server), in row order
+    var k: int = 0
+    while k < c.lst_pair_l.len {
+        if c.lst_pair_l[k] == li && c.lst_pair_s[k] == s {
+            return
+        }
+        k = k + 1
+    }
+    (mut c.lst_pair_l).push(li)
+    (mut c.lst_pair_s).push(s)
+}
