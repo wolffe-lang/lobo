@@ -53,7 +53,9 @@ there):
 
 | code | meaning |
 |---|---|
-| `first-server` / `not-first-server` | the first server block wins — server_name/Host selection is parse-only at this pin (a named delta) |
+| `only-server` | the config's only server block |
+| `host-match` / `default-server` / `not-selected` | ws62 (px25's finding (a)): the server the live loop would pick — at the listener the probe URL's port names (80 or 443 when it names none; else the scheme's first listener), the server whose `server_name` matches the probe's host (exact, longest leading wildcard, longest trailing wildcard), else that listener's `default_server`, else the first server there |
+| `first-server` / `not-first-server` | only from `http.route_traced`, the reader that names no listener or host (server 0); the dry-run no longer emits them |
 | `exact-match` / `exact-miss` | `location =` beats everything / the path is not exactly the argument |
 | `longest-prefix` / `shorter-prefix` | the longest matching prefix wins / matched but shorter |
 | `lost-to-exact` | matched, but an exact location takes precedence |
