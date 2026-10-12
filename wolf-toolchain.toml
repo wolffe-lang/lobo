@@ -14,6 +14,44 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
+# wolf-lang at the **v0.2.28 RELEASE TAG** (f71ece8, r33), the release
+# stamp `wolf 0.2.28 (wolfgang, pin f71ece8)`. Staged from the RELEASE
+# ARCHIVE by digest, NAMED MEMBERS ONLY (the std note below stands), as
+# below:
+#   gh release download v0.2.28 -R wolffe-lang/wolf-lang \
+#       --pattern 'wolf-0.2.28-<host>.tar.gz'
+#   sha256 3215f3219c5c6c3b84f0f9abf421cdaecec5b81cf42d92b6c64475f95ad199aa
+#       (x86_64-unknown-linux-gnu, measured at ws62 on kasumi; the
+#        release asset's own digest, release 410118732)
+#   sha256 656ab5535467bd0dbbde4a93e9a8589a19516c17938b580e80f616ad876926c0
+#       (aarch64-apple-darwin, the release asset's digest)
+# Members BY NAME (linux x86-64): `wolf` 6f5713a2… -> 39644daa…,
+# `libwolf_rt.a` ab575b27… -> d856cb81…, `wolf-cimport-worker`
+# 96f93227… -> d0e63dec…. Highest glibc symbol: GLIBC_2.34
+# (kasumi:~/lanes/ws62/toolchains.txt). The archive's own std is
+# wolf-std 98e1b7b; lobo stages its [std] pin over named members, so
+# that copy is never read here.
+#
+# WHAT THE BUMP CHANGES HERE (ws62; the CHANGELOG entry has the
+# numbers). 0.2.28 is the soundness release: #660 and #665 (and #678's
+# direct half) are compile-time refusals (E1010) in four new shapes,
+# and trunk's `src/` (944edc1) built at this pin on both tiers exits 0
+# with ZERO diagnostics at --error-limit=0 — none of the four shapes is
+# in lobo, as the release's own census (s227, s229) found. None of the
+# eight new prelude names (`fs_set_mode` … `os_umask`) is declared
+# here (W0304). The lobo take is s228: `net_read` now allocates in the
+# region it is called in (#374's net half), so `conn.sock_read` and
+# its two twins go back to `net_read` (ws62's next commits), and the
+# runtime's handle tables are keyed by live numbers (#661): a hand
+# probed by its master every 200 ms no longer keeps 56 bytes a probe
+# (measured at ws62: a hand's RSS flat after its first minute at
+# 0.2.28, +16 kB a minute at 0.2.27). The binaries change by the
+# runtime: release 13,521,248 -> 13,880,080 bytes, text 1,691,412 ->
+# 1,711,464 (kasumi:~/lanes/ws62/build-t27.log, build-t28.log).
+# NOT IN 0.2.28: `os_pid` / `os_ppid` (s232, on wolf-lang trunk after
+# the tag). The pid file's pid is read from the host (ws62, main.lu).
+#
+# (ws58, the previous bump:)
 # wolf-lang at the **v0.2.27 RELEASE TAG** (0ddda6b, r32), the release
 # stamp `wolf 0.2.27 (wolfgang, pin 0ddda6b)`. Staged from the RELEASE
 # ARCHIVE by digest, NAMED MEMBERS ONLY (see the std note), as below:
@@ -530,10 +568,26 @@
 # both ways and docs/BUDGET.md and docs/PARITY.md following. The
 # shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "0ddda6b7ab9f899aeeea13a66b3427f8422b8a0f"
-version_line = "wolf 0.2.27 (wolfgang, pin 0ddda6b)"
+rev = "f71ece8e1ad2234940040d300359888932ad67af"
+version_line = "wolf 0.2.28 (wolfgang, pin f71ece8)"
 
 [lupin]
+# lupin at the **v0.1.51 RELEASE TAG** (f72e78d, r33), staged from the
+# release archive by digest as [wolf] is:
+#   gh release download v0.1.51 -R wolffe-lang/wolf-interp \
+#       --pattern 'lupin-0.1.51-<host>.tar.gz'
+#   sha256 d8f62dd1175b3171d900700ab033f07ba4987a8d545897c5e587314657c69509
+#       (x86_64-unknown-linux-gnu, measured at ws62; the release
+#        asset's digest, release 409991647)
+#   sha256 2b11a7d15bcd56d8695df563ce95a075cfe3a948c6e8552caaed0d5dd444764b
+#       (aarch64-apple-darwin, the release asset's digest)
+# `lupin` 3a476442… -> 583c573b… (linux x86-64). Pairing gap ZERO
+# (wolf@v0.2.28 declares 0.1.51). Its conformance pin stays 294d626 =
+# v0.2.24. It mirrors s230's builtins (lobo calls none) and still does
+# not refuse a `net_read` returned out of its region (wolf-interp#234;
+# lobo has no such shape).
+#
+# (ws58, the previous bump:)
 # lupin at the **v0.1.50 RELEASE TAG** (32b970d, r32), staged from the
 # release archive by digest as [wolf] is:
 #   gh release download v0.1.50 -R wolffe-lang/wolf-interp \
@@ -728,8 +782,8 @@ version_line = "wolf 0.2.27 (wolfgang, pin 0ddda6b)"
 # not a calendar. Its conformance pin (2e4ca76) is information, not
 # this file's rev. Bumped together with [wolf] as always.
 repo = "wolffe-lang/wolf-interp"
-rev = "32b970da7f3a50e0b82825985a39b52b74da59dc"
-version_line = "lupin 0.1.50 (wolf-interp, reference interpreter at pin 294d626)"
+rev = "f72e78d7a9d0ceb39d80380389ad6a2072991c63"
+version_line = "lupin 0.1.51 (wolf-interp, reference interpreter at pin 294d626)"
 
 [std]
 # wolf-std, STILL at **14f0ab2** (ws58, 2026-10-11), re-derived against
