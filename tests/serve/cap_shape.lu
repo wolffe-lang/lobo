@@ -1,8 +1,11 @@
 //! check: run(exit=0, stdout="rounds ok\nbreach: contained true alloc-contract true reclaimed true pipe-silent true\nafter: ok true\n")
 //! phase: run
-//! lanes: native lupin
-//! checked-refuses: structured concurrency in checked execution (C1 deferred)
+//! lanes: native lupin checked
 //! conforms: mem.region.cap.1, mem.region.cap.3, conc.proc.exit, conc.proc.kill
+//!
+//! ws62, at wolf 0.2.28: the checked machine runs procs (s226, ruling
+//! #63), and this file answers there exactly as on native and lupin, so
+//! `checked` is a declared lane where it was `checked-refuses`.
 //!
 //! THE CAP ADOPTION'S SHAPE, executable (ws13 — the ws12 named-gate,
 //! flipped at the language level and, until ws14, gated at the

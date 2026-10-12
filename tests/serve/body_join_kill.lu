@@ -1,8 +1,13 @@
 //! check: run(exit=0, stdout="parked: joined false\nended: killed true gone true quiet-after-join true\nafter: ok true\n")
 //! phase: run
 //! lanes: native
-//! checked-refuses: structured concurrency in checked execution (C1 deferred)
 //! conforms: conc.proc.kill, conc.proc.join
+//!
+//! ws62, at wolf 0.2.28: the checked machine runs procs now (s226), so
+//! the `checked-refuses` line is gone; the checked lane is not declared
+//! because it does not finish — the run met the corpus runner's 60 s
+//! ceiling with the killed proc parked in its read (kasumi:
+//! ~/lanes/ws62/t-chk.log; reported for wolf-lang, not filed by ws62).
 //!
 //! ws58: A BODY PROC NEVER OUTLIVES ITS JOIN, executable. lobo's
 //! budgeted responses run in a proc that is handed two strings built

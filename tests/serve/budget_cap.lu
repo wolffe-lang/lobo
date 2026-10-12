@@ -1,9 +1,18 @@
 //! check: run(exit=0, stdout="envelope: 200 rt>0 true site=\noff: 200 rt>0 true\nstream: 200 rt>0 true site=\njoin: normal cls=0 wcode=0 rt>0 true | breach cls=2 wcode=0 rt=0\nbackstop: no admitted body crosses the cap\nlive: reclaimed true\n")
 //! phase: run
 //! lanes: native
-//! checked-refuses: structured concurrency in checked execution (C1 deferred)
 //! conforms: err.union, err.propagate, mem.region.cap.1, mem.region.cap.3, conc.proc.exit
 //! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! ws62, at wolf 0.2.28: the checked machine RUNS procs now (s226,
+//! ruling #63), so the `checked-refuses` line this file carried is
+//! gone, and the checked lane is not declared: it runs the file to the
+//! end but answers row 4's breach as `cls=0 wcode=0 rt=18` — its
+//! ledger charges the 18-byte body under the 64-byte cap, where the
+//! native ledger's envelope breaches it (a region's ledger units are
+//! per tier — the wolf guide's "compare relations, never numbers";
+//! kasumi:~/lanes/ws62/t-chk.log). Native is the tier lobo ships; the
+//! cap's relations are pinned there.
 //!
 //! THE CAP IS ENFORCED BY THE RUNTIME (ws13 built it on a side branch;
 //! ws14 lands it at the 5f99b9f pin, wolf-lang#219 closed): a budgeted
