@@ -1,5 +1,5 @@
 module pkg :: resolver
-  wolfi v0 · toolchain 0.2.28 · edition v1
+  wolfi v0 · toolchain 0.2.29 · edition v1
   export_hash 937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
   pkg_hash    937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
   deps:
