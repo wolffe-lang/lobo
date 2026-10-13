@@ -73,7 +73,7 @@ fn main() -> !int {
     assert(shell.reuse_due(16, 14, 14) && !shell.reuse_due(16, 14, 13), "16: none free")
     assert(!shell.reuse_due(8, 6, 6), "below 16 a sixteenth is nothing: never from this rule")
 
-    // the oracle's fourteen runs, to the connection
+    // the oracle's sixteen runs, to the connection
     assert(sim(16, 13) == 0, "16/13: {sim(16, 13)}")
     assert(sim(16, 14) == 1, "16/14: {sim(16, 14)}")
     assert(sim(16, 15) == 2, "16/15: {sim(16, 15)}")
