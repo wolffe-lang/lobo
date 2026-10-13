@@ -8,6 +8,7 @@
 #   1. manifest  — src/wolf.pkg parses (`wolf fmt --check` validates it)
 #                  and declares every capability the code reaches
 #                  (`wolf audit --ci --dir src`, s217)
+#   1b. signal names — (ws63) no literal signal bit or host number
 #   2. fmt       — canonical formatting over src/ and tests/
 #   3. tiers     — the entry builds on BOTH tiers (debug owned + release)
 #   4. wolfi     — every module surface matches its checked-in .wolfi
@@ -59,6 +60,30 @@ if ! tools/lobo-stamp --check; then
     echo "lobo-gauntlet: FAILED at stamp — see above for the ritual" >&2
     exit 1
 fi
+
+step "signal names (ws63: a meaning is std.signal's name — no literal bit, no host number)"
+# [os.signal.set.stable] (wolf 0.2.29): a meaning's bit is permanent and
+# a program never writes one. Two shapes are refused, in src/ and
+# tests/: a signal builtin handed a number, and one of shell's meaning
+# helpers handed one (0, "no meaning", is not a bit and is let
+# through). Comment lines are not read. Seen red on a planted
+# `os_signal_raise(8)` and a planted `shell.signal_verb(1)` before it
+# was trusted (notes/ws63-contract.md).
+sig_lit=$(grep -rnE --include='*.lu' \
+    '(os_signal_(listen|wait|poll|raise|ignore|default|send|number|wait_fd)|(signal_verb|signal_name|sig_wire|ev_signal_received))\(([^)]*[^A-Za-z0-9_."])?[1-9][0-9]*[),]' \
+    src tests | grep -vE '^[^:]+:[0-9]+:[[:space:]]*//' || true)
+if [ -n "$sig_lit" ]; then
+    echo "$sig_lit" >&2
+    echo "lobo-gauntlet: FAILED at signal names — a signal call is handed a literal number; name the meaning (std.signal: signal.reload(), signal.user(), …)" >&2
+    exit 1
+fi
+sig_ret=$(awk '/^pub fn sig_[a-z]+\(\) -> int \{/ { f = FILENAME ":" FNR ": " $0; getline; if ($0 ~ /^[[:space:]]*[0-9]+[[:space:]]*$/) print f " -> " $0 }' src/shell/shell.lu)
+if [ -n "$sig_ret" ]; then
+    echo "$sig_ret" >&2
+    echo "lobo-gauntlet: FAILED at signal names — a shell meaning helper returns a literal bit; return std.signal's name" >&2
+    exit 1
+fi
+echo "signal names: ok — no signal call in src/ or tests/ is handed a literal ($(grep -rhoE --include='*.lu' 'signal\.[a-z_]+\(\)' src | sort -u | tr '\n' ' '))"
 
 step "fmt --check (src, tests)"
 if ! "$WOLF" fmt --check src tests; then
