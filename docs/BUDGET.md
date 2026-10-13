@@ -518,7 +518,13 @@ is no longer gated on anything upstream).
   opened (`tests/serve/stream_cap_e2e.lu`'s sweep, downloads read at
   64 KB/s): the proc runs beside up to 6 streams on 1 cpu, 14 on 4,
   62 on 16 (`4·max(cpus, 2) - 2`), and the room is now
-  `3·max(cpus, 2) - 2` (4, 10, 46). The meter still rules every site before a byte is
+  `3·max(cpus, 2) - 2` (4, 10, 46). wolf 0.2.29 removed the pool's
+  limit (s231): with the room opened in a measurement build the proc
+  ran beside 500 parked streams on 4 cpus (ws63,
+  `kasumi:~/lanes/ws63/logs/sweep-open29-c4.log`). The room is kept
+  where it was, as lobo's own margin: past it the loop never waits in
+  a proc's join, which is what a host that refuses another thread
+  would otherwise make it do. The meter still rules every site before a byte is
   written, and since D40 the cap could not fire from a config; what is
   skipped is the backstop, and only while the pool is crowded.
   `run_stream` (capped) stays for callers outside the loop.

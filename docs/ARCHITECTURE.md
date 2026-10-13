@@ -63,14 +63,21 @@ drains whole or fails with the bytes it sent unknown — so the proc is
 the honest shape. The stream is ONE proc holding ints and two
 sockets; the loop owns the row's bookkeeping and never touches the
 socket while the stream does. TLS keeps the inline write (the D24
-residue). A parked proc holds pool workers, so the loop counts its
-streams against `stream_room` and past it writes a budgeted small body
-without its capped proc rather than wait in that proc's join; a stream
-past it still leaves the loop, and past the pool it waits for a
-worker. The room was `cpus / 2 - 2` at the 0.2.22 pin (ws49,
-wolf-lang#570); at 0.2.24, which fixed the pool's retire rule, it is
-`3·max(cpus, 2) - 2` against a measured `4·max(cpus, 2) - 2` (ws51,
-`tests/serve/stream_cap_e2e.lu`).
+residue). A parked proc holds a thread of the runtime's pool (two,
+measured at 0.2.29), so the loop counts its streams against
+`stream_room` and past it writes a budgeted small body without its
+capped proc rather than wait in that proc's join; a stream past it
+still leaves the loop. The room was `cpus / 2 - 2` at the 0.2.22 pin
+(ws49, wolf-lang#570); at 0.2.24, which fixed the pool's retire rule,
+it became `3·max(cpus, 2) - 2` against a measured `4·max(cpus, 2) - 2`
+(ws51, `tests/serve/stream_cap_e2e.lu`), and past `4·max(cpus, 2) - 1`
+streams a new one's body waited for a worker. wolf 0.2.29 (s231,
+wolf-lang#713) grows the pool a worker per parked task, so that last
+limit is gone (ws63, `tests/serve/parked_downloads_e2e.lu`: red built
+with 0.2.28, green with 0.2.29); the room stays as lobo's own margin,
+for the host that refuses the runtime another thread. What bounds the
+streams now is the host: two descriptors and two threads each
+(README, Limits).
 
 ws56 adds two more. The LOOP starts each stream and keeps its proc
 and its file in a slot (lobo#62): a stream parked in a write to a slow
