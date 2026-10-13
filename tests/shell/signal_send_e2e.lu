@@ -1,0 +1,358 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! ws63 (wolf 0.2.29, s232; wolf-lang#126's last half): `lobo -s
+//! <verb>` REACHES A RUNNING LOBO BY SIGNAL when the configuration has
+//! no `control` directive, as nginx's `-s` does: the pid file names
+//! the master (`os_pid`), the verb's MEANING goes to that pid
+//! (`os_signal_send`), and the master takes it through the one verb
+//! dispatch. Against the real binary (os_spawn + net + fs →
+//! native+checked; lupin declines the send by name).
+//!   1. one process: the pid file is the server's pid and the start
+//!      notice names it; `-s reload` exits 0, prints nothing, and the
+//!      server logs the reload with `source=signal`; `-s reopen`
+//!      (USER, `SIGUSR1`) reopens a rotated access log; `-s quit`
+//!      drains and the server exits 0 and removes its pid file;
+//!   2. the pid file's two failures, nginx's shapes: a pid nobody
+//!      holds (`kill(pid, N) failed`), and a file with no pid in it
+//!      (`invalid PID number`), each exit 1;
+//!   3. `worker_processes 2`: the master hears the signal with no
+//!      control listener in its wait set, fans `reload` out so both
+//!      hands reach generation 2, and `-s stop` ends the tree.
+//! (trunk at af0fa41: `-s` with no `control` directive refuses by name
+//! and exits 1 — step 1 is red at its first `-s`; and a master with no
+//! `control` directive never waited on its signal forwarder, so it
+//! span a core and heard nothing — step 3.) `status` and `control
+//! <verb>` still need the endpoint and say so. Loopback only,
+//! OS-chosen ports. Idempotent: the scratch tree is cleared at the
+//! START.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// One GET / on a fresh connection: the reply, or "" (refused, or
+/// nothing inside 2 s). Total.
+fn fetch(port: int) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return ""
+    }
+    net_deadline(c, 2000) else |_| {}
+    net_write(c, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// Poll the http port until it answers 200, up to ~15 s. Total.
+fn wait_serving(port: int) -> bool {
+    var i: int = 0
+    while i < 300 {
+        if fetch(port).contains("200 OK") {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Spawn `<root>/target/lobo-debug <args…> -p . -c conf`, its stdout
+/// and stderr onto `out`, or -1. Total.
+fn lobo(root: str, verb: List[str], conf: str, out: int) -> int {
+    var args = List[str]()
+    for v in verb {
+        (mut args).push(v)
+    }
+    (mut args).push("-p")
+    (mut args).push(".")
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    os_spawn_fds("{root}/target/lobo-debug", args, map) else |_| { -1 }
+}
+
+/// Run a client verb to its end and answer its exit code (-1 when it
+/// could not run). Total.
+fn client(root: str, verb: str, conf: str, out: int) -> int {
+    var v = List[str]()
+    for w in verb.words() {
+        (mut v).push(w)
+    }
+    let h = lobo(root, v, conf, out)
+    if h < 0 {
+        return -1
+    }
+    os_wait(h) else |_| { -1 }
+}
+
+/// How many lines of the file at `path` contain every word of `need`
+/// (space-separated fragments). Total.
+fn lines_with(path: str, need: str) -> int {
+    let t = fs_read_text(path) else |_| { "" }
+    var n: int = 0
+    for line in t.lines() {
+        var all = true
+        for w in need.words() {
+            if !line.contains(w) {
+                all = false
+            }
+        }
+        if all {
+            n = n + 1
+        }
+    }
+    n
+}
+
+/// Wait up to ~10 s for `want` lines of `path` to carry `need`. Total.
+fn wait_lines(path: str, need: str, want: int) -> bool {
+    var i: int = 0
+    while i < 200 {
+        if lines_with(path, need) >= want {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Wait up to ~10 s for the server to be gone from its port (a
+/// refused connect). Total.
+fn wait_closed(port: int) -> bool {
+    var i: int = 0
+    while i < 200 {
+        if fetch(port).is_empty() {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// End a server this test could not stop the intended way, and reap
+/// it: the handle's own kill, never a pid. Total.
+fn put_down(h: int) {
+    os_kill(h) else |_| {}
+    let _ = os_wait(h) else |_| {
+        0
+    }
+}
+
+/// Tell every hand named in a master's output to stop, over the
+/// endpoint its own `serving on …, control <ep> …` line prints (a hand
+/// has one whether or not the configuration has a `control`
+/// directive). The failure path's cleanup: a master put down by its
+/// handle leaves its hands serving. Total.
+fn stop_hands(out_path: str) {
+    let t = fs_read_text(out_path) else |_| { "" }
+    for line in t.lines() {
+        if !line.contains("serving on") || !line.contains("worker=") {
+            continue
+        }
+        var ep_next = false
+        for w in line.words() {
+            if ep_next {
+                shell.control_send(w, "stop") else |_| { "" }
+                ep_next = false
+            } else if w == "control" {
+                ep_next = true
+            }
+        }
+    }
+    time_sleep_ms(300)
+}
+
+fn main() -> !int {
+    let scratch = "ws63_sig"
+    fs_remove_dir_all(scratch) else |_| {}
+    fs_create_dir_all("{scratch}/w")?
+    fs_create_dir_all("{scratch}/logs")?
+    fs_write_text("{scratch}/w/index.html", "signal-send\n")?
+    let root = os_cwd() else |_| "."
+    let pidp = "{scratch}/lobo.pid"
+    let cout_p = "{scratch}/clients.out"
+    let cout = fs_create(cout_p)?
+    var sv = List[str]()
+    (mut sv).push("serve")
+
+    print("step 1: one process, no control directive")
+    let hp = free_port()?
+    let conf1 = "{scratch}/one.conf"
+    let acc = "{scratch}/logs/access.log"
+    fs_write_text(
+        conf1,
+        "pid {pidp};\nhttp {{\n  types {{ text/html html; }}\n  access_log {acc};\n  server {{ listen 127.0.0.1:{hp}; root {scratch}/w; index index.html; }}\n}}\n",
+    )?
+    let so1_p = "{scratch}/server1.out"
+    let so1 = fs_create(so1_p)?
+    let s1 = lobo(root, sv, conf1, so1)
+    assert(s1 >= 0, "the single process spawned")
+    if !wait_serving(hp) {
+        put_down(s1)
+        assert(false, "the single process never served on {hp}")
+    }
+    let pid1 = os_proc_pid(s1) else |_| { -1 }
+    let t1 = fs_read_text(pidp) else |_| { "" }
+    if !(t1 == "{pid1}\n") {
+        put_down(s1)
+        assert(false, "the pid file is exactly the server's pid {pid1} and a newline: [{t1}]")
+    }
+    let rr = client(root, "-s reload", conf1, cout)
+    if rr != 0 {
+        put_down(s1)
+        assert(false, "`lobo -s reload` with no control directive signals the pid: exit {rr}")
+    }
+    if !wait_lines(so1_p, "signal-received sig=reload verb=reload source=signal", 1) ||
+        !wait_lines(so1_p, "generation-activated gen=2", 1) {
+        put_down(s1)
+        assert(false, "the server took the reload as a signal and activated generation 2")
+    }
+    assert(fetch(hp).contains("signal-send"), "…and still serves")
+    if lines_with(so1_p, "pid file (pid {pid1})") != 1 {
+        put_down(s1)
+        assert(false, "the start notice names the pid, with no source clause: (pid {pid1})")
+    }
+    // reopen: rotate the access log away, send USER, the next request
+    // lands in a NEW file at the configured path
+    if !wait_lines(acc, "GET", 1) {
+        put_down(s1)
+        assert(false, "the access log has the requests so far")
+    }
+    fs_rename(acc, "{acc}.1") else |_| {}
+    let ro = client(root, "-s reopen", conf1, cout)
+    if ro != 0 || !wait_lines(so1_p, "reopening log files", 1) {
+        put_down(s1)
+        assert(false, "`lobo -s reopen` sends USER and the server cycles its logs: exit {ro}")
+    }
+    let _g = fetch(hp)
+    if !wait_lines(acc, "GET", 1) {
+        put_down(s1)
+        assert(false, "after the reopen the access log is a new file at its configured path")
+    }
+    // status needs the endpoint, and says so
+    let st = client(root, "status", conf1, cout)
+    assert(st == 1, "`lobo status` with no control directive exits 1: {st}")
+    assert(lines_with(cout_p, "need the control endpoint") >= 1, "…naming the endpoint it needs")
+    let rq = client(root, "-s quit", conf1, cout)
+    if rq != 0 || !wait_lines(so1_p, "signal-received sig=quit verb=quit source=signal", 1) {
+        put_down(s1)
+        assert(false, "`lobo -s quit` sends QUIT (graceful), not another meaning: exit {rq}")
+    }
+    if !wait_closed(hp) {
+        put_down(s1)
+        assert(false, "the server stopped listening after the quit")
+    }
+    let x1 = os_wait(s1) else |_| { -1 }
+    assert(x1 == 0, "the quit server exits 0: {x1}")
+    assert(!fs_exists(pidp), "…and removes its pid file")
+    assert(
+        lines_with(so1_p, "sig=terminate") == 0,
+        "no TERMINATE reached it: quit is its own meaning",
+    )
+
+    print("step 2: the pid file's failures")
+    let none = client(root, "-s reload", conf1, cout)
+    assert(none == 1, "no pid file: exit 1: {none}")
+    // the reaped server's pid: nobody holds it now
+    fs_write_text(pidp, "{pid1}\n")?
+    let dead = client(root, "-s reload", conf1, cout)
+    assert(dead == 1, "a pid nobody holds: exit 1: {dead}")
+    assert(
+        lines_with(cout_p, "[alert] kill({pid1}, failed (no such process") == 1,
+        "…with nginx's `kill(pid, N) failed` shape",
+    )
+    fs_write_text(pidp, "unix:logs/control.sock\n")?
+    let old = client(root, "-s stop", conf1, cout)
+    assert(old == 1, "a pid file with no pid in it (0.1.3's): exit 1: {old}")
+    assert(
+        lines_with(cout_p, "invalid PID number \"unix:logs/control.sock\"") == 1,
+        "…with nginx's `invalid PID number` shape",
+    )
+    fs_remove(pidp) else |_| {}
+
+    print("step 3: worker_processes 2, no control directive")
+    let hp3 = free_port()?
+    let conf3 = "{scratch}/two.conf"
+    fs_write_text(
+        conf3,
+        "worker_processes 2;\npid {pidp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp3}; root {scratch}/w; index index.html; }}\n}}\n",
+    )?
+    let so3_p = "{scratch}/server3.out"
+    let so3 = fs_create(so3_p)?
+    let s3 = lobo(root, sv, conf3, so3)
+    assert(s3 >= 0, "the master spawned")
+    if !wait_serving(hp3) || !wait_lines(so3_p, "generation-activated gen=1 worker=", 2) {
+        stop_hands(so3_p)
+        put_down(s3)
+        assert(false, "the master and two hands never served on {hp3}")
+    }
+    let pid3 = os_proc_pid(s3) else |_| { -1 }
+    let t3 = fs_read_text(pidp) else |_| { "" }
+    if !(t3 == "{pid3}\n") {
+        stop_hands(so3_p)
+        put_down(s3)
+        assert(false, "the pid file is exactly the master's pid {pid3}: [{t3}]")
+    }
+    let r3 = client(root, "-s reload", conf3, cout)
+    if r3 != 0 || !wait_lines(so3_p, "generation-activated gen=2 worker=", 2) {
+        // a deaf master would leave its hands serving once it is put
+        // down: each is told to stop over its own endpoint first
+        stop_hands(so3_p)
+        put_down(s3)
+        let stray = fs_read_text(so3_p) else |_| { "" }
+        assert(
+            false,
+            "the master heard the reload by signal and both hands activated generation 2 (exit {r3}): {stray}",
+        )
+    }
+    assert(
+        lines_with(so3_p, "signal-received sig=reload verb=reload source=signal") == 1,
+        "one signal, at the master; the hands were told over their endpoints",
+    )
+    let x3c = client(root, "-s stop", conf3, cout)
+    assert(x3c == 0, "`lobo -s stop` sends TERMINATE: exit {x3c}")
+    let x3 = os_wait(s3) else |_| { -1 }
+    assert(x3 == 0, "the master exits 0 after stop: {x3}")
+    assert(wait_closed(hp3), "…and no hand is left on the port")
+    assert(!fs_exists(pidp), "…and the pid file is gone")
+
+    fs_close(cout) else |_| {}
+    fs_close(so1) else |_| {}
+    fs_close(so3) else |_| {}
+    fs_remove_dir_all(scratch) else |_| {}
+    0
+}

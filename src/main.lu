@@ -5069,8 +5069,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
 }
 
 // ------------------------------------------------------------------
-// signal-send — `-s verb` reaches the running master through the
-// control channel (the pin has no arbitrary-pid signal send; #126)
+// signal-send — `-s verb` reaches the running master through its
+// control endpoint when the configuration names one, and by a real
+// signal to the pid file's pid when it does not (ws63:
+// `os_signal_send`, wolf 0.2.29 — wolf-lang#126's last half)
 // ------------------------------------------------------------------
 
 /// The client half of the endpoint, shared by `-s`, `status` and
@@ -5080,12 +5082,11 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
 /// caller returns 1.
 ///
 /// This is where "`-s` PREFERS the endpoint when configured" is
-/// expressed. At this pin the preference has nothing to fall back TO:
-/// there is no getpid and no arbitrary-pid signal send (wolf-lang#126's
-/// unlanded half), so a config with no `control` directive cannot be
-/// reached by any means and lobo says exactly that instead of dialling
-/// the http port and printing a 400 at the operator. That refusal is
-/// the windows sentence made operational on EVERY host
+/// expressed. `status` and `control <verb>` have nothing to fall back
+/// TO — a reply needs a connection — so with no `control` directive
+/// they say exactly that instead of dialling the http port and
+/// printing a 400 at the operator. `-s` does have a fallback since
+/// ws63: `signal_main` sends the verb's signal before it gets here
 /// (docs/CONTROL.md, docs/DRAIN.md).
 fn control_target(cli: shell.Cli) -> (str, str) {
     let c = config.load(cli.prefix, cli.conf)
@@ -5093,7 +5094,7 @@ fn control_target(cli: shell.Cli) -> (str, str) {
     // falls back to the default and the missing file is the alert
     if config.ok(c) && shell.control_addr(c).is_empty() {
         eprint(
-            "lobo: [error] no \"control\" directive in {cli.conf}: a running lobo is reached ONLY over its control endpoint at this pin (there is no arbitrary-pid signal send — wolf-lang#126), so add `control 127.0.0.1:<port>;` and restart",
+            "lobo: [error] no \"control\" directive in {cli.conf}: `status` and `control <verb>` need the control endpoint (a reply needs a connection), so add `control unix:logs/control.sock;` and restart — `-s stop|quit|reload|reopen` reach a running lobo without one, by a signal to the pid in its pid file",
         )
         return ("", "")
     }
@@ -5189,6 +5190,10 @@ fn control_silent(ep: str) {
 /// master) is exit 1. Loads the config first, as nginx does, to
 /// resolve the pid path — and, since ws15, the token file too.
 fn signal_main(cli: shell.Cli) -> int {
+    let c = config.load(cli.prefix, cli.conf)
+    if config.ok(c) && shell.control_addr(c).is_empty() {
+        return signal_send(cli, c)
+    }
     let t = control_target(cli)
     if t.0.is_empty() {
         return 1
@@ -5210,6 +5215,62 @@ fn signal_main(cli: shell.Cli) -> int {
     }
     print(reply)
     control_exit(reply)
+}
+
+/// ws63: `-s <verb>` with no `control` directive — nginx's own door.
+/// The pid file names the master (ws62); the verb's MEANING goes to
+/// that pid as a real signal (`os_signal_send`, wolf 0.2.29), and the
+/// master takes it through the same verb dispatch a control line
+/// drives. Nothing is printed on success and the exit is 0, as
+/// nginx's `-s`; a pid file with no pid in it and a pid nobody holds
+/// are nginx's two diagnostics (measured against the pinned oracle,
+/// which prints `invalid PID number` and `kill(pid, N) failed`), with
+/// the host's number for the meaning asked of the runtime
+/// (`os_signal_number`), never written here. No reply comes back, so
+/// a rejected reload is in the master's error log, where nginx puts
+/// it too. exec tier (the send) and fs tier (the file). Total.
+fn signal_send(cli: shell.Cli, c: config.Conf) -> int {
+    let pidp = shell.pid_path(c, cli.prefix)
+    let raw = shell.pid_read(pidp) else |e| match e {
+        none => {
+            eprint("lobo: [alert] open() \"{pidp}\" failed (2: No such file or directory)")
+            return 1
+        },
+        io => {
+            eprint("lobo: [alert] could not read pid file \"{pidp}\"")
+            return 1
+        },
+    }
+    let pid = shell.pid_of(raw)
+    if pid <= 0 {
+        eprint("lobo: [error] invalid PID number \"{shell.first_line(raw)}\" in \"{pidp}\"")
+        return 1
+    }
+    let m = shell.send_meaning(cli.signal)
+    var why = ""
+    os_signal_send(pid, m) else |e| match e {
+        not_found => {
+            why = "no such process: a stale pid file, or no lobo is running there"
+        },
+        denied => {
+            why = "operation not permitted: the master belongs to another user"
+        },
+        invalid => {
+            why = "not a process id"
+        },
+        unsupported => {
+            why = "this host has no signal send; add a `control` directive"
+        },
+        io => {
+            why = "the host refused the send"
+        },
+    }
+    if !why.is_empty() {
+        let n = os_signal_number(m) else |_| { 0 }
+        eprint("lobo: [alert] kill({pid}, {n}) failed ({why})")
+        return 1
+    }
+    0
 }
 
 /// `lobo control <verb>`: the endpoint's own CLI door (ws15). nginx's

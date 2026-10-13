@@ -4,16 +4,17 @@
 //! platform-independent reload path — a loopback CONTROL CHANNEL the
 //! running server listens on. ws04's territory.
 //!
-//! The split (ws04 contract §3, settled at wsm01/ws15). Signal
-//! RECEPTION landed (s114, wolf-lang#126's first half), so a real
-//! SIGHUP/SIGTERM/SIGQUIT reaches the same verb dispatch the control
-//! channel drives. What did NOT land is the SEND side: the pin
-//! exposes neither a getpid nor an arbitrary-pid signal send (os_kill
-//! terminates a CHILD by handle only), so `-s` drives the control
-//! channel and the pid file records the control ENDPOINT, not an os
-//! pid — the named residue, flipping the sprint after #126's second
-//! half lands. The control channel is therefore the working path AND
-//! the Windows reload story, and ws15 makes it the SERVER'S ORDER
+//! The split (ws04 contract §3, settled at wsm01/ws15, closed at
+//! ws63). Signal RECEPTION landed first (s114, wolf-lang#126's first
+//! half), so a real SIGHUP/SIGTERM/SIGQUIT reaches the same verb
+//! dispatch the control channel drives. The SEND side landed with
+//! wolf 0.2.29 (s232: `os_pid`, `os_signal_send`): the pid file holds
+//! the master's pid, and `-s` with no `control` directive signals it,
+//! as nginx's does. Through ws62 the pin exposed neither, so `-s`
+//! drove the control channel only and (through 0.1.3) the pid file
+//! recorded the control ENDPOINT. The control channel stays the door
+//! that ANSWERS and the Windows reload story, and ws15 makes it the
+//! SERVER'S ORDER
 //! DESK rather than a reload pipe: the whole verb set
 //! (`reload`/`quit`/`stop`/`reopen`/`status`/`upgrade`/`ping`) is
 //! reachable over it, `lobo control <verb>` is its CLI door, and an

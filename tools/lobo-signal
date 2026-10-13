@@ -1,10 +1,11 @@
 #!/bin/sh
 # lobo-signal — the REAL-SIGNAL witness (wsm01, s114 in the pin): a
 # genuine SIGHUP / SIGQUIT / SIGTERM — sent with kill(1), the test
-# harness's signal path; the server's os pid is the shell's `$!`,
-# because nothing in wolf exposes a getpid yet (the named residue —
-# the pid FILE still records the control endpoint) — drives the SAME
-# observable drain ws08's control-channel tests pin:
+# harness's signal path, to the shell's `$!` and (ws62) to the pid the
+# pid FILE names — drives the SAME observable drain ws08's
+# control-channel tests pin (lobo's own sender, `-s` with no control
+# directive, and SIGUSR1's reopen are tests/shell/signal_send_e2e.lu,
+# ws63):
 #   1. a held keepalive connection puts generation 1 at live=1;
 #   2. a REAL `kill -HUP` reloads: gen 1 DRAINING live=1 while gen 2
 #      serves new connections (byte-checked against the new root);

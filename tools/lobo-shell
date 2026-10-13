@@ -110,19 +110,49 @@ probe "-s bogus signal"   1 1 "" -- -s bogus
 # exit 1 (lobo: open() failed; nginx: open() failed — same shape)
 probe "-s reload no master" 1 1 "" -- -s reload -p "$scratch" -c n.conf
 
-# ws15: the endpoint is how a running lobo is reached, so a config
-# with no `control` directive REFUSES by name instead of dialling the
-# http port. The exit code keeps parity with the oracle (both 1); the
-# diagnostic is lobo's own and is checked here rather than left to
-# folklore. n.conf above is valid and has no control directive.
-"$LOBO" -s reload -p "$scratch" -c n.conf >/dev/null 2>"$scratch/noctl.err"
+# ws63 (wolf 0.2.29: os_pid, os_signal_send): with no `control`
+# directive `-s` signals the pid in the pid file, as nginx's does, so
+# the pid file's two failures are PARITY rows now — both exit 1 — and
+# each side's diagnostic has the same shape (lobo's checked here; the
+# oracle's are `kill(<pid>, <n>) failed (3: No such process)` and
+# `invalid PID number "…" in "<file>"`). n.conf above is valid, has no
+# control directive, and leaves the pid file at its default path.
+# Through ws62 lobo refused this door by name (ws15: "reached ONLY
+# over its control endpoint", wolf-lang#126).
+deadpid=$(sh -c 'echo $$')
+echo "$deadpid" > "$scratch/logs/nginx.pid"
+probe "-s reload, a pid nobody holds" 1 1 "" -- -s reload -p "$scratch" -c n.conf
+total=$((total + 1))
+if grep -q "\[alert\] kill($deadpid, [0-9]*) failed" "$scratch/lobo.err" && grep -q "\[alert\] kill($deadpid, [0-9]*) failed" "$scratch/oracle.err"; then
+    parity=$((parity + 1))
+    echo "lobo-shell: ok — [-s reload, a pid nobody holds] both name the failed kill($deadpid, N)"
+else
+    echo "lobo-shell: FAILED — [-s reload, a pid nobody holds] lobo: $(head -1 "$scratch/lobo.err") / oracle: $(head -1 "$scratch/oracle.err")" >&2
+    red=$((red + 1))
+fi
+echo "unix:logs/control.sock" > "$scratch/logs/nginx.pid"
+probe "-s stop, no pid in the pid file" 1 1 "" -- -s stop -p "$scratch" -c n.conf
+total=$((total + 1))
+if grep -q 'invalid PID number "unix:logs/control.sock"' "$scratch/lobo.err" && grep -q 'invalid PID number "unix:logs/control.sock"' "$scratch/oracle.err"; then
+    parity=$((parity + 1))
+    echo "lobo-shell: ok — [-s stop, no pid in the pid file] both say invalid PID number"
+else
+    echo "lobo-shell: FAILED — [-s stop, no pid in the pid file] lobo: $(head -1 "$scratch/lobo.err") / oracle: $(head -1 "$scratch/oracle.err")" >&2
+    red=$((red + 1))
+fi
+rm -f "$scratch/logs/nginx.pid"
+
+# `status` needs a connection, so with no `control` directive it still
+# refuses by name instead of dialling the http port (ws15's rule, kept
+# for the verbs that need a reply; lobo-only, nginx has no `status`)
+"$LOBO" status -p "$scratch" -c n.conf >/dev/null 2>"$scratch/noctl.err"
 noctl=$?
 total=$((total + 1))
 if [ "$noctl" = 1 ] && grep -q 'no "control" directive' "$scratch/noctl.err"; then
     parity=$((parity + 1))
-    echo "lobo-shell: ok — [-s reload with no control directive] exit 1 and the diagnostic names the directive (ws15: a running lobo is reached only over its endpoint)"
+    echo "lobo-shell: ok — [status with no control directive] exit 1 and the diagnostic names the directive (a reply needs the endpoint; -s does not)"
 else
-    echo "lobo-shell: FAILED — [-s reload with no control directive] exit $noctl, stderr: $(head -1 "$scratch/noctl.err")" >&2
+    echo "lobo-shell: FAILED — [status with no control directive] exit $noctl, stderr: $(head -1 "$scratch/noctl.err")" >&2
     red=$((red + 1))
 fi
 
@@ -189,14 +219,14 @@ else
 fi
 
 # assert the error diagnostics land on STDERR (nginx's stream), not stdout
-"$LOBO" -Z >/tmp/lobo-shell-stdout 2>/dev/null
-if [ -s /tmp/lobo-shell-stdout ]; then
+"$LOBO" -Z >"$scratch/stdout" 2>/dev/null
+if [ -s "$scratch/stdout" ]; then
     echo "lobo-shell: FAILED — -Z wrote to stdout; nginx writes diagnostics to stderr" >&2
     red=$((red + 1))
 fi
 total=$((total + 1))
-[ ! -s /tmp/lobo-shell-stdout ] && { parity=$((parity + 1)); echo "lobo-shell: ok — [-Z on stderr] diagnostics go to stderr (nginx's stream)"; }
-rm -f /tmp/lobo-shell-stdout
+[ ! -s "$scratch/stdout" ] && { parity=$((parity + 1)); echo "lobo-shell: ok — [-Z on stderr] diagnostics go to stderr (nginx's stream)"; }
+rm -f "$scratch/stdout"
 
 echo "lobo-shell: $total probes — $parity parity, $named named deltas, $red red"
 [ "$red" = 0 ] && [ "$total" -gt 0 ] || exit 1
