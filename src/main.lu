@@ -1718,8 +1718,24 @@ fn serve_main(
     }
     let stream_w = stp.0
     let stream_r = stp.1
+    // ws64 (lobo#84): THE READINESS SET IS MADE HERE. The runtime
+    // makes its one readiness set (and that set's wake descriptor) at
+    // the first call that PARKS, and asserts on the descriptors it
+    // asks the host for. Through ws63 lobo's first park was the first
+    // write to a slow client, which could come with the process at its
+    // descriptor limit: measured at `ulimit -n 32`, the ninth slow
+    // download ended the process (`epoll_create1 failed`, a panic that
+    // cannot unwind). One read of 1 ms on a pipe nobody has written to
+    // parks now, while descriptors are plentiful, so nothing a client
+    // does later can be what creates the set. A host that refused the
+    // pipe has no stream procs to park either.
     if stream_r >= 0 {
+        net_deadline(stream_r, 1) else |_| {}
+        let _warm = net_read(stream_r, 1) else |_| { "" }
         net_deadline(stream_r, 50) else |_| {}
+    } else if pipe_r >= 0 {
+        net_deadline(pipe_r, 1) else |_| {}
+        let _warm = net_read(pipe_r, 1) else |_| { "" }
     }
     var opts = serve.ServerOpts {
         token: d0.token,
@@ -1989,6 +2005,27 @@ fn serve_main(
     var croom = shell.conn_room(wconn, nlisten)
     var cdead: int = 0
     var warn_s: int = -1
+    // ws64: until when the listeners (`acc_off`) and the control
+    // endpoint (`ctl_off`) are left out of the wait set after an accept
+    // the host refused — nginx's half second, which is also what keeps
+    // this loop from spinning on a listener that stays ready
+    var acc_off: int = 0
+    var ctl_off: int = 0
+    // ws64: THE RESERVE. Two descriptors lobo holds and does not use,
+    // so that out of descriptors it can still take an order: `rsv_a`
+    // is let go when the control accept fails (the order's connection
+    // takes its place) and `rsv_b` while a reload or a reopen reads
+    // and opens files. Each is taken back as soon as it can be.
+    let conf_abs = if conf.starts_with("/") { conf } else { "{prefix}/{conf}" }
+    var rsv_a = reserve_take(conf_abs)
+    var rsv_b = reserve_take(conf_abs)
+    if rsv_a < 0 || rsv_b < 0 {
+        ev_log(
+            mut elog_st,
+            "warn",
+            "no descriptor could be held in reserve (neither /dev/null nor {conf_abs} opened): out of descriptors, the control endpoint may not answer",
+        )
+    }
     var cidle = List[int]()
     var cstart = List[int]()
     // ws13: the name a connection is PARKED on, as its index in
@@ -2135,6 +2172,15 @@ fn serve_main(
                         worker: elog_st.worker,
                     }
 
+                    // 0. ws64: the reserve, taken back when a pass let it go
+                    // and the host has a descriptor again
+                    if rsv_a < 0 {
+                        rsv_a = reserve_take(conf_abs)
+                    }
+                    if rsv_b < 0 {
+                        rsv_b = reserve_take(conf_abs)
+                    }
+
                     // 0a. ws16: a standing-by hand retries its bind — the failover
                     // half of this pin's accept-distribution posture (the holder
                     // died: the port is free within its kernel teardown, and the
@@ -2236,7 +2282,12 @@ fn serve_main(
                     // `net_read` behind it is what reports `closed`, which is how
                     // a connection leaves the table instead of being parked on.
                     var wfds = List[int]()
-                    if have_ctrl {
+                    // ws64: an endpoint whose accept the host just refused
+                    // sits out its half second (it would stay ready, and
+                    // the loop would spin on it: 293 cpu ticks in 4.5 s at
+                    // ws63)
+                    let acc_on = now >= acc_off
+                    if have_ctrl && now >= ctl_off {
                         (mut wfds).push(cl)
                     }
                     // ws29: the forwarder's read end — the readiness handle a
@@ -2253,14 +2304,14 @@ fn serve_main(
                     // race answers NOTHING, inside the budget `arm_accept` armed —
                     // so there is nothing left for a turn to buy, and the twenty
                     // lines that bought it are gone.
-                    if have_http && running && !quitting {
+                    if have_http && running && !quitting && acc_on {
                         (mut wfds).push(hl)
                     }
-                    if have_tls && running && !quitting {
+                    if have_tls && running && !quitting && acc_on {
                         (mut wfds).push(tls_l)
                     }
                     // ws62 (px25 (a)): every extra listener too
-                    if running && !quitting {
+                    if running && !quitting && acc_on {
                         for xl in xls {
                             if xl >= 0 {
                                 (mut wfds).push(xl)
@@ -2287,7 +2338,14 @@ fn serve_main(
                         }
                         wi = wi + 1
                     }
-                    let wms = wait_budget(parked)
+                    var wms = wait_budget(parked)
+                    // ws64: the wait ends when a sat-out endpoint is due back
+                    if !acc_on && acc_off - now < wms {
+                        wms = acc_off - now
+                    }
+                    if have_ctrl && now < ctl_off && ctl_off - now < wms {
+                        wms = ctl_off - now
+                    }
                     var ready = List[int]()
                     if wfds.len > 0 {
                         ready = net_wait(wfds, wms) else |_| {
@@ -2394,9 +2452,37 @@ fn serve_main(
                     var denied = false
                     if have_ctrl && ready_has(ready, cl) {
                         var got_ctrl = true
-                        let cand = net_accept(cl) else |_| {
-                            got_ctrl = false
-                            0
+                        var ctl_io = false
+                        var cand = net_accept(cl) else |e| match e {
+                            timeout => {
+                                got_ctrl = false
+                                0
+                            },
+                            io => {
+                                got_ctrl = false
+                                ctl_io = true
+                                0
+                            },
+                        }
+                        // ws64 (lobo#84): the host refused the accept — out
+                        // of descriptors. The reserve is let go and the
+                        // order's connection takes its place; it is taken
+                        // back when the order is answered and closed. With
+                        // no reserve to give, the endpoint sits out and the
+                        // failure is logged as a listener's is.
+                        if ctl_io && rsv_a >= 0 {
+                            fs_close(rsv_a) else |_| {}
+                            rsv_a = -1
+                            got_ctrl = true
+                            cand = net_accept(cl) else |_| {
+                                got_ctrl = false
+                                0
+                            }
+                        }
+                        if ctl_io && !got_ctrl {
+                            ctl_off = now + accept_pause_ms()
+                            let why = descriptor_reason()
+                            ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
                         }
                         if got_ctrl {
                             cc = cand
@@ -2433,6 +2519,13 @@ fn serve_main(
                         if m > 0 {
                             verb = shell.signal_verb(m)
                         }
+                    }
+                    // ws64: a reload reads the configuration and its
+                    // certificates, and it and a reopen open log files:
+                    // the second reserve is theirs while they do
+                    if (verb == "reload" || verb == "reopen") && rsv_b >= 0 {
+                        fs_close(rsv_b) else |_| {}
+                        rsv_b = -1
                     }
                     if cc >= 0 || !verb.is_empty() {
                         let curgen = current_gen(gens)
@@ -2678,6 +2771,11 @@ fn serve_main(
                         }
                         if cc >= 0 {
                             net_close(cc) else |_| {}
+                            // ws64: the order is answered; its descriptor is
+                            // the reserve's again before a client can take it
+                            if rsv_a < 0 {
+                                rsv_a = reserve_take(conf_abs)
+                            }
                         }
                     }
 
@@ -2720,9 +2818,32 @@ fn serve_main(
                                     }
                                 }
                                 var got_conn = true
-                                let conn = net_accept(lh) else |_| {
-                                    got_conn = false
-                                    0
+                                var acc_io = false
+                                let conn = net_accept(lh) else |e| match e {
+                                    timeout => {
+                                        got_conn = false
+                                        0
+                                    },
+                                    io => {
+                                        got_conn = false
+                                        acc_io = true
+                                        0
+                                    },
+                                }
+                                // ws64 (lobo#84): THE HOST REFUSED THE ACCEPT —
+                                // in practice the process (EMFILE) or the system
+                                // (ENFILE) is out of descriptors. nginx logs
+                                // `[crit] accept4() failed (24: Too many open
+                                // files)` and stops accepting for half a second,
+                                // so the line comes twice a second however many
+                                // connections wait; they wait in the kernel's
+                                // queue and are served when descriptors return.
+                                // lobo does the same (through ws63 it logged
+                                // nothing and span on the ready listener).
+                                if acc_io {
+                                    acc_off = now + accept_pause_ms()
+                                    let why = descriptor_reason()
+                                    ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
                                 }
                                 if !got_conn {
                                     draining = false
@@ -2863,12 +2984,25 @@ fn serve_main(
                         let ton = if tsel == 0 { have_tls } else { th >= 0 }
                         if ton && running && !quitting && ready_has(ready, th) {
                             var got_tls = true
-                            let tconn = net_accept(th) else |_| {
-                                got_tls = false
-                                0
+                            var tls_io = false
+                            let tconn = net_accept(th) else |e| match e {
+                                timeout => {
+                                    got_tls = false
+                                    0
+                                },
+                                io => {
+                                    got_tls = false
+                                    tls_io = true
+                                    0
+                                },
                             }
-                            // ws64: a connection past worker_connections, as
-                            // the plaintext listeners'
+                            // ws64: as the plaintext listeners' — the failed
+                            // accept, and a connection past worker_connections
+                            if tls_io {
+                                acc_off = now + accept_pause_ms()
+                                let why = descriptor_reason()
+                                ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
+                            }
                             if got_tls && crows - cdead >= croom {
                                 let picks = idle_pick(cfds, cwait, cstream, cclen, cidle, crows)
                                 for r in picks {
@@ -3326,6 +3460,21 @@ fn serve_main(
                                             ri2 = ri2 * 10 + b - 48
                                         }
                                     }
+                                }
+                                // ws64 (lobo#84): a file the host would not open
+                                // for want of a descriptor was answered 500;
+                                // nginx's `[crit] open() "<path>" failed (24: Too
+                                // many open files)`, one line a request
+                                if st.open_err != 0 && rare {
+                                    ev_log(
+                                        mut elog,
+                                        "crit",
+                                        shell.open_failed_text(
+                                            st.rare[0].open_path,
+                                            st.open_err,
+                                            os_error_text(st.open_err),
+                                        ),
+                                    )
                                 }
                                 carry_set = true
                                 carry_new = st.carry
@@ -4028,6 +4177,64 @@ fn bind_control(addr: str) -> (int, str) {
         return (-1, "could not read the control port")
     }
     (l, "127.0.0.1:{port}")
+}
+
+/// The pause after an accept the host refused: nginx's half second
+/// (measured: two `[crit]` lines a second for as long as it lasts).
+/// Total.
+fn accept_pause_ms() -> int {
+    500
+}
+
+/// ws64 (lobo#84): one descriptor to hold in reserve — `/dev/null`,
+/// or the configuration file itself where the host has no such device
+/// (the file exists: it was just read) — or -1 when neither opens.
+/// Held, never read. fs tier. Total.
+fn reserve_take(conf_path: str) -> int {
+    var got = true
+    let a = fs_open("/dev/null") else |_| {
+        got = false
+        -1
+    }
+    if got {
+        return a
+    }
+    got = true
+    let b = fs_open(conf_path) else |_| {
+        got = false
+        -1
+    }
+    if got {
+        return b
+    }
+    -1
+}
+
+/// ws64 (lobo#84): WHY the host refused a descriptor just now, as
+/// (number, message) — or (0, "") when it cannot be said. `net_accept`
+/// answers `io` and nothing more, and `os_error` serves the fs family
+/// only at this pin ([os.fs.error]), so the reason is read by asking
+/// the host for a descriptor the fs way: an open of `/dev/null` that
+/// fails EMFILE or ENFILE names the reason the accept failed a moment
+/// before. An open that succeeds (a descriptor came back in between),
+/// or fails for another reason, names nothing — the line is then
+/// logged without a number rather than with a guessed one. fs tier.
+/// Total.
+fn descriptor_reason() -> (int, str) {
+    var failed = false
+    let p = fs_open("/dev/null") else |_| {
+        failed = true
+        -1
+    }
+    if !failed {
+        fs_close(p) else |_| {}
+        return (0, "")
+    }
+    let code = os_error()
+    if shell.out_of_descriptors(code) {
+        return (code, os_error_text(code))
+    }
+    (0, "")
 }
 
 /// ws64 (lobo#84): the rows one round of making room closes — the
