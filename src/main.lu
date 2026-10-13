@@ -5261,7 +5261,8 @@ fn signal_send(cli: shell.Cli, c: config.Conf) -> int {
         eprint("lobo: [error] invalid PID number \"{shell.first_line(raw)}\" in \"{pidp}\"")
         return 1
     }
-    let m = shell.send_meaning(cli.signal)
+    // PLANT (ws63-plant, never merged): `-s quit` sends the wrong name
+    let m = if cli.signal == "quit" { shell.sig_terminate() } else { shell.send_meaning(cli.signal) }
     var why = ""
     os_signal_send(pid, m) else |e| match e {
         not_found => {
