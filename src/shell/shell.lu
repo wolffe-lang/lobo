@@ -1104,8 +1104,10 @@ pub fn reload(prefix: str, conf_rel: str, take prev: Gen) -> Gen {
     let c = config.load(prefix, conf_rel)
     // ws41: a reload refuses what a start refuses — a `named_error`
     // row (the -t refusal) and a `user` lobo cannot honour as root
+    // ws64: and a `worker_connections` the oracle refuses
     let refused = !config.delta_refusal(c).is_empty() ||
-        config.user_verdict(c, config.self_euid()).starts_with("emerg:")
+        config.user_verdict(c, config.self_euid()).starts_with("emerg:") ||
+        !config.conn_check(c).is_empty()
     if config.ok(c) && !refused {
         let g = prev.gen + 1
         return Gen { conf: c, gen: g, ok: true, note: "reload complete (generation {g})" }
@@ -2104,4 +2106,101 @@ pub fn control_reachable(addr: str) -> bool {
     }
     net_close(c) else |_| {}
     true
+}
+
+// ------------------------------------------------------------------
+// ws64 (lobo#84): the connection limit and the descriptor limit.
+// `worker_connections` is applied per process, and what a process does
+// at it — and when the host refuses it another descriptor — is
+// nginx's, measured on the pinned oracle (notes/ws64-contract.md §2;
+// the source was not read). The PURE half lives here: how many
+// connections a process may hold, when and how many idle ones it
+// closes to make room, and the bodies of the four log lines. The loop
+// that applies them is main's.
+// ------------------------------------------------------------------
+
+/// How many client connections one process holds under
+/// `worker_connections wc` with `listeners` listening sockets: `wc -
+/// listeners - 1`, never below 0. Measured on the oracle: 14 at 16 with
+/// one `listen`, 13 with two, 28 across two workers — a worker's
+/// listening sockets and its channel to the master each take one of
+/// its connections (15 with `master_process off`, which has no
+/// channel). lobo's processes each hold a control endpoint or a
+/// master's line to them, and take the one in every posture. Pure and
+/// total.
+pub fn conn_room(wc: int, listeners: int) -> int {
+    let r = wc - listeners - 1
+    if r < 0 {
+        return 0
+    }
+    r
+}
+
+/// Whether a process holding `used` of its `room` connections under
+/// `worker_connections wc` should close idle ones now: fewer than `wc
+/// / 16` are free. nginx asks this after every connection it takes
+/// (fitted on the oracle: at 64 the first closes come with the 59th
+/// connection of 62, at 16 with the 14th of 14, and never from this
+/// rule below 16, where `wc / 16` is 0). Pure and total.
+pub fn reuse_due(wc: int, room: int, used: int) -> bool {
+    room - used < wc / 16
+}
+
+/// How many idle connections one round of making room closes, of
+/// `idle` idle ones: an eighth of them, at least 1 and at most 32;
+/// none when none is idle. The oracle's: 1 of 13, 3 of 28, 7 of 58, 9
+/// of 73, 12 of 96 and of 103, 32 of 280. Pure and total.
+pub fn reuse_batch(idle: int) -> int {
+    if idle <= 0 {
+        return 0
+    }
+    var n = idle / 8
+    if n > 32 {
+        n = 32
+    }
+    if n < 1 {
+        n = 1
+    }
+    n
+}
+
+/// The body of the line a process logs at `worker_connections`: with
+/// `reusing`, nginx's `[warn]` when idle connections were closed to
+/// make room (at most one a second); without, its `[alert]` when a new
+/// connection was closed because none was idle (one a connection).
+/// Pure and total.
+pub fn conns_short_text(wc: int, reusing: bool) -> str {
+    if reusing {
+        return "{wc} worker_connections are not enough, reusing connections"
+    }
+    "{wc} worker_connections are not enough"
+}
+
+/// Whether a host error number means the process (24, EMFILE) or the
+/// system (23, ENFILE) is out of descriptors — the two numbers are the
+/// same on linux, macOS and the BSDs. Pure and total.
+pub fn out_of_descriptors(code: int) -> bool {
+    code == 24 || code == 23
+}
+
+/// The body of the `[crit]` line for an accept the host refused:
+/// nginx's `accept4() failed (24: Too many open files)` with the call
+/// named `accept()` (which call the runtime makes is the runtime's;
+/// nginx itself says `accept()` where there is no `accept4`). `code`
+/// and `text` are the host's number and message; with no number known
+/// (`code <= 0`) the clause is left out rather than guessed. Pure and
+/// total.
+pub fn accept_failed_text(code: int, text: str) -> str {
+    if code <= 0 {
+        return "accept() failed"
+    }
+    "accept() failed ({code}: {text})"
+}
+
+/// The body of the `[crit]` line for a file the host would not open:
+/// nginx's `open() "<path>" failed (24: Too many open files)` (its
+/// line goes on to name the client and the request; lobo's stops at
+/// the reason). Pure and total.
+pub fn open_failed_text(path: str, code: int, text: str) -> str {
+    "open() \"{path}\" failed ({code}: {text})"
 }

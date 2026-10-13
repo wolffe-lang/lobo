@@ -1,0 +1,119 @@
+//! check: run(exit=0, stdout="conn limit ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! ws64 (lobo#84): WHAT A PROCESS DOES AT `worker_connections`, as a
+//! rule — PURE, on all three lanes. The rule was fitted on the pinned
+//! nginx 1.30.4 run as a black box (notes/ws64-contract.md §2; its
+//! source was not read) and this file holds it to every run it was
+//! fitted on: `sim` below is the accept path's arithmetic with every
+//! connection idle (the client opens N connections and sends nothing),
+//! and its closed counts are the ORACLE'S, measured — 1 of 14, 2 of 15
+//! and 11 of 24 at 16; 3 of 30 at 32; 7 of 61, 62 and 63 and 42 of 100
+//! at 64; 9 of 79 at 80; 12 of 103 at 104; 12 of 106 at 112; 32 of 285
+//! at 300; 2 of 8 at 8; 2 of 4 at 4; 2 of 3 at 3. A rule that drifts
+//! from nginx by one connection on any of them is red here. The live
+//! half is tests/serve/worker_connections_e2e.lu; the same counts
+//! against the oracle itself are `tools/lobo-shell`'s rows.
+
+use shell
+
+/// How many of `n` idle connections, opened one after another against
+/// `worker_connections wc` and one listening socket, are closed to
+/// make room — the loop's own arithmetic (main.lu, step 2): with no
+/// slot free a batch of the idle goes first; the connection takes its
+/// slot; and with fewer than a sixteenth free a batch goes again, the
+/// new connection not counted. Pure and total.
+fn sim(wc: int, n: int) -> int {
+    let room = shell.conn_room(wc, 1)
+    var used: int = 0
+    var closed: int = 0
+    var refused: int = 0
+    var i: int = 0
+    while i < n {
+        if used >= room {
+            let b = shell.reuse_batch(used)
+            used = used - b
+            closed = closed + b
+        }
+        if used >= room {
+            refused = refused + 1
+        } else {
+            used = used + 1
+            if shell.reuse_due(wc, room, used) {
+                let b = shell.reuse_batch(used - 1)
+                used = used - b
+                closed = closed + b
+            }
+        }
+        i = i + 1
+    }
+    closed + refused * 1000000
+}
+
+fn main() -> !int {
+    // the room: the directive less the listening sockets less one
+    assert(shell.conn_room(16, 1) == 14, "16, one listen: 14 (the oracle serves 14)")
+    assert(shell.conn_room(16, 2) == 13, "16, two: 13 (the oracle serves 13)")
+    assert(shell.conn_room(512, 1) == 510, "the default, one listen")
+    assert(shell.conn_room(2, 1) == 0, "2, one listen: nobody (the oracle refuses every one)")
+    assert(shell.conn_room(1, 4) == 0, "never below 0")
+
+    // the batch: an eighth of the idle, at least 1, at most 32
+    assert(shell.reuse_batch(0) == 0, "none idle: none closed")
+    assert(shell.reuse_batch(1) == 1 && shell.reuse_batch(13) == 1, "at least one")
+    assert(shell.reuse_batch(28) == 3 && shell.reuse_batch(58) == 7, "an eighth")
+    assert(shell.reuse_batch(103) == 12 && shell.reuse_batch(104) == 13, "…rounded down")
+    assert(shell.reuse_batch(280) == 32 && shell.reuse_batch(4000) == 32, "at most 32")
+
+    // when: fewer than a sixteenth free, asked after a slot is taken
+    assert(!shell.reuse_due(64, 62, 58), "64: four free is not fewer than four")
+    assert(shell.reuse_due(64, 62, 59), "64: three free is")
+    assert(shell.reuse_due(16, 14, 14) && !shell.reuse_due(16, 14, 13), "16: none free")
+    assert(!shell.reuse_due(8, 6, 6), "below 16 a sixteenth is nothing: never from this rule")
+
+    // the oracle's fourteen runs, to the connection
+    assert(sim(16, 13) == 0, "16/13: {sim(16, 13)}")
+    assert(sim(16, 14) == 1, "16/14: {sim(16, 14)}")
+    assert(sim(16, 15) == 2, "16/15: {sim(16, 15)}")
+    assert(sim(16, 24) == 11, "16/24: {sim(16, 24)}")
+    assert(sim(32, 30) == 3, "32/30: {sim(32, 30)}")
+    assert(sim(64, 61) == 7, "64/61: {sim(64, 61)}")
+    assert(sim(64, 62) == 7, "64/62: {sim(64, 62)}")
+    assert(sim(64, 63) == 7, "64/63: {sim(64, 63)}")
+    assert(sim(64, 100) == 42, "64/100: {sim(64, 100)}")
+    assert(sim(80, 79) == 9, "80/79: {sim(80, 79)}")
+    assert(sim(104, 103) == 12, "104/103: {sim(104, 103)}")
+    assert(sim(112, 106) == 12, "112/106: {sim(112, 106)}")
+    assert(sim(300, 285) == 32, "300/285: {sim(300, 285)}")
+    assert(sim(8, 8) == 2, "8/8: {sim(8, 8)}")
+    assert(sim(4, 4) == 2, "4/4: {sim(4, 4)}")
+    assert(sim(3, 3) == 2, "3/3: {sim(3, 3)}")
+
+    // the four lines, nginx's bodies
+    assert(
+        shell.conns_short_text(16, true) ==
+            "16 worker_connections are not enough, reusing connections",
+        "the [warn]",
+    )
+    assert(
+        shell.conns_short_text(16, false) == "16 worker_connections are not enough",
+        "the [alert]",
+    )
+    assert(
+        shell.accept_failed_text(24, "Too many open files") ==
+            "accept() failed (24: Too many open files)",
+        "the [crit], accept",
+    )
+    assert(shell.accept_failed_text(0, "") == "accept() failed", "no number known: none claimed")
+    assert(
+        shell.open_failed_text("/srv/big.bin", 24, "Too many open files") ==
+            "open() \"/srv/big.bin\" failed (24: Too many open files)",
+        "the [crit], open",
+    )
+    assert(shell.out_of_descriptors(24) && shell.out_of_descriptors(23), "EMFILE, ENFILE")
+    assert(!shell.out_of_descriptors(2) && !shell.out_of_descriptors(0), "nothing else")
+    print("conn limit ok")
+    0
+}
