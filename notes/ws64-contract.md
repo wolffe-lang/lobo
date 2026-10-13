@@ -229,3 +229,69 @@ control accept is not retried): red in CI on both hosts at
 - macOS: the limit is not readable from `/proc`; the child-shell path
   has not run anywhere yet. kqueue's set is made by the same first
   park.
+
+## 3. The prediction against the measurement
+
+Written after the measurements; §3 above is as it was committed
+(`de87ed8`). Logs are under `kasumi:~/lanes/ws64/logs/` unless a path
+says otherwise.
+
+| item | predicted | measured |
+|---|---|---|
+| parity rows, about 36 probes; trunk red on the `-t` rows and every limit row | **held, 41 probes.** `tools/lobo-shell` at head: 41 probes, 40 parity, 1 named delta, 0 red (`g-w1.log`). Against trunk's binary 17 are red (`red-shell-trunk.log`): seven `-t` rows and two of their texts, the two idle rows, the two busy rows, the accept line, the start warning, the refused open, and `-t` under a lowered limit. **Not red at trunk, as it should not be:** the client's own line out of descriptors (trunk also leaves the newcomer queued and serves again afterwards; what it lacked was the log line) |
+| the closed counts equal nginx's in every row | **held, to the connection.** The first run of the first build gave 11 of 24 at 16 and 42 of 100 at 64, the first eleven and the first forty-two (`lb-d-idle16.log`, `lb-d-idle64.log`); `tests/shell/conn_limit.lu` holds the rule to sixteen oracle runs (§2 says fourteen: a miscount, the runs are the sixteen listed there and in the test). 14 of 24 slow downloads served, ten closed at once, eleven `[alert]` lines with the probe's (`lb-d-dl16.log`; the oracle: the same) |
+| "idle" as nginx reads it | **held on the rows measured**: a connection that has sent nothing and a keep-alive connection between requests. A connection whose first bytes are in the kernel and unread is closed by both (nginx with a reset); one whose request has begun arriving in lobo's buffer is kept by both. Not measured: a pipelined second request, a connection parked on a name |
+| `-t` and the start refuse nginx's refusals in its text | **held** (`tools/lobo-shell`'s rows; `tests/config/worker_connections.lu` on three lanes). Added: a reload with such a value is rejected |
+| `worker_rlimit_nofile` stays refused, reason rewritten | **as predicted**; nginx's own behaviour with it measured for the record (`ng-rlim-idle.log`, `ng-rlim-up.log`) |
+| `parked_downloads_e2e.lu` still passes | **held** (`g-w1.log`, 364 of 364 corpus lane-runs) |
+| the reserve test red at trunk at `status`, green at head | **held.** `tests/shell/control_exhausted_e2e.lu` against trunk's binary: `trap(assert)` on both lanes at line 225, the `status` assertion (`red-e2e-trunk.log`); at head `status answered in 0 ms while out of descriptors`, on 16 and on 4 cpus. `/dev/null` opened on linux; the configuration-file fallback has not run. The limit in the test is 64, not the 40 predicted (room for a host whose process holds more at rest) |
+| `reload` takes and `stop` stops at the limit | **held**, over the endpoint (the e2e's steps 1 and 3) and by signal with no `control` directive (`sig-em-serve.out`: `-s reload`, `-s reopen`, `-s stop`, each exit 0 and each taken, with 32 of 32 descriptors held); and through a master to two hands each at 64 of 64 (`mw-mw-idle-em.log`: `reload complete (generation 2) workers=2/2`) |
+| the abort: the process stays up at `ulimit -n 32` with 12 slow downloads; two more descriptors at start | **held.** `epoll_create1` and `eventfd2` are made during the start now, between the self-pipes and before any client connects (a start under strace, `st-head-start.out`; at trunk they came at the first parked write, `st-trunk-dl.out`); at `ulimit -n 32` to 34 with slow downloads to the limit the process serves on (`lb-d-em-dl.log`, `lb-d-em-dl33.log`, `lb-d-em-dl34.log`) and the e2e's step 2 holds it. **Four more descriptors at rest, not two**: 20 where trunk had 16 — the readiness set, its wake descriptor and the two in reserve. One more thread (21, trunk 20) |
+| the `[crit]` line, at most two a second (8–12 in 5 s) | **held**: 12 lines in about 5.7 s with 40 idle connections (`lb-d-em-idle.log`); the e2e asserts the bound from the clock; beside the oracle 11 lines to its 8 over the same six seconds (`g-w1.log`). The number and text came from the `/dev/null` probe every time; the no-number form has not been seen |
+| the loop no longer spins: under 20 ticks in 4.5 s | **held: 0 ticks** (`lb-d-em-idle.log`; trunk 293, `lb-trunk-idle.log`) |
+| a refused open is a 500 with its `[crit]` line | **held** (`lb-d-em-dl33.log`: six downloads served, the next six and the probe answered 500, seven `open()` lines with the path). Whether the last descriptor goes to a connection or to its file depends on the count at rest, so the parity row tries two neighbouring limits a side |
+| the start warning on linux and through a child shell elsewhere | **held on linux** (`/proc/self/limits`). **Not predicted:** nginx prints its warning only when `error_log`'s level admits a `warn`; at its default level a `-t` under a lowered limit prints nothing (measured after the row first read red). lobo's stderr carries every line, so the row sets `error_log … info`. The child-shell path runs first on macOS in CI |
+| recovery inside 1000 ms | **mostly held**: beside the oracle 0.5 s (`lb-d-em-idle.log`), in the e2e 950 ms on one run, under a 3 s bound. The half second sat out comes first, then the queue's dead connections are taken and dropped before a live one is reached |
+| runner parity close 1.00–1.05x, keepalive 0.90–0.95x; this ÷ trunk 0.98–1.02x | see the PR. kasumi's set (`par-k1.log`) was **refused by the tool's own validity rule**: load 14 before the set from other lanes, the oracle's own spread 2.08. Its medians are not a result |
+| membudget 24/24, master 0 KB; a process within 5 % of 4,380 kB | **held**: 24/24, the master 0 KB over 60 s at 4,356 kB. One process: 4,820 kB at start against trunk's 4,776 in the same minute, 5,108 kB after 400,000 keepalive requests against 5,064 (`par-k1.log`'s `r4` lines; both run without `taskset`, so not comparable with ws63's 4,652) |
+| the plant red at `control_exhausted_e2e.lu` only | see the PR |
+| **not predicted** | with two hands, a hand that is full can win the race for a connection its sibling had room for and close it: 28 of the first 29 downloads served at `worker_connections 16`, where the oracle served the first 28 (`mw-mw-dl16.log`). The total is nginx's; which connection is refused is not |
+
+## 4. Evidence index
+
+kasumi `~/lanes/ws64/`: `toolchains.txt`, `dl/digest-check.txt` (each
+digest twice); the oracle at its limits, `logs/ng-*.log` (30 runs) and
+`scripts/ngm.sh`, `scripts/climit.py`; trunk at its limits,
+`logs/lb-trunk-idle.log`, `lb-trunk-dl.log`, `lb-trunk-wc16-dl.log`,
+`logs/st-trunk-dl.out` (the trace that ends in `epoll_create1(…) = -1
+EMFILE`), `logs/st-head-start.out`; the head at its limits, `logs/lb-d-*.log`,
+`logs/mw-*.log`, `logs/sig-em-serve.out`; the reds,
+`logs/red-e2e-trunk.log` and `logs/red-shell-trunk.log`; each source
+commit formatting, building and passing its own tests,
+`logs/eachcommit.log`; the gauntlets, `logs/g-w1.log` (the tree
+before it was committed: GREEN, exit 0, 0 SKIP, 933 s under `taskset
+-c 0-3`) and `logs/g-head.log` (commit `7ba7ac9` in a clean worktree,
+the head but for this section); `logs/par-k1.log` (the refused set and
+the two resident-size lines). The plant: branch `ws64-plant`, its CI
+run named in the PR.
+
+## Not verified
+
+- macOS beyond CI: the child-shell `ulimit -n`, kqueue's set made at
+  start, the limit rows against a macOS build of the oracle.
+- That the master replaces a hand that ended at its descriptor limit
+  at trunk (it replaces any hand that ends; this ending was measured
+  for one process only).
+- The configuration-file fallback for the reserve (a host with no
+  `/dev/null`); PAX.
+- ENFILE (the system's limit): the code reads 23 as it reads 24; only
+  24 was produced.
+- TLS: a TLS listener's failed accept and a TLS connection past
+  `worker_connections` take the plaintext path's code and were not
+  driven.
+- A reload that opens more than one new log output with the process at
+  its limit.
+- Two descriptors, two threads and about 150 KB a parked download are
+  ws63's figures; this lane re-measured the descriptors (20 at rest,
+  32 with six downloads) and not the rest.
+- Windows: not built.
