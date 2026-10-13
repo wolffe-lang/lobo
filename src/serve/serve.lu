@@ -580,6 +580,8 @@ struct Charge {
     handed: bool,
     handed_fd: int,
     procs_ok: bool,
+    oerr: int,
+    opath: str,
 }
 
 fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
@@ -596,6 +598,8 @@ fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
         handed: false,
         handed_fd: -1,
         procs_ok: true,
+        oerr: 0,
+        opath: "",
     }
 }
 
@@ -2590,8 +2594,11 @@ fn not_a_file(kind: int) -> Classified {
 /// ELOOP, a name too long: the path stat answered "no" to all of
 /// these and the router drew 404, and it still does (nginx draws 403
 /// for ELOOP and 500 for a true EIO; that delta predates this sprint
-/// and is unchanged by it) — and 6 an fstat that failed on a handle
-/// it just got (the 500 `serve_file` gave it before). Total.
+/// and is unchanged by it), 6 an fstat that failed on a handle
+/// it just got (the 500 `serve_file` gave it before) — and, ws64
+/// (lobo#84), 7 and 8 an open the host refused for want of a
+/// descriptor (EMFILE, ENFILE): the 500 nginx answers, never the 404
+/// of kind 5. Total.
 pub fn classify(path: str) -> Classified {
     let fd = fs_open_mode(path, 5) else |e| match e {
         not_found => {
@@ -2607,6 +2614,18 @@ pub fn classify(path: str) -> Classified {
             return not_a_file(5)
         },
         io => {
+            // ws64 (lobo#84): the host had no descriptor to give. Not
+            // "no such file": nginx answers 500 and logs the open, and
+            // a 404 for a file that is there is a wrong answer a cache
+            // can keep. The fs family's own number says which
+            // ([os.fs.error]): 24 the process's limit, 23 the system's.
+            let code = os_error()
+            if code == 24 {
+                return not_a_file(7)
+            }
+            if code == 23 {
+                return not_a_file(8)
+            }
             return not_a_file(5)
         },
     }
@@ -2919,7 +2938,11 @@ fn handle_request(
             send_err(mut cn, 403, false, token)
             return true
         }
-        if cl.kind == 6 {
+        if cl.kind == 6 || cl.kind == 7 || cl.kind == 8 {
+            if cl.kind != 6 {
+                chg.oerr = if cl.kind == 7 { 24 } else { 23 }
+                chg.opath = d.fs_path
+            }
             acc.status = 500
             acc.body_bytes = err_len(500, false, token)
             send_err(mut cn, 500, false, token)
@@ -2973,7 +2996,11 @@ fn handle_request(
             send_err(mut cn, 403, false, token)
             return true
         }
-        if cl.kind == 6 {
+        if cl.kind == 6 || cl.kind == 7 || cl.kind == 8 {
+            if cl.kind != 6 {
+                chg.oerr = if cl.kind == 7 { 24 } else { 23 }
+                chg.opath = cand
+            }
             acc.status = 500
             acc.body_bytes = err_len(500, false, token)
             send_err(mut cn, 500, false, token)
@@ -3405,6 +3432,8 @@ pub struct ReqOut {
     stream_fd: int,
     rs_rot: str,
     rs_new: List[resolver.Resolver],
+    open_err: int,
+    open_path: str,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -3431,6 +3460,8 @@ fn req_out(close: bool, carry: str, take acc: obs.Access, chg: Charge) -> ReqOut
         stream_fd: chg.handed_fd,
         rs_rot: "",
         rs_new: List[resolver.Resolver](),
+        open_err: chg.oerr,
+        open_path: chg.opath,
     }
 }
 
@@ -3460,6 +3491,8 @@ fn req_out_wait(take acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
         stream_fd: -1,
         rs_rot: "",
         rs_new: List[resolver.Resolver](),
+        open_err: 0,
+        open_path: "",
     }
 }
 
@@ -3488,6 +3521,8 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
         stream_fd: -1,
         rs_rot: "",
         rs_new: List[resolver.Resolver](),
+        open_err: 0,
+        open_path: "",
     }
 }
 
@@ -3857,6 +3892,8 @@ pub struct ConnStep {
     memo: MemoUpd,
     rs_rot: str,
     rs_new: List[resolver.Resolver],
+    open_err: int,
+    open_path: str,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -3894,6 +3931,8 @@ fn step_out(
         memo: memo_upd_new(),
         rs_rot: "",
         rs_new: List[resolver.Resolver](),
+        open_err: 0,
+        open_path: "",
     }
 }
 
@@ -3911,6 +3950,7 @@ pub struct StepRare {
     memo: MemoUpd,
     rs_rot: str,
     rs_new: List[resolver.Resolver],
+    open_path: str,
 }
 
 /// A `ConnStep` as it leaves the step's region (ws57, lobo#66). The
@@ -3944,6 +3984,7 @@ pub struct StepOut {
     streaming: bool,
     stream_fd: int,
     has_head: bool,
+    open_err: int,
     rare: List[StepRare],
 }
 
@@ -3957,6 +3998,7 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
         !s.rs_rot.is_empty() ||
         s.rs_new.len > 0 ||
         memo_dirty(s.memo) ||
+        s.open_err != 0 ||
         keep_acc && s.logged
     let status = s.acc.status
     let body_bytes = s.acc.body_bytes
@@ -3974,6 +4016,7 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
             memo: s.memo,
             rs_rot: s.rs_rot,
             rs_new: s.rs_new,
+            open_path: s.open_path,
         })
     }
     StepOut {
@@ -3997,6 +4040,7 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
         streaming: s.streaming,
         stream_fd: s.stream_fd,
         has_head: s.has_head,
+        open_err: s.open_err,
         rare: rare,
     }
 }
@@ -4096,6 +4140,8 @@ fn step_serve(
         memo: fu,
         rs_rot: ro.rs_rot,
         rs_new: ro.rs_new,
+        open_err: ro.open_err,
+        open_path: ro.open_path,
     }
 }
 
