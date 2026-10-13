@@ -674,3 +674,31 @@ instead of on the round.
 - **What a parked download costs a hand** (README, Limits): since wolf
   0.2.29 a hand serves as many as its descriptors and the host's
   threads allow, where it stopped at `4·max(cpus, 2) - 1`.
+
+## ws64 — `worker_connections` is each hand's own (lobo#84)
+
+- **The limit is per process**, as nginx's is per worker: each hand
+  holds `worker_connections - listeners - 1` client connections
+  (nginx counts a worker's listening sockets and its channel to the
+  master; a hand has the same listeners and its own endpoint to the
+  master). `worker_processes 4` with the default 512 and one `listen`
+  serves 2,040 clients. Measured on the oracle: 14 at 16 with one
+  worker, 28 with two.
+- **What a hand does at it** is the single process's (README, Limits):
+  idle connections are closed to make room, an eighth at a time; with
+  none idle the new connection is closed at once. Each hand logs its
+  own lines, with its `worker=N` field.
+- **The descriptor limit is each hand's too**, inherited from the
+  master. The master prints nginx's start warning once
+  (`N worker_connections exceed open file resource limit: M`); each
+  hand holds its own two descriptors in reserve and answers the
+  master's fan-out at its limit (docs/CONTROL.md).
+- **A reload applies the new value to the running hands** (a named
+  delta: nginx starts new workers under the new configuration and
+  retires the old ones with theirs). The listening sockets are the
+  ones bound at start, so the count they take does not move.
+- **`worker_rlimit_nofile` is still refused by name.** nginx sets each
+  worker's descriptor limit with it; wolf has no call that sets a
+  resource limit, and a directive that parsed and did nothing is what
+  lobo#84 was. Set the limit where lobo is started.
+

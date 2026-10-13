@@ -76,8 +76,17 @@ wolf-lang#713) grows the pool a worker per parked task, so that last
 limit is gone (ws63, `tests/serve/parked_downloads_e2e.lu`: red built
 with 0.2.28, green with 0.2.29); the room stays as lobo's own margin,
 for the host that refuses the runtime another thread. What bounds the
-streams now is the host: two descriptors and two threads each
-(README, Limits).
+streams now is `worker_connections`, applied since ws64 (lobo#84),
+and behind it the host: two descriptors and two threads each (README,
+Limits).
+
+ws64 also moves one thing to the start: the runtime makes its
+readiness set at the first call that parks, and asserts on the
+descriptors it asks for. The loop itself never parks (`net_wait` is a
+poll), so lobo's first park used to be the first stream's first write
+to a slow client, whenever that came; one that came with the process
+at its descriptor limit ended the process. `serve_main` now parks
+once, for a millisecond, on its own pipe before it serves.
 
 ws56 adds two more. The LOOP starts each stream and keeps its proc
 and its file in a slot (lobo#62): a stream parked in a write to a slow
