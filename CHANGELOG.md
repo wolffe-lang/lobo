@@ -608,6 +608,75 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws63 — 2026-10-13 — built with wolf 0.2.29; no ceiling on parked downloads; `-s` by signal; `SIGUSR1` reopens; a master with no `control` hears its signals
+
+Unreleased (trunk). lobo moves to wolf 0.2.29 / lupin 0.1.52 and takes
+what that release changes for it. Contract and measurements:
+`notes/ws63-contract.md`.
+
+- **The pin.** wolf 0.2.29 (`6ffe7c6`), lupin 0.1.52 (`025428b`), from
+  the release archives by digest, each checked twice. Zero diagnostics
+  on both tiers and the gauntlet's verdicts unchanged at the pin
+  commit. std moves for the first time since ws42, `14f0ab2` →
+  `9e5bd6b` (wolf-std at 0.2.29), for `std.signal`; trunk's source
+  built against either is the same bytes.
+- **No ceiling on parked downloads** (wolf's s231, wolf-lang#713).
+  Built with wolf 0.2.24 to 0.2.28, one lobo process served the body
+  of at most `4·max(cpus, 2) - 1` downloads parked on slow clients
+  (15 on 4 cpus); the next got its head and waited for one to finish.
+  0.2.29's runtime grows its pool a worker per parked task.
+  `tests/serve/parked_downloads_e2e.lu` holds 20 and then 32 slow
+  downloads on 4 cpus and requires every body to start: 15 of 20 and
+  15 of 32 against the same source built with 0.2.28 (red), all of
+  them built with 0.2.29. What bounds a process now is the host's
+  (README, Limits): two descriptors, two threads and about 150 KB a
+  parked download; 900 were served in one process. Out of
+  descriptors, new connections and the control endpoint wait
+  unanswered with nothing logged, and answer again when a download
+  ends; out of threads, a body waits and nothing stops. `stream_room`
+  is unchanged and is now lobo's own margin.
+- **The pid file's pid is `os_pid()`** (wolf-lang#126). ws62 read
+  `/proc/self/status` or asked a child shell for `$PPID`; both are
+  gone, on linux and macOS. The file's bytes do not change. The start
+  notice reads `(pid N)`.
+- **`-s` reaches a lobo with no `control` directive, by signal.**
+  `lobo -s stop|quit|reload|reopen` sends the verb's signal to the
+  pid in the pid file, as nginx's does, and exits 0 having printed
+  nothing; trunk refused and exited 1. A stale pid and a pid file
+  with no pid in it are nginx's two diagnostics, exit 1 (parity rows
+  in `tools/lobo-shell`). With a `control` directive the endpoint is
+  still used, because it answers. `status` and `control <verb>` still
+  need it.
+- **`SIGUSR1` reopens the logs**, as nginx's does: wolf 0.2.29 gives
+  the signal a meaning (USER) and lobo listens for it.
+- **A master with no `control` directive hears its signals.** With
+  `worker_processes` above 1 and no `control` directive, the master
+  never waited on its signal forwarder: it used a whole core and
+  answered neither `kill -HUP` nor `kill -TERM` (measured at
+  `af0fa41`: 500 cpu ticks in 5 s idle). Now 0 ticks, and a signal
+  fans out to the workers. Found while testing `-s`.
+- **Signals by name.** RELOAD, TERMINATE, QUIT, USER and UPGRADE are
+  `std.signal`'s functions everywhere; through ws62 `shell.lu` wrote
+  1, 2, 4, 7 and 8. A meaning's bit is permanent in wolf since 0.2.29
+  and lobo writes none, nor any host signal number; the gauntlet's
+  `signal names` step refuses one in `src/` or `tests/`.
+
+Measured (kasumi, linux x86-64, 4 cpus of 16 under `taskset`, load
+2.4 to 4.3 from other work): parity at four workers, nginx ÷ lobo,
+close **1.019x**, keepalive **1.002x** (bar 1.10); lobo ÷ trunk
+0.999x / 0.991x. One process after 400,000 keepalive requests:
+4.65 MB resident (trunk on 0.2.28 in the same minute: 4.54). Membudget
+24/24, the master flat. An idle lobo of a master and four workers
+makes about 2,100 system calls a second built with 0.2.29 (1,550 with
+0.2.28): each process's signal wait reads its self-pipe every 5 ms.
+The gauntlet is green with 0 SKIP lines
+(`kasumi:~/lanes/ws63/logs/g-h2.log`). Runner-VM parity: see the PR.
+
+Not taken: lobo#81 (the proxy inside the loop; 0.2.29 removes the
+pool limit that stood in the way of a proc per upstream exchange, and
+the move is a lane of its own) and lobo#82 (nothing in 0.2.29 touches
+its three deltas).
+
 ## ws62 — 2026-10-12 — built with wolf 0.2.28; every server block served; a replaced worker at its generation; a flat master; a pid in the pid file
 
 Unreleased (trunk). lobo moves to wolf 0.2.28 / lupin 0.1.51 and
