@@ -194,3 +194,55 @@ Then lobo#81 and lobo#82 if in reach, otherwise why not.
 A branch `ws63-plant` on the head with `-s quit` sending TERMINATE's
 meaning (the wrong name): red in CI on both hosts at the `-s`-by-signal
 test and nowhere else.
+
+## 3. The prediction against the measurement
+
+Written after the measurements; §3 above is as it was committed
+(`74374c9`).
+
+| item | predicted | measured |
+|---|---|---|
+| the pin | 0 diagnostics; the gauntlet GREEN at the pin commit with trunk's verdicts, 0 SKIP | **held.** `kasumi:~/lanes/ws63/logs/g-pin29.log` at `bd3551c`: GREEN, exit 0, 0 SKIP, 348 corpus lane-runs; its 360 verdict lines equal trunk's at 0.2.28 (`g-trunk28.log`) but for one row's seconds (`g-pin29.verdicts`). Release 13,946,688 → 14,309,896 bytes |
+| `[std]` moves, builds byte-identical to the pin commit's | **held for the source, wrong as written.** Trunk's source is one digest a tier against all three std trees (an input). But `shell.std_rev()` is compiled in and `-V` prints it, so the commit that moves the pin moves the binary by that string. Also wrong in §2: lobo reaches none of the ten files that differ (`std.x.jose` does not import `x/json`); corrected in `wolf-toolchain.toml` |
+| the audit holds with the manifest unchanged | **held**: `[net, fs, exec, env]`; net +173, fs +101, exec +15, env +6. Not predicted: importing `std.signal` is itself charged `exec` and `env` (the module's reach), both already declared |
+| the ceiling test red at 0.2.28, green at 0.2.29 | **held, to the number.** `tests/serve/parked_downloads_e2e.lu` against trunk's source built with 0.2.28: `bodies started 15/20` and `15/32` on 4 cpus, `63/68` and `63/128` on 16, both lanes `trap(assert)` (`logs/ceiling-t28-s14-c4.log`, `ceiling-t28-s14-c16.log`); the same source built with 0.2.29 on 4 cpus, and the head on 16: green (`ceiling-t29-s14-c4.log`, `ceiling-h2-c16.log`). The sweep on 12 cpus read 47/48 and 47/60 at 0.2.28, 48/48 to 200/200 at 0.2.29 (`sweep-t28-c12.log`, `sweep-t29-c12.log`) |
+| with the room opened the capped proc runs beside 500 parked downloads | **held**: a measurement build (`stream_room` returning a million, never committed), `memory_budget 128k`, 4 cpus: the probe answers in 1 ms beside 14, 15, 100 and 500 streams (`sweep-open29-c4.log`) |
+| a thread and 20–80 kB a parked download; about 1,000 at `ulimit -n` 2048; `status` still answers when the next accept fails | **wrong on all three counts.** Two threads a download (threads = 2N + 9: 11, 39, 209, 809, 1,809 at N = 1, 15, 100, 400, 900) and about **153 kB** resident each (4,732 → 142,180 kB over 899; `limits-t29-rel-c4.log`). 900 served at 2048 descriptors (two each: about 1,015). At 1,024 descriptors 505 served, and then the probe GET and **`status` both went unanswered** (3 s and 2 s): the control endpoint needs a descriptor too. Nothing is logged. At a 64-descriptor limit the same, and when the downloads ended the descriptors came back (64 → 18), the threads too (55 → 9), and both answered (`fdrecover-t29.log`) |
+| past the thread limit a body waits and nothing aborts | **held**: under a 300-task scope 145 of 200 bodies started at 294 threads, the probe and `status` answered, and wolf's runtime wrote one line (`limits-t29-rel-tasks300.log`, its `-n200.stderr`) |
+| `stream_room` stays | **as predicted**; that it keeps the loop out of a join on a thread-starved host is read from the code, not measured |
+| load applied | at most 900 loopback connections at 64 KB/s for about 3 s a probe; fifteen probes |
+| the pid: `os_pid`, the file unchanged, no `/bin/sh`, no open of `/proc/self/status` | **held but for one open.** `<pid>\n` unchanged; no `execve` of a shell either side on linux (trunk's shell is the macOS path). `/proc/self/status` is opened twice at trunk and **once** at head (`stracepid-*.log`): lobo's read is gone, and the one left is at the same place in both, before lobo's first line (not lobo's source; not identified further). The notice reads `(pid N)` |
+| signals by name; a gate | **held.** No literal bit in `src/` or `tests/`; `tools/lobo-gauntlet`'s `signal names` step, seen to fire on a planted `os_signal_raise(8)`, `shell.signal_verb(1)`, `os_signal_send(pid, 512)` and `os_signal_wait(mask + 8)`, on trunk's five `sig_*` returns and on nine lines of trunk's `status_surface.lu` |
+| `-s` by signal with no `control` | **held.** `tests/shell/signal_send_e2e.lu`: red at trunk on both lanes at its first `-s` (`red-sig-trunk.log`: line 237, the refusal text in the client's output), green at head. nginx's two failure shapes measured on the oracle first (`kasumi:~/lanes/ws63/oracle-s/`) and held as parity rows in `tools/lobo-shell` (22 probes, 21 parity) |
+| `reopen` by `SIGUSR1`; the wire a letter | **held**: a rotated access log is a new file after `-s reopen` |
+| the fan-out fallback | **not built**: no deterministic test (an unreachable hand is reaped by the master's probe within 600 ms) |
+| **not predicted** | a master with `worker_processes 2` and **no `control` directive** never waited on its forwarder: 499–500 cpu ticks in 5 s idle and no answer to HUP or TERM, at trunk on both pins (`nomaster-t28.log`, `nomaster-t29.log`); fixed (0 ticks, both heard: `nomaster-wip.log`; step 3 of the e2e). And a listen for USER answers `io` on windows by the spec's table, so a fallback to the three older meanings was added; it has never run |
+| parity, runner 0.90–0.95x / 1.01–1.05x; kasumi the same | kasumi (load 2.4 → 4.3, `par-k1.log`, VALID SET): close **1.019x** [1.011, 1.621], keepalive **1.002x** [0.975, 1.379]; ws63 ÷ trunk 0.999x / 0.991x. **Keepalive is outside the predicted band on kasumi** (ws62's kasumi figure was 0.981x; the band was the runner's). The runner VM's set is in the PR |
+| membudget 24/24, master 0 KB, within 25 % of 4,160 kB; 400,000 requests within 1 MB of 4.98 MB | **held**: 24/24; master 0 KB over 60 s at 4,380 kB (+5 %); 4,652 kB after 400,000 keepalive requests (`r4-h2/r4.txt`; trunk on 0.2.28 beside it 4,536) |
+| idle syscalls fall | **wrong: they rose.** A master and four hands, 10 s, started under strace: 1,547 a second at 0.2.28 (futex 1,184, madvise 200), **2,113** at 0.2.29 and 2,117 at head (read 975, futex 975; `logs/idle.log`). One thread a process reads the signal self-pipe (`EAGAIN`) and waits 5 ms on a futex, 200 times a second: `os_signal_wait`'s poll, which lobo's forwarder parks in. 0.2.28's madvise is gone |
+| lobo#81, lobo#82 | not in reach, as predicted; reasons in §3 |
+
+## 4. Evidence index
+
+kasumi `~/lanes/ws63/`: `toolchains.txt`, `dl/digest-check.txt` (each
+digest twice); `logs/build-t28-s14.log`, `build-t29-s14.log`,
+`build-t29-sd7.log`, `build-t29-s9e.log`; `logs/sweep-*.log`,
+`limits-*.log`, `fdrecover-t29.log`, `ceiling-*.log` (the ceiling);
+`logs/nomaster-*.log`; `logs/stracepid-*.log`; `logs/idle.log`;
+`logs/red-sig-trunk.log`; `oracle-s/`; `logs/g-trunk28.log`,
+`g-pin29.log` (the pin commit), `g-h2.log` (the head's source: GREEN,
+0 SKIP, 352 corpus lane-runs); `logs/par-k1.log`; `r4-h2/r4.txt`.
+nomad-1 `~/lanes/ws63/ev/api-digests-2.txt`. The plant: branch
+`ws63-plant` (`-s quit` sending TERMINATE), its CI run named in the PR.
+
+## Not verified
+
+- macOS beyond CI: `os_pid`, `os_signal_send`, `SIGUSR1`, the master
+  with no `control` directive.
+- Windows: the listen fallback and the `unsupported` send are written
+  from the spec's table; lobo is not built there.
+- That `stream_room` is what keeps the loop out of a join when the
+  host refuses a thread.
+- Which code opens `/proc/self/status` before lobo's first line.
+- PAX: nothing here was run there.
+- User instructions a request (not re-taken).
