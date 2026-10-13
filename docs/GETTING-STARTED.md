@@ -76,8 +76,11 @@ docs/directives.md is the directive table with its deltas), then:
 
 `-s` talks to the running server over the control endpoint the config
 names (`control unix:logs/control.sock;`, a socket in a directory you
-own, so file permissions are the boundary; docs/CONTROL.md). There is
-no pid to `kill`: at this pin the pid file records the endpoint.
+own, so file permissions are the boundary; docs/CONTROL.md), and the
+server answers: a reload that did not load says so and exits 1. The
+pid file holds the server's pid, as nginx's does, so `kill -HUP
+"$(cat logs/lobo.pid)"` works too, and with no `control` line in the
+config `-s` sends that signal itself (`status` needs the endpoint).
 
 ## Reaching the network
 

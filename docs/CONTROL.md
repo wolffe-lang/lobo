@@ -2,13 +2,16 @@
 
 A running nginx takes orders from `kill(2)`: `nginx -s reload` looks up
 the pid in the pid file and sends `SIGHUP`, and the KERNEL does the
-authorizing: you may signal that process if you own it. That answer is
-not available to lobo. The pin exposes no getpid and no arbitrary-pid
-signal SEND (wolf-lang#126's unlanded half), and on windows `RELOAD` and
-`UPGRADE` have no analog at all ([os.signal.platform]): nothing outside
-the process can raise them. So lobo has a control endpoint, a
-loopback listener a running server takes verbs on, and ws15 widened
-it from a reload pipe into the server's order desk.
+authorizing: you may signal that process if you own it. Since ws63
+(wolf 0.2.29: `os_pid`, `os_signal_send`) lobo takes orders that way
+too: with no `control` directive, `lobo -s stop|quit|reload|reopen`
+signals the pid in the pid file. A signal cannot answer, and on windows
+`RELOAD` and `UPGRADE` have no analog at all ([os.signal.platform]):
+nothing outside the process can raise them. So lobo also has a control
+endpoint, a loopback listener a running server takes verbs on, which
+ws15 widened from a reload pipe into the server's order desk. Through
+ws62 the endpoint was the only door: the pin had no getpid and no
+signal send (wolf-lang#126).
 
 This page is the CONTRACT for that surface. docs/DRAIN.md owns what a
 reload DOES (the generation table, the status stanza, the frozen log
@@ -32,22 +35,19 @@ one.
 
 The pid file holds the master's pid, `<pid>\n`, nginx's own format
 (ws62, px25's finding (d)), so `kill -HUP "$(cat logs/lobo.pid)"`
-reaches a running lobo as it reaches nginx. wolf 0.2.28 has no
-`os_pid` (wolf-lang#126's last half is s232's `os_pid`, on wolf-lang
-trunk after that release), so lobo asks the host: the `Tgid:` line of
-`/proc/self/status` on linux and on PAX, and where there is no `/proc`
-(macOS) a child `/bin/sh` that echoes `$PPID`, which POSIX defines as
-the shell's parent: lobo. The start notice names the pid and its
-source. A host that answers neither keeps 0.1.3's file, the endpoint
-alone, and the notice says so. `lobo -s`, `lobo status`, `lobo
-control` and the next start's stale-pid check still CONNECT to the
-endpoint; they derive it from the configuration they already read (the
-`control` address, resolved under `-p`), so only an endpoint the
-configuration cannot name — `control 127.0.0.1:0`, whose port is the
-kernel's — rides a second line of the file. Every reader also takes
-0.1.3's endpoint-only file. Through 0.1.3 the file held the endpoint
-and no pid, so a signal needed the pid from the shell that started
-lobo (`$!`).
+reaches a running lobo as it reaches nginx. The pid is `os_pid()`
+(ws63, wolf 0.2.29; at ws62's pin there was no such builtin and lobo
+read `Tgid:` from `/proc/self/status`, or asked a child shell for
+`$PPID` where there is no `/proc`). The start notice names the pid.
+With a `control` directive, `lobo -s`, `lobo status`, `lobo control`
+and the next start's stale-pid check CONNECT to the endpoint; they
+derive it from the configuration they already read (the `control`
+address, resolved under `-p`), so only an endpoint the configuration
+cannot name — `control 127.0.0.1:0`, whose port is the kernel's —
+rides a second line of the file. Every reader also takes 0.1.3's
+endpoint-only file. Through 0.1.3 the file held the endpoint and no
+pid, so a signal needed the pid from the shell that started lobo
+(`$!`).
 
 The master's `status` rows carry each worker's pid (`pid=`, from the
 spawn handle: `os_proc_pid`, wolf 0.2.27), for an operator who signals
@@ -151,7 +151,7 @@ close). Every verb is reachable three ways: over the wire, through
 | `reload` | re-parse the config, freeze a new generation, drain the old one | `SIGHUP` (RELOAD) | `reload complete (generation N)` / `reload rejected: …; keeping generation N` |
 | `quit` | graceful: stop accepting, drain, exit | `SIGQUIT` (QUIT) | `quit: draining then exiting (generation N)` |
 | `stop` | fast shutdown | `SIGTERM` (TERMINATE) | `stop: shutting down (generation N)` |
-| `reopen` | cycle the log outputs | — (nginx's `SIGUSR1`; lobo does not listen for it) | `reopen: log outputs cycled (generation N)` |
+| `reopen` | cycle the log outputs | `SIGUSR1` (USER; ws63, a meaning since wolf 0.2.29) | `reopen: log outputs cycled (generation N)` |
 | `status` (`status json`) | the ws08 drain stanza, human or schema-1 JSON | — | the stanza |
 | `upgrade` | the binary-swap verb — **unclaimed at this pin**, and dispatched so it can say so | — (see below) | `upgrade: not implemented at this pin — … when it lands it lands HERE` |
 | `ping` | liveness | — | `pong` |
@@ -188,19 +188,48 @@ residue). On windows there is no external RELOAD or UPGRADE at all. Naming the v
 here puts the binary swap at this endpoint when it lands, and the
 reply says so instead of answering `unknown verb`.
 
-With no `control` directive, `lobo -s reload` refuses and says why:
+## `-s` with no `control` directive: a signal to the pid (ws63)
+
+With no `control` directive, `lobo -s stop|quit|reload|reopen` does
+what nginx's does: it reads the pid from the pid file and sends the
+verb's signal (`stop` TERMINATE, `quit` QUIT, `reload` RELOAD, `reopen`
+USER; on unix `SIGTERM`, `SIGQUIT`, `SIGHUP`, `SIGUSR1`). It prints
+nothing and exits 0 once the signal is sent. A signal carries no
+reply: a reload the master rejects is in the master's error log, as
+nginx's is, and the exit code does not say so. A configuration with a
+`control` directive keeps the endpoint, whose reply does.
+
+The pid file's two failures have nginx's shape (measured against the
+pinned oracle, which prints `invalid PID number "…" in "<file>"` and
+`kill(<pid>, <n>) failed (3: No such process)`, each exit 1):
 
 ```
-lobo: [error] no "control" directive in nginx.conf: a running lobo is
-reached ONLY over its control endpoint at this pin (there is no
-arbitrary-pid signal send — wolf-lang#126), so add
-`control 127.0.0.1:<port>;` and restart
+lobo: [error] invalid PID number "unix:logs/control.sock" in "logs/lobo.pid"
+lobo: [alert] kill(4194000, 1) failed (no such process: a stale pid file, or no lobo is running there)
 ```
 
-That is the windows sentence made operational on every host. Signals
-still work where they are delivered: `kill -TERM` on a lobo with no
-control directive shuts it down, and `tools/lobo-signal` witnesses
-it.
+The number after the pid is the host's for the meaning, asked of the
+runtime (`os_signal_number`); lobo's source names meanings and writes
+no bit and no host signal number ([os.signal.set.stable];
+`tools/lobo-gauntlet`'s `signal names` step holds that).
+
+`lobo status` and `lobo control <verb>` need a connection and refuse
+without the directive:
+
+```
+lobo: [error] no "control" directive in nginx.conf: `status` and
+`control <verb>` need the control endpoint (a reply needs a
+connection), so add `control unix:logs/control.sock;` and restart —
+`-s stop|quit|reload|reopen` reach a running lobo without one, by a
+signal to the pid in its pid file
+```
+
+A master with `worker_processes` above 1 and no `control` directive
+hears the signal and fans the verb out to its workers. Through ws62 it
+did not: with no control listener its loop never waited on the signal
+forwarder, so it used a whole core and answered no signal (measured at
+`af0fa41`, built with wolf 0.2.28 and 0.2.29 alike).
+`tests/shell/signal_send_e2e.lu` holds all of this against the binary.
 
 ## A verb and a signal are the same code path
 
@@ -234,8 +263,9 @@ the content hash and the age, and requires exactly one differing line;
 then it normalizes `source` too and requires the blocks to be
 byte-identical.
 
-The verbs with no signal twin (`status`, `reopen`, `ping`, `upgrade`)
-emit NO vocabulary event: `sig`'s value set stays the frozen
+`status`, `ping` and `upgrade` have no signal twin, and `reopen`
+(whose twin is `SIGUSR1` since ws63) stamps none on either door: these
+four emit NO vocabulary event, so `sig`'s value set stays the frozen
 `reload|terminate|quit`, and a verb that changes no generation writes no
 generation event. An unauthorized line emits no event either; the
 refusal is a prose notice at `warn`
@@ -316,7 +346,7 @@ Four rows are NAMED DELTAS, printed with their reason:
 
 | delta | nginx | lobo | why |
 |---|---|---|---|
-| **D1 transport** | `kill(pid, SIGHUP)`; the kernel authorizes (same uid), the pid file is not a secret | a unix socket where the host has one, else a loopback TCP endpoint with an optional token | no getpid/kill-by-pid at this pin (#126) and no external RELOAD on windows; the unix socket #227 asked for LANDED at ws17 and is now the recommended form |
+| **D1 transport** | `kill(pid, SIGHUP)`; the kernel authorizes (same uid), the pid file is not a secret | with a `control` directive: a unix socket where the host has one, else a loopback TCP endpoint with an optional token. With none: `kill(pid, …)` as nginx (ws63) | the endpoint answers and a signal cannot (D2); there is no external RELOAD on windows; through ws62 the pin had no getpid/kill-by-pid (#126). The differential's rows are taken over the endpoint |
 | **D2 who parses** | the CLIENT parses the config and exits 1 with the `[emerg]`; the master is never signalled | the MASTER parses and answers the verdict on the wire, naming the generation that kept serving | lobo's trigger carries a reply socket; nginx's is a signal, which cannot answer |
 | **D3 narration** | the old workers drain in the dark (zero drain events in the error log) | six events per reload — `generation-draining`/`-loaded`/`-activated`/`-retired` — plus `lobo status` | docs/DRAIN.md's whole subject |
 | **D4 idle keepalive at reload** | the old worker closes its IDLE keepalive connections once it finishes shutting down | the draining generation HOLDS them until they close, or `worker_shutdown_timeout` aborts them | lobo is the more forgiving of the two: a client written against nginx keeps working, a client written against lobo may not survive nginx |
@@ -340,8 +370,9 @@ docs/DRAIN.md, which holds the promise lobo makes there:
 > On windows, `lobo -s reload` reaches a running lobo over its `control`
 > endpoint or not at all.
 
-That sentence now holds on every host: the refusal above fires
-wherever a config has no `control` directive. `upgrade` got its place
+On unix a config with no `control` directive is reached by signal
+since ws63 (above); on windows the runtime answers `unsupported` to
+the send and `-s` says so. `upgrade` got its place
 at the same time. A windows-native lobo job is out of scope
 here (the release tier still refuses on windows by name at this pin,
 s60c's work) and is a ws16-class decision.
