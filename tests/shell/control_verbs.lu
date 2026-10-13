@@ -187,11 +187,26 @@ fn main() -> !int {
     assert(shell.signal_meaning("stop") == shell.sig_terminate(), "stop ↔ TERMINATE")
     assert(shell.signal_meaning("quit") == shell.sig_quit(), "quit ↔ QUIT")
     assert(shell.signal_meaning("status") == 0, "status has no signal twin")
-    assert(shell.signal_meaning("reopen") == 0, "reopen has no listened meaning at this pin")
+    assert(
+        shell.signal_meaning("reopen") == 0,
+        "reopen stamps no trigger event on either door (the frozen `sig` set), though it has a signal twin since ws63",
+    )
     assert(shell.signal_meaning("ping") == 0, "ping has no signal twin")
     assert(
         shell.signal_meaning("upgrade") == 0,
         "upgrade has NO signal twin: UPGRADE's bit is lobo's own poll probe on unix and has no windows analog at all — the one verb the endpoint reaches and no signal does",
+    )
+    // ws63: what `-s <verb>` SENDS when the configuration has no
+    // control endpoint — nginx's four words, each a meaning
+    assert(shell.send_meaning("reload") == shell.sig_reload(), "-s reload sends RELOAD")
+    assert(shell.send_meaning("stop") == shell.sig_terminate(), "-s stop sends TERMINATE")
+    assert(shell.send_meaning("quit") == shell.sig_quit(), "-s quit sends QUIT")
+    assert(shell.send_meaning("reopen") == shell.sig_reopen(), "-s reopen sends USER")
+    assert(shell.send_meaning("status") == 0, "status is not sent as a signal")
+    assert(shell.send_meaning("upgrade") == 0, "nor is upgrade")
+    assert(
+        !(shell.send_meaning("quit") == shell.send_meaning("stop")),
+        "graceful and fast shutdown are two meanings",
     )
     // the round trip: every meaning's verb maps back to it
     assert(

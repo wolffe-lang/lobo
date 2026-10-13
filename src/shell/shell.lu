@@ -54,6 +54,7 @@
 //! splits the call at the dot.
 
 use config
+use std.signal
 
 /// This module's interface version. Bumped from the ws00 stub's
 /// "0.0.1" as ws04 lands its real surface. Total; never traps.
@@ -1284,100 +1285,119 @@ pub fn shutdown_timeout_ms(c: config.Conf) -> int {
     0
 }
 
-// ---- the signal surface (wsm01, s114 in the pin) --------------------
-// Real signal reception exists as of the s115 pin: the s114 builtins
-// (os_signal_listen/os_signal_wait/os_signal_raise) deliver OS signals
-// as events by MEANING ([os.signal.set] — a bitmask, mapped to
-// platform signal numbers only at the runtime boundary). These helpers
-// are the pure half: the meaning constants and the meaning→verb map.
-// The entry owns the listen/wait/forward wiring; BOTH triggers — a
-// real SIGHUP and a control-channel line — flow through the ONE verb
-// dispatch (the flip ws04 §3 designed for). The UPGRADE meaning (8,
-// SIGUSR2 — binary swap) is deliberately not listened yet: that path
-// is a later sprint. Zero-arg fns are the portable constant spelling.
+// ---- the signal surface (wsm01; named at ws63) ----------------------
+// The runtime delivers OS signals as events by MEANING
+// ([os.signal.set] — a set is the OR of meanings, mapped to a host
+// signal number only at the runtime boundary). A meaning's bit is
+// permanent ([os.signal.set.stable], wolf 0.2.29) and a program never
+// writes one: every meaning below is `std.signal`'s function, and no
+// bit and no host signal number is spelled anywhere in lobo. (Through
+// ws62 this section wrote 1, 2, 4, 7 and 8, because no library named
+// them.) These helpers are the pure half: lobo's own names for the
+// meanings it uses and the meaning↔verb maps. The entry owns the
+// listen/wait/forward wiring; BOTH triggers — a real signal and a
+// control-channel line — flow through the ONE verb dispatch.
 
-/// The RELOAD meaning (bit 1; SIGHUP on unix). Total.
+/// The RELOAD meaning (`SIGHUP` on unix). Total.
 pub fn sig_reload() -> int {
-    1
+    signal.reload()
 }
 
-/// The TERMINATE meaning (bit 2; SIGTERM on unix — fast shutdown).
-/// Total.
+/// The TERMINATE meaning (`SIGTERM` on unix — fast shutdown). Total.
 pub fn sig_terminate() -> int {
-    2
+    signal.terminate()
 }
 
-/// The QUIT meaning (bit 4; SIGQUIT on unix — graceful drain-then-
-/// exit). Total.
+/// The QUIT meaning (`SIGQUIT` on unix — graceful drain-then-exit).
+/// Total.
 pub fn sig_quit() -> int {
-    4
+    signal.quit()
 }
 
-/// The interest mask of the OPERATOR meanings: RELOAD | TERMINATE |
-/// QUIT. Total.
+/// The meaning that cycles the log outputs: USER (`SIGUSR1` on unix,
+/// nginx's reopen signal). ws63: the meaning exists since wolf 0.2.29
+/// (s232); before it `reopen` had no signal twin. Total.
+pub fn sig_reopen() -> int {
+    signal.user()
+}
+
+/// The interest set of the OPERATOR meanings: RELOAD | TERMINATE |
+/// QUIT | USER. Total.
 pub fn sig_mask() -> int {
-    7
+    signal.reload() | signal.terminate() | signal.quit() | signal.user()
 }
 
-/// The probe meaning (bit 8 — UPGRADE, SIGUSR2 on unix). Through ws28
-/// the serve loop self-raised this bit on a cadence and waited once,
-/// the runtime queue being FIFO so a real pending operator signal came
-/// back first and the probe bounded the wait. ws29 (lobo#8) retired
-/// that poll for a parked forwarder, and the bit's remaining job is
-/// its TEARDOWN: the loop raises it exactly once on its way out and
-/// the forwarder, seeing it, retires. NAMED residue, unchanged: until
-/// the binary-swap sprint claims UPGRADE, an outside SIGUSR2 is
-/// indistinguishable from the probe and is ignored — an operator who
-/// sends one now retires a forwarder, and the loop is on its way out
-/// or will simply stop hearing signals; the control channel still
-/// reaches it. Total.
+/// The operator meanings every host can listen for: RELOAD |
+/// TERMINATE | QUIT — the set a host with no USER falls back to
+/// (windows, [os.signal.platform]). Total.
+pub fn sig_mask_core() -> int {
+    signal.reload() | signal.terminate() | signal.quit()
+}
+
+/// The probe meaning: UPGRADE (`SIGUSR2` on unix, the signal nginx
+/// starts a new binary generation on). Through ws28 the serve loop
+/// self-raised it on a cadence and waited once; ws29 (lobo#8) retired
+/// that poll for a parked forwarder, and the meaning's remaining job is
+/// the forwarder's TEARDOWN: the loop raises it exactly once on its
+/// way out and the forwarder, seeing it, retires. NAMED residue,
+/// unchanged: until a binary swap claims UPGRADE, an outside `SIGUSR2`
+/// is indistinguishable from the probe and is ignored — an operator
+/// who sends one retires a forwarder, and the loop is on its way out
+/// or stops hearing signals; the control channel still reaches it.
+/// Total.
 pub fn sig_probe() -> int {
-    8
+    signal.upgrade()
 }
 
 /// The meaning's stable lowercase name (for log events and docs) —
 /// the MEANING vocabulary, not the platform signal name. Unknown
 /// meanings answer "unknown". Total.
 pub fn signal_name(m: int) -> str {
-    if m == 1 {
+    if m == signal.reload() {
         return "reload"
     }
-    if m == 2 {
+    if m == signal.terminate() {
         return "terminate"
     }
-    if m == 4 {
+    if m == signal.quit() {
         return "quit"
+    }
+    if m == signal.user() {
+        return "user"
     }
     "unknown"
 }
 
 /// The operator verb a received signal meaning drives: SIGHUP→reload,
-/// SIGTERM→stop (nginx's fast shutdown), SIGQUIT→quit (graceful).
-/// The SAME verbs the control channel accepts — one dispatch layer.
-/// An unknown meaning maps to "" (the entry ignores it). Total.
+/// SIGTERM→stop (nginx's fast shutdown), SIGQUIT→quit (graceful),
+/// SIGUSR1→reopen (ws63). The SAME verbs the control channel accepts —
+/// one dispatch layer. An unknown meaning, the probe among them, maps
+/// to "" (the entry ignores it). Total.
 pub fn signal_verb(m: int) -> str {
-    if m == 1 {
+    if m == signal.reload() {
         return "reload"
     }
-    if m == 2 {
+    if m == signal.terminate() {
         return "stop"
     }
-    if m == 4 {
+    if m == signal.quit() {
         return "quit"
+    }
+    if m == signal.user() {
+        return "reopen"
     }
     ""
 }
 
-/// The signal MEANING a control verb corresponds to — the inverse of
-/// `signal_verb`, so ONE emission site can stamp the same
-/// `signal-received` event whichever trigger arrived and a verb and a
-/// signal are indistinguishable in the log but for their `source`
-/// field (ws15). 0 for a verb with no signal twin: `status`, `reopen`
-/// and `ping` never had one, and `upgrade` has none at this pin —
-/// UPGRADE's bit is lobo's own poll probe on unix and has no windows
-/// analog at all ([os.signal.platform]), which is why it is the one
-/// verb the control channel reaches and no signal does
-/// (docs/CONTROL.md). Total.
+/// The meaning whose `signal-received` event a control verb stamps —
+/// so ONE emission site writes the same event whichever trigger
+/// arrived and a verb and a signal are indistinguishable in the log
+/// but for their `source` field (ws15). 0 for a verb that stamps none:
+/// `status`, `ping` and `upgrade` have no signal twin, and `reopen`
+/// (whose twin is USER since ws63) keeps the frozen vocabulary — the
+/// event's `sig` set stays reload|terminate|quit, and a reopen writes
+/// its own lines on either door. `send_meaning` is the map `-s` sends
+/// by. Total.
 pub fn signal_meaning(verb: str) -> int {
     if verb == "reload" {
         return sig_reload()
@@ -1387,6 +1407,55 @@ pub fn signal_meaning(verb: str) -> int {
     }
     if verb == "quit" {
         return sig_quit()
+    }
+    0
+}
+
+/// The meaning `-s <verb>` sends to a running master (ws63): nginx's
+/// four words — stop=TERMINATE, quit=QUIT, reload=RELOAD, reopen=USER.
+/// 0 for any other word. `signal_verb` is its inverse. Pure and total.
+pub fn send_meaning(verb: str) -> int {
+    if verb == "reopen" {
+        return sig_reopen()
+    }
+    signal_meaning(verb)
+}
+
+/// The one byte the signal forwarder writes for a meaning, and the
+/// loop reads back (ws29's self-pipe; ws63: a letter, since a meaning
+/// is no longer one decimal digit): "r" reload, "t" terminate, "q"
+/// quit, "u" user. "" for a meaning the forwarder never forwards (the
+/// probe, anything unknown). Pure and total.
+pub fn sig_wire(m: int) -> str {
+    if m == signal.reload() {
+        return "r"
+    }
+    if m == signal.terminate() {
+        return "t"
+    }
+    if m == signal.quit() {
+        return "q"
+    }
+    if m == signal.user() {
+        return "u"
+    }
+    ""
+}
+
+/// The meaning in one forwarder byte (`sig_wire`'s inverse); 0 for
+/// anything else — an empty read included. Pure and total.
+pub fn sig_unwire(b: str) -> int {
+    if b == "r" {
+        return signal.reload()
+    }
+    if b == "t" {
+        return signal.terminate()
+    }
+    if b == "q" {
+        return signal.quit()
+    }
+    if b == "u" {
+        return signal.user()
     }
     0
 }

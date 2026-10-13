@@ -15,11 +15,12 @@
 //! and each received meaning feeds the SAME verb dispatch the control
 //! channel drives — the one-layer design ws04 built for exactly this
 //! flip. The control channel STAYS
-//! (the portable path, and the Windows reload story — [os.signal.
-//! platform] names RELOAD/UPGRADE as having no Windows analog). What
-//! did NOT land: a getpid surface — so `-s` still SENDS over the
-//! control channel and the pid file still records the control
-//! endpoint (named residue; a real pid file follows a getpid).
+//! (the door that answers, and the Windows reload story — [os.signal.
+//! platform] names RELOAD/UPGRADE as having no Windows analog). The
+//! SEND side landed with wolf 0.2.29 (ws63): the pid file holds
+//! `os_pid()`, `-s` with no `control` directive is `os_signal_send`
+//! to it, USER (`SIGUSR1`) is `reopen`, and every meaning is
+//! `std.signal`'s name — no bit is written in this tree.
 //! Signal delivery is Linux+macOS at the wsm03 pin (s114/s59; other
 //! hosts follow the ports); where the listen refuses, the server says
 //! so and runs control-channel-only — a named gap, never a fake.
@@ -1864,8 +1865,16 @@ fn serve_main(
     // the NAMED platform gap, said out loud at startup.
     let sprobe = shell.sig_probe()
     var sig_on = true
-    os_signal_listen(shell.sig_mask() + sprobe) else |_| {
-        sig_on = false
+    var smask = shell.sig_mask()
+    os_signal_listen(smask | sprobe) else |_| {
+        // a host that cannot listen for USER (windows hears only the
+        // first four meanings, [os.signal.platform]) keeps the three
+        // every host has; CLAIMED from the table, not measured — lobo
+        // is not built there (docs/DRAIN.md)
+        smask = shell.sig_mask_core()
+        os_signal_listen(smask | sprobe) else |_| {
+            sig_on = false
+        }
     }
     // ws29 (lobo#8): THE FORWARDER, not a poll. A signal has no
     // readiness handle in the language, so through ws28 this loop
@@ -1887,14 +1896,14 @@ fn serve_main(
         }
         if sig_on {
             sig_r = sp.1
-            let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
+            let _fw = spawn proc sig_forwarder(sp.0, smask, sprobe)
         }
     }
     if sig_on {
         ev_log(
             mut elog_st,
             "notice",
-            "signal reception armed by meaning (reload, terminate=stop, quit): unix HUP/TERM/QUIT; windows CTRL_C/CTRL_CLOSE=terminate, CTRL_BREAK=quit, no external reload — there the control channel is reload's only trigger ([os.signal.platform])",
+            "signal reception armed by meaning (reload, terminate=stop, quit, user=reopen): unix HUP/TERM/QUIT/USR1 ([os.signal.set])",
         )
     } else {
         ev_log(
@@ -2385,7 +2394,7 @@ fn serve_main(
                         // landed in the same gap stays in the socket, and
                         // level-triggered readiness brings the loop back for it.
                         let b = net_read(sig_r, 1) else |_| { "" }
-                        let m = sig_meaning_of(b)
+                        let m = shell.sig_unwire(b)
                         if m > 0 {
                             verb = shell.signal_verb(m)
                         }
@@ -3929,8 +3938,8 @@ fn ready_has(ready: List[int], fd: int) -> bool {
 /// sprint after the fix entered the pin. #136 is closed and the pin is
 /// v0.2.9: this is that flip.
 ///
-/// ONE BYTE per meaning goes out the write end — the meaning's decimal
-/// digit, no separator — and the loop reads exactly one byte per pass
+/// ONE BYTE per meaning goes out the write end — `shell.sig_wire`'s
+/// letter, no separator — and the loop reads exactly one byte per pass
 /// off the read end. One byte and not one line, deliberately: two
 /// operator signals can land between two passes, and readiness is
 /// level-triggered, so leaving the second byte in the socket keeps the
@@ -3948,33 +3957,17 @@ fn ready_has(ready: List[int], fd: int) -> bool {
 fn sig_forwarder(w: int, mask: int, probe: int) -> int {
     var run = true
     while run {
-        let m = os_signal_wait(mask + probe) else |_| { probe }
+        let m = os_signal_wait(mask | probe) else |_| { probe }
         if m == probe {
             run = false
         } else {
-            net_write(w, "{m}") else |_| {
-                run = false
+            let b = shell.sig_wire(m)
+            if !b.is_empty() {
+                net_write(w, b) else |_| {
+                    run = false
+                }
             }
         }
-    }
-    0
-}
-
-/// ws29: the meaning in one forwarder byte. The wire between
-/// `sig_forwarder` and the loop is its own and is private to this
-/// file: one decimal digit per meaning, the same integers
-/// `shell.sig_mask()` names. Anything else — an empty read, or the
-/// probe's own digit, which the forwarder consumes and never forwards
-/// — answers 0 and the loop ignores it. Pure and total.
-fn sig_meaning_of(b: str) -> int {
-    if b == "1" {
-        return 1
-    }
-    if b == "2" {
-        return 2
-    }
-    if b == "4" {
-        return 4
     }
     0
 }
@@ -4613,8 +4606,16 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     )
     let sprobe = shell.sig_probe()
     var sig_on = true
-    os_signal_listen(shell.sig_mask() + sprobe) else |_| {
-        sig_on = false
+    var smask = shell.sig_mask()
+    os_signal_listen(smask | sprobe) else |_| {
+        // a host that cannot listen for USER (windows hears only the
+        // first four meanings, [os.signal.platform]) keeps the three
+        // every host has; CLAIMED from the table, not measured — lobo
+        // is not built there (docs/DRAIN.md)
+        smask = shell.sig_mask_core()
+        os_signal_listen(smask | sprobe) else |_| {
+            sig_on = false
+        }
     }
     // ws29 (lobo#8): the master takes its signals the same way a hand
     // does — one parked forwarder, its self-pipe in the wait set. The
@@ -4629,14 +4630,14 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         }
         if sig_on {
             sig_r = sp.1
-            let _fw = spawn proc sig_forwarder(sp.0, shell.sig_mask(), sprobe)
+            let _fw = spawn proc sig_forwarder(sp.0, smask, sprobe)
         }
     }
     if sig_on {
         ev_log(
             mut elog_st,
             "notice",
-            "signal reception armed by meaning (reload, terminate=stop, quit): every meaning fans out to the workers",
+            "signal reception armed by meaning (reload, terminate=stop, quit, user=reopen): every meaning fans out to the workers",
         )
     } else {
         ev_log(
@@ -4768,7 +4769,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                 // ws29 (lobo#8): the forwarder's byte, read only on the
                 // pass a signal actually arrived
                 let b = net_read(sig_r, 1) else |_| { "" }
-                let m = sig_meaning_of(b)
+                let m = shell.sig_unwire(b)
                 if m > 0 {
                     verb = shell.signal_verb(m)
                 }

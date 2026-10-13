@@ -12,6 +12,7 @@
 
 use config
 use shell
+use std.signal
 
 fn main() -> !int {
     // ---- the generation id: content hash, deterministic + sensitive
@@ -115,30 +116,78 @@ fn main() -> !int {
     let full = "{jopen}{jobj}{shell.status_json_close()}"
     assert(!full.contains("\n"), "the JSON stanza is a single line")
 
-    // ---- the signal surface (wsm01, s114 in the pin), PURE half:
-    // the meaning constants, the meaning→verb map every trigger
-    // shares, and the vocabulary EXTENSION event. The real delivery
-    // is witnessed by tools/lobo-signal against the live binary.
-    assert(shell.sig_reload() == 1, "RELOAD is bit 1 (SIGHUP)")
-    assert(shell.sig_terminate() == 2, "TERMINATE is bit 2 (SIGTERM)")
-    assert(shell.sig_quit() == 4, "QUIT is bit 4 (SIGQUIT)")
-    assert(shell.sig_mask() == 7, "the operator mask is RELOAD|TERMINATE|QUIT")
-    assert(shell.sig_probe() == 8, "the probe rides the UPGRADE bit (SIGUSR2)")
-    assert(shell.signal_verb(1) == "reload", "SIGHUP drives the reload verb")
-    assert(shell.signal_verb(2) == "stop", "SIGTERM drives the stop verb (fast shutdown)")
-    assert(shell.signal_verb(4) == "quit", "SIGQUIT drives the quit verb (graceful)")
-    assert(shell.signal_verb(8).is_empty(), "the probe maps to no verb")
+    // ---- the signal surface (wsm01; named at ws63), PURE half: lobo's
+    // names for the meanings it uses, the meaning→verb map every
+    // trigger shares, and the vocabulary EXTENSION event. Every
+    // meaning is `std.signal`'s NAME — a bit is permanent
+    // ([os.signal.set.stable]) and is written nowhere in lobo, this
+    // file included. The real delivery is witnessed by
+    // tools/lobo-signal and tests/shell/signal_send_e2e.lu against the
+    // live binary.
+    assert(shell.sig_reload() == signal.reload(), "RELOAD (SIGHUP)")
+    assert(shell.sig_terminate() == signal.terminate(), "TERMINATE (SIGTERM)")
+    assert(shell.sig_quit() == signal.quit(), "QUIT (SIGQUIT)")
+    assert(shell.sig_reopen() == signal.user(), "reopen is USER (SIGUSR1), nginx's reopen signal")
+    assert(
+        shell.sig_mask() == signal.reload() | signal.terminate() | signal.quit() | signal.user(),
+        "the operator set is RELOAD|TERMINATE|QUIT|USER",
+    )
+    assert(
+        shell.sig_mask_core() == signal.reload() | signal.terminate() | signal.quit(),
+        "the core set is the three meanings every host listens for",
+    )
+    assert(
+        shell.sig_mask_core() | signal.user() == shell.sig_mask(),
+        "…and the operator set adds USER to it",
+    )
+    assert(shell.sig_probe() == signal.upgrade(), "the probe rides UPGRADE (SIGUSR2)")
+    assert(shell.sig_mask() & shell.sig_probe() == 0, "the probe is not an operator meaning")
+    assert(shell.signal_verb(signal.reload()) == "reload", "SIGHUP drives the reload verb")
+    assert(
+        shell.signal_verb(signal.terminate()) == "stop",
+        "SIGTERM drives the stop verb (fast shutdown)",
+    )
+    assert(shell.signal_verb(signal.quit()) == "quit", "SIGQUIT drives the quit verb (graceful)")
+    assert(shell.signal_verb(signal.user()) == "reopen", "SIGUSR1 drives the reopen verb (ws63)")
+    assert(shell.signal_verb(signal.upgrade()).is_empty(), "the probe maps to no verb")
     assert(shell.signal_verb(0).is_empty(), "an unknown meaning maps to no verb")
-    assert(shell.signal_name(1) == "reload", "meaning 1 names reload")
-    assert(shell.signal_name(2) == "terminate", "meaning 2 names terminate")
-    assert(shell.signal_name(4) == "quit", "meaning 4 names quit")
-    assert(shell.signal_name(9) == "unknown", "a non-meaning names unknown")
+    assert(shell.signal_verb(signal.interrupt()).is_empty(), "a meaning lobo does not listen for")
+    assert(shell.signal_name(signal.reload()) == "reload", "RELOAD names reload")
+    assert(shell.signal_name(signal.terminate()) == "terminate", "TERMINATE names terminate")
+    assert(shell.signal_name(signal.quit()) == "quit", "QUIT names quit")
+    assert(shell.signal_name(signal.user()) == "user", "USER names user")
+    assert(
+        shell.signal_name(signal.reload() | signal.upgrade()) == "unknown",
+        "a set of two is not a meaning",
+    )
+    // the forwarder's wire (ws63): one letter a meaning, there and back
+    var ops = List[int]()
+    (mut ops).push(signal.reload())
+    (mut ops).push(signal.terminate())
+    (mut ops).push(signal.quit())
+    (mut ops).push(signal.user())
+    var seen = ""
+    for m in ops {
+        let b = shell.sig_wire(m)
+        assert(b.len == 1, "one byte on the wire for {shell.signal_name(m)}: [{b}]")
+        assert(!seen.contains(b), "…and no two meanings share one: [{b}] in [{seen}]")
+        seen = "{seen}{b}"
+        assert(shell.sig_unwire(b) == m, "{shell.signal_name(m)} comes back off the wire")
+        assert(
+            shell.send_meaning(shell.signal_verb(m)) == m,
+            "{shell.signal_name(m)}: its verb sends it",
+        )
+    }
+    assert(shell.sig_wire(signal.upgrade()).is_empty(), "the probe is never forwarded")
+    assert(shell.sig_wire(0).is_empty(), "nor is nothing")
+    assert(shell.sig_unwire("") == 0, "an empty read is no meaning")
+    assert(shell.sig_unwire("1") == 0, "ws29's digit wire is gone")
     // ws15 appends `source` — the door the trigger came through
     // (the vocabulary's extension discipline: appended, nothing
     // renamed, every earlier prefix pin still matching). The verb
     // half of the surface — the whole order desk — is pinned in
     // tests/shell/control_verbs.lu.
-    let sev = shell.ev_signal_received(1, "signal")
+    let sev = shell.ev_signal_received(signal.reload(), "signal")
     assert(
         sev == "signal-received sig=reload verb=reload source=signal",
         "the signal-received event shape: {sev}",
