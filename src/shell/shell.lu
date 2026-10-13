@@ -547,100 +547,16 @@ pub fn usage_text() -> str {
 // content was the CONTROL ENDPOINT, not an os pid (no getpid;
 // wolf-lang#126). ws62 (px25's finding (d)): it holds the master's
 // pid, `<pid>\n`, nginx's format, so `kill -HUP "$(cat lobo.pid)"`
-// reaches it — read from the host, because wolf 0.2.28 has no
-// `os_pid` (s232's, after the tag): `Tgid:` of `/proc/self/status` on
-// linux and PAX, a child shell's `$PPID` where there is no `/proc`
-// (macOS). `-s`, `status` and stale-detection still reach the master
-// by CONNECTING to its endpoint, which they now derive from the
+// reaches it. ws63: the pid is `os_pid()` (wolf 0.2.29, s232), which
+// the entry calls; at ws62's pin there was no such builtin and lobo
+// read `Tgid:` from `/proc/self/status`, or a child shell's `$PPID`
+// where there is no `/proc`. `status` and stale-detection still reach
+// the master by CONNECTING to its endpoint, which they derive from the
 // configuration they already read; only an endpoint the config cannot
-// name (a TCP control on port 0) rides a second line. A host that
-// answers neither keeps 0.1.3's form, the endpoint alone. Write-rename
-// so a reader never sees a torn file (contract pitfall).
+// name (a TCP control on port 0) rides a second line. `-s` with no
+// `control` directive signals the pid (ws63, `send_meaning`).
+// Write-rename so a reader never sees a torn file (contract pitfall).
 // ------------------------------------------------------------------
-
-/// This process's id from `/proc/self/status`'s `Tgid:` line (the
-/// process, where `Pid:` is the reading thread's on PAX), or -1 when
-/// the host has no such file or line. wolf 0.2.28 has no `os_pid`
-/// (s232's `os_pid` is on wolf-lang trunk after the tag): this is the
-/// host's own answer, read. fs tier. Total.
-pub fn proc_self_pid() -> int {
-    let t = fs_read_text("/proc/self/status") else |_| {
-        return -1
-    }
-    for line in t.lines() {
-        if line.starts_with("Tgid:") {
-            let v = line["Tgid:".len..line.len].trim()
-            if v.is_empty() || !all_digits(v) {
-                return -1
-            }
-            return digits_val(v)
-        }
-    }
-    -1
-}
-
-/// This process's id as a child `/bin/sh` reports its parent (`$PPID`,
-/// which POSIX defines as the shell's parent: the process that spawned
-/// it, this one), or -1 when there is no `/bin/sh`, no pipe, or an
-/// answer that is not a number. The fallback where `/proc` is absent
-/// (macOS) at a pin with no `os_pid`; one fork and exec, once, at
-/// start. exec + fs tiers. Total.
-pub fn sh_parent_pid() -> int {
-    let pp = os_pipe() else |_| {
-        return -1
-    }
-    var args = List[str]()
-    (mut args).push("-c")
-    (mut args).push("echo $PPID")
-    var map = List[int]()
-    (mut map).push(1)
-    (mut map).push(pp.1)
-    var ok = true
-    let h = os_spawn_fds("/bin/sh", args, map) else |_| {
-        ok = false
-        -1
-    }
-    fs_close(pp.1) else |_| {}
-    if !ok {
-        fs_close(pp.0) else |_| {}
-        return -1
-    }
-    var out = ""
-    var reading = true
-    var rounds: int = 0
-    while reading && rounds < 16 {
-        let piece = fs_read(pp.0, 64) else |_| {
-            reading = false
-            ""
-        }
-        out = "{out}{piece}"
-        rounds = rounds + 1
-    }
-    fs_close(pp.0) else |_| {}
-    let _ = os_wait(h) else |_| {
-        0
-    }
-    let v = out.trim()
-    if v.is_empty() || !all_digits(v) {
-        return -1
-    }
-    digits_val(v)
-}
-
-/// This process's id and where it came from: (`pid`, "proc") from
-/// `/proc/self/status`, (`pid`, "sh") from a child shell's `$PPID`,
-/// (-1, "") when the host answers neither. Total.
-pub fn self_pid() -> (int, str) {
-    let p = proc_self_pid()
-    if p > 0 {
-        return (p, "proc")
-    }
-    let q = sh_parent_pid()
-    if q > 0 {
-        return (q, "sh")
-    }
-    (-1, "")
-}
 
 /// True when `s` is one or more ASCII digits. Pure and total.
 fn all_digits(s: str) -> bool {
@@ -682,6 +598,15 @@ pub fn pid_of(text: str) -> int {
         return -1
     }
     -1
+}
+
+/// The first line of a pid file's text, trimmed ("" for an empty
+/// file) — what `-s` names when it is not a pid. Pure and total.
+pub fn first_line(text: str) -> str {
+    for line in text.lines() {
+        return line.trim()
+    }
+    ""
 }
 
 /// The endpoint a pid file's text records — its first line that is not

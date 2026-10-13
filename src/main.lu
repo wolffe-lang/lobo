@@ -1257,20 +1257,13 @@ fn pid_endpoint_of(pidp: str, c: config.Conf, prefix: str) -> str {
     shell.endpoint_under(shell.endpoint_of(raw, pid_derived(c)), prefix)
 }
 
-/// The pid file notice's tail: which pid the file holds and where the
-/// pid came from — wolf 0.2.28 has no `os_pid` (wolf-lang#126, s232),
-/// so the host is asked. "" for a hand (it writes no pid file). Total.
-fn pid_note(worker: int, pid: int, src: str) -> str {
+/// The pid file notice's tail: the pid the file holds (`os_pid`,
+/// ws63). "" for a hand (it writes no pid file). Total.
+fn pid_note(worker: int, pid: int) -> str {
     if worker > 0 {
         return ""
     }
-    if pid <= 0 {
-        return " (no pid: this host answered neither /proc/self/status nor a child shell's $PPID, so the file records the control endpoint as 0.1.3 did — wolf-lang#126)"
-    }
-    if src == "proc" {
-        return " (pid {pid}, from /proc/self/status)"
-    }
-    " (pid {pid}, from a child shell's $PPID)"
+    " (pid {pid})"
 }
 
 /// The memo region's size limit, in ledger bytes: past it the loop
@@ -1658,14 +1651,11 @@ fn serve_main(
         have_ctrl = true
     }
 
-    // ws62 (px25's finding (d)): the pid file holds this process's pid
-    // (`pid_note` says where it came from at this pin)
-    var self_pid: int = -1
-    var pid_src = ""
+    // ws62 (px25's finding (d)): the pid file holds this process's pid.
+    // ws63: `os_pid` (wolf 0.2.29, s232) answers it; through ws62 the
+    // host was asked (`/proc/self/status`, else a child shell's $PPID)
+    let self_pid = os_pid()
     if worker == 0 {
-        let sp = shell.self_pid()
-        self_pid = sp.0
-        pid_src = sp.1
         let text = shell.pid_text(self_pid, shell.pid_endpoint(ctrl_ep, c0), pid_derived(c0))
         shell.pid_write(pidp, text) else |_| {
             eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
@@ -1863,7 +1853,7 @@ fn serve_main(
     ev_log(
         mut elog_st,
         "notice",
-        "serving on {where}, control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}{pid_note(worker, self_pid, pid_src)}",
+        "serving on {where}, control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}{pid_note(worker, self_pid)}",
     )
 
     // signal reception (wsm01, s114 in the pin): register interest in
@@ -4518,9 +4508,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         ctrl_ep = cb.1
         have_ctrl = true
     }
-    // ws62 (px25's finding (d)): the master's pid, nginx's format
-    let msp = shell.self_pid()
-    let mtext = shell.pid_text(msp.0, shell.pid_endpoint(ctrl_ep, c0), pid_derived(c0))
+    // ws62 (px25's finding (d)): the master's pid, nginx's format;
+    // ws63: from `os_pid`
+    let mpid = os_pid()
+    let mtext = shell.pid_text(mpid, shell.pid_endpoint(ctrl_ep, c0), pid_derived(c0))
     shell.pid_write(pidp, mtext) else |_| {
         eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
         return 1
@@ -4618,7 +4609,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     ev_log(
         mut elog_st,
         "notice",
-        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}{pid_note(0, msp.0, msp.1)}; accept distribution: {dist}",
+        "master: {n} workers (worker_processes), control {ctrl_ep} (auth: {ctrl_auth}), pid file {pidp}{pid_note(0, mpid)}; accept distribution: {dist}",
     )
     let sprobe = shell.sig_probe()
     var sig_on = true

@@ -6,10 +6,11 @@
 //! ws62 (px25's finding (d), wolf-lang#126): the pid file holds the
 //! running master's pid, nginx's `<pid>\n`, so `kill -HUP "$(cat
 //! lobo.pid)"` reaches it. Against the real binary (os_spawn + net +
-//! fs → native+checked; lupin declines the process trio). wolf 0.2.28
-//! has no `os_pid`; lobo reads its own from the host (`/proc/self/status`
-//! on linux, a child shell's `$PPID` on macOS), and this test reads the
-//! truth from the other side: `os_proc_pid` of the spawn handle.
+//! fs → native+checked; lupin declines the process trio). lobo's own
+//! pid is `os_pid()` since ws63 (wolf 0.2.29; at ws62's pin it read
+//! `/proc/self/status` on linux and asked a child shell for `$PPID` on
+//! macOS), and this test reads the truth from the other side:
+//! `os_proc_pid` of the spawn handle.
 //!   1. one process, a TCP control: the file is exactly `<pid>\n`, and
 //!      `lobo -s reload` and `lobo status` still reach the server (they
 //!      derive the endpoint from the configuration);
