@@ -5262,7 +5262,10 @@ fn signal_send(cli: shell.Cli, c: config.Conf) -> int {
         return 1
     }
     // PLANT (ws63-plant, never merged): `-s quit` sends the wrong name
-    let m = if cli.signal == "quit" { shell.sig_terminate() } else { shell.send_meaning(cli.signal) }
+    var m = shell.send_meaning(cli.signal)
+    if cli.signal == "quit" {
+        m = shell.sig_terminate()
+    }
     var why = ""
     os_signal_send(pid, m) else |e| match e {
         not_found => {
