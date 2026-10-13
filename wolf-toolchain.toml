@@ -843,6 +843,22 @@ rev = "025428b725a35bfbc53745d4166817ff3053c0fd"
 version_line = "lupin 0.1.52 (wolf-interp, reference interpreter at pin 294d626)"
 
 [std]
+# wolf-std at **9e5bd6b** (ws63, 2026-10-13; sc60, wolf-std's trunk:
+# std at wolf 0.2.29 / lupin 0.1.52). The pin MOVES for the first time
+# since ws42, for one module: `std.signal`, which names every signal
+# meaning (`signal.reload()` … `signal.user()`) so that lobo writes no
+# bit (`[os.signal.set.stable]`; 0.2.29's prelude declares no constant
+# for a meaning, and 14f0ab2 has no `std/signal` at all). The
+# archive's own std (d7c2968) names nine meanings and lacks `user()`,
+# which `reopen` listens for. Measured before the move (B151): trunk's
+# lobo source built at 0.2.29 against 14f0ab2, d7c2968 and 9e5bd6b is
+# one digest a tier (the note below), so the move itself changes no
+# byte but the `std_rev` stamp `-V` prints. 14f0ab2 -> 9e5bd6b touches
+# ten files under `std/` (env, errors, fs, io, json, map, process,
+# signal, term, x/json); lobo `use`s none of the nine it had, and now
+# `signal`.
+#
+# (ws63, at the pin commit:)
 # wolf-std, STILL at **14f0ab2** at the pin commit (ws63, 2026-10-13),
 # re-derived against 0.2.29 before any source change (B151): the
 # archive's own std is d7c2968 (sc59) and wolf-std's trunk is 9e5bd6b
@@ -851,8 +867,8 @@ version_line = "lupin 0.1.52 (wolf-interp, reference interpreter at pin 294d626)
 # diagnostics at --error-limit=0 and gives ONE digest a tier (debug
 # fc99e23a…, release 77f76f84…;
 # kasumi:~/lanes/ws63/logs/build-t29-s14.log, build-t29-sd7.log,
-# build-t29-s9e.log). lobo `use`s nothing the trees
-# differ in but `x/json`, and that difference does not reach its code.
+# build-t29-s9e.log). lobo `use`s nothing the trees differ in (ws63's
+# pin commit said "but `x/json`": `std.x.jose` does not import it).
 #
 # (ws62:)
 # wolf-std, STILL at **14f0ab2** (ws62, 2026-10-12), re-derived against
@@ -1036,4 +1052,4 @@ version_line = "lupin 0.1.52 (wolf-interp, reference interpreter at pin 294d626)
 # WOLF_MIDEND=0" was written at the twentieth measurement. #146 closed
 # 2026-09-15; ws52 took the flip-back at 0.2.24 — see [wolf].)
 repo = "wolffe-lang/wolf-std"
-rev = "14f0ab2c6a64e86240113e21c4da9f746380eb29"
+rev = "9e5bd6b16beeab1708a95c75d43b9926dd95f31e"
