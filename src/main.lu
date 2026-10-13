@@ -2470,7 +2470,7 @@ fn serve_main(
                         // back when the order is answered and closed. With
                         // no reserve to give, the endpoint sits out and the
                         // failure is logged as a listener's is.
-                        if ctl_io && rsv_a >= 0 {
+                        if ctl_io && rsv_a < 0 {
                             fs_close(rsv_a) else |_| {}
                             rsv_a = -1
                             got_ctrl = true
