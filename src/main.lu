@@ -1300,6 +1300,22 @@ fn serve_main(
     if worker == 0 && !config.user_gate(c0) {
         return 1
     }
+    // ws64 (lobo#84): `worker_connections` is applied, so a value the
+    // oracle refuses refuses the start as it refuses -t; and nginx's
+    // start warning when the process may not have that many
+    // descriptors (a hand inherits its master's line)
+    let conn_err = config.conn_check(c0)
+    if !conn_err.is_empty() {
+        eprint("lobo: [emerg] {conn_err}")
+        return 1
+    }
+    if worker == 0 {
+        let nn = config.nofile_note(c0, config.nofile_limit())
+        if !nn.is_empty() {
+            eprint("lobo: [warn] {nn}")
+        }
+    }
+    let wconn0 = config.worker_connections(c0)
     // ws62 (px25's finding (a)): the named deltas of a many-server
     // config, once, by the process that answers for the config
     if worker == 0 {
@@ -1961,6 +1977,18 @@ fn serve_main(
     var cfds = List[int]()
     var cgens = List[int]()
     var cserved = List[int]()
+    // ws64 (lobo#84): `worker_connections`, applied. `croom` is how
+    // many client connections this process holds at once (nginx's
+    // count: the directive less the listening sockets less one);
+    // `cdead` counts rows step 2 closed to make room this pass (their
+    // descriptor is -1 until step 3 compacts the table), so the
+    // connections held are `crows - cdead`. `warn_s` is the second the
+    // reuse warning was last logged in (nginx's rate: one a second).
+    var wconn = wconn0
+    let nlisten = paddrs.len + taddrs.len
+    var croom = shell.conn_room(wconn, nlisten)
+    var cdead: int = 0
+    var warn_s: int = -1
     var cidle = List[int]()
     var cstart = List[int]()
     // ws13: the name a connection is PARKED on, as its index in
@@ -2617,6 +2645,11 @@ fn serve_main(
                                         }
                                     }
                                     let cur = conf_index(gens, newgen)
+                                    // ws64: the new generation's limit is the
+                                    // process's from here (the listening sockets
+                                    // are the ones bound at start)
+                                    wconn = config.worker_connections(gens[cur].conf)
+                                    croom = shell.conn_room(wconn, nlisten)
                                     asinks = build_sinks(gens[cur].conf, prefix)
                                     elog_st = build_elog(gens[cur].conf, prefix, elog.seq, worker)
                                     optin = config.log_headers_join(gens[cur].conf)
@@ -2697,46 +2730,115 @@ fn serve_main(
                                 }
                                 let curgen = current_gen(gens)
                                 counters.accepted = counters.accepted + 1
-                                in life {
-                                    gen_live_add(mut gens, curgen, 1)
-                                }
-                                // ws24: `tcp_nodelay off` is the one value that moves
-                                // anything — every accepted stream is already NODELAY
-                                // ([os.net.nodelay]); a host that declines is an
-                                // unchanged socket, which is what `on` means
-                                if !lim_for(gens, curgen).nodelay {
-                                    net_nodelay(conn, false) else |_| {}
-                                }
-                                // ws57: the new row, in place when the table has been
-                                // this long before
-                                if crows < cfds.len {
-                                    cfds[crows] = conn
-                                    cgens[crows] = curgen
-                                    cserved[crows] = 0
-                                    cidle[crows] = now
-                                    cstart[crows] = now
-                                    cwait[crows] = -1
-                                    cstream[crows] = 0
-                                    ccbuf[crows] = -1
-                                    cclen[crows] = 0
-                                    chead[crows] = 0
-                                    clst[crows] = lsel
-                                } else {
-                                    in life {
-                                        (mut cfds).push(conn)
-                                        (mut cgens).push(curgen)
-                                        (mut cserved).push(0)
-                                        (mut cidle).push(now)
-                                        (mut cstart).push(now)
-                                        (mut cwait).push(-1)
-                                        (mut cstream).push(0)
-                                        (mut ccbuf).push(-1)
-                                        (mut cclen).push(0)
-                                        (mut chead).push(0)
-                                        (mut clst).push(lsel)
+                                // ws64 (lobo#84): `worker_connections`. With no
+                                // slot free (phase 0), and again once the new
+                                // connection has taken one and fewer than a
+                                // sixteenth are free (phase 1), the least
+                                // recently used IDLE connections are closed —
+                                // nginx's batch, `shell.reuse_batch` — with its
+                                // `[warn]` at most once a second. A connection
+                                // that still finds no slot is closed at once with
+                                // its `[alert]`, one line each (nginx does not
+                                // rate-limit that one). A row closed here keeps
+                                // its place with descriptor -1 until step 3
+                                // compacts the table (`cdead`).
+                                var admitted = false
+                                var phase: int = 0
+                                while phase < 2 {
+                                    let used = crows - cdead
+                                    let due = if phase == 0 {
+                                        used >= croom
+                                    } else {
+                                        admitted && shell.reuse_due(wconn, croom, used)
+                                    }
+                                    if due {
+                                        let upto = if phase == 0 { crows } else { crows - 1 }
+                                        let picks = idle_pick(
+                                            cfds,
+                                            cwait,
+                                            cstream,
+                                            cclen,
+                                            cidle,
+                                            upto,
+                                        )
+                                        for r in picks {
+                                            net_close(cfds[r]) else |_| {}
+                                            cfds[r] = -1
+                                            let rg = cgens[r]
+                                            var rnl: int = -1
+                                            in life {
+                                                rnl = conn_closed(mut gens, rg, false)
+                                            }
+                                            if rnl >= 0 {
+                                                ev_event(
+                                                    mut elog,
+                                                    "notice",
+                                                    shell.ev_connection_retired(rg, rnl),
+                                                )
+                                            }
+                                        }
+                                        cdead = cdead + picks.len
+                                        if picks.len > 0 && now / 1000 != warn_s {
+                                            warn_s = now / 1000
+                                            ev_log(
+                                                mut elog,
+                                                "warn",
+                                                shell.conns_short_text(wconn, true),
+                                            )
+                                        }
+                                    }
+                                    if phase == 0 && crows - cdead < croom {
+                                        admitted = true
+                                    }
+                                    phase = if admitted { phase + 1 } else { 2 }
+                                    if phase == 1 {
+                                        in life {
+                                            gen_live_add(mut gens, curgen, 1)
+                                        }
+                                        // ws24: `tcp_nodelay off` is the one value that
+                                        // moves anything — every accepted stream is
+                                        // already NODELAY ([os.net.nodelay]); a host
+                                        // that declines is an unchanged socket, which
+                                        // is what `on` means
+                                        if !lim_for(gens, curgen).nodelay {
+                                            net_nodelay(conn, false) else |_| {}
+                                        }
+                                        // ws57: the new row, in place when the table
+                                        // has been this long before
+                                        if crows < cfds.len {
+                                            cfds[crows] = conn
+                                            cgens[crows] = curgen
+                                            cserved[crows] = 0
+                                            cidle[crows] = now
+                                            cstart[crows] = now
+                                            cwait[crows] = -1
+                                            cstream[crows] = 0
+                                            ccbuf[crows] = -1
+                                            cclen[crows] = 0
+                                            chead[crows] = 0
+                                            clst[crows] = lsel
+                                        } else {
+                                            in life {
+                                                (mut cfds).push(conn)
+                                                (mut cgens).push(curgen)
+                                                (mut cserved).push(0)
+                                                (mut cidle).push(now)
+                                                (mut cstart).push(now)
+                                                (mut cwait).push(-1)
+                                                (mut cstream).push(0)
+                                                (mut ccbuf).push(-1)
+                                                (mut cclen).push(0)
+                                                (mut chead).push(0)
+                                                (mut clst).push(lsel)
+                                            }
+                                        }
+                                        crows = crows + 1
                                     }
                                 }
-                                crows = crows + 1
+                                if !admitted {
+                                    net_close(conn) else |_| {}
+                                    ev_log(mut elog, "alert", shell.conns_short_text(wconn, false))
+                                }
                                 burst = burst + 1
                             }
                         }
@@ -2764,6 +2866,38 @@ fn serve_main(
                             let tconn = net_accept(th) else |_| {
                                 got_tls = false
                                 0
+                            }
+                            // ws64: a connection past worker_connections, as
+                            // the plaintext listeners'
+                            if got_tls && crows - cdead >= croom {
+                                let picks = idle_pick(cfds, cwait, cstream, cclen, cidle, crows)
+                                for r in picks {
+                                    net_close(cfds[r]) else |_| {}
+                                    cfds[r] = -1
+                                    let rg = cgens[r]
+                                    var rnl: int = -1
+                                    in life {
+                                        rnl = conn_closed(mut gens, rg, false)
+                                    }
+                                    if rnl >= 0 {
+                                        ev_event(
+                                            mut elog,
+                                            "notice",
+                                            shell.ev_connection_retired(rg, rnl),
+                                        )
+                                    }
+                                }
+                                cdead = cdead + picks.len
+                                if picks.len > 0 && now / 1000 != warn_s {
+                                    warn_s = now / 1000
+                                    ev_log(mut elog, "warn", shell.conns_short_text(wconn, true))
+                                }
+                                if crows - cdead >= croom {
+                                    counters.accepted = counters.accepted + 1
+                                    net_close(tconn) else |_| {}
+                                    ev_log(mut elog, "alert", shell.conns_short_text(wconn, false))
+                                    got_tls = false
+                                }
                             }
                             if got_tls {
                                 let tgen = current_gen(gens)
@@ -2901,7 +3035,11 @@ fn serve_main(
                         // a close is accounted after the branches, once
                         var closed_now = false
                         var closed_abort = false
-                        if wi0 >= 0 && resolver.is_pending(rs, wnames[wi0]) {
+                        if fd < 0 {
+                            // ws64: step 2 closed this row to make room, and
+                            // told its generation; it leaves the table here
+                            keep = false
+                        } else if wi0 >= 0 && resolver.is_pending(rs, wnames[wi0]) {
                             // ws13: a PARKED connection is not stepped while its
                             // name is still in flight — the row rides forward
                             // untouched (its idle clock too: waiting on the
@@ -3502,6 +3640,7 @@ fn serve_main(
                         k = k + 1
                     }
                     crows = w
+                    cdead = 0
 
                     // ws09: pump the pass's records through every access output
                     // (ONE bounded append per sink per pass — emit never blocked
@@ -3889,6 +4028,47 @@ fn bind_control(addr: str) -> (int, str) {
         return (-1, "could not read the control port")
     }
     (l, "127.0.0.1:{port}")
+}
+
+/// ws64 (lobo#84): the rows one round of making room closes — the
+/// least recently active of the IDLE rows among the first `rows`
+/// (`shell.reuse_batch` of them; ties go to the older row). A row is
+/// idle when it waits on its client with nothing of a request held:
+/// not parked on a name, not streaming, no carry — a connection that
+/// has sent nothing yet, or a keep-alive connection between requests,
+/// which are the two the oracle closes. A row already closed this pass
+/// (descriptor -1) is not there to pick. Pure and total.
+fn idle_pick(
+    cfds: List[int],
+    cwait: List[int],
+    cstream: List[int],
+    cclen: List[int],
+    cidle: List[int],
+    rows: int,
+) -> List[int] {
+    var idle = List[int]()
+    var i: int = 0
+    while i < rows {
+        if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 {
+            (mut idle).push(i)
+        }
+        i = i + 1
+    }
+    let want = shell.reuse_batch(idle.len)
+    var out = List[int]()
+    while out.len < want {
+        var best: int = -1
+        for r in idle {
+            if index_in(out, r) < 0 && (best < 0 || cidle[r] < cidle[best]) {
+                best = r
+            }
+        }
+        if best < 0 {
+            return out
+        }
+        (mut out).push(best)
+    }
+    out
 }
 
 /// ws49 (lobo#46), ws51: how many streams may be parked beside the
@@ -4447,6 +4627,17 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     }
     if !config.user_gate(c0) {
         return 1
+    }
+    // ws64 (lobo#84): as serve_main's — the refusal and the start
+    // warning are the master's to print, once
+    let conn_err = config.conn_check(c0)
+    if !conn_err.is_empty() {
+        eprint("lobo: [emerg] {conn_err}")
+        return 1
+    }
+    let nn = config.nofile_note(c0, config.nofile_limit())
+    if !nn.is_empty() {
+        eprint("lobo: [warn] {nn}")
     }
     // ws62 (px25's finding (a)): the named deltas of a many-server
     // config, once, by the master
