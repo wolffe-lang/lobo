@@ -1,0 +1,181 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked
+//! conforms: err.propagate
+//!
+//! climit — rig DRIVER (the corpus lane runs it bare, which exercises
+//! exactly the no-argument usage path: exit 2). ws64 (lobo#84): the
+//! client `tools/lobo-shell` puts in front of BOTH servers — the
+//! pinned nginx and lobo — to see what each does at
+//! `worker_connections` and out of descriptors, with one program so
+//! the two are asked the same thing. argv is `<port> <mode> <n>
+//! <hold_ms>`:
+//!   idle      open n connections to 127.0.0.1:<port>, one after
+//!             another, and send nothing;
+//!   download  open n connections, each asking for /big.bin and
+//!             reading only its first bytes (so every body parks on a
+//!             client that has stopped reading), waiting for each
+//!             answer before the next.
+//! Then hold them `hold_ms`, ask a fresh `GET /index.html` beside
+//! them, close them all, wait, and ask again. It prints ONE line:
+//!   climit mode=<m> n=<n> map=<digits> held=<probe> after=<probe>
+//! `map` has a digit a connection: 0 open and silent, 1 closed by the
+//! server (end-of-stream or a reset), 2 a response began, 3 (download)
+//! nothing inside 2 s. A probe is the status code of the answer, or
+//! `closed` (connected, then closed with no bytes), `none` (connected,
+//! no answer inside 1500 ms — the connection is waiting in the
+//! kernel's queue) or `refused`. The line is what the harness compares
+//! between the two servers. Loopback only, forever.
+
+/// A decimal from argv, or `io`. Total.
+fn to_int(s: str, most: int) -> int ! {io} {
+    if s.is_empty() {
+        return io
+    }
+    var n: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b < 48 || b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+        if n > most {
+            return io
+        }
+    }
+    n
+}
+
+/// Read what `c` has, having been told it is ready or under a
+/// deadline: (bytes, 0 they arrived / 1 the server closed / 3 nothing
+/// inside the deadline). Total.
+fn recv_some(c: int) -> (List[byte], int) {
+    var kind: int = 0
+    let b = net_read_bytes(c, 2048) else |e| match e {
+        timeout => {
+            kind = 3
+            List[byte]()
+        },
+        closed => {
+            kind = 1
+            List[byte]()
+        },
+        io => {
+            kind = 1
+            List[byte]()
+        },
+    }
+    if kind == 0 && b.len == 0 {
+        kind = 1
+    }
+    (b, kind)
+}
+
+/// The three digits after `HTTP/1.1 ` in `b`, or "?". Total.
+fn status_of(b: List[byte]) -> str {
+    if b.len < 12 {
+        return "?"
+    }
+    var s = ""
+    var i: int = 9
+    while i < 12 {
+        let d = b[i] as int
+        if d < 48 || d > 57 {
+            return "?"
+        }
+        s = "{s}{d - 48}"
+        i = i + 1
+    }
+    s
+}
+
+/// One fresh GET /index.html: its status code, `closed`, `none` or
+/// `refused`. Total.
+fn probe(port: int) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return "refused"
+    }
+    net_deadline(c, 1500) else |_| {}
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return "closed"
+    }
+    let r = recv_some(c)
+    net_close(c) else |_| {}
+    if r.1 == 3 {
+        return "none"
+    }
+    if r.1 == 1 {
+        return "closed"
+    }
+    status_of(r.0)
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len != 4 || !(args[1] == "idle" || args[1] == "download") {
+        eprint("usage: climit <port> idle|download <n> <hold_ms>")
+        return 2
+    }
+    let port = to_int(args[0], 65535)?
+    let mode = args[1]
+    let n = to_int(args[2], 2000)?
+    let hold = to_int(args[3], 30000)?
+    var cs = List[int]()
+    var st = List[int]()
+    var stalled = false
+    var k: int = 0
+    while k < n {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        var s: int = 0
+        if c < 0 {
+            s = 1
+        } else if mode == "download" {
+            // once one connection has gone unanswered the server is not
+            // accepting; the rest are opened without the wait
+            net_deadline(c, if stalled { 50 } else { 2000 }) else |_| {}
+            net_write(
+                c,
+                "GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            ) else |_| {}
+            let r = recv_some(c)
+            s = if r.1 == 0 { 2 } else { r.1 }
+            if s == 3 {
+                stalled = true
+            }
+        }
+        (mut cs).push(c)
+        (mut st).push(s)
+        k = k + 1
+    }
+    time_sleep_ms(hold)
+    // what became of the ones that were open and silent
+    var map = ""
+    k = 0
+    while k < n {
+        var s = st[k]
+        if s == 0 && cs[k] >= 0 {
+            var one = List[int]()
+            (mut one).push(cs[k])
+            let ready = net_wait(one, 0) else |_| {
+                List[int]()
+            }
+            if ready.len > 0 {
+                let r = recv_some(cs[k])
+                s = if r.1 == 0 { 2 } else { 1 }
+            }
+        }
+        map = "{map}{s}"
+        k = k + 1
+    }
+    let held = probe(port)
+    for c in cs {
+        if c >= 0 {
+            net_close(c) else |_| {}
+        }
+    }
+    time_sleep_ms(1200)
+    let after = probe(port)
+    print("climit mode={mode} n={n} map={map} held={held} after={after}")
+    0
+}

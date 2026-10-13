@@ -19,6 +19,7 @@
 # reason lobo-confcheck is sh.
 set -u
 cd "$(dirname "$0")/.." || exit 2
+. tools/lib-toolchain.sh
 . tools/lib-rigproc.sh
 rig_arm
 
@@ -217,6 +218,232 @@ if [ "$(id -u)" != 0 ]; then
 else
     echo "lobo-shell: SKIP — [-t -q user warn] runs only unprivileged (root: nginx drops privileges and lobo refuses by name, a different row); named skip" >&2
 fi
+
+# ------------------------------------------------------------------
+# ws64 (lobo#84): AT THE LIMITS. `worker_connections` was a parsed word
+# through ws63 and lobo had nothing of its own in front of the host's
+# descriptor limit; out of descriptors it went silent. What nginx does
+# at each limit was MEASURED on this oracle first (run, never read:
+# notes/ws64-contract.md §2) and is held here as rows: the same
+# configuration, the same client (tests/rig/climit.lu, one wolf
+# program in front of both servers), and what the client saw and each
+# server logged compared. A row is parity when both servers gave the
+# client the line the oracle was measured to give and both logs carry
+# the line's shape.
+#
+# The descriptor rows lower the limit with `ulimit -n` in the subshell
+# that execs ONE server: that process's limit and nobody else's. Every
+# server binds 127.0.0.1 on a port the kernel chose and is stopped by
+# the pid this script started.
+# ------------------------------------------------------------------
+
+# `-t`: the values nginx refuses, refused (trunk at 1d23471: exit 0 on
+# every one — the word was never read)
+wct() { # wct <name> <events-body> [listens]
+    printf 'events { %s }\nhttp {\n  server { %s }\n}\n' "$2" "${3:-listen 127.0.0.1:18558;}" > "$scratch/wc-$1.conf"
+}
+wct zero 'worker_connections 0;'
+wct one 'worker_connections 1;'
+wct word 'worker_connections x;'
+wct minus 'worker_connections -1;'
+wct unit 'worker_connections 1k;'
+wct twice 'worker_connections 8; worker_connections 9;'
+wct two2 'worker_connections 2;' 'listen 127.0.0.1:18558; listen 127.0.0.1:18559;'
+wct two1 'worker_connections 2;'
+probe "-t worker_connections 0"  1 1 "" -- -t -p "$scratch" -c wc-zero.conf
+probe "-t worker_connections 1, one listen" 1 1 "" -- -t -p "$scratch" -c wc-one.conf
+total=$((total + 1))
+if grep -q '\[emerg\] 1 worker_connections are not enough for 1 listening sockets' "$scratch/lobo.err" && grep -q '\[emerg\] 1 worker_connections are not enough for 1 listening sockets' "$scratch/oracle.err"; then
+    parity=$((parity + 1))
+    echo "lobo-shell: ok — [-t worker_connections 1, one listen] both say 1 worker_connections are not enough for 1 listening sockets"
+else
+    echo "lobo-shell: FAILED — [-t worker_connections 1] lobo: $(head -1 "$scratch/lobo.err") / oracle: $(head -1 "$scratch/oracle.err")" >&2
+    red=$((red + 1))
+fi
+probe "-t worker_connections x"  1 1 "" -- -t -p "$scratch" -c wc-word.conf
+total=$((total + 1))
+if grep -q '\[emerg\] invalid number "x" in ' "$scratch/lobo.err" && grep -q '\[emerg\] invalid number "x" in ' "$scratch/oracle.err"; then
+    parity=$((parity + 1))
+    echo "lobo-shell: ok — [-t worker_connections x] both say invalid number \"x\""
+else
+    echo "lobo-shell: FAILED — [-t worker_connections x] lobo: $(head -1 "$scratch/lobo.err") / oracle: $(head -1 "$scratch/oracle.err")" >&2
+    red=$((red + 1))
+fi
+probe "-t worker_connections -1" 1 1 "" -- -t -p "$scratch" -c wc-minus.conf
+probe "-t worker_connections 1k" 1 1 "" -- -t -p "$scratch" -c wc-unit.conf
+probe "-t worker_connections twice" 1 1 "" -- -t -p "$scratch" -c wc-twice.conf
+probe "-t worker_connections 2, two listens" 1 1 "" -- -t -p "$scratch" -c wc-two2.conf
+probe "-t worker_connections 2, one listen (accepted: it then serves nobody)" 0 0 "" -- -t -p "$scratch" -c wc-two1.conf
+
+# the live rows
+lim="$scratch/lim"
+mkdir -p "$lim/html" "$lim/logs"
+limroot="$(pwd)/$lim"
+echo small-page > "$lim/html/index.html"
+head -c 25165824 /dev/zero | tr '\000' w > "$lim/html/big.bin"
+CLIMIT="$(pwd)/$scratch/climit"
+lim_ready=1
+if ! "$WOLF" build "$rig_root"/tests/rig/climit.lu -o "$CLIMIT" > "$scratch/climit-build.err" 2>&1; then
+    echo "lobo-shell: FAILED — the limit rows' client (tests/rig/climit.lu) does not build:" >&2
+    sed 's/^/lobo-shell:   /' "$scratch/climit-build.err" >&2
+    lim_ready=0
+fi
+if ! command -v curl > /dev/null 2>&1; then
+    echo "lobo-shell: FAILED — the limit rows poll a started server with curl, which this host lacks (CLAUDE.md's host tools)" >&2
+    lim_ready=0
+fi
+
+# lim_one <ng|lb> <tag> <worker_connections> <nofile|-> <mode> <n> <hold_ms>
+# One server, started (under the lowered limit when one is given),
+# polled until it answers, driven by the client, stopped by its pid.
+# The client's line lands in ${side}_line, the server's stderr and
+# error log in $lim/<side>-<tag>.log.
+lim_one() {
+    _side=$1; _tag=$2; _wc=$3; _nf=$4; _mode=$5; _n=$6; _hold=$7
+    _port=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    _log="$lim/$_side-$_tag.log"
+    : > "$_log"
+    if [ "$_side" = ng ]; then
+        printf 'daemon off;\nmaster_process on;\nworker_processes 1;\npid logs/ng-%s.pid;\nerror_log ng-%s.log info;\nevents { worker_connections %s; }\nhttp {\n  access_log off;\n  server { listen 127.0.0.1:%s; root html; }\n}\n' \
+            "$_tag" "$_tag" "$_wc" "$_port" > "$lim/ng-$_tag.conf"
+        set -- "$NGINX" -p "$limroot" -c "ng-$_tag.conf" -e "ng-$_tag.log"
+    else
+        printf 'pid logs/lb-%s.pid;\nevents { worker_connections %s; }\nhttp {\n  types { text/html html; application/octet-stream bin; }\n  server { listen 127.0.0.1:%s; root html; }\n}\n' \
+            "$_tag" "$_wc" "$_port" > "$lim/lb-$_tag.conf"
+        set -- "$LOBO" serve -p "$limroot" -c "lb-$_tag.conf"
+    fi
+    if [ "$_nf" = - ]; then
+        "$@" >> "$_log" 2>&1 &
+    else
+        (ulimit -n "$_nf" && exec "$@") >> "$_log" 2>&1 &
+    fi
+    _pid=$!
+    _i=0
+    while [ "$_i" -lt 50 ]; do
+        curl -s -o /dev/null -m 1 "http://127.0.0.1:$_port/index.html" 2> /dev/null && break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    _line=$("$CLIMIT" "$_port" "$_mode" "$_n" "$_hold" 2>> "$_log")
+    kill "$_pid" 2> /dev/null
+    wait "$_pid" 2> /dev/null
+    eval "${_side}_line=\$_line"
+}
+# lim_count <ng|lb> <tag> <pattern> — lines of that run's log matching
+lim_count() { grep -c -- "$3" "$lim/$1-$2.log" 2> /dev/null || true; }
+# lim_row <desc> <0 ok|1 red> <what both gave> — one parity row
+lim_row() {
+    total=$((total + 1))
+    if [ "$2" = 0 ]; then
+        parity=$((parity + 1))
+        echo "lobo-shell: ok — [$1] $3 (parity)"
+    else
+        echo "lobo-shell: FAILED — [$1] $3" >&2
+        echo "lobo-shell:   lobo:   ${lb_line:-}" >&2
+        echo "lobo-shell:   oracle: ${ng_line:-}" >&2
+        red=$((red + 1))
+    fi
+}
+
+if [ "$lim_ready" = 1 ]; then
+    # A. past worker_connections with idle connections: both close the
+    # least recently used to make room — the first eleven of 24 at 16,
+    # with one listen — and serve the newcomer
+    lim_one ng a 16 - idle 24 600
+    lim_one lb a 16 - idle 24 600
+    want="climit mode=idle n=24 map=111111111110000000000000 held=200 after=200"
+    ok=1
+    [ "$ng_line" = "$want" ] && [ "$lb_line" = "$want" ] && ok=0
+    lim_row "worker_connections 16, 24 idle connections" "$ok" "both close the first eleven to make room and serve a newcomer"
+    ok=1
+    [ "$(lim_count ng a '\[warn\] .*16 worker_connections are not enough, reusing connections')" -ge 1 ] &&
+        [ "$(lim_count lb a '\[warn\] 16 worker_connections are not enough, reusing connections')" -ge 1 ] && ok=0
+    lim_row "…and its log line" "$ok" "both log [warn] 16 worker_connections are not enough, reusing connections"
+
+    # B. past it with every connection busy: 14 slow downloads are
+    # served, and each connection after them is accepted and closed at
+    # once, one [alert] line each (six, and the probe: seven)
+    lim_one ng b 16 - download 20 600
+    lim_one lb b 16 - download 20 600
+    want="climit mode=download n=20 map=22222222222222111111 held=closed after=200"
+    ok=1
+    [ "$ng_line" = "$want" ] && [ "$lb_line" = "$want" ] && ok=0
+    lim_row "worker_connections 16, 20 slow downloads" "$ok" "both serve fourteen, close the rest at once, and serve again when they end"
+    nga=$(lim_count ng b '\[alert\] .*16 worker_connections are not enough$')
+    lba=$(lim_count lb b '\[alert\] 16 worker_connections are not enough$')
+    ok=1
+    [ "$nga" = 7 ] && [ "$lba" = 7 ] && ok=0
+    lim_row "…and its log line" "$ok" "one [alert] 16 worker_connections are not enough a refused connection (oracle $nga, lobo $lba, want 7)"
+
+    # C. out of descriptors (this one server's limit lowered to 48):
+    # the accept fails; the connections that cannot be taken wait in
+    # the kernel's queue unanswered and no idle one is closed for them;
+    # the failure is logged about twice a second, however many wait;
+    # and when descriptors return the queue is served
+    lim_one ng c 1024 48 idle 100 2500
+    lim_one lb c 1024 48 idle 100 2500
+    zeros=$(printf '%0100d' 0)
+    want="climit mode=idle n=100 map=$zeros held=none after=200"
+    ok=1
+    [ "$ng_line" = "$want" ] && [ "$lb_line" = "$want" ] && ok=0
+    lim_row "out of descriptors, 100 idle connections" "$ok" "both leave the newcomer unanswered in the queue, close nobody, and serve again when descriptors return"
+    ngc=$(lim_count ng c '\[crit\] .*accept4\{0,1\}() failed (24: Too many open files)')
+    lbc=$(lim_count lb c '\[crit\] accept() failed (24: Too many open files)')
+    ok=1
+    [ "$ngc" -ge 2 ] && [ "$ngc" -le 16 ] && [ "$lbc" -ge 2 ] && [ "$lbc" -le 16 ] && ok=0
+    lim_row "…and its log line, at a bounded rate" "$ok" "[crit] accept() failed (24: Too many open files), about two a second for some six seconds (oracle $ngc, lobo $lbc; lobo names the call accept(), nginx accept4() where the host has it)"
+    ok=1
+    [ "$(lim_count ng c '\[warn\] .*1024 worker_connections exceed open file resource limit: 48')" -ge 1 ] &&
+        [ "$(lim_count lb c '\[warn\] 1024 worker_connections exceed open file resource limit: 48')" -ge 1 ] && ok=0
+    lim_row "…and the start warning" "$ok" "both warn 1024 worker_connections exceed open file resource limit: 48"
+
+    # D. a FILE that cannot be opened for want of a descriptor: 500,
+    # never 404, and the open logged. Whether the last descriptor goes
+    # to a connection or to its file depends on how many a server holds
+    # at rest (they differ), so each side is tried at two neighbouring
+    # limits and the row reads the one where a connection took it.
+    for side in ng lb; do
+        eval "${side}_500=0"
+        for nf in 48 49; do
+            lim_one "$side" "d$nf" 1024 "$nf" download 24 300
+            eval "_l=\$${side}_line"
+            case "$_l" in
+            *" held=500 "*)
+                if [ "$(lim_count "$side" "d$nf" '\[crit\] .*open() ".*/html/index.html" failed (24: Too many open files)')" -ge 1 ]; then
+                    eval "${side}_500=1"
+                fi
+                ;;
+            esac
+        done
+    done
+    ok=1
+    [ "$ng_500" = 1 ] && [ "$lb_500" = 1 ] && ok=0
+    ng_line="oracle answered 500 and logged the open: $ng_500"
+    lb_line="lobo answered 500 and logged the open: $lb_500"
+    lim_row "out of descriptors, a file cannot be opened" "$ok" "both answer 500 and log [crit] open() \"<path>\" failed (24: Too many open files)"
+
+    # E. `-t` under a lowered limit prints the start warning too. The
+    # configuration sets `error_log … info`: nginx prints this warning
+    # only when its error log's level admits one (its default level is
+    # `error`, measured: no line), where lobo's stderr carries every
+    # line whatever the level (ws02's seam; docs/LOGGING.md)
+    printf 'error_log logs/t-error.log info;\nevents { worker_connections 1024; }\nhttp {\n  server { listen 127.0.0.1:18558; }\n}\n' > "$scratch/wc-big.conf"
+    (ulimit -n 48 && exec "$LOBO" -t -p "$scratch" -c wc-big.conf) > "$scratch/t-lobo.out" 2>&1
+    tl=$?
+    (ulimit -n 48 && exec "$NGINX" -t -p "$scratch" -c wc-big.conf) > "$scratch/t-oracle.out" 2>&1
+    to=$?
+    ok=1
+    [ "$tl" = 0 ] && [ "$to" = 0 ] &&
+        grep -q '\[warn\] 1024 worker_connections exceed open file resource limit: 48' "$scratch/t-lobo.out" &&
+        grep -q '\[warn\] 1024 worker_connections exceed open file resource limit: 48' "$scratch/t-oracle.out" && ok=0
+    lb_line=$(grep -m1 warn "$scratch/t-lobo.out")
+    ng_line=$(grep -m1 warn "$scratch/t-oracle.out")
+    lim_row "-t under a 48-descriptor limit" "$ok" "both exit 0 and warn 1024 worker_connections exceed open file resource limit: 48"
+else
+    red=$((red + 1))
+    total=$((total + 1))
+fi
+rm -f "$lim/html/big.bin"
 
 # assert the error diagnostics land on STDERR (nginx's stream), not stdout
 "$LOBO" -Z >"$scratch/stdout" 2>/dev/null
