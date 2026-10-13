@@ -401,7 +401,9 @@ pub struct StreamSlot {
 /// would report a FAULTED stream — a killed proc writes nothing, so
 /// such a row would wait for its generation's drain) would double
 /// that cost; the loop bounds what the rest costs (`stream_room` in
-/// main.lu). The region cap ws13 built for the budgeted body is not
+/// main.lu). ws63: at wolf 0.2.29 the pool grows a worker per parked
+/// task (s231), so streams no longer starve one another — each costs
+/// two threads and two descriptors, and the host's limits bound them. The region cap ws13 built for the budgeted body is not
 /// used here: the meter rules the body at the `file` site before a
 /// byte is written, and since D40 the cap could not fire on this path
 /// from any config (docs/BUDGET.md). Total.

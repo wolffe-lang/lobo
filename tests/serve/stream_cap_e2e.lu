@@ -34,6 +34,12 @@
 //! The cpu count is `os_cpus()`, affinity-aware like the runtime's own
 //! pool, so the file means the same thing under `taskset`.
 //!
+//! ws63, at wolf 0.2.29: the pool grows a worker per parked task
+//! (s231, wolf-lang#713), so phase B is no longer "past what the pool
+//! holds" — every one of its bodies starts, which is
+//! `parked_downloads_e2e.lu`'s assertion. This file still holds the
+//! ROOM: inside it and past it the probe and the order desk answer.
+//!
 //! The measurement knob (the ws51 sweep, never set by the corpus):
 //! `LOBO_STREAMS=N` runs ONE probe at N, prints its line and exits 0;
 //! `LOBO_BIN` names the lobo binary (default target/lobo-debug).

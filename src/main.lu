@@ -2034,9 +2034,16 @@ fn serve_main(
     // 4, 14 on 16. The room is `3·max(cpus, 2) - 2` (stream_room), a
     // quarter under that. Past it the loop hands serve `crowded`, which
     // writes a budgeted small body without its proc (the meter still
-    // rules it); a stream past it still leaves the loop, and past the
-    // pool its proc waits for a worker instead of the loop waiting for
-    // its client.
+    // rules it); a stream past it still leaves the loop.
+    // ws63: wolf 0.2.29 (s231, wolf-lang#713) grows the pool a worker
+    // per parked task, so there is no "past the pool" any more — at
+    // 0.2.24–0.2.28 the body of stream number 4·max(cpus, 2) waited for
+    // a worker (15 of 20 started on 4 cpus; 20 of 20 at 0.2.29,
+    // tests/serve/parked_downloads_e2e.lu). With the room opened the
+    // probe's proc ran beside 500 streams. The room is KEPT, as lobo's
+    // own margin: on a host that refuses the runtime another thread a
+    // spawned proc waits, and past the room the loop is never in its
+    // join.
     let cpus = os_cpus() else |_| { 1 }
     let room = stream_room(cpus)
     let crowded = serve.ServerOpts {
@@ -3888,7 +3895,9 @@ fn bind_control(addr: str) -> (int, str) {
 /// loop while a budgeted small body still gets its capped proc:
 /// `3·max(cpus, 2) - 2` — 4, 10 and 46 on 1, 4 and 16 cpus, against a
 /// measured 6, 14 and 62 at wolf 0.2.24 (serve_main's note has the
-/// table; ws49's `cpus / 2 - 2` was the 0.2.22 pool's). Pure and total.
+/// table; ws49's `cpus / 2 - 2` was the 0.2.22 pool's). Since wolf
+/// 0.2.29 the pool has no such limit and this is lobo's own margin
+/// (ws63). Pure and total.
 fn stream_room(cpus: int) -> int {
     let t = if cpus < 2 { 2 } else { cpus }
     3 * t - 2
