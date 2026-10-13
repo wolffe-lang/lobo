@@ -36,6 +36,19 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws64, 2026-10-13, wolf 0.2.29: the audit reads net +182, fs +112,
+exec +18, env +6. No capability moves. New calls, all for lobo#84:
+`fs_read_text("/proc/self/limits")` for the descriptor limit the
+start warning names, and where that file is absent a child shell's
+`ulimit -n` (`os_pipe`, `os_spawn_fds`, the pipe's `fs_read` and
+`fs_close`, `os_wait`: exec and fs, the shape ws62's `$PPID` shell had
+and ws63 retired); `fs_open` and `fs_close` for the two descriptors
+held in reserve and for the probe that reads why an accept failed;
+`os_error` and `os_error_text` (uncharged) for that reason and for a
+refused open's. The nine more net calls are beside the accepts (the
+retry on the reserve, the closes of evicted and refused connections,
+the one parked read at start); none is a new reach.)
+
 (ws63, 2026-10-13, wolf 0.2.29: the audit reads net +173, fs +101,
 exec +15, env +6. No capability moves. `shell.lu` imports
 `std.signal` for the meanings' names, and an import is charged what
