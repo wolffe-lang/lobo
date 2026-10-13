@@ -263,7 +263,12 @@ ws04 built:
   until the binary-swap sprint claims UPGRADE; and with no getpid
   surface yet, the pid FILE still records the control endpoint, so
   `lobo -s reload` still sends over the channel while `kill -HUP`
-  needs the pid from the process table.
+  needs the pid from the process table. (Since: ws29 parked a
+  forwarder in place of the poll; ws62 put the pid in the pid file;
+  ws63, on wolf 0.2.29, reads it with `os_pid`, sends `-s` as a signal
+  when there is no `control` directive, gives `reopen` its signal
+  (`SIGUSR1`, the USER meaning), and names every meaning through
+  `std.signal` instead of writing its bit.)
 - The control channel (ws04, made the ORDER DESK at ws15) STAYS:
   the portable trigger, the Windows reload story, and the transport
   for `status`, plus the whole verb set
@@ -320,6 +325,12 @@ and macOS:
    UPGRADE at all. "It will be a control-channel verb when it exists"
    is now "it is a control-channel verb, and it says what it is."
 
+ws63 moved point 1 on unix: with no `control` directive `lobo -s`
+now signals the pid in the pid file, as nginx's does
+(docs/CONTROL.md), and only `status` and `control <verb>` refuse. On
+windows the runtime answers `unsupported` to a signal send, so the
+sentence stands there as written.
+
 What is still CLAIMED and not measured is the windows half itself: the
 console-handler mapping, and that no external RELOAD arrives there. The
 measured-versus-claimed paragraph below is unchanged by ws15: lobo's
@@ -334,9 +345,14 @@ the two platform maps in one line
 (`signal reception armed by meaning … windows CTRL_C/CTRL_CLOSE=
 terminate, CTRL_BREAK=quit, no external reload — the control channel
 is reload's only trigger there`); an operator reads the line, not a
-platform-detected variant of it. `lobo -s reload` already sends over
-the channel on every platform (there is no getpid surface, so it
-never did anything else; the wsm01 residue), which is why the
+platform-detected variant of it. (ws63: the unix line now reads
+`signal reception armed by meaning (reload, terminate=stop, quit,
+user=reopen): unix HUP/TERM/QUIT/USR1`. USER cannot be listened for
+on windows, where a listen holding it answers `io`; lobo then listens
+for the three meanings every host has. That fallback is written from
+[os.signal.platform]'s table and has never run.) `lobo -s reload`
+sends over the channel wherever a `control` directive names one,
+which is why the
 seam falls out small: nothing in lobo's dispatch changes, and the
 control channel's tests (`tests/shell/control_e2e.lu`, `-s` against
 a running master) are the reload witness windows would run.

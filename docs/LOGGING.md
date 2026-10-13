@@ -140,8 +140,9 @@ the error_log file is a level-gated mirror.
 - Clocks are UTC (`+0000` / `+00:00`): wolf has no timezone
   surface, and a zone-independent log is the better door anyway.
   logdiff normalizes timestamps; the SHAPE matches the oracle.
-- Error lines carry no `pid#tid:`: there is no getpid surface (the
-  ws04 residue), and lobo does not fake one.
+- Error lines carry no `pid#tid:`. wolf has `os_pid` since 0.2.29
+  (the pid file is written with it, ws63) and no thread id; half the
+  pair is not printed, and lobo does not fake the other half.
 - `$remote_addr` is 127.0.0.1: no peer-address builtin, and the
   loopback-only law makes it truthful today; the row lifts with the
   builtin.
@@ -157,7 +158,8 @@ the error_log file is a level-gated mirror.
 - `worker=N` (ws16): under `worker_processes N` every line a hand
   writes to the error log ends in that trailing field (a number
   member in the JSON door; the k=v decode is unchanged). nginx's
-  error lines carry `pid#tid:` instead, which lobo cannot (no getpid).
+  error lines carry `pid#tid:` instead, which lobo does not print (a
+  pid since wolf 0.2.29, no thread id).
   Access lines carry no worker id on either server.
 - `$upstream_status`/`$upstream_response_time` report the final
   attempt (nginx lists every tried peer's); `$upstream_addr` does
