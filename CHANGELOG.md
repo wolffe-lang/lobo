@@ -608,6 +608,92 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws64 — 2026-10-13 — `worker_connections` applied; out of descriptors lobo logs, keeps answering its control endpoint and no longer ends (lobo#84)
+
+Unreleased (trunk). Through 0.1.3 `worker_connections` was parsed and
+ignored, and a process that ran out of descriptors went silent.
+lobo now does at both limits what nginx does, measured on the pinned
+nginx 1.30.4 run as a black box (its source was not read). Contract,
+the oracle's measurements and the prediction:
+`notes/ws64-contract.md`.
+
+- **`worker_connections` is applied**, per process, default 512.
+  A process serves `worker_connections - listeners - 1` clients at
+  once, nginx's count (14 at 16 with one `listen`). Past it, idle
+  connections (nothing sent yet, or keep-alive between requests) are
+  closed least-recently-used first to make room, an eighth of them at
+  a time (at least 1, at most 32), with `[warn] N worker_connections
+  are not enough, reusing connections` at most once a second. With
+  none idle the new connection is accepted and closed at once with
+  `[alert] N worker_connections are not enough`. The rule was fitted
+  on sixteen runs of the oracle and closes the same connections it
+  closed in each (`tests/shell/conn_limit.lu`; 11 of 24 at 16 and 42
+  of 100 at 64 against a live lobo). **A configuration that relied on
+  more than about 510 connections a process must now say so.**
+- **`-t` and the start refuse what nginx refuses**, in its words:
+  `invalid number "x"`, `"worker_connections" directive is
+  duplicate`, `N worker_connections are not enough for L listening
+  sockets`. 0.1.3 accepted `0`, `x` and `1k`. A reload with such a
+  value is rejected and the running generation kept.
+- **Out of descriptors, the failure is logged and bounded.** A failed
+  accept is `[crit] accept() failed (24: Too many open files)`; the
+  process then stops accepting for half a second, so the line comes
+  about twice a second however many clients wait, and the loop no
+  longer spins (0 cpu ticks in 4.5 s at the limit; trunk 293). The
+  clients wait in the kernel's queue and are served when descriptors
+  return, with nothing restarted. A request whose file cannot be
+  opened is answered 500 with `[crit] open() "<path>" failed (24: Too
+  many open files)`; trunk answered 404.
+- **The control endpoint answers at the limit.** A process holds two
+  descriptors in reserve: one is let go for an order's connection
+  when its accept fails, the other while a `reload` or `reopen` reads
+  and opens files. `status`, `reload`, `reopen` and `stop` answer with
+  the process out of descriptors, over the endpoint and by signal,
+  for one process and for a master's fan-out to its hands. At trunk
+  `lobo status` got no reply (`tests/shell/control_exhausted_e2e.lu`,
+  red there at its `status`).
+- **A process at its descriptor limit no longer ends.** wolf's
+  runtime makes its readiness set at the first call that parks and
+  asserts on the descriptors it asks for. lobo's first park was the
+  first write to a slow client; when that came with the process at
+  its limit the process ended (`epoll_create1 failed`; measured at
+  trunk under `ulimit -n 32`: the ninth slow download). lobo now
+  parks once at start. With `worker_processes` above 1 the master
+  replaced such a hand; a single process stopped serving.
+- **The start warning**, at start and at `-t`: `[warn] N
+  worker_connections exceed open file resource limit: M`, the limit
+  read from `/proc/self/limits` or a child shell's `ulimit -n`.
+- **`worker_rlimit_nofile` is still refused by name.** wolf has no
+  call that sets a resource limit. Its reason line now says where to
+  set the limit instead.
+- **Parity rows.** `tools/lobo-shell` drives both servers with one
+  client (`tests/rig/climit.lu`) at each limit: 41 probes, 40 parity,
+  1 named delta (22 and 21 at ws63). At trunk 17 are red.
+
+Named deltas: lobo's line says `accept()` where nginx's says
+`accept4()`; its `open()` line stops at the reason; an upstream
+connection and a TLS connection being served are not counted against
+`worker_connections`; a reload applies a new value to the running
+processes; nginx prints the start warning only when `error_log`
+admits a `warn`, lobo's stderr always.
+
+Measured (kasumi, linux x86-64, other lanes loading it to 14–24):
+a process holds 20 descriptors at rest where trunk held 16 (the two
+in reserve, the readiness set and its wake descriptor, which trunk
+took at its first slow download) and 21 threads where trunk had 20;
+4,820 kB resident at start (trunk in the same minute: 4,776) and
+5,108 kB after 400,000 keepalive requests (trunk: 5,064). Membudget
+24/24, the master flat at 4,356 kB. The gauntlet is green with 0 SKIP
+lines under `taskset -c 0-3` (`kasumi:~/lanes/ws64/logs/g-w1.log`,
+364 corpus lane-runs). A parity set on kasumi was refused by its own
+validity rule (load 14 before the set); the runner VM's is in the PR.
+Two descriptors, two threads and about 150 KB a parked download are
+ws63's figures, not re-measured.
+
+Not taken: a setting of the descriptor limit (`worker_rlimit_nofile`);
+counters for refused and evicted connections in `/metrics`; lobo#81
+and lobo#82.
+
 ## ws63 — 2026-10-13 — built with wolf 0.2.29; no ceiling on parked downloads; `-s` by signal; `SIGUSR1` reopens; a master with no `control` hears its signals
 
 Unreleased (trunk). lobo moves to wolf 0.2.29 / lupin 0.1.52 and takes
