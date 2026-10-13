@@ -178,23 +178,57 @@ serve linux aarch64.
 
 ## Limits
 
-- **Downloads beside the loop.** A large plaintext body is written by
-  its own proc beside the loop, and a download parked on a slow client
-  holds that proc. Built with wolf 0.2.29 nothing in lobo or in wolf's
-  runtime limits how many: 900 downloads parked in one process were
-  all being served, at two threads and about 150 KB resident each.
-  The host's limits are what is left, and lobo has no connection limit
-  of its own (`worker_connections` is parsed and not applied):
-  - descriptors: two a parked download (its socket and its file), one
-    an idle connection. When a process runs out (`ulimit -n`), new
-    connections wait unanswered, the control endpoint's included, and
-    nothing is logged; it answers again when a download ends. Measured
-    at a limit of 1,024: 505 downloads served, the next client and
-    `lobo status` unanswered.
-  - threads: past the host's limit a download gets its head and its
-    body waits for an earlier one to end; wolf's runtime writes one
-    line to stderr and nothing stops. Measured at 300 tasks: 145 of
-    200 downloads served, other requests answered.
+- **Connections.** `worker_connections` (default 512, nginx's) is
+  the most connections one process holds, counting its listening
+  sockets and one more, as nginx counts them: with one `listen` a
+  process serves 510 clients at once, and `worker_processes 4` serves
+  four times that. Past it lobo does what nginx does. Idle
+  connections (one that has sent nothing yet, or a keep-alive
+  connection between requests) are closed to make room, least
+  recently used first, an eighth of them at a time, and the log says
+  `[warn] 512 worker_connections are not enough, reusing connections`
+  at most once a second. With none idle, the new connection is
+  accepted and closed at once, and the log says `[alert] 512
+  worker_connections are not enough`, one line each. Upstream
+  connections and a TLS connection while it is served are not counted
+  (`docs/directives.md`). Through 0.1.3 the directive was parsed and
+  ignored.
+- **Descriptors.** An idle connection holds one descriptor; a
+  download parked on a slow client holds two (its socket and its
+  file), two threads and about 150 KB resident. A process holds about
+  20 at rest, two of them in reserve. Set the limit where lobo is
+  started (`ulimit -n`, systemd's `LimitNOFILE=`); lobo cannot set it
+  (`worker_rlimit_nofile` is refused by name), and warns at start,
+  `[warn] 512 worker_connections exceed open file resource limit:
+  256`, when the limit is lower than the connections it may be asked
+  to hold. With downloads, plan two descriptors a connection: 512
+  connections that are all slow downloads need about 1,050. Out of
+  descriptors lobo does what nginx does:
+  - it stops accepting for half a second at a time and logs `[crit]
+    accept() failed (24: Too many open files)` each time, so about
+    two lines a second however many clients wait. They wait in the
+    kernel's queue and are served when descriptors return; nothing is
+    restarted;
+  - a request whose file cannot be opened is answered 500 (never 404)
+    and logged, `[crit] open() "<path>" failed (24: Too many open
+    files)`;
+  - the control endpoint still answers. lobo lets one reserved
+    descriptor go for the order's connection, and the other while a
+    `reload` or `reopen` reads and opens files, and takes them back.
+    `lobo status`, `-s reload` and `-s stop` work with the process at
+    its limit.
+  Through 0.1.3 a process out of descriptors logged nothing, did not
+  answer `lobo status`, and kept most of a core busy while it waited; and if
+  the first download ever to wait on a slow client came with the
+  process already at its limit, the process ended.
+- **Threads.** A large plaintext body is written by its own proc
+  beside the loop. Past the host's thread limit a download gets its
+  head and its body waits for an earlier one to end; wolf's runtime
+  writes one line to stderr and nothing stops. Measured at 300 tasks:
+  145 of 200 downloads served, other requests answered. Built with
+  wolf 0.2.29 nothing else limits how many downloads are parked: 900
+  in one process were all being served (with `worker_connections`
+  raised to hold them).
   Built with wolf 0.2.24 to 0.2.28 (lobo 0.1.2 and 0.1.3) a process
   served at most `4·max(cpus, 2) - 1` parked downloads, 15 on 4 cpus;
   the next got its head and its body waited.
