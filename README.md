@@ -167,7 +167,7 @@ hosts.
 
 ## Compatibility
 
-[`docs/directives.md`](docs/directives.md) has a row for each of 122 nginx directives: 49 implemented, 48 planned and 25 refused by name when the configuration loads.
+[`docs/directives.md`](docs/directives.md) has a row for each of 122 nginx directives: 50 implemented, 47 planned and 25 refused by name when the configuration loads.
 <!-- the sentence above is derived from src/config/table.lu by tools/lobo-directives (--emit rewrites it, --check reds on drift); keep it on one line --> It lists every place lobo's behaviour
 differs from nginx's, and where it differs, lobo says so when the
 configuration loads.

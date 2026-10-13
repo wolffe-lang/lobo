@@ -1,0 +1,110 @@
+//! check: run(exit=0, stdout="worker_connections ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! ws64 (lobo#84): `worker_connections`, PURE, on all three lanes —
+//! the directive's value and default, the three refusals `-t` and the
+//! start make in the oracle's words, the descriptor limit read off
+//! linux's `/proc/self/limits`, and nginx's start warning. Every
+//! verdict here was probed on the pinned nginx 1.30.4 first
+//! (notes/ws64-contract.md §2); through ws63 the row was `planned`
+//! and `-t` accepted `0`, `1`, `x`, `-1` and `1k`. The exit codes
+//! beside the oracle's are `tools/lobo-shell`'s rows; what a process
+//! does AT the limit is tests/shell/conn_limit.lu (the rule) and
+//! tests/serve/worker_connections_e2e.lu (a live server).
+
+use config
+
+fn conf(events: str, listens: str) -> config.Conf {
+    config.parse_str("events {{ {events} }}\nhttp {{ server {{ {listens} }} }}\n", "w.conf")
+}
+
+fn main() -> !int {
+    // the value: absent → nginx's 512; a number → itself
+    assert(config.worker_connections_default() == 512, "nginx's default")
+    assert(config.worker_connections(conf("", "listen 8080;")) == 512, "absent: 512")
+    assert(
+        config.worker_connections(conf("worker_connections 16;", "listen 8080;")) == 16,
+        "sixteen",
+    )
+    assert(
+        config.worker_connections(conf("worker_connections 99999999999;", "listen 8080;")) ==
+            99999999999,
+        "a large value is a value (the oracle accepts it)",
+    )
+
+    // the listening sockets it is read against
+    assert(config.listening_sockets(conf("", "listen 8080;")) == 1, "one listen")
+    assert(config.listening_sockets(conf("", "listen 8080; listen 8081;")) == 2, "two")
+    assert(
+        config.listening_sockets(conf("", "listen 8080; listen 8443 ssl;")) == 2,
+        "a TLS listener is a listening socket",
+    )
+
+    // -t: clean
+    assert(config.conn_check(conf("", "listen 8080;")).is_empty(), "absent is clean")
+    assert(
+        config.conn_check(conf("worker_connections 2;", "listen 8080;")).is_empty(),
+        "2 with one listen: the oracle accepts it (and serves nobody)",
+    )
+    // -t: not a number — `invalid number "x" in <file>:<line>`
+    for bad in "x -1 1k 0x10".words() {
+        let e = config.conn_check(conf("worker_connections {bad};", "listen 8080;"))
+        assert(e == "invalid number \"{bad}\" in w.conf:1", "not a number [{bad}]: {e}")
+    }
+    // -t: no larger than the listening sockets
+    assert(
+        config.conn_check(conf("worker_connections 0;", "listen 8080;")) ==
+            "0 worker_connections are not enough for 1 listening sockets",
+        "0 with one listen",
+    )
+    assert(
+        config.conn_check(conf("worker_connections 1;", "listen 8080;")) ==
+            "1 worker_connections are not enough for 1 listening sockets",
+        "1 with one listen",
+    )
+    assert(
+        config.conn_check(conf("worker_connections 2;", "listen 8080; listen 8081;")) ==
+            "2 worker_connections are not enough for 2 listening sockets",
+        "2 with two",
+    )
+    // -t: twice
+    assert(
+        config.conn_check(conf("worker_connections 8; worker_connections 9;", "listen 8080;")) ==
+            "\"worker_connections\" directive is duplicate in w.conf:1",
+        "a second directive",
+    )
+
+    // the limit, off the host's own table
+    let limits = "Limit                     Soft Limit           Hard Limit           Units     \nMax cpu time              unlimited            unlimited            seconds   \nMax open files            1024                 524288               files     \nMax locked memory         8388608              8388608              bytes     \n"
+    assert(config.limits_nofile(limits) == 1024, "the soft limit: {config.limits_nofile(limits)}")
+    assert(
+        config.limits_nofile(
+            "Max open files            unlimited            unlimited            files\n",
+        ) ==
+            -1,
+        "unlimited is no limit",
+    )
+    assert(
+        config.limits_nofile("") == -1 && config.limits_nofile("Max cpu time 1 2 s\n") == -1,
+        "no row",
+    )
+
+    // nginx's start warning
+    assert(
+        config.nofile_note(conf("worker_connections 1024;", "listen 8080;"), 32) ==
+            "1024 worker_connections exceed open file resource limit: 32",
+        "more connections than descriptors",
+    )
+    assert(
+        config.nofile_note(conf("", "listen 8080;"), 256) ==
+            "512 worker_connections exceed open file resource limit: 256",
+        "the default is read against the limit too",
+    )
+    assert(config.nofile_note(conf("", "listen 8080;"), 1024).is_empty(), "512 under 1024: quiet")
+    assert(config.nofile_note(conf("", "listen 8080;"), 512).is_empty(), "512 at 512: quiet")
+    assert(config.nofile_note(conf("", "listen 8080;"), -1).is_empty(), "an unknown limit: quiet")
+    print("worker_connections ok")
+    0
+}

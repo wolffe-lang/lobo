@@ -415,8 +415,8 @@ pub fn table() -> Table {
         "",
         1,
         1,
-        "planned(ws02)",
-        "per-worker connection budget",
+        "implemented",
+        "nginx's directive and meaning since ws64 (lobo#84), measured on the oracle: the most connections ONE process holds, default 512; its listening sockets and one more (nginx: the worker's channel to its master) count, so a process serves `worker_connections - listeners - 1` clients. Past that the least recently used IDLE connections (nothing sent yet, or keep-alive between requests) are closed to make room, an eighth of them at a time, at least 1 and at most 32, with `[warn] N worker_connections are not enough, reusing connections` at most once a second; with none idle the new connection is accepted and closed at once with `[alert] N worker_connections are not enough`. `-t` and the start refuse what nginx refuses, in its words (`invalid number`, `is duplicate`, `N worker_connections are not enough for L listening sockets`) and print its `[warn] N worker_connections exceed open file resource limit: M`. Named deltas: an upstream connection is not counted (the proxy exchange runs inside the loop, one at a time, lobo#81), nor is a TLS connection while it is served (one at a time, to completion); a reload applies the new value to the process that is running (nginx starts new workers with it)",
     )
     row(
         mut t,
@@ -780,7 +780,7 @@ pub fn table() -> Table {
         1,
         1,
         "named_error",
-        "single-process task model — one descriptor budget, not per-worker (ws14 revisits)",
+        "lobo cannot set its own descriptor limit — wolf has no call that sets a resource limit at this pin — so the directive is refused by name rather than parsed and ignored; set the limit where lobo is started (`ulimit -n`, systemd's LimitNOFILE=) and lobo warns at start when `worker_connections` is more than it (ws64, lobo#84)",
     )
     row(
         mut t,

@@ -1,0 +1,195 @@
+//! member: true
+//! config/connconf — ws64 (lobo#84): `worker_connections`, and the
+//! descriptor limit it is read against. The directive is nginx's and
+//! since ws64 it means what nginx's means: the most connections ONE
+//! worker process holds at once, its listening sockets and its channel
+//! to the master among them. Through ws63 the row was `planned`:
+//! parsed and never read, so lobo had no limit of its own in front of
+//! the host's descriptor limit. Everything here was measured on the
+//! pinned oracle first (notes/ws64-contract.md §2, "nginx at its
+//! limits"); nginx's source was not read.
+//!
+//! The reader and the `-t` half live here because `-t` is config's
+//! verb; what a serving loop does AT the limit is shell's (the pure
+//! rules) and main's (the loop).
+
+/// A decimal count of at most eighteen digits, or -1. Total.
+fn conn_digits(s: str) -> int {
+    if s.is_empty() || s.len > 18 {
+        return -1
+    }
+    var n: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b < 48 || b > 57 {
+            return -1
+        }
+        n = n * 10 + b - 48
+    }
+    n
+}
+
+/// nginx's default `worker_connections` (its documentation's, and what
+/// the oracle's start warning names with the directive absent: `512
+/// worker_connections exceed open file resource limit: 256`). Total.
+pub fn worker_connections_default() -> int {
+    512
+}
+
+/// The `worker_connections` directive's value: absent → 512; a digit
+/// run → its value. A value `-t` refuses reads as the default (the
+/// serving entries refuse on `conn_check` before they read this).
+/// Total.
+pub fn worker_connections(c: Conf) -> int {
+    var i: int = 0
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "worker_connections" && c.args_n[i] >= 1 {
+            let v = conn_digits(c.argp[c.args_at[i]].trim())
+            if v >= 0 {
+                return v
+            }
+            return worker_connections_default()
+        }
+        i = i + 1
+    }
+    worker_connections_default()
+}
+
+/// How many sockets this configuration listens on: every plaintext
+/// and every TLS `listen` lobo binds (what nginx counts against
+/// `worker_connections` before any client). Total.
+pub fn listening_sockets(c: Conf) -> int {
+    listen_plain_addrs(c).len + listen_ssl_addrs(c).len
+}
+
+/// The `worker_connections` half of `-t`, the oracle's three refusals
+/// in the oracle's words (probed 2026-10-13 against nginx/1.30.4):
+/// a value that is not a number is `invalid number "x" in <file>:<line>`;
+/// a second directive is `"worker_connections" directive is duplicate`;
+/// a value no larger than the number of listening sockets is `N
+/// worker_connections are not enough for L listening sockets` (nginx
+/// says it for 0 and 1 with one `listen`, for 2 with two, and accepts
+/// 2 with one — a configuration that then serves nobody, as lobo's
+/// does). "" when the config is clean. Total.
+pub fn conn_check(c: Conf) -> str {
+    var i: int = 0
+    var seen = false
+    let total = c.names.len
+    while i < total {
+        if c.names[i] == "worker_connections" && c.args_n[i] >= 1 {
+            if seen {
+                return "\"worker_connections\" directive is duplicate in {c.files[i]}:{c.lines[i]}"
+            }
+            seen = true
+            let raw = c.argp[c.args_at[i]].trim()
+            if conn_digits(raw) < 0 {
+                return "invalid number \"{raw}\" in {c.files[i]}:{c.lines[i]}"
+            }
+        }
+        i = i + 1
+    }
+    let wc = worker_connections(c)
+    let ls = listening_sockets(c)
+    if ls > 0 && wc <= ls {
+        return "{wc} worker_connections are not enough for {ls} listening sockets"
+    }
+    ""
+}
+
+/// The soft open-files limit off the text of linux's
+/// `/proc/self/limits` (the `Max open files` row: soft, hard, unit),
+/// or -1 when the row is absent, unreadable or `unlimited`. Pure and
+/// total.
+pub fn limits_nofile(text: str) -> int {
+    for line in text.lines() {
+        if line.starts_with("Max open files") {
+            let rest = line["Max open files".len..line.len].trim()
+            var n: int = 0
+            var digits: int = 0
+            for b_raw in rest.bytes() {
+                let b = b_raw as int
+                if b < 48 || b > 57 {
+                    break
+                }
+                if digits >= 18 {
+                    return -1
+                }
+                n = n * 10 + b - 48
+                digits = digits + 1
+            }
+            if digits == 0 {
+                return -1
+            }
+            return n
+        }
+    }
+    -1
+}
+
+/// The soft open-files limit as a child `/bin/sh` reports it (`ulimit
+/// -n`, which a child inherits), or -1 when there is no shell, no
+/// pipe, or an answer that is not a number (`unlimited`). The path for
+/// a host with no `/proc/self/limits` (macOS); one fork and exec, at
+/// `-t` and at start. exec + fs tiers. Total.
+fn sh_nofile() -> int {
+    let pp = os_pipe() else |_| {
+        return -1
+    }
+    var args = List[str]()
+    (mut args).push("-c")
+    (mut args).push("ulimit -n")
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(pp.1)
+    var ok_spawn = true
+    let h = os_spawn_fds("/bin/sh", args, map) else |_| {
+        ok_spawn = false
+        -1
+    }
+    fs_close(pp.1) else |_| {}
+    if !ok_spawn {
+        fs_close(pp.0) else |_| {}
+        return -1
+    }
+    var out = ""
+    var reading = true
+    var rounds: int = 0
+    while reading && rounds < 16 {
+        let piece = fs_read(pp.0, 64) else |_| {
+            reading = false
+            ""
+        }
+        out = "{out}{piece}"
+        rounds = rounds + 1
+    }
+    fs_close(pp.0) else |_| {}
+    let _ = os_wait(h) else |_| {
+        0
+    }
+    conn_digits(out.trim())
+}
+
+/// This process's soft open-files limit, or -1 when the host does not
+/// say (or says `unlimited`): `/proc/self/limits` on linux and PAX,
+/// a child shell's `ulimit -n` elsewhere. wolf has no call that reads
+/// a resource limit at this pin, so the host is asked. fs tier (exec
+/// where `/proc` is absent). Total.
+pub fn nofile_limit() -> int {
+    let text = fs_read_text("/proc/self/limits") else |_| {
+        return sh_nofile()
+    }
+    limits_nofile(text)
+}
+
+/// nginx's start warning when `worker_connections` is more than the
+/// process may have descriptors — `N worker_connections exceed open
+/// file resource limit: M` (the text after `[warn] `) — or "" when it
+/// is not, or the limit is unknown (-1). Pure and total.
+pub fn nofile_note(c: Conf, limit: int) -> str {
+    let wc = worker_connections(c)
+    if limit >= 0 && wc > limit {
+        return "{wc} worker_connections exceed open file resource limit: {limit}"
+    }
+    ""
+}
