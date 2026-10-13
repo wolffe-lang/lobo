@@ -4702,9 +4702,9 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var cwf = List[int]()
     if have_ctrl {
         (mut cwf).push(cl)
-        if sig_on {
-            (mut cwf).push(sig_r)
-        }
+    }
+    if sig_on {
+        (mut cwf).push(sig_r)
     }
     // ws62 (px25's finding (c)): THE REGIONS, as the hands have them
     // since ws57. `life` is where what the master keeps across passes
@@ -4734,14 +4734,14 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             var cc = -1
             var denied = false
             var cready = List[int]()
-            if have_ctrl {
-                // ws17: the master waits on its ONE socket the same way a
+            if !cwf.is_empty() {
+                // ws17: the master waits on its sockets the same way a
                 // hand waits on its set ([os.net.wait]); the supervision
                 // pass below is this loop's timer work
                 cready = net_wait(cwf, wait_budget(false)) else |_| {
                     List[int]()
                 }
-                var got_ctrl = ready_has(cready, cl)
+                var got_ctrl = have_ctrl && ready_has(cready, cl)
                 if got_ctrl {
                     let cand = net_accept(cl) else |_| {
                         got_ctrl = false
