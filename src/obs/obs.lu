@@ -841,9 +841,11 @@ pub fn render_access_jsonl(a: Access, header_optin: List[str]) -> str {
 
 /// One error-log line in the oracle's text shape, without the
 /// trailing newline: `2026/08/30 22:51:21 [notice] message`. LOBO
-/// DELTA (named): no `pid#tid:` — wolf has no getpid surface (the
-/// ws04/wsm01 residue), and a fake pid would be worse than none.
-/// Total.
+/// DELTA (named): no `pid#tid:`. wolf has had `os_pid` since 0.2.29
+/// (ws63 writes the pid file with it) and has no thread id, so the
+/// pair nginx prints is still half missing; the lines stay as they
+/// are, and half a pair would move every log this module is diffed
+/// against. Total.
 pub fn render_error(level: str, msg: str, unix_ms: int) -> str {
     "{err_date(unix_ms)} [{level}] {msg}"
 }
