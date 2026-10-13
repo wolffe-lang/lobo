@@ -36,6 +36,18 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws63, 2026-10-13, wolf 0.2.29: the audit reads net +173, fs +101,
+exec +15, env +6. No capability moves. `shell.lu` imports
+`std.signal` for the meanings' names, and an import is charged what
+the module reaches, so the audit's first exec and env lines now read
+"uses `std.signal`, which reaches `os_signal_listen`" and "…
+`os_signal_ignored`"; lobo calls only the module's name functions,
+which reach nothing. New calls of lobo's own: `os_pid` (env) for the
+pid file, twice, and `os_signal_send` (exec) with `os_signal_number`
+(uncharged) for `-s` with no `control` directive. Gone: ws62's
+`fs_read_text("/proc/self/status")`, `os_pipe`, `os_spawn_fds`, the
+pipe's reads and closes and the `os_wait` behind the `$PPID` shell.)
+
 (ws62, 2026-10-12, wolf 0.2.28: the audit reads net +173, fs +106,
 exec +14, env +3. No capability moves. The new exec calls are the pid
 file's: `os_pipe`, `os_spawn_fds` and `os_wait` for the child shell
