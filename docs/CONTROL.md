@@ -231,6 +231,47 @@ forwarder, so it used a whole core and answered no signal (measured at
 `af0fa41`, built with wolf 0.2.28 and 0.2.29 alike).
 `tests/shell/signal_send_e2e.lu` holds all of this against the binary.
 
+## Out of descriptors: the reserve (ws64, lobo#84)
+
+A control connection needs a descriptor like any other, and through
+0.1.3 a lobo at its descriptor limit did not answer `lobo status`:
+the accept failed, nothing was logged, and the loop went round on the
+listener that stayed ready (measured at trunk `1d23471`, one process
+under `ulimit -n 32` with 40 idle connections: `status` unanswered
+after 2000 ms, 293 cpu ticks in 4.5 s).
+
+A serving process now holds two descriptors it does not use
+(`/dev/null`, or the configuration file where the host has no such
+device; a start that could open neither says so at `warn`):
+
+- when the control accept fails, the first is closed and the accept
+  is tried again, so the order's connection takes its place. The
+  order is answered, its connection is closed, and the reserve is
+  taken back before a client can take the descriptor;
+- a `reload` or a `reopen` is given the second while it runs (a
+  reload reads the configuration and its certificates one file at a
+  time; both open log files). It is taken back at the next pass, or
+  as soon as the host has a descriptor again.
+
+So `status`, `reload`, `reopen`, `quit` and `stop` answer with the
+process at its limit, over the endpoint and by signal.
+`tests/shell/control_exhausted_e2e.lu` holds it: a lobo under
+`ulimit -n 64` (the limit is that process's own), 100 idle
+connections, `status` inside 1000 ms, a `reload` that takes, a `stop`
+that is answered. At trunk the test is red at its `status`.
+
+nginx has no control endpoint; its orders are signals, which need no
+descriptor. What the two servers do with their CLIENTS out of
+descriptors is the same, and is in README (Limits) and
+docs/LOGGING.md.
+
+Not covered: an order that needs more than one descriptor at a time
+beyond its connection (a reload whose new configuration opens several
+log outputs has one descriptor for them until more return); and the
+master of
+`worker_processes N`, which holds a handful of descriptors whatever
+its hands hold and has no reserve of its own.
+
 ## A verb and a signal are the same code path
 
 Both triggers reach ONE dispatch in the serve loop, and ONE emission

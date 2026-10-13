@@ -135,6 +135,46 @@ above the configured one. STDERR KEEPS EVERY LINE as before ws09:
 the ws02 seam the rig and the signal witness read is unchanged, and
 the error_log file is a level-gated mirror.
 
+### At the limits (ws64, lobo#84)
+
+Four lines a process writes at `worker_connections` and out of
+descriptors. Each is nginx's, body and level, measured on the pinned
+oracle (notes/ws64-contract.md §2) and held beside it in
+`tools/lobo-shell`:
+
+| level | line | when | how often |
+|---|---|---|---|
+| `warn` | `512 worker_connections are not enough, reusing connections` | idle connections were closed to make room for a new one | at most once a second |
+| `alert` | `512 worker_connections are not enough` | a new connection was closed at once: the process is at `worker_connections` and none is idle | once a refused connection (nginx does not rate-limit it either: 187 lines for 187 refusals) |
+| `crit` | `accept() failed (24: Too many open files)` | the host refused an accept; the process then stops accepting for half a second | about twice a second for as long as it lasts |
+| `crit` | `open() "<path>" failed (24: Too many open files)` | a request's file could not be opened for want of a descriptor; the request is answered 500 | once a request |
+
+and one at start and at `-t`:
+
+| level | line | when |
+|---|---|---|
+| `warn` | `512 worker_connections exceed open file resource limit: 256` | the process may not have as many descriptors as `worker_connections` |
+
+Three deltas from nginx's lines, each named:
+
+- nginx writes `accept4()` where the host has that call and
+  `accept()` elsewhere; lobo writes `accept()` everywhere (which call
+  the runtime makes is the runtime's).
+- nginx's `open()` line goes on to name the client, the server, the
+  request and the host; lobo's stops at the reason.
+- The number and its text are the host's (`os_error`,
+  `os_error_text`). wolf sets that number for file calls only, so
+  after a failed accept lobo asks the host for a descriptor the file
+  way (an open of `/dev/null`) and reports what THAT answers. If the
+  open succeeds because a descriptor came back in between, the line
+  is `accept() failed` with no number rather than a guessed one.
+
+nginx prints the start warning only when `error_log`'s level admits
+a `warn` (its default level is `error`, so a default configuration
+prints nothing); lobo's stderr carries every line whatever the level,
+as for every other line, and its `error_log` file is gated the same
+way nginx's is.
+
 ## Named deltas (routed to the wsc03 closeout)
 
 - Clocks are UTC (`+0000` / `+00:00`): wolf has no timezone
