@@ -180,16 +180,30 @@ serve linux aarch64.
 
 - **Downloads beside the loop.** A large plaintext body is written by
   its own proc beside the loop, and a download parked on a slow client
-  holds workers in wolf's runtime pool. Under `memory_budget` a small
-  body runs in a capped proc while fewer than `3·max(cpus, 2) - 2`
-  downloads are parked: 4 on 1 cpu, 10 on 4, 46 on 16. Past that it
-  is written without the proc, and the budget still rules it. Built
-  with wolf 0.2.24 that proc was measured to run beside up to
-  `4·max(cpus, 2) - 2` downloads (6, 14 and 62), so the room leaves a
-  quarter in hand. Past `4·max(cpus, 2) - 1` parked downloads a new
-  one gets its head and its body waits for a worker. lobo 0.1.2, built
-  with wolf 0.2.23, wrote the small body without its proc from
-  `cpus / 2 - 2` downloads on (wolf-lang#570, fixed in 0.2.24).
+  holds that proc. Built with wolf 0.2.29 nothing in lobo or in wolf's
+  runtime limits how many: 900 downloads parked in one process were
+  all being served, at two threads and about 150 KB resident each.
+  The host's limits are what is left, and lobo has no connection limit
+  of its own (`worker_connections` is parsed and not applied):
+  - descriptors: two a parked download (its socket and its file), one
+    an idle connection. When a process runs out (`ulimit -n`), new
+    connections wait unanswered, the control endpoint's included, and
+    nothing is logged; it answers again when a download ends. Measured
+    at a limit of 1,024: 505 downloads served, the next client and
+    `lobo status` unanswered.
+  - threads: past the host's limit a download gets its head and its
+    body waits for an earlier one to end; wolf's runtime writes one
+    line to stderr and nothing stops. Measured at 300 tasks: 145 of
+    200 downloads served, other requests answered.
+  Built with wolf 0.2.24 to 0.2.28 (lobo 0.1.2 and 0.1.3) a process
+  served at most `4·max(cpus, 2) - 1` parked downloads, 15 on 4 cpus;
+  the next got its head and its body waited.
+  Under `memory_budget` a small body runs in a capped proc while fewer
+  than `3·max(cpus, 2) - 2` downloads are parked: 4 on 1 cpu, 10 on 4,
+  46 on 16. Past that it is written without the proc, and the budget
+  still rules it. That margin was sized a quarter under the old limit
+  and is kept as lobo's own: it is what keeps the loop out of a proc's
+  join on a host that has run out of threads.
 - **Kept files.** A regular file of at most 32 KiB that has not
   changed for three seconds is answered from bytes lobo keeps, after
   one `stat` that must match the file's device, inode, size and both
@@ -209,9 +223,9 @@ serve linux aarch64.
   silent every other client of that process waits, up to
   `proxy_read_timeout` (60 s by default). Run more than one worker in
   front of an upstream.
-- **Memory.** Built with wolf 0.2.28 a serving lobo is flat over
-  requests and connections (0 KB over 4,000 keepalive requests and
-  over 2,000 connections in the gate), and so is a master supervising
+- **Memory.** Built with wolf 0.2.28 or 0.2.29 a serving lobo is flat
+  over requests and connections (0 KB over 4,000 keepalive requests
+  and over 2,000 connections in the gate), and so is a master supervising
   idle workers (it grew about 260 KB a minute through 0.1.3). Under
   `memory_budget` the runtime keeps one word for each finished
   response proc (wolf-lang#671).
@@ -223,8 +237,11 @@ serve linux aarch64.
   warns when a later server sets one). A `server_name` regular
   expression never matches. A reload re-routes among the addresses
   bound at start and opens no new one.
-- **An idle lobo is not quiet.** It makes about 1,700 system calls a
-  second with no client, where nginx makes 23 (wolf-lang#710).
+- **An idle lobo is not quiet.** A master and four workers with no
+  client make about 2,100 system calls a second built with wolf
+  0.2.29 (about 1,550 with 0.2.28), where nginx makes 23: each
+  process's wait for a signal reads its pipe every 5 ms
+  (wolf-lang#710).
 - **No binary swap.** `-s reload` re-reads the configuration and
   keeps the running binary; a new lobo is installed by stopping the
   old one and starting the new.
