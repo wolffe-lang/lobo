@@ -648,3 +648,29 @@ instead of on the round.
 - **A hand's pid.** The master's `status` rows carry `pid=` for each
   hand (`os_proc_pid` of its spawn handle), and the pid file holds the
   master's (docs/CONTROL.md).
+
+## ws63 — a master with no `control` directive, and signals by name
+
+- **A master hears signals whether or not it has a control listener.**
+  Through ws62 the master built its wait set, and waited at all, only
+  when the configuration had a `control` directive. Without one it
+  never waited on its signal forwarder: it used a whole core and
+  answered no signal (measured at `af0fa41` with `worker_processes 2`:
+  500 cpu ticks in 5 s idle, nothing after `kill -HUP` or `kill
+  -TERM`; `kasumi:~/lanes/ws63/logs/nomaster-t28.log`,
+  `nomaster-t29.log`). The forwarder's read end is in the wait set
+  either way now: 0 ticks idle, a HUP fans `reload` out to every hand
+  and a TERM stops the tree (`nomaster-wip.log`;
+  `tests/shell/signal_send_e2e.lu` step 3).
+- **`-s` reaches such a master by signal** (docs/CONTROL.md): the pid
+  file holds the master's `os_pid()`, and `lobo -s reload` sends
+  RELOAD to it. The master still tells its hands over their own
+  endpoints, which a hand has with or without the directive; a reply
+  is how the master counts `workers=k/n`.
+- **Meanings are named.** RELOAD, TERMINATE, QUIT and USER (`reopen`,
+  new) are `std.signal`'s functions; the forwarder's teardown probe is
+  UPGRADE, by name. No bit and no host signal number is written in
+  `src/` or `tests/`, and the gauntlet's `signal names` step holds it.
+- **What a parked download costs a hand** (README, Limits): since wolf
+  0.2.29 a hand serves as many as its descriptors and the host's
+  threads allow, where it stopped at `4·max(cpus, 2) - 1`.
