@@ -4698,7 +4698,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
 
     var running = true
     var quitting = false
-    // the wait set, built once (it was two lists a pass)
+    // the wait set, built once (it was two lists a pass). ws63: the
+    // forwarder's read end is in it with or without a control
+    // listener. Through ws62 it was added only under `have_ctrl`, and
+    // the wait below ran only under it too, so a master whose
+    // configuration had no `control` directive never waited: it span a
+    // whole core and heard no signal at all (measured at af0fa41 on
+    // both pins: 500 cpu ticks in 5 s idle, no answer to HUP or TERM).
     var cwf = List[int]()
     if have_ctrl {
         (mut cwf).push(cl)
