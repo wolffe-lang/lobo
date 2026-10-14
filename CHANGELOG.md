@@ -640,14 +640,16 @@ the oracle's measurements and the prediction:
   process then stops accepting for half a second, so the line comes
   about twice a second however many clients wait, and the loop no
   longer spins (0 cpu ticks in 4.5 s at the limit; trunk 293). The
-  clients wait in the kernel's queue and are served when descriptors
-  return, with nothing restarted. A request whose file cannot be
+  clients wait in the kernel's queue (linux; macOS drops the one
+  whose accept failed) and are served when descriptors return, with
+  nothing restarted. A request whose file cannot be
   opened is answered 500 with `[crit] open() "<path>" failed (24: Too
   many open files)`; trunk answered 404.
 - **The control endpoint answers at the limit.** A process holds two
   descriptors in reserve: one is let go for an order's connection
-  when its accept fails, the other while a `reload` or `reopen` reads
-  and opens files. `status`, `reload`, `reopen` and `stop` answer with
+  when the host has none to give (asked before the accept: macOS
+  drops a connection whose accept failed), the other while a `reload`
+  or `reopen` reads and opens files. `status`, `reload`, `reopen` and `stop` answer with
   the process out of descriptors, over the endpoint and by signal,
   for one process and for a master's fan-out to its hands. At trunk
   `lobo status` got no reply (`tests/shell/control_exhausted_e2e.lu`,

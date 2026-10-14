@@ -169,6 +169,11 @@ Three deltas from nginx's lines, each named:
   open succeeds because a descriptor came back in between, the line
   is `accept() failed` with no number rather than a guessed one.
 
+What becomes of a connection whose accept failed is the host's and
+is the same under either server: linux leaves it in the listener's
+queue, macOS drops it (`tools/lobo-shell` prints both servers' client
+lines there instead of comparing them digit for digit).
+
 nginx prints the start warning only when `error_log`'s level admits
 a `warn` (its default level is `error`, so a default configuration
 prints nothing); lobo's stderr carries every line whatever the level,

@@ -244,10 +244,15 @@ A serving process now holds two descriptors it does not use
 (`/dev/null`, or the configuration file where the host has no such
 device; a start that could open neither says so at `warn`):
 
-- when the control accept fails, the first is closed and the accept
-  is tried again, so the order's connection takes its place. The
-  order is answered, its connection is closed, and the reserve is
-  taken back before a client can take the descriptor;
+- before a control accept, lobo asks the host for a descriptor and
+  gives it straight back. When there is none, the first reserve is
+  closed and the order's connection takes its place. The order is
+  answered, its connection is closed, and the reserve is taken back
+  before a client can take the descriptor. The question comes before
+  the accept because what a failed accept costs is the host's: linux
+  leaves the connection queued to be taken again, and macOS drops it
+  (measured in CI: with the reserve let go only after the failure,
+  `status` got no reply there);
 - a `reload` or a `reopen` is given the second while it runs (a
   reload reads the configuration and its certificates one file at a
   time; both open log files). It is taken back at the next pass, or

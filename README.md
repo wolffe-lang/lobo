@@ -206,9 +206,10 @@ serve linux aarch64.
   descriptors lobo does what nginx does:
   - it stops accepting for half a second at a time and logs `[crit]
     accept() failed (24: Too many open files)` each time, so about
-    two lines a second however many clients wait. They wait in the
-    kernel's queue and are served when descriptors return; nothing is
-    restarted;
+    two lines a second however many clients wait. On linux they wait
+    in the kernel's queue and are served when descriptors return;
+    macOS drops a connection whose accept failed, one each half
+    second, and the rest wait. Nothing is restarted;
   - a request whose file cannot be opened is answered 500 (never 404)
     and logged, `[crit] open() "<path>" failed (24: Too many open
     files)`;
