@@ -22,18 +22,24 @@ lobo -s stop -c conf/lobo.conf
 `lobo -v` prints the version and the compiler that built it:
 
 ```
-lobo version: lobo/0.1.3 (built with wolf 0.2.27, pin 0ddda6b)
+lobo version: lobo/0.1.4 (built with wolf 0.2.29, pin 6ffe7c6)
 ```
 
-> **Version 0.1.3.** Static serving, reverse proxy, TLS, ACME, prefork
+> **Version 0.1.4.** Static serving, reverse proxy, TLS, ACME, prefork
 > workers, reload with connection draining, structured logs and a
 > control socket all work and are tested. It has not carried anyone's
 > production traffic. Please file what breaks.
 >
-> **0.1.2 and earlier: upgrade.** One unauthenticated request whose
-> bytes split a UTF-8 scalar can end a worker there, and with
-> `worker_processes 1` the server stops. 0.1.3 answers it with 400.
-> [`CHANGELOG.md`](CHANGELOG.md) has the upgrade steps.
+> **Upgrade from 0.1.3 or earlier.** Two faults a client or operator
+> could trip are fixed in 0.1.4, both measured on the released
+> binaries: a process at its descriptor limit could be ended by a
+> client (0.1.2 and 0.1.3), and a master with `worker_processes` above
+> 1 and no `control` directive spun a cpu and ignored HUP and TERM
+> (0.1.1 to 0.1.3). 0.1.4 also applies `worker_connections` for the
+> first time — **a site that served more than about 510 connections a
+> process must set it** (the stock config's 1024 gives about 1,022).
+> [`CHANGELOG.md`](CHANGELOG.md) has the upgrade steps and the affected
+> versions.
 
 ## Why another web server
 
