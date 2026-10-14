@@ -257,6 +257,41 @@ says otherwise.
 | the plant red at `control_exhausted_e2e.lu` only | see the PR |
 | **not predicted** | with two hands, a hand that is full can win the race for a connection its sibling had room for and close it: 28 of the first 29 downloads served at `worker_connections 16`, where the oracle served the first 28 (`mw-mw-dl16.log`). The total is nginx's; which connection is refused is not |
 
+### After the first CI run: macOS
+
+The first run at `5434d7b` (38485476872) was green on linux (the
+gauntlet's own lines: `lobo-gauntlet: GREEN`, 364 of 364) and **red
+on macOS** at `tests/shell/control_exhausted_e2e.lu`, both lanes,
+line 230: out of descriptors, `status` got no reply. Every other new
+test passed there (362 of 364).
+
+- **What it was.** As first written, lobo let the reserve go AFTER
+  the control accept failed and then accepted again. On linux the
+  connection whose accept failed is still in the listener's queue. On
+  macOS it is not: the order's connection was gone, so the client got
+  no reply, and the second accept, on a listener with no budget armed,
+  parked the loop until the next control connection. This is read
+  from the test's behaviour on the two hosts, not from any kernel's
+  source; the mechanism inside macOS was not looked at.
+- **The fix** (`0dfcf44`): before a control accept lobo asks the host
+  for a descriptor (an open of `/dev/null`, given straight back) and
+  lets the reserve go first when there is none. The fail-then-retry
+  path stays as a backstop and asks the listener with a zero deadline
+  before it accepts, so the loop never parks in an accept.
+- **What it means for clients** on macOS: a connection whose accept
+  failed is dropped by the host, one each half second, under lobo and
+  under nginx alike. `tools/lobo-shell`'s exhaustion row prints both
+  servers' client lines there and holds them to what is the server's
+  (`cc1a5cf`); the e2e prints how many idle connections the host
+  closed (0 of 100 on linux).
+- **The plant.** The first planted run (38485484306, `94f2b2b`) was
+  red on both hosts at the same line, and on macOS that proves
+  nothing: the head was red there too. The plant was made again on
+  the fixed head and run again; its runs are in the PR.
+- **This is the prediction's own "what would make this wrong"**, the
+  macOS line, though not the cause it guessed (the child-shell limit
+  read and kqueue's set, which both passed).
+
 ## 4. Evidence index
 
 kasumi `~/lanes/ws64/`: `toolchains.txt`, `dl/digest-check.txt` (each
@@ -270,8 +305,10 @@ EMFILE`), `logs/st-head-start.out`; the head at its limits, `logs/lb-d-*.log`,
 commit formatting, building and passing its own tests,
 `logs/eachcommit.log`; the gauntlets, `logs/g-w1.log` (the tree
 before it was committed: GREEN, exit 0, 0 SKIP, 933 s under `taskset
--c 0-3`) and `logs/g-head.log` (commit `7ba7ac9` in a clean worktree,
-the head but for this section); `logs/par-k1.log` (the refused set and
+-c 0-3`) and `logs/g-head.log` (commit `7ba7ac9` in a clean worktree)
+(GREEN, exit 0, 0 SKIP) and `logs/g-head2.log` (commit `df5b02a`,
+after the macOS fix, the head but for this file: running as this is
+written, its verdict is in the PR); `logs/par-k1.log` (the refused set and
 the two resident-size lines). The plant: branch `ws64-plant`, its CI
 run named in the PR.
 
