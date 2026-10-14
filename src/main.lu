@@ -2451,6 +2451,21 @@ fn serve_main(
                     var cc = -1
                     var denied = false
                     if have_ctrl && ready_has(ready, cl) {
+                        // ws64 (lobo#84): IS THERE A DESCRIPTOR FOR THE ORDER'S
+                        // CONNECTION? Asked BEFORE the accept, because what a
+                        // failed accept costs is the host's: linux leaves the
+                        // connection in the queue to be taken again, and macOS
+                        // drops it (measured in CI: with the reserve let go
+                        // only AFTER the failure, `status` got no reply there
+                        // and this loop parked in the second accept). So when
+                        // the host has no descriptor to give, the reserve is
+                        // let go first and the order's connection takes its
+                        // place; it is taken back when the order is answered
+                        // and closed. Two file calls an order; orders are rare.
+                        if rsv_a >= 0 && !descriptor_free() {
+                            fs_close(rsv_a) else |_| {}
+                            rsv_a = -1
+                        }
                         var got_ctrl = true
                         var ctl_io = false
                         var cand = net_accept(cl) else |e| match e {
@@ -2464,21 +2479,29 @@ fn serve_main(
                                 0
                             },
                         }
-                        // ws64 (lobo#84): the host refused the accept — out
-                        // of descriptors. The reserve is let go and the
-                        // order's connection takes its place; it is taken
-                        // back when the order is answered and closed. With
-                        // no reserve to give, the endpoint sits out and the
-                        // failure is logged as a listener's is.
+                        // the backstop, for a descriptor that went between the
+                        // question and the accept: let the reserve go now, and
+                        // take the connection only if the host still has it
+                        // queued (a zero-deadline ask: this loop never parks
+                        // in an accept)
                         if ctl_io && rsv_a >= 0 {
                             fs_close(rsv_a) else |_| {}
                             rsv_a = -1
-                            got_ctrl = true
-                            cand = net_accept(cl) else |_| {
-                                got_ctrl = false
-                                0
+                            var cprobe = List[int]()
+                            (mut cprobe).push(cl)
+                            let still = net_wait(cprobe, 0) else |_| {
+                                List[int]()
+                            }
+                            if still.len > 0 {
+                                got_ctrl = true
+                                cand = net_accept(cl) else |_| {
+                                    got_ctrl = false
+                                    0
+                                }
                             }
                         }
+                        // with no reserve to give, the endpoint sits out and
+                        // the failure is logged as a listener's is
                         if ctl_io && !got_ctrl {
                             ctl_off = now + accept_pause_ms()
                             let why = descriptor_reason()
@@ -4208,6 +4231,23 @@ fn reserve_take(conf_path: str) -> int {
         return b
     }
     -1
+}
+
+/// ws64 (lobo#84): whether the host has a descriptor to give right
+/// now — one is asked for and given straight back. The question the
+/// control accept asks before it accepts. A host with no `/dev/null`
+/// answers no every time, which costs the reserve a round trip an
+/// order and nothing else. fs tier. Total.
+fn descriptor_free() -> bool {
+    var got = true
+    let p = fs_open("/dev/null") else |_| {
+        got = false
+        -1
+    }
+    if got {
+        fs_close(p) else |_| {}
+    }
+    got
 }
 
 /// ws64 (lobo#84): WHY the host refused a descriptor just now, as

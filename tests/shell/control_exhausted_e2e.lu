@@ -11,7 +11,9 @@
 //!      accept fails; the connection waits in the kernel's queue, as
 //!      nginx's does). Then, while it is out of descriptors:
 //!        * `status` answers inside 1000 ms — lobo holds a descriptor
-//!          in reserve and lets it go for the order's connection;
+//!          in reserve and lets it go for the order's connection,
+//!          BEFORE the accept (a failed accept leaves the connection
+//!          queued on linux and drops it on macOS);
 //!        * the failure is LOGGED, nginx's line, at nginx's rate:
 //!          `[crit] accept() failed (24: Too many open files)`, the
 //!          process sitting out half a second after each, so the
@@ -141,6 +143,38 @@ fn put_down(h: int) {
     }
 }
 
+/// Print what the server wrote last (its final `n` lines), so a
+/// failure's record carries it: an assert's own message is not in the
+/// record (wolf-lang#150). Total.
+fn tail_out(path: str, n: int) {
+    let t = fs_read_text(path) else |_| { "" }
+    var all = List[str]()
+    for line in t.lines() {
+        (mut all).push(line)
+    }
+    var i = if all.len > n { all.len - n } else { 0 }
+    while i < all.len {
+        print("server: {all[i]}")
+        i = i + 1
+    }
+}
+
+/// How many of `cs` the server has closed. Total.
+fn dropped(cs: List[int]) -> int {
+    var n: int = 0
+    for c in cs {
+        var one = List[int]()
+        (mut one).push(c)
+        let ready = net_wait(one, 0) else |_| {
+            List[int]()
+        }
+        if ready.len > 0 {
+            n = n + 1
+        }
+    }
+    n
+}
+
 fn close_all(cs: List[int]) {
     for c in cs {
         net_close(c) else |_| {}
@@ -224,7 +258,10 @@ fn main() -> !int {
         )
     }
     let s1 = ask_status(ep)
+    print("status while out of descriptors: {s1.1} ms, {s1.0.len} bytes")
     if !s1.0.contains("current generation: 1") || s1.1 > 1000 {
+        print("reply: [{s1.0}]; the endpoint answers a ping now: {shell.control_alive(ep)}")
+        tail_out(so_p, 12)
         close_all(idle)
         put_down(h)
         assert(
@@ -232,8 +269,8 @@ fn main() -> !int {
             "out of descriptors, `status` answers inside 1000 ms: {s1.1} ms, reply [{s1.0}] (trunk: no reply — the control accept fails with the rest)",
         )
     }
-    print("status answered in {s1.1} ms while out of descriptors")
     if !wait_line(so_p, crit) {
+        tail_out(so_p, 12)
         close_all(idle)
         put_down(h)
         assert(false, "the failed accept is logged: {crit} (trunk: nothing)")
@@ -242,6 +279,8 @@ fn main() -> !int {
     // second reserve
     let rl = shell.control_fetch(ep, "reload") else |_| { "" }
     if !rl.contains("reload complete (generation 2)") {
+        print("reload: [{rl}]")
+        tail_out(so_p, 12)
         close_all(idle)
         put_down(h)
         assert(false, "out of descriptors, `reload` takes: [{rl}]")
@@ -261,7 +300,11 @@ fn main() -> !int {
             "the [crit] line comes about twice a second: {lines} lines in {span} ms (at most {most})",
         )
     }
-    print("{lines} accept-failure lines in {span} ms")
+    // what a failed accept costs the connection it could not take is
+    // the host's (linux keeps it queued; macOS drops it): reported
+    print(
+        "{lines} accept-failure lines in {span} ms; {dropped(idle)} of {idle.len} idle connections closed by the host meanwhile",
+    )
     // recovery: the connections close, the queue is served
     close_all(idle)
     var back = false
@@ -282,6 +325,8 @@ fn main() -> !int {
     time_sleep_ms(1500)
     let s2 = ask_status(ep)
     if !s2.0.contains("current generation: 2") || s2.1 > 1000 {
+        print("status with downloads parked: {s2.1} ms, reply [{s2.0}]")
+        tail_out(so_p, 12)
         close_all(dl)
         put_down(h)
         assert(
@@ -312,6 +357,8 @@ fn main() -> !int {
     let st = shell.control_fetch(ep, "stop") else |_| { "" }
     close_all(idle3)
     if !st.contains("stop") {
+        print("stop: [{st}]")
+        tail_out(so_p, 12)
         put_down(h)
         assert(false, "out of descriptors, `stop` is answered: [{st}]")
     }
