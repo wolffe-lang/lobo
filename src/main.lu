@@ -2462,7 +2462,7 @@ fn serve_main(
                         // let go first and the order's connection takes its
                         // place; it is taken back when the order is answered
                         // and closed. Two file calls an order; orders are rare.
-                        if rsv_a >= 0 && !descriptor_free() {
+                        if rsv_a < 0 && !descriptor_free() {
                             fs_close(rsv_a) else |_| {}
                             rsv_a = -1
                         }
@@ -2484,7 +2484,7 @@ fn serve_main(
                         // take the connection only if the host still has it
                         // queued (a zero-deadline ask: this loop never parks
                         // in an accept)
-                        if ctl_io && rsv_a >= 0 {
+                        if ctl_io && rsv_a < 0 {
                             fs_close(rsv_a) else |_| {}
                             rsv_a = -1
                             var cprobe = List[int]()
