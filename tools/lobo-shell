@@ -385,8 +385,26 @@ if [ "$lim_ready" = 1 ]; then
     zeros=$(printf '%0100d' 0)
     want="climit mode=idle n=100 map=$zeros held=none after=200"
     ok=1
-    [ "$ng_line" = "$want" ] && [ "$lb_line" = "$want" ] && ok=0
-    lim_row "out of descriptors, 100 idle connections" "$ok" "both leave the newcomer unanswered in the queue, close nobody, and serve again when descriptors return"
+    if [ "$(uname -s)" = Darwin ]; then
+        # What a failed accept costs the connection it could not take
+        # is the HOST's, not the server's: linux leaves it in the queue
+        # (the line above, digit for digit), and macOS drops it (ws64,
+        # measured in CI: the control endpoint lost its order that
+        # way). There the connections past the limit go one a failed
+        # accept, at each server's own half-second beat, so the two
+        # lines are printed and held only to the part that is the
+        # server's: nothing answered while out of descriptors, and
+        # service again when they return.
+        echo "lobo-shell: [out of descriptors, on macOS] oracle: $ng_line"
+        echo "lobo-shell: [out of descriptors, on macOS] lobo:   $lb_line"
+        case "$ng_line" in *" held=none after=200" | *" held=closed after=200")
+            case "$lb_line" in *" held=none after=200" | *" held=closed after=200") ok=0 ;; esac ;;
+        esac
+        lim_row "out of descriptors, 100 idle connections" "$ok" "neither answers a newcomer while out of descriptors and both serve again when descriptors return (macOS drops a connection whose accept failed, so the clients' lines are printed, not compared digit for digit)"
+    else
+        [ "$ng_line" = "$want" ] && [ "$lb_line" = "$want" ] && ok=0
+        lim_row "out of descriptors, 100 idle connections" "$ok" "both leave the newcomer unanswered in the queue, close nobody, and serve again when descriptors return"
+    fi
     ngc=$(lim_count ng c '\[crit\] .*accept4\{0,1\}() failed (24: Too many open files)')
     lbc=$(lim_count lb c '\[crit\] accept() failed (24: Too many open files)')
     ok=1
