@@ -216,13 +216,16 @@ built with wolf 0.2.29:
 
 | measured | connection-per-request | keepalive |
 |---|---|---|
+| a GitHub hosted runner, 4 vcpus (ws65, the release tree against 0.1.3's, run 38503723305) | **1.034x** | **0.920x** |
 | a GitHub hosted runner, 4 vcpus (ws64, run 38495258325) | **1.048x** | **0.938x** |
 | a GitHub hosted runner, 4 vcpus (ws63, run 38352428270) | **1.016x** | **0.916x** |
 | kasumi, 4 of 16 cpus under taskset (ws63) | 1.019x | 1.002x |
 
-Both runner rows are inside the bar and on keepalive lobo answers more
-requests than nginx. The ws65 release smoke measured 0.1.4 ÷ 0.1.3 on
-one VM; see `docs/PARITY.md`. Not re-measured: any host at more than
+Every runner row is inside the bar and on keepalive lobo answers more
+requests than nginx. On the release VM, 0.1.4 answered 1.009x the
+requests 0.1.3 did with a connection per request and 0.992x on
+keepalive — the release changes correctness and operability, not
+throughput (`docs/PARITY.md`). Not re-measured: any host at more than
 four workers, and macOS since 2026-10-02 (1.031x / 1.037x, wolf
 0.2.20).
 
