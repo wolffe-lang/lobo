@@ -1,5 +1,277 @@
 # Changelog
 
+## 0.1.4 — 2026-10-14 — a process at its descriptor limit no longer ends; a master with no `control` directive hears its signals; `worker_connections` is applied; built with wolf 0.2.29
+
+The fifth release, and a security release: read the first section and
+upgrade. Two faults that a client or an operator could trip are fixed,
+`worker_connections` is now enforced (an operator must check this),
+every `server` block is served, and the binary is built with wolf
+0.2.29. The command line and the configuration format are 0.1.3's.
+
+### Security
+
+Two faults are fixed; both reach a default build. The affected
+versions below were measured by running the released binaries, not
+read from the code.
+
+**A process at its descriptor limit could be ended by a client.**
+A lobo process that reached its open-file-descriptor limit and then
+had to start streaming a large download for the first time ended:
+wolf's runtime builds its readiness set at the first task it parks,
+and with no descriptor to spare that build aborts the process. A
+client that drives a process to its descriptor limit — opening
+connections, or holding slow downloads — and then asks for a download
+could end it, without authenticating. With `worker_processes 1` the
+server stops; with more, the master starts a replacement and that
+worker's other connections are dropped. Running the released linux
+binaries, **0.1.2 and 0.1.3 end this way; 0.1.1 and 0.1.0 do not**
+(they write a body inside the serving loop and never park a download,
+so the readiness set is built at startup). 0.1.4 builds the readiness
+set once at startup, logs `[crit] accept() failed` or `[crit] open()
+… failed` at its limit, keeps serving and recovers when descriptors
+return. **What to do:** upgrade to 0.1.4; a reload is not enough, the
+process must be replaced. Setting a generous `worker_rlimit_nofile`-
+equivalent limit (`ulimit -n`, systemd `LimitNOFILE=`) before the
+process can reach it reduces the exposure on 0.1.2/0.1.3 but does not
+remove it.
+
+**A master with `worker_processes` above 1 and no `control` directive
+spun a cpu and ignored HUP and TERM.** Such a master waited on an
+empty descriptor set, so it used most of a core while idle and never
+noticed its signal pipe: `kill -HUP` did not reload it and `kill
+-TERM` did not stop it (it had to be killed with `-KILL`, and its
+workers by hand). Running the released linux binaries, **0.1.3, 0.1.2
+and 0.1.1 behave this way; 0.1.0 spins idle in the same configuration
+but still answers both signals.** A `control` directive avoids it
+entirely on every version (the stock `conf/lobo.conf` has one, so a
+site that kept it is unaffected). 0.1.4's master waits on its signal
+pipe with or without a `control` endpoint: it is idle-quiet and
+answers HUP and TERM. **What to do:** if you run `worker_processes`
+above 1 with no `control` directive, upgrade to 0.1.4, or add a
+`control` directive; `-s stop`/`-s reload` by signal still work on
+0.1.4 with no `control` directive.
+
+The public security issues are filed after the release.
+
+### Upgrading from 0.1.3
+
+**`worker_connections` is now applied. Check it before you upgrade a
+busy site.** Through 0.1.3 the directive was parsed and ignored, so a
+process answered as many connections as its descriptors allowed. From
+0.1.4 a process holds at most `worker_connections` connections,
+counting its listening sockets and one more, as nginx counts them:
+the default 512 is about 510 clients a process with one `listen`
+(`worker_processes 4` serves four times that). The stock
+`conf/lobo.conf` sets `worker_connections 1024` and always has, so a
+site that started from it has about 1,022 a process. **A site that
+served more connections a process than its `worker_connections` value
+allows must raise the value**, or lobo will start closing idle
+connections to make room (`[warn] … worker_connections are not enough,
+reusing connections`) and, with none idle, accept-and-close new ones
+(`[alert] … worker_connections are not enough`), as nginx does.
+
+Two smaller changes an operator may notice:
+
+- `-t` and the start now refuse a `worker_connections` that nginx
+  refuses, in nginx's words: a non-number (`invalid number "x"`), a
+  duplicate (`"worker_connections" directive is duplicate`), and a
+  value smaller than the listening sockets need (`N
+  worker_connections are not enough for L listening sockets`). 0.1.3
+  accepted `0`, `x` and `1k`. A reload carrying such a value is
+  rejected and the running generation kept.
+- A request whose file cannot be opened because the process is out of
+  descriptors is now answered `500` (it was `404`), logged `[crit]
+  open() "<path>" failed (24: Too many open files)`.
+
+Then the upgrade itself:
+
+1. Install 0.1.4 (below) or unpack the archive over a copy of your
+   prefix. `lobo -v` must print `lobo/0.1.4`.
+2. Test your configuration with the new binary: `lobo -t -c
+   conf/lobo.conf`. No directive was removed or renamed, and every
+   configuration tried loads the same on both versions, except where
+   0.1.4 now refuses a `worker_connections` value 0.1.3 accepted
+   (above).
+3. Stop the old server and start the new one: `lobo -s stop -c
+   conf/lobo.conf`, then `lobo -c conf/lobo.conf serve`. A reload is
+   not enough: `-s reload` re-reads the configuration in the running
+   master and keeps the running binary. lobo has no binary-swap verb
+   (`lobo control upgrade` says it is not implemented and exits 1).
+
+Measured on linux x86-64 with 0.1.3's published binary and the
+release workflow's 0.1.4 binary, the stock configuration, and the
+start issued as soon as the stop returned, a client asking every
+20 ms: the listener is closed between the two commands, so a slower
+start is a longer gap in which connections are refused. What a request
+in flight sees at the stop was not measured.
+
+Every configuration 0.1.3 shipped or tested that loaded on 0.1.3
+loaded the same on 0.1.4 except any whose `worker_connections` 0.1.4
+refuses (above); those gave the same refusal nginx gives.
+
+### Install
+
+```sh
+brew install wolffe-lang/wolf/lobo     # macOS arm64
+yay -S lobo-bin                        # Arch x86-64
+```
+
+or download the archive for your host, unpack it, and run it in place:
+
+```sh
+tar -xzf lobo-0.1.4-x86_64-unknown-linux-gnu.tar.gz   # macOS: lobo-0.1.4-aarch64-apple-darwin
+cd lobo-0.1.4-x86_64-unknown-linux-gnu
+./lobo -v
+./lobo -t -c conf/lobo.conf
+./lobo -c conf/lobo.conf serve      # then: curl -i http://127.0.0.1:8080/
+```
+
+`GETTING-STARTED.md` in the archive is the learner path. The release
+workflow's last job downloads the published archive with no
+credentials on a clean runner, checks its digest, runs `lobo -v`,
+serves the stock page and compares the bytes.
+
+### `lobo -v`
+
+```
+lobo version: lobo/0.1.4 (built with wolf 0.2.29, pin 6ffe7c6)
+```
+
+`wolf-toolchain.toml` pins wolf 0.2.29 (`6ffe7c6`), lupin 0.1.52
+(`025428b`) and wolf-std `9e5bd6b`; the release workflow builds that
+toolchain from source on each host, and the archive's `BUILD` file
+records it.
+
+### What changed since 0.1.3
+
+- **A process at its descriptor limit keeps serving and no longer
+  ends** (ws64, lobo#84/#87). See Security above. The readiness set is
+  built once at startup. Out of descriptors, lobo does what nginx
+  does: a failed accept logs `[crit] accept() failed (24: Too many
+  open files)` and the process sits out half a second (so the line
+  comes about twice a second however many clients wait, with no cpu
+  spin), the waiting connections sit in the kernel's queue (linux) and
+  are served when descriptors return; a request whose file cannot be
+  opened is answered 500; the control endpoint still answers (`lobo
+  status`, `-s reload`, `-s stop`), because two descriptors are held
+  in reserve. `tests/shell/control_exhausted_e2e.lu` and
+  `tests/serve/worker_connections_e2e.lu` hold this against a live
+  lobo, red at 0.1.3.
+- **`worker_connections` is applied** (ws64, lobo#84). See Upgrading
+  above: default 512, nginx's rule to the connection (closing idle
+  ones least-recently-used first, an eighth at a time, with nginx's
+  `[warn]`; accepting and closing with nginx's `[alert]` when none is
+  idle), fitted on sixteen runs of the pinned nginx and checked
+  against a live lobo. `worker_rlimit_nofile` stays refused by name
+  (wolf cannot set a resource limit); its reason line says where to
+  set the limit.
+- **A master with no `control` directive hears its signals** (ws63,
+  lobo#85). See Security above. The master waits on its signal pipe
+  whether or not a `control` endpoint is configured: idle-quiet, and
+  `kill -HUP`/`-TERM` reach it and fan out to its workers.
+- **`-s` reaches a lobo with no `control` directive, by signal**
+  (ws63). `lobo -s stop|quit|reload|reopen` sends the verb's signal to
+  the pid in the pid file, as nginx's does, and exits 0; 0.1.3 refused
+  and exited 1. A stale pid and a pid file with no pid are nginx's two
+  diagnostics. `SIGUSR1` reopens the logs. With a `control` directive
+  the endpoint is still used; `status` and `control <verb>` need it.
+- **No ceiling on downloads parked on slow clients** (ws63; wolf's
+  s231, wolf-lang#713). Built with wolf 0.2.24 to 0.2.28 (lobo 0.1.2
+  and 0.1.3) a process streamed at most `4·max(cpus, 2) - 1` downloads
+  beside the loop (15 on 4 cpus); the next got its head and its body
+  waited. Built with wolf 0.2.29 the runtime grows its pool a worker
+  per parked task, so what bounds a process is descriptors, threads
+  and memory (about two descriptors, two threads and 150 KB a parked
+  download). 900 were served in one process.
+- **Every `server` block is served** (ws62, px25). Through 0.1.3 lobo
+  bound the first plaintext and the first TLS `listen` of the whole
+  configuration and routed every request in the first server. Now
+  every distinct `listen` of every server binds, and a request is
+  routed in the server nginx would choose (the address it arrived on,
+  then exact / leading-wildcard / trailing-wildcard `server_name`,
+  then that address's `default_server`, else the first server there).
+  Still read from the first server only, each warned at `-t`:
+  `client_max_body_size`, `large_client_header_buffers`,
+  `memory_budget`, `tcp_nodelay`, `access_log`, `metrics` (lobo#82); a
+  regex `server_name` never matches; a reload opens no new address.
+- **A replaced worker starts at its master's generation** (ws62,
+  px25). 0.1.3 brought a replacement back at generation 1.
+- **The master's memory is flat** (ws62, px25). Four idle workers over
+  five minutes grew about 260 KB a minute through 0.1.3; 0 now.
+- **The pid file holds the pid** (ws62/ws63, px25, wolf-lang#126):
+  `<pid>\n`, so `kill -HUP "$(cat logs/lobo.pid)"` works. 0.1.3's
+  file held only the control endpoint. 0.1.4 reads both its own and
+  0.1.3's file.
+- **Built with wolf 0.2.29** (ws62, ws63; 0.1.3 was built with
+  0.2.27). lupin 0.1.52; wolf-std moves `14f0ab2` → `9e5bd6b` for
+  `std.signal`.
+
+### Against nginx
+
+`docs/PARITY.md` defines the comparison: nginx ÷ lobo on one machine,
+32 concurrent clients, the median of five interleaved pairs; 1.10 or
+under is parity, and under 1.00 lobo answered more requests than
+nginx. The rows below are at four workers, linux x86-64, nginx 1.30.4,
+built with wolf 0.2.29:
+
+| measured | connection-per-request | keepalive |
+|---|---|---|
+| a GitHub hosted runner, 4 vcpus (ws64, run 38495258325) | **1.048x** | **0.938x** |
+| a GitHub hosted runner, 4 vcpus (ws63, run 38352428270) | **1.016x** | **0.916x** |
+| kasumi, 4 of 16 cpus under taskset (ws63) | 1.019x | 1.002x |
+
+Both runner rows are inside the bar and on keepalive lobo answers more
+requests than nginx. The ws65 release smoke measured 0.1.4 ÷ 0.1.3 on
+one VM; see `docs/PARITY.md`. Not re-measured: any host at more than
+four workers, and macOS since 2026-10-02 (1.031x / 1.037x, wolf
+0.2.20).
+
+### The hosts, and what is still known wrong or limited
+
+| host | archive |
+|---|---|
+| `x86_64-unknown-linux-gnu` | yes |
+| `aarch64-apple-darwin` | yes |
+| `x86_64-pc-windows-msvc` | no: wolf's release tier refuses it by name |
+| `aarch64-unknown-linux-gnu` | no: not built or tested; `tools/lobo-dist` refuses it by name |
+
+- **A proxied request holds its serving process** (lobo#81).
+  `proxy_pass` asks the upstream inside the serving loop, so while one
+  upstream is silent every other client of that process waits, up to
+  `proxy_read_timeout` (60 s by default; the proxied request then
+  answers 504). 0.1.3 behaves the same. Run more than one worker in
+  front of an upstream and set `proxy_read_timeout` to what the
+  upstream needs.
+- **Per-server limits, logs and metrics** (lobo#82). The six
+  directives named under "Every `server` block is served" are still
+  read from the first server only; a regex `server_name` never
+  matches; a reload binds no new listener.
+- **Limits follow-ups** (lobo#87). The master holds no descriptor
+  reserve of its own; with two workers a full one can win a connection
+  its sibling had room for; `/metrics` has no counters for refused or
+  evicted connections or accept failures; TLS listeners at the two
+  limits were not driven.
+- **An idle lobo is not quiet.** A master and four workers with no
+  client make about 2,100 system calls a second (nginx 23): each
+  process's wait for a signal reads its pipe every 5 ms
+  (wolf-lang#710).
+- **Memory that is the runtime's.** Under `memory_budget` the runtime
+  keeps one word for each finished response proc (wolf-lang#671).
+- **Kept files** lean on the filesystem's clock matching the host's,
+  a status-change time, and files published by rename; one rewritten
+  through a shared `mmap` can be answered from bytes as old as the
+  kernel's writeback interval.
+- **Known issues.** The serving loop can stop accepting its control
+  socket after a burst of closes on a loaded host (lobo#72): seen once
+  in 40 runs, not reproduced in 300 loaded rounds since, not located.
+  lobo still spends about 2,300 more user instructions a request than
+  nginx (lobo#68).
+- A range starting at byte N reads and drops N bytes first. Under
+  `memory_budget` a `Range` is ignored. An `If-Range` date in RFC 850
+  or asctime form is not parsed.
+- The 25 directives refused by name are listed in
+  `docs/directives.md`.
+
 ## 0.1.3 — 2026-10-11 — a request that could end a worker now answers 400; memory stays flat; inside ten percent of nginx on linux; built with wolf 0.2.27
 
 The fourth release, and a security release: read the first section
