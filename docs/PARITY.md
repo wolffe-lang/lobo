@@ -169,6 +169,33 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-14 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws65: the 0.1.4 release tree against 0.1.3's, TWO trees on one VM · **VALID** · close **MET** (1.034x), keepalive **MET** (0.920x); 0.1.4 ÷ 0.1.3 **1.009x / 0.992x**
+
+The release's own measurement. This side is the 0.1.4 release tree
+(`842e558`: trunk `f9fea55` with the version sites moved), built with
+wolf 0.2.29; the reference is the `v0.1.3` tag (`d6bd15b`), built with
+the toolchain its own pin file names, wolf 0.2.27, as that release was.
+workflow_dispatch, `parity=true`, `ref_tree=v0.1.3`, run
+**38503723305**, load(1m) 1.56, five interleaved pairs, three fresh
+servers a pair.
+
+| cell | shape | 0.1.4 req/s | 0.1.3 req/s | nginx req/s | nginx ÷ 0.1.4 median [min, max] | nginx ÷ 0.1.3 | **0.1.4 ÷ 0.1.3** median [min, max] |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 24,430 | 24,215 | 25,263 | **1.034x** [1.007, 1.046] | 1.044x [1.022, 1.050] | **1.009x** [1.000, 1.015] |
+| N=4 c=32 | keepalive | 93,087 | 93,801 | 86,115 | **0.920x** [0.910, 0.939] | 0.909x [0.903, 0.951] | **0.992x** [0.980, 1.012] |
+| N=1 c=32 | close | 20,762 | 21,228 | 15,059 | 0.725x [0.722, 0.726] | 0.709x [0.699, 0.714] | 0.979x [0.967, 0.986] |
+| N=1 c=32 | keepalive | 40,803 | 44,605 | 33,925 | 0.843x [0.712, 0.854] | 0.761x [0.711, 0.798] | 0.922x [0.840, 0.999] |
+
+Both shapes are inside the 1.10 bar at four workers, and 0.1.4 answers
+within one percent of 0.1.3 (close 1.009x, keepalive 0.992x): the
+release changes correctness and operability, not throughput. This VM
+was about half ws61's speed (nginx close 25,263 req/s against 48,403),
+so the rows compare within the set only. The packed 0.1.4 binary's RSS
+after 400,000 keepalive requests on kasumi was 4,688 kB against 0.1.3's
+4,488 kB (both flat, growth 0 B/request); the 200 kB is the readiness
+set and the two reserved descriptors 0.1.4 holds from the start
+(`kasumi:~/lanes/ws65/logs/gates.log`).
+
 ### 2026-10-11 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws61: the 0.1.3 release tree against 0.1.2's, TWO trees on one VM · **VALID** · close **MET** (1.020x), keepalive **MET** (0.921x); 0.1.3 ÷ 0.1.2 **1.099x / 1.261x**
 
 The release's own measurement. This side is the 0.1.3 release tree
