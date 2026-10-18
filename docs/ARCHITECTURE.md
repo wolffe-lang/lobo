@@ -80,13 +80,18 @@ streams now is `worker_connections`, applied since ws64 (lobo#84),
 and behind it the host: two descriptors and two threads each (README,
 Limits).
 
-ws64 also moves one thing to the start: the runtime makes its
-readiness set at the first call that parks, and asserts on the
-descriptors it asks for. The loop itself never parks (`net_wait` is a
-poll), so lobo's first park used to be the first stream's first write
-to a slow client, whenever that came; one that came with the process
-at its descriptor limit ended the process. `serve_main` now parks
-once, for a millisecond, on its own pipe before it serves.
+The readiness set is made before `main`. Through wolf 0.2.30 the
+runtime made it at the first call that parked, and asserted on the
+descriptors it asked for. The loop itself never parks (`net_wait` is a
+poll), so lobo's first park was the first stream's first write to a
+slow client, whenever that came; one that came with the process at its
+descriptor limit ended the process (lobo#90). ws64 parked once, for a
+millisecond, on its own pipe before serving. From wolf 0.2.31 (s239,
+`[os.net.reactor]`) the runtime makes the set, and the signal hub,
+before `main` in a program that reaches a park; a host that refuses
+either ends the program before any line of lobo runs, with one line on
+stderr and exit 71. ws66 retired the park (lobo#92;
+`tests/serve/park_at_limit_e2e.lu`, `tests/shell/start_at_limit_e2e.lu`).
 
 ws56 adds two more. The LOOP starts each stream and keeps its proc
 and its file in a slot (lobo#62): a stream parked in a write to a slow
