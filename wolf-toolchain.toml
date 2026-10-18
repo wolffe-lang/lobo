@@ -905,6 +905,20 @@ rev = "0e536e8fb4518eaa798ac426901ab81275db5c9f"
 version_line = "lupin 0.1.54 (wolf-interp, reference interpreter at pin 294d626)"
 
 [std]
+# wolf-std at **d37c911** (ws66, 2026-10-18; sc63: the std wolf 0.2.32's
+# archive bundles, `std/STD-REV` d37c911f…, pinned to 0.2.31 / 0.1.54).
+# Re-derived against 0.2.32 before any source change (B151): trunk's
+# lobo source (d3f4a38) built at 0.2.32 against 9e5bd6b and against
+# d37c911, both tiers, exits 0 with zero diagnostics at
+# --error-limit=0 (kasumi:~/lanes/ws66/logs/build-t32-s9e.log,
+# build-t32-sd3.log). The digests DIFFER this time: of the six files
+# 9e5bd6b -> d37c911 touches (env, fs, os/users, process, signal,
+# term), lobo `use`s `signal`, which gains `wait_fd` and with it
+# `use std.fs` (ruling #82). lobo calls nothing new; the move keeps
+# lobo on the std its compiler ships with, so a reader of `-V` and of
+# the archive sees one tree.
+#
+# (ws63:)
 # wolf-std at **9e5bd6b** (ws63, 2026-10-13; sc60, wolf-std's trunk:
 # std at wolf 0.2.29 / lupin 0.1.52). The pin MOVES for the first time
 # since ws42, for one module: `std.signal`, which names every signal
@@ -1114,4 +1128,4 @@ version_line = "lupin 0.1.54 (wolf-interp, reference interpreter at pin 294d626)
 # WOLF_MIDEND=0" was written at the twentieth measurement. #146 closed
 # 2026-09-15; ws52 took the flip-back at 0.2.24 — see [wolf].)
 repo = "wolffe-lang/wolf-std"
-rev = "9e5bd6b16beeab1708a95c75d43b9926dd95f31e"
+rev = "d37c911f12206c4bf5c8d3281a649bf31da3beef"
