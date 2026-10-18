@@ -160,3 +160,69 @@ One deliverable, five items:
   the at-rest fds would drop to 18 without the park, and the 30
   downloads would end the process at 0.2.32 too.
 - A hub refusal ordered before the set's, or neither line exactly one.
+
+## 3. The prediction against the measurement
+
+Measured on kasumi (16 cpus, load 1–2.6, other lanes beside it), the
+toolchains of §2; logs under `kasumi:~/lanes/ws66/logs/` (digests in §4).
+
+**Held.**
+- The pin: zero diagnostics on both tiers; the gauntlet GREEN at the
+  pin (`4a2b17b`, `g-pin32.log`) with trunk's verdicts: 364/364 corpus
+  lane-runs (trunk at 0.2.29: 364/364, `g-trunk29.log`), `lobo-shell`
+  41 / 40 / 1, membudget 24/24, signal 22/22, 0 SKIP lines; the audit
+  holds with the manifest unchanged.
+- At rest: 20 descriptors, 21 threads at trunk 0.2.29, at the pin and
+  at the head without the park, both tiers (`rest-inputs.log`,
+  `job-head.log`); the set at 3 and 4 at 0.2.32.
+- Red at 0.2.29 without the park: `ulimit -n 32`, 30 downloads, the
+  process ends at the 8th (`epoll_create1 failed`, `reactor.rs:139`),
+  release, dev and release under `taskset -c 0-3` (`job-head.log`).
+  `park_at_limit_e2e` red 3 of 3 on both tiers plain and 2 of 2 under
+  `taskset` (`trials-1.log`, `trials-ts.log`).
+- Green at 0.2.32 without the park: the process stays up, `status`
+  answers, 6 bodies started (s239: 6), 108 `[crit] accept() failed`
+  lines and 12 refused opens, served again 0.45–0.47 s after the
+  clients close; release, dev and both under `taskset`. Of 12 downloads
+  read to the end none is cut (11 whole and one 500 on release, 9 and
+  3 on dev; at 0.2.29 without the park 7 cut at 2.2–2.6 MB, 4 reset,
+  the process gone; with the park at 0.2.29 11 and 1). The two tests
+  green 3 of 3 both tiers and under `taskset`.
+- The start at the limit: exit 71, one line, nothing on stdout, no pid
+  file, at 4 for certain (the set's line).
+- Memory: membudget 24/24 at the head (`g-head2.log`); the master grew
+  0 kB over 60 s of supervision.
+
+**Wrong.**
+- The 71 range is 4–8, not 3–6, and **the hub's line comes first**
+  from 5 to 8 (the set needs two descriptors and comes first; the hub
+  then needs four). At 3 nothing of lobo's or wolf's runs: `setsid`
+  cannot load libc (the harness's, recorded). lobo's own `[emerg]` is
+  9–11, not 7–19, and **it serves from 12**, not 20 (`ladder-trunk.log`,
+  `job-head.log`; the same on release and dev, at the pin with the park
+  and at the head without it).
+- Release text **grew** 2,376 bytes without the park (1,822,199 →
+  1,824,575 at 0.2.32; +336 at 0.2.29), where I predicted a shrink
+  under 1 kB: removing four calls changed what is inlined.
+- The master's resident size at start of the 60 s gate is 4,544 kB at
+  the head against 4,344 at trunk 0.2.29 (4,480 at the pin): +200 kB,
+  outside the ±100 kB I predicted; it stays flat.
+- My first `park_at_limit_e2e` was green at 0.2.29 without the park:
+  it pinged the control endpoint to see the server up and opened the
+  downloads 20 ms apart, and either lets the first park come before the
+  limit. It now waits on the pid file and a bare connect and opens the
+  downloads back to back (both written in the file's header).
+- The macOS plant: the new test did not go red on the runner at 0.2.29
+  without the park; `control_exhausted_e2e` [checked] did, a panic in
+  the runtime (§4). I named macOS as the least certain row.
+
+**Not predicted.**
+- At 0.2.29 a start at 6–14 descriptors writes the pid file, binds
+  the control socket and the listener, and then ends with SIGABRT in
+  the runtime (`eventfd failed` at `reactor.rs:142`, `signal self-pipe
+  failed` at `signal.rs:351`), leaving both behind; at 15 it started
+  and could not be stopped over its endpoint.
+- At 0.2.32 a start that fails at the pid file (limit 11) leaves the
+  control socket it bound, and the next start refuses: `something
+  already exists at "logs/c.sock"`. lobo's own, not the runtime's (for
+  the orchestrator to file).
