@@ -1718,24 +1718,16 @@ fn serve_main(
     }
     let stream_w = stp.0
     let stream_r = stp.1
-    // ws64 (lobo#84): THE READINESS SET IS MADE HERE. The runtime
-    // makes its one readiness set (and that set's wake descriptor) at
-    // the first call that PARKS, and asserts on the descriptors it
-    // asks the host for. Through ws63 lobo's first park was the first
-    // write to a slow client, which could come with the process at its
-    // descriptor limit: measured at `ulimit -n 32`, the ninth slow
-    // download ended the process (`epoll_create1 failed`, a panic that
-    // cannot unwind). One read of 1 ms on a pipe nobody has written to
-    // parks now, while descriptors are plentiful, so nothing a client
-    // does later can be what creates the set. A host that refused the
-    // pipe has no stream procs to park either.
+    // ws66 (lobo#92): the readiness set is the runtime's. From wolf
+    // 0.2.31 (s239, `[os.net.reactor]`) a program that reaches a call
+    // which can park makes its set before `main`, and a host that
+    // refuses it ends the program there: one line on stderr, exit 71,
+    // before any line of lobo runs. So no park can be what asks the
+    // host for the set, and ws64's one parked read at start (lobo#90:
+    // at `ulimit -n 32` the ninth slow download ended the process) is
+    // gone. The stream pipe's read deadline is the loop's own.
     if stream_r >= 0 {
-        net_deadline(stream_r, 1) else |_| {}
-        let _warm = net_read(stream_r, 1) else |_| { "" }
         net_deadline(stream_r, 50) else |_| {}
-    } else if pipe_r >= 0 {
-        net_deadline(pipe_r, 1) else |_| {}
-        let _warm = net_read(pipe_r, 1) else |_| { "" }
     }
     var opts = serve.ServerOpts {
         token: d0.token,
