@@ -226,3 +226,49 @@ toolchains of §2; logs under `kasumi:~/lanes/ws66/logs/` (digests in §4).
   control socket it bound, and the next start refuses: `something
   already exists at "logs/c.sock"`. lobo's own, not the runtime's (for
   the orchestrator to file).
+
+## 4. Evidence index
+
+kasumi logs (`kasumi:~/lanes/ws66/logs/`, sha256 prefixes): toolchains
+`../toolchains.txt` 325f1c30…, `../dl/digest-check.txt` f48f1acc…;
+gauntlets `g-trunk29.log` a142ae25… (trunk at 0.2.29, 364/364),
+`g-pin32.log` 1bc998c0… (the pin `4a2b17b`, 364/364), `g-head2.log`
+553e7cbe… (`748d777`, the head's source, 368/368), each exit 0, 0 SKIP,
+under `taskset`; `rest-inputs.log` 3119b8a5…; `ladder-trunk.log`
+f4bf61f9…; `job-nowa.log` bf890a7f…; `trials-1.log` f5c49c35…,
+`trials-ts.log` be1eca0e…; `job-head.log` 4a8a2e5f… (at rest, 30 and
+12 downloads, the ladder at the head). Client scripts: ws64's
+`lbm.sh` (paths changed) and `climit.py` 741ce30f…, s239's `dlcut.py`
+9ac1560a….
+
+CI:
+- PR run 39170573094 at `feb58e1`: green on both hosts (linux 21 m 30 s,
+  macOS 25 m 56 s). Each log: `wolf 0.2.32 (wolfgang, pin 72de141)`
+  paired with lupin 0.1.54, std `d37c911`, `corpus: 368/368 lane-runs
+  green` (both new tests ok on [native] and [checked]), `lobo-shell: 41
+  probes — 40 parity, 1 named deltas, 0 red`, `lobo-signal: 22/22`,
+  `lobo-membudget: 24/24`, `lobo-gauntlet: GREEN`, 0 SKIP lines.
+- Plant 39168774526 on `ws66-plant` `a6948a5` (trunk's 0.2.29 pin, the
+  park removed, `park_at_limit_e2e`): red on both hosts. linux:
+  `park_at_limit_e2e` [native] and [checked], `control_exhausted_e2e`
+  [checked], `corpus: 363/366`; macOS: `control_exhausted_e2e`
+  [checked] (`thread caused non-unwinding panic`), `corpus: 365/366`.
+- Parity 39170446495 on `ws66-parity` (`99558f7`, the head's source),
+  `ref_tree` trunk `d3f4a38` on the same VM (4 cpus, load 1.28, VALID
+  SET): nginx ÷ ws66 close **1.031x** [0.987, 1.085], keepalive
+  **0.949x** [0.893, 0.955]; ws66 ÷ trunk close 0.993x [0.967, 1.036],
+  keepalive 0.993x [0.962, 1.018] (N=1 informative: 1.007x, 0.990x).
+
+## Not verified
+
+Why the macOS runner's 0.2.29 build survives `park_at_limit_e2e`'s
+shape (seen in CI only; no macOS host here); the start ladder on macOS
+(the start test at 6 is green there); a master with `worker_processes`
+above 1 started at the limit; threads at the limit; windows; PAX.
+
+## 5. Done-when
+
+Branch `ws66`, PR #93 open and unmerged, CI green at its head,
+`wolf/tools/lane-audit.sh lobo ws66 93` run from the org directory.
+lobo#92 is the orchestrator's to close by hand at the merge.
+`ws66-plant` and `ws66-parity` stay on origin as evidence.
