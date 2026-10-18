@@ -224,6 +224,14 @@ serve linux aarch64.
     `reload` or `reopen` reads and opens files, and takes them back.
     `lobo status`, `-s reload` and `-s stop` work with the process at
     its limit.
+  Built with wolf 0.2.31 or later (trunk), a process started with too
+  few descriptors for the runtime's own (its readiness set and signal
+  hub, made before lobo's first line) does not start: one line on stderr, `wolf: the runtime could
+  not make its signal hub (Too many open files (os error 24)); the
+  program did not start` (or `… its readiness set …`), and exit 71.
+  Measured on linux: `ulimit -n` 4 to 8 gives that line; 9 to 11
+  lobo's own `[emerg]` (a socket or the pid file it cannot open) and
+  exit 1; from 12 it serves.
   Through 0.1.3 a process out of descriptors logged nothing, did not
   answer `lobo status`, and kept most of a core busy while it waited; and if
   the first download ever to wait on a slow client came with the
