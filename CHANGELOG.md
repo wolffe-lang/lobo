@@ -883,6 +883,46 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws66 — 2026-10-18 — built with wolf 0.2.32; the park at start retired (lobo#92); a start at the descriptor limit refused in one line
+
+Unreleased (trunk). Contract, inputs and the prediction:
+`notes/ws66-contract.md`.
+
+- **The pin**: wolf 0.2.29 → **0.2.32** (`72de141`), lupin 0.1.52 →
+  **0.1.54** (`0e536e8`), from the release archives by digest; wolf-std
+  `9e5bd6b` → **`d37c911`**, the std 0.2.32's archive bundles. Nothing
+  is refused: both tiers build with zero diagnostics, and none of the
+  eighteen prelude names 0.2.30 and 0.2.31 add is declared here. What
+  the three releases move for lobo: s239 and s243 make the readiness
+  set and the signal hub before `main`, refusing to start with exit 71
+  when the host has no descriptor for them; s245 keeps the runtime's
+  descriptors off 0–2 and decides from what is reached; s237's shift
+  rule finds lobo's shifts all `wrapping`; s233's must-join rule
+  compiles lobo unchanged. lupin 0.1.54 changes no test's lanes.
+- **The park at start is retired** (lobo#92). ws64 parked once at
+  start so that the runtime's readiness set existed before a client
+  could drive the process to its descriptor limit (lobo#90); the
+  runtime makes it before `main` now. `tests/serve/park_at_limit_e2e.lu`
+  holds lobo#90's shape (`ulimit -n 32`, 30 downloads opened back to
+  back, the first thing that parks): built at 0.2.29 without the park
+  the process ends (`epoll_create1 failed`) on both tiers on linux (on
+  the macOS runner that shape did not end it; `control_exhausted_e2e`'s
+  downloads did, a panic in the runtime); with the
+  park at 0.2.29, and without it at 0.2.32, it stays up, `status`
+  answers and it serves again: 6 bodies started, 108 `[crit]
+  accept() failed` lines, and 12 downloads read to the end 12 of 12
+  whole (at 0.2.29 without the park: 1 of 12, the process gone). At
+  rest the process holds 20 descriptors and 21 threads, as before;
+  the release text is 2,376 bytes larger without the park (inlining).
+- **A start at the descriptor limit** (`tests/shell/start_at_limit_e2e.lu`).
+  Measured on linux by limit: 4 gives `wolf: the runtime could not
+  make its readiness set (Too many open files (os error 24)); the
+  program did not start` and exit 71; 5 to 8 the same line for the
+  signal hub; 9 to 11 lobo's own `[emerg]` and exit 1; from 12 it
+  serves. One line, nothing on stdout, no pid file, no socket. Built
+  at 0.2.29 the same tree at 6 to 14 wrote its pid file, bound its
+  sockets and ended with SIGABRT in the runtime.
+
 ## ws64 — 2026-10-13 — `worker_connections` applied; out of descriptors lobo logs, keeps answering its control endpoint and no longer ends (lobo#84)
 
 Unreleased (trunk). Through 0.1.3 `worker_connections` was parsed and
