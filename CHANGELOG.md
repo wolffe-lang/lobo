@@ -910,8 +910,10 @@ Unreleased (trunk). Contract, inputs and the prediction:
   downloads did, a panic in the runtime); with the
   park at 0.2.29, and without it at 0.2.32, it stays up, `status`
   answers and it serves again: 6 bodies started, 108 `[crit]
-  accept() failed` lines, and 12 downloads read to the end 12 of 12
-  whole (at 0.2.29 without the park: 1 of 12, the process gone). At
+  accept() failed` lines; of 12 downloads read to the end none is cut,
+  each a whole 24 MiB body or a 500 for a file it could not open (11
+  and 1 on release, 9 and 3 on dev; at 0.2.29 without the park 7 cut,
+  4 reset, the process gone). At
   rest the process holds 20 descriptors and 21 threads, as before;
   the release text is 2,376 bytes larger without the park (inlining).
 - **A start at the descriptor limit** (`tests/shell/start_at_limit_e2e.lu`).
