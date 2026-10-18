@@ -1,0 +1,267 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! ws66 (lobo#92, lobo#90): A DOWNLOAD THAT PARKS AT THE DESCRIPTOR
+//! LIMIT DOES NOT END THE PROCESS, WITH NOTHING OF LOBO'S DOING IT.
+//! wolf's runtime used to make its one readiness set at the first call
+//! that parked, and asserted on the descriptors it asked the host for:
+//! a lobo whose first park was a write to a slow client with the
+//! process at its limit ended there (`epoll_create1 failed`, a panic
+//! that cannot unwind; lobo 0.1.2 and 0.1.3, lobo#90). ws64 parked once
+//! at start to make the set early. From wolf 0.2.31 (s239,
+//! `[os.net.reactor]`) the runtime makes it before `main`, and ws66
+//! retired lobo's park. This file holds the shape lobo#90 measured,
+//! with the downloads the FIRST thing that parks:
+//!   a lobo at `ulimit -n 32` (the child shell's own limit, nobody
+//!   else's), then 30 clients opened back to back (so the limit comes
+//!   before the first park), each asking for a 24 MiB file and never
+//!   reading; no word to the control endpoint before them (its reply
+//!   may park). While they hang, the process is there, `status`
+//!   answers inside 1000 ms, and once they close a GET is served;
+//!   `stop` is answered and the process exits 0; no `panicked` line.
+//! RED against a lobo built with wolf 0.2.29 without ws64's park (the
+//! process ends at about the eighth download); green with the park at
+//! 0.2.29, and green without it at 0.2.32. Against the real binary
+//! (`LOBO_BIN`, default target/lobo-debug). Loopback only, OS-chosen
+//! ports; the scratch tree is cleared at the START and the end; the
+//! server is stopped over its endpoint, or by its own handle on a
+//! failure path.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// One GET /index.html on a fresh connection: the reply, or "" when
+/// nothing arrived inside `ms`. Total.
+fn fetch(port: int, ms: int) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return ""
+    }
+    net_deadline(c, ms) else |_| {}
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    buf
+}
+
+/// `bin serve -p . -c conf` with its descriptor limit lowered to
+/// `nofile` by a child `/bin/sh` that execs it. -1 when it could not
+/// start. Total.
+fn lobo_limited(bin: str, conf: str, nofile: int, out: int) -> int {
+    var args = List[str]()
+    (mut args).push("-c")
+    (mut args).push("ulimit -n \"$1\" || exit 97; exec \"$2\" serve -p . -c \"$3\"")
+    (mut args).push("sh")
+    (mut args).push("{nofile}")
+    (mut args).push(bin)
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    os_spawn_fds("/bin/sh", args, map) else |_| { -1 }
+}
+
+fn lines_with(path: str, need: str) -> int {
+    let t = fs_read_text(path) else |_| { "" }
+    var n: int = 0
+    for line in t.lines() {
+        if line.contains(need) {
+            n = n + 1
+        }
+    }
+    n
+}
+
+/// End a server this test could not stop the intended way, and reap
+/// it: the handle's own kill, never a pid. Total.
+fn put_down(h: int) {
+    os_kill(h) else |_| {}
+    let _ = os_wait(h) else |_| {
+        0
+    }
+}
+
+/// The server's last `n` lines into this test's record (an assert's
+/// own message is not in the record, wolf-lang#150). Total.
+fn tail_out(path: str, n: int) {
+    let t = fs_read_text(path) else |_| { "" }
+    var all = List[str]()
+    for line in t.lines() {
+        (mut all).push(line)
+    }
+    var i = if all.len > n { all.len - n } else { 0 }
+    while i < all.len {
+        print("server: {all[i]}")
+        i = i + 1
+    }
+}
+
+fn close_all(cs: List[int]) {
+    for c in cs {
+        net_close(c) else |_| {}
+    }
+}
+
+/// How many of `cs` have bytes waiting (a download that began). Total.
+fn begun(cs: List[int]) -> int {
+    var n: int = 0
+    for c in cs {
+        var one = List[int]()
+        (mut one).push(c)
+        let ready = net_wait(one, 0) else |_| {
+            List[int]()
+        }
+        if ready.len > 0 {
+            n = n + 1
+        }
+    }
+    n
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws66_park_at_limit"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    var mk = List[str]()
+    (mut mk).push("/bin/sh")
+    (mut mk).push("-c")
+    (mut mk).push("head -c 25165824 /dev/zero | tr '\\000' w > \"$1\"")
+    (mut mk).push("sh")
+    (mut mk).push("{d}/www/big.bin")
+    let mh = os_spawn(mk)?
+    let mrc = os_wait(mh)?
+    assert(mrc == 0, "the 24 MiB file is written")
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let nofile = 32
+    let n = 30
+
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/lobo.pid;\ncontrol {ep};\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; }}\n}}\n",
+    )?
+    let so_p = "{d}/server.out"
+    let so = fs_create(so_p)?
+    let h = lobo_limited(bin, conf, nofile, so)
+    assert(h >= 0, "the server spawned")
+    // up, without a word to the control endpoint: its reply may park,
+    // and a park before the downloads would make the set early (the
+    // shape lobo#90 needs is the downloads parking first). The pid file
+    // and a listener that completes a connect say the process is up.
+    var up = false
+    var w: int = 0
+    while !up && w < 200 {
+        if fs_exists("{d}/lobo.pid") {
+            let pc = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+            if pc >= 0 {
+                net_close(pc) else |_| {}
+                up = true
+            }
+        }
+        if !up {
+            time_sleep_ms(50)
+        }
+        w = w + 1
+    }
+    if !up {
+        tail_out(so_p, 12)
+        put_down(h)
+        assert(false, "the server never listened on {hp}")
+    }
+    time_sleep_ms(200)
+
+    print("{n} downloads that never read, at a {nofile}-descriptor limit")
+    var dl = List[int]()
+    var k: int = 0
+    while k < n {
+        let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+        if c >= 0 {
+            net_write(
+                c,
+                "GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            ) else |_| {}
+            (mut dl).push(c)
+        }
+        k = k + 1
+    }
+    time_sleep_ms(1500)
+    let t0 = time_unix_ms()
+    let st = shell.control_fetch(ep, "status") else |_| { "" }
+    let ms = time_unix_ms() - t0
+    let started = begun(dl)
+    print("status with {dl.len} downloads hanging: {ms} ms; {started} downloads began")
+    if !st.contains("current generation: 1") || ms > 1000 {
+        print("reply: [{st}]")
+        tail_out(so_p, 12)
+        close_all(dl)
+        put_down(h)
+        assert(
+            false,
+            "with downloads parked at the limit the process is there and `status` answers inside 1000 ms: {ms} ms (lobo without its park at wolf 0.2.29: the process ends)",
+        )
+    }
+    assert(started >= 1, "at least one download began at the limit: {started}")
+    close_all(dl)
+    var back = false
+    let t_back = time_unix_ms()
+    while !back && time_unix_ms() - t_back < 5000 {
+        back = fetch(hp, 1000).contains("small-page")
+    }
+    if !back {
+        tail_out(so_p, 12)
+        put_down(h)
+        assert(false, "with the downloads gone lobo serves again")
+    }
+    print("serving again {time_unix_ms() - t_back} ms after the downloads closed")
+    let stop = shell.control_fetch(ep, "stop") else |_| { "" }
+    if !stop.contains("stop") {
+        print("stop: [{stop}]")
+        tail_out(so_p, 12)
+        put_down(h)
+        assert(false, "`stop` is answered: [{stop}]")
+    }
+    let rc = os_wait(h) else |_| { -1 }
+    fs_close(so) else |_| {}
+    let panics = lines_with(so_p, "panicked")
+    if rc != 0 || panics != 0 {
+        tail_out(so_p, 12)
+    }
+    assert(rc == 0, "the server exits 0 on stop: {rc}")
+    assert(panics == 0, "the runtime never panicked: {panics} lines")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
