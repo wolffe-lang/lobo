@@ -36,6 +36,14 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws66, 2026-10-18, wolf 0.2.32, std `d37c911`: the audit reads net
++179, fs +116, exec +18, env +6 (trunk `d3f4a38` at 0.2.29: net +183,
+fs +115). No capability moves. net loses four calls, the parked read
+at start and its deadline on either pipe (lobo#92; the runtime makes
+the readiness set before `main` now). fs's first site is now
+`std.signal`, which at `d37c911` imports `std.fs` for `signal.wait_fd`
+(ruling #82); lobo calls nothing new.)
+
 (ws64, 2026-10-13, wolf 0.2.29: the audit reads net +182, fs +112,
 exec +18, env +6. No capability moves. New calls, all for lobo#84:
 `fs_read_text("/proc/self/limits")` for the descriptor limit the
