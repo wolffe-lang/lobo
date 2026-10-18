@@ -1,0 +1,110 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws66 (lobo#92): A LOBO STARTED WITH TOO FEW DESCRIPTORS DOES NOT
+//! START, AND SAYS SO IN ONE LINE. From wolf 0.2.31 (s239, s243,
+//! `[os.net.reactor]`, `[os.signal.hub]`) the runtime makes lobo's
+//! readiness set and its signal hub before `main`; a host that refuses
+//! either ends the process before any line of lobo runs: one line on
+//! standard error, `wolf: the runtime could not make its readiness set
+//! (…); the program did not start` (or `… its signal hub …`), exit 71.
+//! Measured at ws66 on linux (`notes/ws66-contract.md` §3): at
+//! `ulimit -n` 4 the set's line, 5–8 the hub's, 9–11 lobo's own
+//! `[emerg]` and exit 1, 12 up. This file starts lobo at a limit of 6
+//! (a child `/bin/sh` lowers its own limit and execs it, nobody else's)
+//! and holds: exit 71; exactly one line in standard output and
+//! standard error together, naming the runtime and that the program
+//! did not start; no pid file and no control socket left behind;
+//! nothing listening on the port. RED against a lobo built with wolf
+//! 0.2.29: at that limit it wrote its pid file, bound its sockets and
+//! ended with SIGABRT (134) in the runtime (`eventfd failed`, `signal
+//! self-pipe failed`). Against the real binary (`LOBO_BIN`, default
+//! target/lobo-debug). Loopback only, an OS-chosen port; the scratch
+//! tree is cleared at the START and the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws66_start_at_limit"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let nofile = 6
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; }}\n}}\n",
+    )?
+    let so_p = "{d}/server.out"
+    let so = fs_create(so_p)?
+    var args = List[str]()
+    (mut args).push("-c")
+    (mut args).push("ulimit -n \"$1\" || exit 97; exec \"$2\" serve -p \"$4\" -c \"$3\"")
+    (mut args).push("sh")
+    (mut args).push("{nofile}")
+    (mut args).push(bin)
+    (mut args).push(conf)
+    (mut args).push(d)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds("/bin/sh", args, map)?
+    // it either ends at once or it is serving: give it 1.5 s, then look
+    time_sleep_ms(1500)
+    let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+    let listening = c >= 0
+    if listening {
+        net_close(c) else |_| {}
+        // a lobo that started: put it down by its own handle, never a pid
+        os_kill(h) else |_| {}
+    }
+    // a lobo the runtime ended by a signal (wolf 0.2.29 here: SIGABRT)
+    // reads -1, so the assert below names it
+    let rc = os_wait(h) else |_| { -1 }
+    fs_close(so) else |_| {}
+    let out = fs_read_text(so_p) else |_| { "" }
+    var lines = List[str]()
+    for line in out.lines() {
+        (mut lines).push(line)
+    }
+    for line in lines {
+        print("lobo: {line}")
+    }
+    print("at ulimit -n {nofile}: exit {rc}, {lines.len} line(s), listening {listening}")
+    assert(!listening, "nothing listens on the port: the program did not start")
+    assert(
+        rc == 71,
+        "the runtime refuses to start lobo with exit 71 (EX_OSERR): {rc} (wolf 0.2.29: ended by SIGABRT in the runtime)",
+    )
+    assert(lines.len == 1, "exactly one line on stdout and stderr together: {lines.len}")
+    let l0 = lines[0]
+    assert(
+        l0.starts_with("wolf: the runtime could not make its "),
+        "the line is the runtime's: [{l0}]",
+    )
+    assert(
+        l0.ends_with("; the program did not start"),
+        "the line says the program did not start: [{l0}]",
+    )
+    assert(!fs_exists("{d}/logs/lobo.pid"), "no pid file was written")
+    assert(!fs_exists("{d}/logs/c.sock"), "no control socket was bound")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
