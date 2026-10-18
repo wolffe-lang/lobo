@@ -14,6 +14,51 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
+# wolf-lang at the **v0.2.32 RELEASE TAG** (72de141, r37), the release
+# stamp `wolf 0.2.32 (wolfgang, pin 72de141)`. Staged from the RELEASE
+# ARCHIVE by digest, NAMED MEMBERS ONLY (the std note below stands), as
+# below:
+#   gh release download v0.2.32 -R wolffe-lang/wolf-lang \
+#       --pattern 'wolf-0.2.32-<host>.tar.gz'
+#   sha256 4c37f9c5dc3d8830c06810948027d38bdbc375dc5524ab23127b0ada0907d851
+#       (x86_64-unknown-linux-gnu, measured at ws66 on kasumi, checked
+#        twice; the release asset's own digest, release 416327027)
+#   sha256 061ea7e5ca63449d5d933cdba2f4e3a717e3f8570455a0c31233e31da08cfec6
+#       (aarch64-apple-darwin, the release asset's digest)
+# Members BY NAME (linux x86-64): `wolf` 07f12158… -> 81bdf8d4…,
+# `libwolf_rt.a` fa0a0ae5… -> 74d55d5f…, `wolf-cimport-worker`
+# ebd3b809… -> 0498e8e1…. Highest glibc symbol: GLIBC_2.34
+# (kasumi:~/lanes/ws66/toolchains.txt). The archive's own std is
+# wolf-std d37c911; lobo stages its [std] pin over named members.
+#
+# WHAT THE BUMP CHANGES HERE (ws66; notes/ws66-contract.md has the
+# numbers). Three releases since 0.2.29. NOTHING is refused: trunk's
+# `src/` (d3f4a38) built at this pin on both tiers exits 0 with ZERO
+# diagnostics at --error-limit=0, and none of the eighteen new prelude
+# names (0.2.30's eleven, 0.2.31's seven; 0.2.32 adds none) is
+# declared here (W0304). What reaches lobo:
+#   0.2.30 — s755's straight-line panic fix (lobo built at 0.2.29, so
+#     none was in a function it compiled); s233's must-join rule
+#     (E1010; lobo compiles unchanged, `budget.run_small` is read path
+#     by path).
+#   0.2.31 — s237's shift rule (lobo's shifts are all `wrapping`; no
+#     new trap); **s239: the readiness set is made BEFORE `main`** in a
+#     program that names a parking net call, and a host that refuses it
+#     ends the program before it starts (one stderr line, exit 71);
+#     s243: the signal hub likewise (lobo names `os_signal_listen` and
+#     `os_signal_wait`); the net family sets `os_error()` (#751).
+#   0.2.32 — s245: the runtime's descriptors never take 0, 1 or 2, and
+#     the set and the hub are made where they are REACHED on both
+#     tiers (lobo reaches both).
+# So ws64's one parked read at start (lobo#90, #92) is the runtime's
+# job now; it is retired in its own commit after this one. At rest
+# lobo holds 20 descriptors and 21 threads at both pins (the set sits
+# at 3 and 4 here, at 5 and 11 at 0.2.29). The binaries change by the
+# runtime: release 14,335,096 -> 14,695,128 bytes, dev 16,410,816 ->
+# 16,770,928 (kasumi:~/lanes/ws66/logs/build-t29-s9e.log,
+# build-t32-s9e.log).
+#
+# (ws63, the previous bump:)
 # wolf-lang at the **v0.2.29 RELEASE TAG** (6ffe7c6, r34), the release
 # stamp `wolf 0.2.29 (wolfgang, pin 6ffe7c6)`. Staged from the RELEASE
 # ARCHIVE by digest, NAMED MEMBERS ONLY (the std note below stands), as
@@ -607,10 +652,27 @@
 # both ways and docs/BUDGET.md and docs/PARITY.md following. The
 # shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "6ffe7c6056eeb8c661b37e38d99b91166e8c1add"
-version_line = "wolf 0.2.29 (wolfgang, pin 6ffe7c6)"
+rev = "72de141f624662fdff522e8beba459fab7c5cf66"
+version_line = "wolf 0.2.32 (wolfgang, pin 72de141)"
 
 [lupin]
+# lupin at the **v0.1.54 RELEASE TAG** (0e536e8, r36), staged from the
+# release archive by digest as [wolf] is:
+#   gh release download v0.1.54 -R wolffe-lang/wolf-interp \
+#       --pattern 'lupin-0.1.54-<host>.tar.gz'
+#   sha256 175df23880cd5bb993b778e5c8fdd7d0d96c176696802e640f6fc87d3dab40dd
+#       (x86_64-unknown-linux-gnu, measured at ws66, checked twice; the
+#        release asset's digest, release 415937354)
+#   sha256 9cd14db71e32c277829b5e05cdae27bf60cd6f269a9a24f97a7dba67e28a4093
+#       (aarch64-apple-darwin, the release asset's digest)
+# `lupin` 74043b0a… -> a9856dd4… (linux x86-64). Pairing gap ZERO
+# (wolf@v0.2.32 declares 0.1.54). Its conformance pin stays 294d626.
+# Since 0.1.52: 0.1.53 mirrors s234 and s236; 0.1.54 mirrors s241's
+# group send and s242's poll, and is76's shift rule (#251), the net
+# family's `os_error()` (#250) and a refused run ending the group it
+# started (#249). No lobo test's declared lanes change.
+#
+# (ws63, the previous bump:)
 # lupin at the **v0.1.52 RELEASE TAG** (025428b, r34), staged from the
 # release archive by digest as [wolf] is:
 #   gh release download v0.1.52 -R wolffe-lang/wolf-interp \
@@ -839,8 +901,8 @@ version_line = "wolf 0.2.29 (wolfgang, pin 6ffe7c6)"
 # not a calendar. Its conformance pin (2e4ca76) is information, not
 # this file's rev. Bumped together with [wolf] as always.
 repo = "wolffe-lang/wolf-interp"
-rev = "025428b725a35bfbc53745d4166817ff3053c0fd"
-version_line = "lupin 0.1.52 (wolf-interp, reference interpreter at pin 294d626)"
+rev = "0e536e8fb4518eaa798ac426901ab81275db5c9f"
+version_line = "lupin 0.1.54 (wolf-interp, reference interpreter at pin 294d626)"
 
 [std]
 # wolf-std at **9e5bd6b** (ws63, 2026-10-13; sc60, wolf-std's trunk:
