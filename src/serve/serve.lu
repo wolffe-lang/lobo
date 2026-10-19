@@ -3434,6 +3434,7 @@ pub struct ReqOut {
     rs_new: List[resolver.Resolver],
     open_err: int,
     open_path: str,
+    proxy_job: str,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -3462,6 +3463,7 @@ fn req_out(close: bool, carry: str, take acc: obs.Access, chg: Charge) -> ReqOut
         rs_new: List[resolver.Resolver](),
         open_err: chg.oerr,
         open_path: chg.opath,
+        proxy_job: "",
     }
 }
 
@@ -3493,6 +3495,7 @@ fn req_out_wait(take acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
         rs_new: List[resolver.Resolver](),
         open_err: 0,
         open_path: "",
+        proxy_job: "",
     }
 }
 
@@ -3523,6 +3526,7 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
         rs_new: List[resolver.Resolver](),
         open_err: 0,
         open_path: "",
+        proxy_job: "",
     }
 }
 
@@ -3737,8 +3741,14 @@ pub fn serve_request(
         // (the copy dies with this step's region) and reports what it
         // changed: a cursor step by index, anything else whole
         var rsx = copy rs
-        should_close = proxy.run(
-            conn,
+        // ws67 (lobo#81): the serving loop (a stream pipe is its mark,
+        // ws49) takes the exchange beside itself. The step prepares it
+        // — nothing here waits on the upstream — and hands the job back
+        // unanswered and unlogged; the loop starts the proc, and the
+        // access line and the counters are written when it reports. A
+        // refusal the plan already knows (502) is answered here, now.
+        // Every other caller keeps the inline exchange.
+        let job = proxy.prepare(
             c,
             req,
             body,
@@ -3748,8 +3758,19 @@ pub fn serve_request(
             now_date(),
             keep,
             mut rsx,
-            mut pacc,
-        ) else |_| {
+        )
+        if opts.stream_w >= 0 && job.fail == 0 {
+            acc.proxied = true
+            var hand = req_out(!keep, if keep { rest } else { "" }, take acc, chg)
+            hand.logged = false
+            hand.proxy_job = proxy.job_text(job)
+            hand.rs_rot = resolver.rot_diff(rs, rsx)
+            if resolver.muts(rsx) != resolver.muts(rs) {
+                (mut hand.rs_new).push(take rsx)
+            }
+            return hand
+        }
+        should_close = proxy.exchange(conn, job, -1, mut pacc) else |_| {
             raised = true
             true
         }
@@ -3894,6 +3915,7 @@ pub struct ConnStep {
     rs_new: List[resolver.Resolver],
     open_err: int,
     open_path: str,
+    proxy_job: str,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -3933,6 +3955,7 @@ fn step_out(
         rs_new: List[resolver.Resolver](),
         open_err: 0,
         open_path: "",
+        proxy_job: "",
     }
 }
 
@@ -3951,6 +3974,7 @@ pub struct StepRare {
     rs_rot: str,
     rs_new: List[resolver.Resolver],
     open_path: str,
+    proxy_job: str,
 }
 
 /// A `ConnStep` as it leaves the step's region (ws57, lobo#66). The
@@ -3985,6 +4009,7 @@ pub struct StepOut {
     stream_fd: int,
     has_head: bool,
     open_err: int,
+    proxying: bool,
     rare: List[StepRare],
 }
 
@@ -3999,12 +4024,14 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
         s.rs_new.len > 0 ||
         memo_dirty(s.memo) ||
         s.open_err != 0 ||
+        !s.proxy_job.is_empty() ||
         keep_acc && s.logged
     let status = s.acc.status
     let body_bytes = s.acc.body_bytes
     let proxied = s.acc.proxied
     let up_status = s.acc.up_status
     let up_ms = s.acc.up_ms
+    let proxying = !s.proxy_job.is_empty()
     var rare = List[StepRare]()
     if need {
         (mut rare).push(take StepRare {
@@ -4017,6 +4044,7 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
             rs_rot: s.rs_rot,
             rs_new: s.rs_new,
             open_path: s.open_path,
+            proxy_job: s.proxy_job,
         })
     }
     StepOut {
@@ -4041,6 +4069,7 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
         stream_fd: s.stream_fd,
         has_head: s.has_head,
         open_err: s.open_err,
+        proxying: proxying,
         rare: rare,
     }
 }
@@ -4142,6 +4171,7 @@ fn step_serve(
         rs_new: ro.rs_new,
         open_err: ro.open_err,
         open_path: ro.open_path,
+        proxy_job: ro.proxy_job,
     }
 }
 
