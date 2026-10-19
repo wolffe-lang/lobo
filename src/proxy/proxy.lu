@@ -1473,6 +1473,7 @@ fn attempt_tls(
     token: str,
     date: str,
     keep: bool,
+    notes: int,
     mut pacc: RunAcc,
 ) -> int ! {closed, io} {
     let up = net_connect("{phost}:{pport}") else |e| match e {
@@ -1480,8 +1481,9 @@ fn attempt_tls(
         timeout => { return 504 },
         io => { return 502 },
     }
+    up_note(notes, "u", up)
     net_deadline(up, read_ms) else |_| {
-        net_close(up) else |_| {}
+        up_close(notes, up)
         return 502
     }
     let pend = tlsc.begin(
@@ -1495,7 +1497,7 @@ fn attempt_tls(
         eprint(
             "lobo: [error] upstream TLS to {phost}:{pport}: ClientHello write failed; answering 502",
         )
-        net_close(up) else |_| {}
+        up_close(notes, up)
         return 502
     }
     // ws12 (wolf-std#3/sc31): the row NAMES itself. What stood here
@@ -1521,12 +1523,13 @@ fn attempt_tls(
         eprint(
             "lobo: [error] upstream TLS handshake with {phost}:{pport} failed: {why}; answering {gw}",
         )
-        net_close(up) else |_| {}
+        up_close(notes, up)
         return gw
     }
 
     tlsc.write(mut cli, upreq.bytes()) else |_| {
         eprint("lobo: [error] upstream TLS to {phost}:{pport}: request write failed; answering 502")
+        up_note(notes, "x", up)
         tlsc.close(take cli) else |_| {}
         return 502
     }
@@ -1546,6 +1549,7 @@ fn attempt_tls(
         },
     }
     if hgw != 0 {
+        up_note(notes, "x", up)
         tlsc.close(take cli) else |_| {}
         return hgw
     }
@@ -1553,6 +1557,7 @@ fn attempt_tls(
     let rest = hr.1
     let parsed = parse_response(uphead)
     if parsed.status_line.is_empty() {
+        up_note(notes, "x", up)
         tlsc.close(take cli) else |_| {}
         return 502
     }
@@ -1580,6 +1585,7 @@ fn attempt_tls(
             ""
         }
     }
+    up_note(notes, "x", up)
     tlsc.close(take cli) else |_| {}
     if bgw != 0 {
         return bgw
@@ -1696,6 +1702,7 @@ fn attempt(
     token: str,
     date: str,
     keep: bool,
+    notes: int,
     mut pacc: RunAcc,
 ) -> int ! {closed, io} {
     let up = net_connect("{phost}:{pport}") else |e| match e {
@@ -1703,25 +1710,26 @@ fn attempt(
         timeout => { return 504 },
         io => { return 502 },
     }
+    up_note(notes, "u", up)
     net_deadline(up, read_ms) else |_| {
-        net_close(up) else |_| {}
+        up_close(notes, up)
         return 502
     }
     net_write(up, upreq) else |_| {
-        net_close(up) else |_| {}
+        up_close(notes, up)
         return 502
     }
     let hr = read_up_head(up) else |e| match e {
         timeout => {
-            net_close(up) else |_| {}
+            up_close(notes, up)
             return 504
         },
         closed => {
-            net_close(up) else |_| {}
+            up_close(notes, up)
             return 502
         },
         io => {
-            net_close(up) else |_| {}
+            up_close(notes, up)
             return 502
         },
     }
@@ -1729,13 +1737,13 @@ fn attempt(
     let rest = hr.1
     let parsed = parse_response(uphead)
     if parsed.status_line.is_empty() {
-        net_close(up) else |_| {}
+        up_close(notes, up)
         return 502
     }
     var body = ""
     if parsed.body_mode == "length" {
         body = read_up_length(up, rest, parsed.content_length) else |_| {
-            net_close(up) else |_| {}
+            up_close(notes, up)
             return 599
         }
     } else if parsed.body_mode == "chunked" {
@@ -1743,20 +1751,20 @@ fn attempt(
         // exact Content-Length (buffered v0; re-chunking is a table
         // row). http.decode_chunked validates the framing.
         let whole = read_up_close(up, rest, 8388608) else |_| {
-            net_close(up) else |_| {}
+            up_close(notes, up)
             return 599
         }
         body = http.decode_chunked(whole, http.default_limits()) else |_| {
-            net_close(up) else |_| {}
+            up_close(notes, up)
             return 599
         }
     } else {
         body = read_up_close(up, rest, 8388608) else |_| {
-            net_close(up) else |_| {}
+            up_close(notes, up)
             return 599
         }
     }
-    net_close(up) else |_| {}
+    up_close(notes, up)
     pacc.status = status_code_of(parsed.status_line)
     pacc.body_bytes = body.len
     let out = relay_response(parsed, body, token, date, keep)
@@ -1807,17 +1815,22 @@ fn selection_order(p: UpPool, mut s: Swrr) -> (List[str], List[int]) {
 }
 
 /// Proxy one request to completion and relay the reply. THE io entry
-/// serve calls when a location has a proxy_pass. Selects a peer,
-/// builds the upstream request (rewrite + header discipline), tries
-/// peers in selection order on a connect-time failure (the retry-
-/// safety rule: only while NO response byte has reached the client),
-/// and relays the reply. An https target (wsm04) dials through
-/// std.x.tls.client — the trust anchors load per exchange from
-/// `pl.trust_path` (read-what-exists: a rotated root applies on the
-/// next request), SNI/verification is proxy_ssl_name else the peer
-/// host, and a missing/unreadable anchor file is a NAMED [error] +
-/// 502 (it should already be a `-t` failure). A config error in the
-/// proxy_pass (a variable) is a clean 502 at v0 (same posture).
+/// serve calls when a location has a proxy_pass and the caller is not
+/// the serving loop (the differential, the rig, a TLS-less test): it is
+/// `prepare` and `exchange` back to back, on the caller's thread. The
+/// serving loop takes the two halves apart (ws67, lobo#81): the step
+/// prepares, and `job_run` exchanges in a proc beside the loop, so an
+/// upstream that never answers holds that proc and not the loop.
+/// Selects a peer, builds the upstream request (rewrite + header
+/// discipline), tries peers in selection order on a connect-time
+/// failure (the retry-safety rule: only while NO response byte has
+/// reached the client), and relays the reply. An https target (wsm04)
+/// dials through std.x.tls.client — the trust anchors load per
+/// exchange from `pl.trust_path` (read-what-exists: a rotated root
+/// applies on the next request), SNI/verification is proxy_ssl_name
+/// else the peer host, and a missing/unreadable anchor file is a NAMED
+/// [error] + 502 (it should already be a `-t` failure). A config error
+/// in the proxy_pass (a variable) is a clean 502 at v0 (same posture).
 /// Returns should_close. Rows: the client-facing net `closed`/`io`.
 /// `remote_addr` is the client address (loopback: 127.0.0.1 until a
 /// peer-address builtin lands). `body` is the buffered request body.
@@ -1837,11 +1850,96 @@ pub fn run(
     mut rs: resolver.Resolver,
     mut acc: RunAcc,
 ) -> bool ! {closed, io} {
+    let j = prepare(c, req, body, pl, remote_addr, token, date, keep, mut rs)
+    exchange(client, j, -1, mut acc)
+}
+
+// ------------------------------------------------------------------
+// ws67 (lobo#81): THE EXCHANGE BESIDE THE LOOP. Through 0.1.4 `run`
+// ran inside the serving loop's step, so a proxied request to an
+// upstream that accepts and never answers held the whole process for
+// `proxy_read_timeout` (60 s): ws61 measured 48 of 49 static GETs
+// timed out, and `-s stop` not obeyed within 10 s; ws67 measured 0 of
+// 250 answered with one silent upstream and 50 concurrent clients, and
+// the process still running 15 s after `-s stop`
+// (notes/ws67-contract.md §2). The exchange is connect → write → read
+// → relay under deadlines, with failover and an https leg whose
+// handshake is several blocking reads, so it runs as ONE PROC per
+// exchange beside the loop — the shape the loop already has for a
+// large body (ws49's streams) and the ACME daemon (ws56) — and reports
+// one line down the stream pipe when it is done.
+//
+// What crosses into the proc is bytes, never a view: the loop's
+// strings live in regions a pass frees, and a proc that outlives its
+// spawner may not hold one (`[conc.proc.arg]`, E1010). So the step
+// PREPARES the exchange (`prepare`: the plan's refusals, the trust
+// anchors, the peers through the resolver, the upstream request per
+// peer) into a `Job`, `job_text` writes it as text, the loop sends
+// that text down a loopback connection of its own (the JOB SOCKET)
+// and spawns `job_run` with four ints; the proc reads the job into its
+// own region, exchanges, and writes its account back on the same
+// socket before it reports. The account carries the opaque tail the
+// loop sent after the job (its access record, packed), so the loop
+// keeps nothing but ints for a row whose exchange is out.
+// ------------------------------------------------------------------
+
+/// One prepared exchange (ws67): `fail` is 0 when the exchange is to
+/// run, else the gateway status to answer at once (502) with `addr`
+/// as the access log's `$upstream_addr` (empty: none); the peers, in
+/// selection order, each with the upstream request built for it; and
+/// what the relay needs. `anchors` are the https leg's trust anchors
+/// (DER), loaded once at `prepare`.
+pub struct Job {
+    fail: int,
+    addr: str,
+    scheme: str,
+    sni: str,
+    read_ms: int,
+    token: str,
+    date: str,
+    keep: bool,
+    anchors: List[byte],
+    hosts: List[str],
+    ports: List[int],
+    reqs: List[str],
+}
+
+fn job_failed(code: int, addr: str, token: str, date: str) -> Job {
+    Job {
+        fail: code,
+        addr: addr,
+        scheme: "",
+        sni: "",
+        read_ms: 0,
+        token: token,
+        date: date,
+        keep: false,
+        anchors: List[byte](),
+        hosts: List[str](),
+        ports: List[int](),
+        reqs: List[str](),
+    }
+}
+
+/// Everything of an exchange that does not wait on the upstream, as
+/// `run` did it before its peer loop, in its order: the proxy_pass's
+/// own refusal, the https leg's trust anchors (each refusal a named
+/// [error] line here), the peer set through the resolver's cache, and
+/// the upstream request for each peer. Writes nothing to the client.
+/// Total.
+pub fn prepare(
+    c: config.Conf,
+    req: http.Request,
+    body: str,
+    pl: Plan,
+    remote_addr: str,
+    token: str,
+    date: str,
+    keep: bool,
+    mut rs: resolver.Resolver,
+) -> Job {
     if !pl.pt.err.is_empty() {
-        acc.status = 502
-        acc.body_bytes = gw_body(502, token).len
-        send_gateway_error(client, 502, date, token)
-        return true
+        return job_failed(502, "", token, date)
     }
     // the https leg's trust anchors (wsm04): loaded per exchange,
     // refused loudly when the -t contract was somehow skipped
@@ -1851,10 +1949,7 @@ pub fn run(
             eprint(
                 "lobo: [error] proxy_pass https:// with no proxy_ssl_trusted_certificate — the std client verifies always; answering 502",
             )
-            acc.status = 502
-            acc.body_bytes = gw_body(502, token).len
-            send_gateway_error(client, 502, date, token)
-            return true
+            return job_failed(502, "", token, date)
         }
         var aok = true
         let pem = fs_read_text(pl.trust_path) else |_| {
@@ -1871,10 +1966,7 @@ pub fn run(
             eprint(
                 "lobo: [error] proxy_ssl_trusted_certificate \"{pl.trust_path}\" did not load as PEM CERTIFICATE blocks; answering 502",
             )
-            acc.status = 502
-            acc.body_bytes = gw_body(502, token).len
-            send_gateway_error(client, 502, date, token)
-            return true
+            return job_failed(502, "", token, date)
         }
     }
     // resolve the peer set
@@ -1883,10 +1975,7 @@ pub fn run(
     if pl.pt.is_pool {
         let pool = pool_named(c, pl.pt.authority)
         if peer_count(pool) == 0 {
-            acc.status = 502
-            acc.body_bytes = gw_body(502, token).len
-            send_gateway_error(client, 502, date, token)
-            return true
+            return job_failed(502, "", token, date)
         }
         var rot = swrr_new(peer_count(pool))
         let ord = selection_order(pool, mut rot)
@@ -1915,11 +2004,7 @@ pub fn run(
             oi = oi + 1
         }
         if hosts.len == 0 {
-            acc.addr = copy pl.pt.authority
-            acc.status = 502
-            acc.body_bytes = gw_body(502, token).len
-            send_gateway_error(client, 502, date, token)
-            return true
+            return job_failed(502, copy pl.pt.authority, token, date)
         }
     } else {
         let hp = split_hostport(pl.pt.authority)
@@ -1939,11 +2024,7 @@ pub fn run(
             pl.resolver_valid_ms,
         )
         if ex.len == 0 {
-            acc.addr = "{hp.0}:{dport}"
-            acc.status = 502
-            acc.body_bytes = gw_body(502, token).len
-            send_gateway_error(client, 502, date, token)
-            return true
+            return job_failed(502, "{hp.0}:{dport}", token, date)
         }
         var ei: int = 0
         while ei < ex.len {
@@ -1952,14 +2033,53 @@ pub fn run(
             ei = ei + 1
         }
     }
+    var reqs = List[str]()
+    var ri: int = 0
+    while ri < hosts.len {
+        (mut reqs).push(build_upstream(c, req, pl, hosts[ri], ports[ri], remote_addr, body))
+        ri = ri + 1
+    }
+    Job {
+        fail: 0,
+        addr: "",
+        scheme: pl.pt.scheme,
+        sni: pl.ssl_name,
+        read_ms: pl.read_ms,
+        token: token,
+        date: date,
+        keep: keep,
+        anchors: anchors,
+        hosts: hosts,
+        ports: ports,
+        reqs: reqs,
+    }
+}
 
+/// The half of an exchange that waits on the upstream, as `run`'s peer
+/// loop did it: a prepared refusal is answered at once; otherwise each
+/// peer in order — connect, send, read, relay — the next only on a
+/// connect-time failure (502) while no byte has reached the client.
+/// `notes` is the job socket the upstream descriptor's notes go to
+/// (`up_note`; -1 none). Returns should_close. Rows: the client-facing
+/// net `closed`/`io` (W0602 allowed, as `run`).
+#[allow(w0602)]
+pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {closed, io} {
+    if j.fail != 0 {
+        if !j.addr.is_empty() {
+            acc.addr = copy j.addr
+        }
+        acc.status = j.fail
+        acc.body_bytes = gw_body(j.fail, j.token).len
+        send_gateway_error(client, j.fail, j.date, j.token)
+        return true
+    }
     var last_status: int = 502
     var idx: int = 0
-    let np = hosts.len
+    let np = j.hosts.len
     while idx < np {
-        let phost = hosts[idx]
-        let pport = ports[idx]
-        let upreq = build_upstream(c, req, pl, phost, pport, remote_addr, body)
+        let phost = j.hosts[idx]
+        let pport = j.ports[idx]
+        let upreq = j.reqs[idx]
         acc.addr = if acc.addr.is_empty() {
             "{phost}:{pport}"
         } else {
@@ -1967,8 +2087,8 @@ pub fn run(
         }
         let t0 = time_unix_ms()
         var st: int = 0
-        if pl.pt.scheme == "https" {
-            var sni = pl.ssl_name
+        if j.scheme == "https" {
+            var sni = j.sni
             if sni.is_empty() {
                 sni = phost
             }
@@ -1978,19 +2098,31 @@ pub fn run(
                 phost,
                 pport,
                 sni,
-                copy anchors,
-                pl.read_ms,
-                token,
-                date,
-                keep,
+                copy j.anchors,
+                j.read_ms,
+                j.token,
+                j.date,
+                j.keep,
+                notes,
                 mut acc,
             )?
         } else {
-            st = attempt(client, upreq, phost, pport, pl.read_ms, token, date, keep, mut acc)?
+            st = attempt(
+                client,
+                upreq,
+                phost,
+                pport,
+                j.read_ms,
+                j.token,
+                j.date,
+                j.keep,
+                notes,
+                mut acc,
+            )?
         }
         acc.up_ms = acc.up_ms + (time_unix_ms() - t0)
         if st == 0 {
-            return !keep
+            return !j.keep
         }
         last_status = st
         if st == 504 || st == 599 {
@@ -2002,7 +2134,311 @@ pub fn run(
         idx = idx + 1
     }
     acc.status = last_status
-    acc.body_bytes = gw_body(last_status, token).len
-    send_gateway_error(client, last_status, date, token)
+    acc.body_bytes = gw_body(last_status, j.token).len
+    send_gateway_error(client, last_status, j.date, j.token)
     true
+}
+
+/// The upstream descriptor's note to the loop (ws67): `u <fd>` when it
+/// opens and `x <fd>` just before it closes, on the job socket
+/// `notes` (-1: none). A loop that KILLS an exchange (its generation's
+/// `worker_shutdown_timeout`) reads them to close what the proc left
+/// open, because a killed proc runs no further code
+/// (`[conc.proc.kill]`). The close's note is written BEFORE the close:
+/// a kill between the two leaves a descriptor open (a leak), never
+/// closes another's. Total.
+fn up_note(notes: int, tag: str, up: int) {
+    if notes >= 0 {
+        net_write(notes, "{tag} {up}\n") else |_| {}
+    }
+}
+
+/// `up_note`'s `x`, then the close. Total.
+fn up_close(notes: int, up: int) {
+    up_note(notes, "x", up)
+    net_close(up) else |_| {}
+}
+
+// ---- the job's text: a field is `<n>;` (an int) or `<len>:<bytes>`
+// (a str); the order is `job_text`'s. Valid UTF-8 in, valid out, so
+// a reader may cut it at the byte lengths it carries.
+
+fn w_int(n: int) -> str {
+    "{n};"
+}
+
+fn w_str(s: str) -> str {
+    "{s.len}:{s}"
+}
+
+fn hex_of(b: List[byte]) -> str {
+    var out = List[byte]()
+    for x in b {
+        let v = x as int
+        (mut out).push(hex_digit(v / 16))
+        (mut out).push(hex_digit(v % 16))
+    }
+    str_from_utf8(out) else |_| { "" }
+}
+
+fn hex_digit(d: int) -> byte {
+    if d < 10 {
+        return (48 + d) as byte
+    }
+    (87 + d) as byte
+}
+
+fn hex_val(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    -1
+}
+
+/// A reader over a job's text: `at` the next byte, `bad` once a field
+/// did not parse (every later read answers empty). Pure.
+struct JobCur {
+    s: str,
+    at: int,
+    bad: bool,
+}
+
+fn r_tok(mut c: JobCur, sep: str) -> str {
+    if c.bad || c.at > c.s.len {
+        c.bad = true
+        return ""
+    }
+    let rest = c.s[c.at..c.s.len]
+    let k = rest.find(sep) else -1
+    if k < 0 {
+        c.bad = true
+        return ""
+    }
+    c.at = c.at + k + 1
+    rest[0..k]
+}
+
+fn r_int(mut c: JobCur) -> int {
+    let t = r_tok(mut c, ";")
+    if c.bad {
+        return 0
+    }
+    t.to_int() else |_| {
+        c.bad = true
+        0
+    }
+}
+
+fn r_str(mut c: JobCur) -> str {
+    let t = r_tok(mut c, ":")
+    if c.bad {
+        return ""
+    }
+    let n = t.to_int() else |_| { -1 }
+    if n < 0 || c.at + n > c.s.len {
+        c.bad = true
+        return ""
+    }
+    let v = c.s.get(c.at..c.at + n) else {
+        c.bad = true
+        ""
+    }
+    c.at = c.at + n
+    v
+}
+
+/// The job as text, for the job socket (ws67). Total.
+pub fn job_text(j: Job) -> str {
+    let k = if j.keep { 1 } else { 0 }
+    var out = "{w_int(j.fail)}{w_str(j.addr)}{w_str(j.scheme)}{w_str(j.sni)}{w_int(j.read_ms)}{w_str(j.token)}{w_str(j.date)}{w_int(k)}{w_str(hex_of(j.anchors))}{w_int(j.hosts.len)}"
+    var i: int = 0
+    while i < j.hosts.len {
+        out = "{out}{w_str(j.hosts[i])}{w_int(j.ports[i])}{w_str(j.reqs[i])}"
+        i = i + 1
+    }
+    out
+}
+
+/// `job_text` read back; `bad` when the text is not one it wrote.
+/// Pure. Total.
+pub fn job_parse(s: str) -> Job ! {bad} {
+    var c = JobCur { s: s, at: 0, bad: false }
+    let fail = r_int(mut c)
+    let addr = r_str(mut c)
+    let scheme = r_str(mut c)
+    let sni = r_str(mut c)
+    let read_ms = r_int(mut c)
+    let token = r_str(mut c)
+    let date = r_str(mut c)
+    let keep = r_int(mut c) == 1
+    let ahex = r_str(mut c)
+    let n = r_int(mut c)
+    if c.bad || n < 0 || ahex.len % 2 != 0 {
+        return bad
+    }
+    var anchors = List[byte]()
+    let ab = ahex.bytes()
+    var ai: int = 0
+    while ai + 1 < ab.len {
+        let hi = hex_val(ab[ai] as int)
+        let lo = hex_val(ab[ai + 1] as int)
+        if hi < 0 || lo < 0 {
+            return bad
+        }
+        (mut anchors).push((hi * 16 + lo) as byte)
+        ai = ai + 2
+    }
+    var hosts = List[str]()
+    var ports = List[int]()
+    var reqs = List[str]()
+    var i: int = 0
+    while i < n {
+        (mut hosts).push(r_str(mut c))
+        (mut ports).push(r_int(mut c))
+        (mut reqs).push(r_str(mut c))
+        i = i + 1
+    }
+    if c.bad || c.at != s.len {
+        return bad
+    }
+    Job {
+        fail: fail,
+        addr: addr,
+        scheme: scheme,
+        sni: sni,
+        read_ms: read_ms,
+        token: token,
+        date: date,
+        keep: keep,
+        anchors: anchors,
+        hosts: hosts,
+        ports: ports,
+        reqs: reqs,
+    }
+}
+
+/// THE PROC (ws67, lobo#81): one exchange beside the serving loop.
+/// `client` is the connection it answers (the loop does not touch it
+/// until this proc reports), `jr` its end of the job socket, `out` the
+/// loop's stream pipe, `id` the slot's id. It reads the frame the loop
+/// wrote — `<joblen> <taillen>\n`, the job's text, an opaque tail —
+/// into its own region, runs `exchange` (its notes on `jr`), writes
+/// its account on `jr` — `r <dlen> <taillen>\n`, then `<status>
+/// <body_bytes> <up_ms> <close 0|1> <addrlen>:<addr>`, then the tail
+/// as it came — and reports `<client> 0 <wcode> 0 <id>` down the
+/// stream pipe, the line a stream writes (`wcode` 0 clean, 1 the
+/// client closed, 2 io or a frame that did not read). The account is
+/// written before the line, so a loop that has the line has the
+/// account. The proc closes nothing it was handed. Total.
+pub fn job_run(client: int, jr: int, out: int, id: int) -> int {
+    // everything the exchange makes lives in this block and dies at its
+    // brace — the job's bytes, the upstream reads, the relayed reply,
+    // the account — as a stream's chunks die in theirs (ws49). Without
+    // it each exchange left about 27 kB behind (2,000 proxied requests
+    // grew the process 55 MB, notes/ws67-contract.md §3)
+    region job {
+        net_deadline(jr, 10000) else |_| {}
+        var wcode = 0
+        var buf = List[byte]()
+        var want = -1
+        var hdr = 0
+        var jl = 0
+        var tl = 0
+        var reading = true
+        while reading {
+            let piece = net_read_bytes(jr, 65536) else |_| {
+                wcode = 2
+                reading = false
+                List[byte]()
+            }
+            for b in piece {
+                (mut buf).push(b)
+                if hdr == 0 && b as int == 10 {
+                    hdr = buf.len
+                }
+            }
+            if want < 0 && hdr > 0 {
+                let h = str_from_utf8(buf[0..hdr - 1]) else |_| { "" }
+                var parts = List[int]()
+                for w in h.words() {
+                    (mut parts).push(w.to_int() else |_| { -1 })
+                }
+                if parts.len != 2 || parts[0] < 0 || parts[1] < 0 {
+                    wcode = 2
+                    reading = false
+                } else {
+                    jl = parts[0]
+                    tl = parts[1]
+                    want = hdr + jl + tl
+                }
+            }
+            if want >= 0 && buf.len >= want {
+                reading = false
+            }
+            if piece.len == 0 {
+                reading = false
+                if want < 0 || buf.len < want {
+                    wcode = 2
+                }
+            }
+        }
+        var answer = ""
+        if wcode == 0 {
+            let all = str_from_utf8(buf) else |_| { "" }
+            let text = all.get(hdr..want) else { "" }
+            let job_s = text.get(0..jl) else { "" }
+            let tail = text.get(jl..text.len) else { "" }
+            if job_s.len != jl || tail.len != tl {
+                wcode = 2
+            } else {
+                let r = job_serve(client, job_s, tail, jr)
+                answer = r.0
+                wcode = r.1
+            }
+        }
+        if answer.is_empty() {
+            let det = "0 0 0 1 0:"
+            answer = "r {det.len} 0\n{det}"
+        }
+        net_write(jr, answer) else |_| {}
+        net_write(out, "{client} 0 {wcode} 0 {id}\n") else |_| {}
+    }
+    0
+}
+
+/// The exchange a job's text asks for, answered on `client` (ws67):
+/// the account `job_run` writes back — `r <dlen> <taillen>\n`, then
+/// `<status> <body_bytes> <up_ms> <close 0|1> <addrlen>:<addr>`, then
+/// `tail` as it came — and the stream line's `wcode` (0 clean, 1 the
+/// client closed, 2 io or a job that did not parse). The proc's body,
+/// and the loop's own when it cannot make a job socket. Total.
+pub fn job_serve(client: int, job_s: str, tail: str, notes: int) -> (str, int) {
+    var wcode = 0
+    var acc = run_acc()
+    var close = true
+    var parsed = true
+    let j = job_parse(job_s) else |_| {
+        parsed = false
+        job_failed(502, "", "", "")
+    }
+    if !parsed {
+        wcode = 2
+    } else {
+        close = exchange(client, j, notes, mut acc) else |e| match e {
+            closed => {
+                wcode = 1
+                true
+            },
+            io => {
+                wcode = 2
+                true
+            },
+        }
+    }
+    let cl = if close { 1 } else { 0 }
+    let det = "{acc.status} {acc.body_bytes} {acc.up_ms} {cl} {acc.addr.len}:{acc.addr}"
+    ("r {det.len} {tail.len}\n{det}{tail}", wcode)
 }
