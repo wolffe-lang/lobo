@@ -36,6 +36,21 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws67, 2026-10-19, wolf 0.2.32, std `d37c911`: the audit reads net
++194, fs +124, exec +18, env +9 (trunk `9a4723c`: net +179, fs +116,
+exec +18, env +6). No capability moves. `config/userconf.lu` imports
+`std.env` (`euid`, which replaces the `/proc/self/status` read and
+ws54's `id -u` probe, so the exec tier loses that spawn) and
+`std.os.users` (pure: `passwd(5)` and `group(5)` text), and `main.lu`
+imports `std.process` for `set_ids`, the hands' privilege drop
+(lobo#96); the audit now names `std.process` as the first fs and exec
+site. The new net calls are the proxied exchange beside the loop
+(lobo#81: the job listener, a job socket's connect and accept, its
+reads and writes, the upstream descriptor's notes) and the stale
+control socket's dial (lobo#94); `os_signal_send(pid, 0)` asks whether
+a pid file's process is alive, and `fs_set_owner` gives the logs to the
+user.)
+
 (ws66, 2026-10-18, wolf 0.2.32, std `d37c911`: the audit reads net
 +179, fs +116, exec +18, env +6 (trunk `d3f4a38` at 0.2.29: net +183,
 fs +115). No capability moves. net loses four calls, the parked read
