@@ -702,3 +702,53 @@ instead of on the round.
   resource limit, and a directive that parsed and did nothing is what
   lobo#84 was. Set the limit where lobo is started.
 
+
+## ws67 — the hands drop to `user`; the master keeps root (lobo#96)
+
+nginx's master, started as root, keeps root and runs its workers as the
+`user` directive's user and group. lobo does the same since ws67, with
+`std.process.set_ids` (wolf 0.2.30+, s236; ruling #78's wrapper): one
+call that sets the supplementary groups, the group ids and the user ids
+in that order and reads them back, so a hand is wholly the user or the
+call fails.
+
+- **Who.** Root with a `user` line starts a master and its hands even
+  under `worker_processes 1` (one hand): nginx has a master unless
+  `master_process off`, which lobo refuses by name. The master binds the
+  listeners — a port below 1024 is fine — and never drops. Not root,
+  `user` is nginx's `[warn]` and nothing changes.
+- **When.** A hand drops after it has adopted its listeners, bound its
+  control endpoint and read its certificates and keys, and before the
+  first log line it writes or the first connection it serves.
+- **To whom.** The user by name from `/etc/passwd`; the group named by
+  the second argument, else the group NAMED like the user (nginx's
+  rule); the supplementary groups are that group and every group that
+  lists the user as a member (`std.os.users.groups_of`). Measured
+  against the pinned nginx as root in a container (notes/ws67-contract.md
+  §2): `user lw lwx;` gives `Uid: 1500 ×4`, `Gid: 1600 ×4`, `Groups:
+  1600`, and `user lw;` gives `Gid: 1500 ×4`, `Groups: 1500 1600`, the
+  same lines from lobo's hands as from nginx's workers
+  (`tools/lobo-user`, a gauntlet step).
+- **The logs.** The hands are not root, so the master makes every log
+  file the configuration names and gives it to the user (the owner; the
+  group stays) before the first hand starts and again before a reopen
+  reaches the hands — nginx's order at reopen ("Controlling nginx": the
+  master re-opens the files and gives them to the workers' user, then
+  the workers re-open them). nginx leaves them root's until the first
+  reopen because its forked workers inherit the master's descriptors;
+  lobo's hands are exec'd and open their own, so it gives them at start
+  too (a named delta).
+- **When it fails.** An account that does not exist is refused at
+  `-t`, at start and at a reload, in nginx's words (`getpwnam("x")
+  failed in <file>:<line>`, `getgrnam`). A hand whose drop fails ends
+  with exit 2 and the master does not respawn it (`worker N exited with
+  fatal code 2 and cannot be respawned`, nginx's line). The drop is
+  linux's at this pin (`set_ids` answers `unsupported` elsewhere), so
+  root with `user` on macOS is refused by name.
+- **Named deltas.** Root with NO `user` line keeps lobo's one root
+  process and says so in one `[warn]`; nginx drops to its default
+  `nobody nobody`. A hand reads a reload's files as the user, so a
+  reload whose configuration or key only root may read is refused by
+  every hand: the master answers `reload complete (generation 2)
+  workers=0/2` and the hands keep serving the generation they had
+  (measured, `kasumi:~/lanes/ws67/ev/reload96-h96.log`).
