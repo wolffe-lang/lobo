@@ -196,9 +196,10 @@ serve linux aarch64.
   at most once a second. With none idle, the new connection is
   accepted and closed at once, and the log says `[alert] 512
   worker_connections are not enough`, one line each. Upstream
-  connections and a TLS connection while it is served are not counted
-  (`docs/directives.md`). Through 0.1.3 the directive was parsed and
-  ignored.
+  connections count as nginx counts them: a proxied request is two
+  connections while its exchange is out. A TLS connection while it is
+  served is not counted (`docs/directives.md`). Through 0.1.3 the
+  directive was parsed and ignored.
 - **Descriptors.** An idle connection holds one descriptor; a
   download parked on a slow client holds two (its socket and its
   file), two threads and about 150 KB resident. A process holds about
@@ -267,11 +268,18 @@ serve linux aarch64.
 - A range starting at byte N reads and drops N bytes first. Under
   `memory_budget` a `Range` is ignored. An `If-Range` date in RFC 850
   or asctime form is not parsed.
-- **A proxied request holds its serving process.** `proxy_pass` asks
-  the upstream inside the serving loop, so while one upstream is
-  silent every other client of that process waits, up to
-  `proxy_read_timeout` (60 s by default). Run more than one worker in
-  front of an upstream.
+- **A proxied request is an exchange beside the loop.** Since ws67
+  (lobo#81; through 0.1.4 `proxy_pass` asked the upstream inside the
+  serving loop, so one silent upstream held every other client of
+  that process for `proxy_read_timeout`) each exchange runs in a proc
+  of its own and reports when it is done: a silent upstream holds its
+  own request and nothing else, and `-s stop` is obeyed at once. What
+  it costs: about four descriptors and a thread while an exchange is
+  out, and on kasumi about half 0.1.4's proxied requests a second
+  against a prompt upstream (one client in turn: 0.48x; `ab -c 32`:
+  0.44-0.57x) — a proc and a loopback job socket per exchange. A
+  client that closes while its exchange waits is not noticed until
+  `proxy_read_timeout` (nginx drops the exchange at once).
 - **Memory.** Built with wolf 0.2.28 or 0.2.29 a serving lobo is flat
   over requests and connections (0 KB over 4,000 keepalive requests
   and over 2,000 connections in the gate), and so is a master supervising
