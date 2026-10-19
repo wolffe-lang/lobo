@@ -74,8 +74,9 @@ NOT_SELECTABLE = ("plan", "tier", "nightly-red")
 TIERS = ("full", "pr", "noop")
 # What a repository's config may add (the defaults: nothing):
 #   ON_REQUEST   jobs that only a dispatch's own input runs, never full or pr;
-#   EXTRA_TIERS  {tier: (the jobs it runs, of `every`), whether it runs every
-#                leg)}, for the verdict;
+#   EXTRA_TIERS  {tier: (the jobs it runs, of `every`; whether it runs every
+#                leg; whether it runs ALL those jobs (True) or one or more of
+#                them (False))}, for the verdict;
 #   special(a, every, log) -> None, or (tier, the jobs it chose): a run the
 #                event and the dispatch's own inputs (a.inputs) decide alone.
 ON_REQUEST = ()
@@ -97,7 +98,7 @@ def pr_leg(job, leg):
 LINUX = ("gauntlet",)
 PROSE = ()
 FULL = "FULL"
-EXTRA_TIERS = {"measure": (lambda every: ["gauntlet"], False)}
+EXTRA_TIERS = {"measure": (lambda every: ["gauntlet"], False, True)}
 
 
 def special(a, every, log):
@@ -136,6 +137,9 @@ RULES = [
     (".gitattributes", LINUX),
 ]
 # --- end of this repository's -------------------------------------------------
+# Below: the planner itself, the same in every repository tl28 tiered (wolf-std,
+# pelt, wolf-book, lobo, boreutils, wolf-lsp). Only the docstring and the
+# block above are this repository's.
 
 
 def die(msg):
@@ -346,10 +350,11 @@ def verdict(needs):
     every = [j for j in needs if j != "plan"]
     bad = 0
     want_jobs = jobs_of(tier, every)
-    if tier == "pr":
+    some = tier == "pr" or (tier in EXTRA_TIERS and not EXTRA_TIERS[tier][2])
+    if some:
         if not chosen or [j for j in chosen if j not in want_jobs]:
-            print("tier: a pr run chose %s; it may choose one or more of %s" % (
-                " ".join(chosen) or "nothing", " ".join(want_jobs)))
+            print("tier: a %s run chose %s; it may choose one or more of %s" % (
+                tier, " ".join(chosen) or "nothing", " ".join(want_jobs)))
             bad += 1
     elif tier in EXTRA_TIERS and not want_jobs:
         print("tier: tier %s names no job of this workflow" % tier)
