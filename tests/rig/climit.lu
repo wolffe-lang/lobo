@@ -15,7 +15,10 @@
 //!   download  open n connections, each asking for /big.bin and
 //!             reading only its first bytes (so every body parks on a
 //!             client that has stopped reading), waiting for each
-//!             answer before the next.
+//!             answer before the next;
+//!   proxied   (ws67, lobo#81) open n connections, each asking for
+//!             /up/x — a location whose upstream never answers — 100 ms
+//!             apart, reading nothing.
 //! Then hold them `hold_ms`, ask a fresh `GET /index.html` beside
 //! them, close them all, wait, and ask again. It prints ONE line:
 //!   climit mode=<m> n=<n> map=<digits> held=<probe> after=<probe>
@@ -113,8 +116,8 @@ fn probe(port: int) -> str {
 
 fn main() -> !int {
     let args = env_args()
-    if args.len != 4 || !(args[1] == "idle" || args[1] == "download") {
-        eprint("usage: climit <port> idle|download <n> <hold_ms>")
+    if args.len != 4 || !(args[1] == "idle" || args[1] == "download" || args[1] == "proxied") {
+        eprint("usage: climit <port> idle|download|proxied <n> <hold_ms>")
         return 2
     }
     let port = to_int(args[0], 65535)?
@@ -143,6 +146,9 @@ fn main() -> !int {
             if s == 3 {
                 stalled = true
             }
+        } else if mode == "proxied" {
+            net_write(c, "GET /up/x HTTP/1.1\r\nHost: x\r\n\r\n") else |_| {}
+            time_sleep_ms(100)
         }
         (mut cs).push(c)
         (mut st).push(s)

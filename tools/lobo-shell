@@ -299,17 +299,17 @@ fi
 # The client's line lands in ${side}_line, the server's stderr and
 # error log in $lim/<side>-<tag>.log.
 lim_one() {
-    _side=$1; _tag=$2; _wc=$3; _nf=$4; _mode=$5; _n=$6; _hold=$7
+    _side=$1; _tag=$2; _wc=$3; _nf=$4; _mode=$5; _n=$6; _hold=$7; _loc=${8:-}
     _port=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
     _log="$lim/$_side-$_tag.log"
     : > "$_log"
     if [ "$_side" = ng ]; then
-        printf 'daemon off;\nmaster_process on;\nworker_processes 1;\npid logs/ng-%s.pid;\nerror_log ng-%s.log info;\nevents { worker_connections %s; }\nhttp {\n  access_log off;\n  server { listen 127.0.0.1:%s; root html; }\n}\n' \
-            "$_tag" "$_tag" "$_wc" "$_port" > "$lim/ng-$_tag.conf"
+        printf 'daemon off;\nmaster_process on;\nworker_processes 1;\npid logs/ng-%s.pid;\nerror_log ng-%s.log info;\nevents { worker_connections %s; }\nhttp {\n  access_log off;\n  server { listen 127.0.0.1:%s; root html; %s }\n}\n' \
+            "$_tag" "$_tag" "$_wc" "$_port" "$_loc" > "$lim/ng-$_tag.conf"
         set -- "$NGINX" -p "$limroot" -c "ng-$_tag.conf" -e "ng-$_tag.log"
     else
-        printf 'pid logs/lb-%s.pid;\nevents { worker_connections %s; }\nhttp {\n  types { text/html html; application/octet-stream bin; }\n  server { listen 127.0.0.1:%s; root html; }\n}\n' \
-            "$_tag" "$_wc" "$_port" > "$lim/lb-$_tag.conf"
+        printf 'pid logs/lb-%s.pid;\nevents { worker_connections %s; }\nhttp {\n  types { text/html html; application/octet-stream bin; }\n  server { listen 127.0.0.1:%s; root html; %s }\n}\n' \
+            "$_tag" "$_wc" "$_port" "$_loc" > "$lim/lb-$_tag.conf"
         set -- "$LOBO" serve -p "$limroot" -c "lb-$_tag.conf"
     fi
     if [ "$_nf" = - ]; then
@@ -439,6 +439,52 @@ if [ "$lim_ready" = 1 ]; then
     ng_line="oracle answered 500 and logged the open: $ng_500"
     lb_line="lobo answered 500 and logged the open: $lb_500"
     lim_row "out of descriptors, a file cannot be opened" "$ok" "both answer 500 and log [crit] open() \"<path>\" failed (24: Too many open files)"
+
+    # F. ws67 (lobo#81): a proxied request is TWO connections while its
+    # upstream exchange is out — nginx's count, its directive's text:
+    # "includes all connections (e.g. connections with proxied
+    # servers)". Eight requests to an upstream that never answers
+    # (tests/rig/wedge.lu: a listener nobody accepts on; the kernel
+    # completes each dial in its backlog), 100 ms apart, at
+    # worker_connections 16 with one listener: both hold seven and close
+    # the eighth (7 x 2 + the listener + one = 16) with the [alert], and
+    # a fresh GET beside them is refused too. Through 0.1.4 lobo's loop
+    # was held by the first exchange: nothing after it was even taken.
+    # When the clients close, nginx drops their exchanges at once
+    # (proxy_ignore_client_abort off) and serves; lobo's proc does not
+    # see the close while it waits on its upstream, so its exchanges
+    # end at proxy_read_timeout (10 s here): a named delta.
+    "$WOLF" run "$rig_root"/tests/rig/wedge.lu 20000 > "$lim/wedge.port" 2> "$lim/wedge.err" &
+    wp=""
+    _i=0
+    while [ "$_i" -lt 100 ]; do
+        wp=$(head -1 "$lim/wedge.port" 2> /dev/null | tr -cd '0-9')
+        [ -n "$wp" ] && break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    ploc="location /up/ { proxy_pass http://127.0.0.1:$wp; proxy_read_timeout 10s; }"
+    lim_one ng f 16 - proxied 8 300 "$ploc"
+    lim_one lb f 16 - proxied 8 300 "$ploc"
+    want="climit mode=proxied n=8 map=00000001 held=closed"
+    ok=1
+    case "$ng_line" in "$want "*) case "$lb_line" in "$want "*) ok=0 ;; esac ;; esac
+    lim_row "worker_connections 16, 8 proxied requests to a silent upstream" "$ok" "both hold seven, close the eighth, and refuse a fresh GET beside them: a proxied request is two connections"
+    nga=$(lim_count ng f '\[alert\] .*16 worker_connections are not enough')
+    lba=$(lim_count lb f '\[alert\] 16 worker_connections are not enough$')
+    ok=1
+    [ "$nga" -ge 1 ] && [ "$lba" -ge 1 ] && ok=0
+    lim_row "…and its log line" "$ok" "both log [alert] 16 worker_connections are not enough (oracle $nga, lobo $lba)"
+    total=$((total + 1))
+    case "$ng_line" in *" after=200") ngafter=200 ;; *) ngafter="${ng_line##*after=}" ;; esac
+    lbafter="${lb_line##*after=}"
+    if [ "$ngafter" = 200 ] && [ "$lbafter" = closed ]; then
+        named=$((named + 1))
+        echo "lobo-shell: ok — [8 proxied requests, after the clients close] lobo after=$lbafter vs oracle after=$ngafter (named: lobo's exchange does not see its client close while it waits on the upstream — nginx's proxy_ignore_client_abort off — so it ends at proxy_read_timeout)"
+    else
+        echo "lobo-shell: FAILED — [8 proxied requests, after the clients close] lobo after=$lbafter, oracle after=$ngafter (the named delta moved — re-measure)" >&2
+        red=$((red + 1))
+    fi
 
     # E. `-t` under a lowered limit prints the start warning too. The
     # configuration sets `error_log … info`: nginx prints this warning
