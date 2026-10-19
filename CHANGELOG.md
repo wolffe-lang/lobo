@@ -883,6 +883,54 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws67 — 2026-10-19 — a silent upstream holds only its own request (lobo#81); `user` drops privilege (lobo#96); a stale control socket is taken over (lobo#94)
+
+Unreleased (trunk). Contract, inputs, the oracle's measurements and the
+prediction: `notes/ws67-contract.md`. The pins do not move (wolf 0.2.32,
+lupin 0.1.54, wolf-std `d37c911`).
+
+- **A proxied request no longer holds its process** (lobo#81). Through
+  0.1.4 the upstream exchange ran inside the serving loop: with one
+  request to an upstream that accepts and never answers, 50 clients
+  asking for a static file for 10 s got 0 answers of 250, and the
+  process was still running 15 s after `-s stop`. Now each exchange
+  runs in a proc beside the loop: the same shape is 179,588 answered
+  and none missed (p99 6.1 ms; the pinned nginx 328,903, p99 3.0 ms)
+  with one or eight such requests out, and `-s stop` ends the process
+  at once. The proxy differential, the log differential and the
+  resolver witness are unchanged. A proxied request now counts two
+  connections against `worker_connections` (nginx's count: seven held
+  and the eighth closed at 16). **The cost**: proxied requests a second
+  against a prompt upstream are about half 0.1.4's (0.48x one client
+  in turn, 0.44–0.57x at `ab -c 32`), and while an exchange is out it
+  holds about four descriptors more. A client that closes while its
+  exchange waits is not noticed until `proxy_read_timeout` (nginx drops
+  the exchange at once): a named delta.
+- **`user` drops privilege, as nginx** (lobo#96). Through 0.1.4 root
+  with a `user` line refused to start. Now the process that ran
+  `lobo serve` is a master that keeps root (with `worker_processes 1`
+  too: one hand), and each hand becomes the user before it serves
+  (`std.process.set_ids`): `user lw lwx;` reads `Uid: 1500 ×4`,
+  `Gid: 1600 ×4`, `Groups: 1600`, `user lw;` the group named lw and
+  `Groups: 1500 1600` — nginx's workers' lines, measured as root in a
+  container (`tools/lobo-user`, a gauntlet step); port 80 still
+  answers and a root-only file is 403. The master gives the log files
+  to the user before the hands start and before each reopen. An
+  unknown account is `getpwnam("x") failed` at `-t`, start and reload.
+  **Named deltas**: root with no `user` line keeps one root process
+  and warns (nginx drops to `nobody nobody`); the drop is linux's (macOS
+  as root with `user` is refused by name); a reload whose files only
+  root may read is refused by every hand.
+- **A failed start leaves nothing; a stale control socket is taken
+  over** (lobo#94). A start that fails after binding its `unix:`
+  control socket (at the pid file, as ws66 found under `ulimit -n 11`)
+  removes the pid file, the socket and its listeners before it exits,
+  and a start that finds a socket nobody answers on, whose pid file
+  names no live process, removes it with one `[warn]` and binds: a lobo
+  ended by SIGKILL restarts. A live lobo's socket, a socket whose pid
+  file names a live process, and an ordinary file are refused as
+  before (`tests/shell/stale_socket_e2e.lu`).
+
 ## ws66 — 2026-10-18 — built with wolf 0.2.32; the park at start retired (lobo#92); a start at the descriptor limit refused in one line
 
 Unreleased (trunk). Contract, inputs and the prediction:
