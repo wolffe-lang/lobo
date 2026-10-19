@@ -108,15 +108,19 @@ which is what the filing asked for):
 | row at bind | lobo |
 |---|---|
 | `unsupported` | **refuses at startup, by name**: "this host has no unix-domain sockets, so `control unix:…` cannot be served … use a loopback address with the token arm instead". windows at this pin |
-| `exists` | **refuses, and does not clobber.** Something is already at that path — a live master, a stale socket, or an ordinary file — and which of those it is is not a decision a server can make for an operator. Remove it yourself if you know which |
+| `exists` | **takes over a stale socket; refuses everything else, and does not clobber it** (ws67, lobo#94). A SOCKET at the path that refuses a dial (nobody listens on it), whose pid file names no live process (`kill(pid, 0)` answers no such process; no pid file, or this process's own pid, names none), is removed with one line, `[warn] removing stale control socket "<path>" (no lobo answers on it)`, and bound — the rule lobo and nginx both apply to a stale pid file. A live lobo answers its own socket, so its path is never taken; an ordinary file, a directory, a link, or a socket whose pid file names a live process is refused: "something already exists at …". Remove it yourself if you know which. The pinned nginx refuses every existing path at `listen unix:` (`bind() … failed (98: Address already in use)`, measured at ws67) — it has no control socket to compare |
 | `not_found` | the directory on the way to the path does not exist |
 | `denied` | the caller may not create it there |
 
 Cleanup is the binder's. `net_close` of a unix LISTENER unlinks
-its path, so an orderly `stop`/`quit` leaves nothing behind; a
-SIGKILLed master leaves the socket file, and the next start's
-stale-pid check tells an operator whether a master is still
-alive. A hand's endpoint is the master's to clean: the master NAMES
+its path, so an orderly `stop`/`quit` leaves nothing behind, and
+since ws67 (lobo#94) so does a start that fails after its bind: it
+takes back what it made in reverse (the pid file, the control socket,
+the listeners) before it exits 1 — through 0.1.4 a start whose pid
+file write failed (ws66: at `ulimit -n 11`) left the socket, and every
+later start refused on it. A SIGKILLed master still leaves the socket
+file; the next start's stale-pid check and the stale-socket rule above
+take it over when nobody answers on it. A hand's endpoint is the master's to clean: the master NAMES
 those paths (below), so it removes a dead one before starting a
 replacement, the one case `[os.net.unix]` says a program may unlink
 unconditionally.
