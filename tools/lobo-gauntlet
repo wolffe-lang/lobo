@@ -195,6 +195,12 @@ if ! tools/lobo-prefork; then
     exit 1
 fi
 
+step "user (ws67, lobo#96: the privilege drop as root inside a container — the master keeps root, the hands are the user and group, port 80 still bound, a root-only file refused; linux with podman or docker, else named skip)"
+if ! tools/lobo-user; then
+    echo "lobo-gauntlet: FAILED at user — the privilege-drop witness (ws67, lobo#96)" >&2
+    exit 1
+fi
+
 step "replay (ws11: the planted drain race explored to a finding, its .loborace artifact replayed byte-stable, the fix's frontier closed)"
 if ! tools/lobo-replay; then
     echo "lobo-gauntlet: FAILED at replay — the replay-the-race witness (ws11)" >&2
