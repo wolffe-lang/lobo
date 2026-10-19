@@ -6,12 +6,17 @@
 //! ws41: the `user` directive. nginx drops privileges when its master
 //! is root and warns when it is not (probed against nginx/1.30.4: `[warn]
 //! the "user" directive makes sense only if the master process runs
-//! with super-user privileges, ignored in <file>:<line>`, exit 0). lobo
-//! has no privilege drop at this pin, so the unprivileged case is
-//! nginx's warning and a load, and root — or a host where lobo cannot
-//! read its uid — is a refusal by name. The verdict is pure (the uid
-//! passed in), so all three lanes run it; the /proc read is the
-//! corpus's and tools/lobo-confcheck's to exercise live.
+//! with super-user privileges, ignored in <file>:<line>`, exit 0). ws67
+//! (lobo#96): lobo drops too — as root the verdict is `drop:` and the
+//! ids resolve from the account files by nginx's rules (measured as root
+//! in a container, notes/ws67-contract.md §2: `user lw lwx;` is uid
+//! 1500, gid 1600, groups 1600; `user lw;` takes the group NAMED lw,
+//! 1500, and groups 1500 1600; an unknown name is `getpwnam("x") failed`
+//! / `getgrnam("x") failed`, located). Through ws66 root was refused by
+//! name. A host with no uid answer is still refused. The verdict and the
+//! resolution are pure (the uid and the texts passed in), so all three
+//! lanes run them; the drop itself is tools/lobo-user's, as root in a
+//! container.
 
 use config
 
@@ -42,11 +47,59 @@ fn main() -> !int {
         "unprivileged: nginx's warning, located: {w}",
     )
     let r = config.user_verdict(c1, 0)
-    assert(r.starts_with("emerg:the \"user\" directive"), "root: refused by name: {r}")
-    assert(r.ends_with("in t.conf:1"), "root: located: {r}")
+    assert(r == "drop:t.conf:1", "root: the drop is asked for, located (ws41-ws66: refused): {r}")
+    assert(config.user_drops(c1, 0), "root with a user line drops")
+    assert(!config.user_drops(c1, 1000), "not root: no drop")
+    assert(!config.user_drops(c0, 0), "root with no user line: no drop (a named delta)")
     let u = config.user_verdict(c1, -1)
     assert(u.starts_with("emerg:"), "unknown uid: refused by name: {u}")
-    assert(u.contains("/proc/self/status"), "unknown uid: the reason names the missing file: {u}")
+    assert(
+        u.contains("os_euid is unsupported"),
+        "unknown uid: the reason names the missing answer: {u}",
+    )
+
+    // ---- ws67: the ids, by nginx's rules, off the account files' texts
+    let pw = "root:x:0:0:root:/root:/bin/sh\nlw:x:1500:1500::/nonexistent:/usr/sbin/nologin\nnobody:x:65534:65534:nobody:/:/usr/bin/nologin\n"
+    let gr = "root:x:0:\nlw:x:1500:\nlwx:x:1600:lw\nnobody:x:65534:\nother:x:1700:root,lw\n"
+    let a = config.user_ids(conf_of("user lw lwx;"), pw, gr)
+    assert(a.ok && a.uid == 1500 && a.gid == 1600, "user lw lwx: uid 1500, gid 1600: {a}")
+    assert(
+        a.groups.len == 2 && a.groups[0] == 1600 && a.groups[1] == 1700,
+        "user lw lwx: the group, then every group listing lw (lwx is the group itself): {a.groups}",
+    )
+    let b = config.user_ids(c1, pw, gr)
+    assert(
+        !b.ok && b.err == "getpwnam(\"www-data\") failed in t.conf:1",
+        "an unknown user, nginx's words: {b.err}",
+    )
+    let lw = config.user_ids(conf_of("user lw;"), pw, gr)
+    assert(
+        lw.ok && lw.uid == 1500 && lw.gid == 1500 && lw.group == "lw",
+        "user lw: the group NAMED lw: {lw}",
+    )
+    assert(
+        lw.groups.len == 3 && lw.groups[0] == 1500 && lw.groups[1] == 1600 && lw.groups[2] == 1700,
+        "user lw: 1500, then lwx and other, which list lw: {lw.groups}",
+    )
+    let ng = config.user_ids(conf_of("user lw nosuchgrp;"), pw, gr)
+    assert(
+        !ng.ok && ng.err == "getgrnam(\"nosuchgrp\") failed in t.conf:1",
+        "an unknown group: {ng.err}",
+    )
+    let nb = config.user_ids(conf_of("user nobody;"), pw, "root:x:0:\nnogroup:x:65534:\n")
+    assert(
+        !nb.ok && nb.err == "getgrnam(\"nobody\") failed in t.conf:1",
+        "user nobody where no group is named nobody: refused, as nginx: {nb.err}",
+    )
+    let none = config.user_ids(c0, pw, gr)
+    assert(none.ok && none.uid == -1, "no user line: nothing to resolve")
+    // the named delta: root and no user line, one line at start
+    assert(
+        config.root_note(c0, 0).starts_with("running as root with no \"user\" directive"),
+        "root, no user: the note",
+    )
+    assert(config.root_note(c0, 1000).is_empty(), "not root: no note")
+    assert(config.root_note(c1, 0).is_empty(), "root with a user line: no note")
 
     // ---- the /proc/self/status reader (effective = the second field)
     let status = "Name:\tlobo\nUid:\t1000\t1001\t1000\t1000\nGid:\t1000\t1000\t1000\t1000\n"

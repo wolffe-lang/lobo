@@ -1,30 +1,46 @@
 //! member: true
-//! config/userconf — the `user` directive (ws41). nginx drops the
-//! workers' privileges to the named user when its master runs as
-//! root, and when it does not it cannot, so it warns and goes on
-//! (`ngx_set_user`, probed against nginx/1.30.4: `[warn] the "user"
-//! directive makes sense only if the master process runs with
-//! super-user privileges, ignored in <file>:<line>`). lobo has no
-//! privilege drop at this pin: wolf 0.2.16 has no setuid and no
-//! getuid, so the only reading of the effective uid is linux's
-//! `/proc/self/status`. The posture follows from that:
-//!   - unprivileged (effective uid known and not 0): nginx's own
-//!     warning, and the config loads — nginx does the same thing;
-//!   - root: refused BY NAME, because lobo would keep running as root
-//!     while the config names someone else — silently inert is the
-//!     one outcome the table forbids;
-//!   - unknown: refused by name too, for the same reason, with the
-//!     reason in the message. ws54 (lobo#52): with no
-//!     `/proc/self/status` (macOS) the host is ASKED (`id -u` through
-//!     `/bin/sh`, read off the exit code), so an unprivileged macOS
-//!     lobo warns and loads as nginx does; "unknown" is now only a
-//!     host that cannot answer either way.
-//! The decision is pure (`user_verdict`, the uid passed in) so it runs
-//! on every lane; `self_euid` is the one fs read.
+//! config/userconf — the `user` directive (ws41; the drop since ws67,
+//! lobo#96). nginx's master, started as root, keeps root and runs its
+//! workers as the configured user and group, supplementary groups too;
+//! not root, it cannot, so it warns and goes on. Measured against the
+//! pinned nginx/1.30.4 as root in a container (notes/ws67-contract.md
+//! §2): under `user lw lwx;` each worker reads `Uid: 1500 ×4`, `Gid:
+//! 1600 ×4`, `Groups: 1600`; under `user lw;` the group is the one
+//! NAMED like the user (`Gid: 1500`) and `Groups: 1500 1600` — the
+//! given group and every group that lists the user as a member, which
+//! is `std.os.users.groups_of` exactly; an unknown name is `[emerg]
+//! getpwnam("x") failed in <file>:<line>` (or `getgrnam`); not root,
+//! `[warn] the "user" directive makes sense only if the master process
+//! runs with super-user privileges, ignored in <file>:<line>`.
+//!
+//! Through ws66 lobo had no way to change its ids (wolf had no setuid),
+//! so root with `user` was refused by name. From wolf 0.2.30 (s236,
+//! `[os.proc.ids]`) it has `os_euid` and `os_set_ids`, and wolf-std
+//! `d37c911` wraps them (`std.env.euid`, `std.process.set_ids`, ruling
+//! #78) beside `std.os.users`, which reads `passwd(5)` and `group(5)`.
+//! The posture:
+//!   - not root: nginx's warning, and the config loads (unchanged);
+//!   - root, on a host that can drop (linux: `set_ids` is linux's at
+//!     this pin): `drop:` — the process that ran `lobo serve` is a
+//!     master that keeps root, and each hand drops before it serves
+//!     (main.lu, `drop_privileges`);
+//!   - root where the drop cannot be made, or a `user` naming no
+//!     account: refused by name;
+//!   - no user ids at all (`os_euid` unsupported): refused by name.
+//! The verdict and the id resolution are pure (`user_verdict`,
+//! `user_ids`, the uid and the account texts passed in) so they run on
+//! every lane; `self_euid`, `user_ids_host` and `drop_host` are the
+//! host reads.
+
+use std.env
+use std.os.users
 
 /// The effective uid in a `/proc/<pid>/status` text: the second
 /// number on the `Uid:` line (real, effective, saved, fs), or -1 when
-/// the line is missing or malformed. Pure. Total.
+/// the line is missing or malformed. ws41's reader; since ws67
+/// `self_euid` asks `os_euid` and nothing in lobo calls this — kept,
+/// with its rows in tests/config/user_directive.lu, because it is the
+/// interface's and the rows still hold. Pure. Total.
 pub fn status_euid(text: str) -> int {
     for line in text.lines() {
         if line.starts_with("Uid:") {
@@ -54,45 +70,13 @@ pub fn status_euid(text: str) -> int {
     -1
 }
 
-/// This process's effective uid, read off `/proc/self/status`. ws54
-/// (lobo#52): where the host has no such file (macOS) lobo ASKS the
-/// host instead — `host_root_probe` — because wolf 0.2.25 has no uid
-/// surface at all (no getuid/geteuid, and `fs_fstat` carries no owner;
-/// wolf-lang#633). The probe answers privilege, not a number, so an
-/// unprivileged host reads as 1 (a positive stand-in: "not root"), root
-/// as 0, and no answer as -1. fs and exec tiers.
+/// This process's effective uid (`std.env.euid`, `os_euid`; ws67).
+/// Through ws66 it was read off `/proc/self/status`, and where that
+/// file is absent (macOS) the host was asked through `id -u` (ws54,
+/// lobo#52). -1 where the host answers no user ids (windows). env
+/// tier. Total.
 pub fn self_euid() -> int {
-    let text = fs_read_text("/proc/self/status") else |_| {
-        return host_root_probe()
-    }
-    status_euid(text)
-}
-
-/// Ask the host whether this process is root, off an EXIT CODE (the
-/// one thing a child hands back at this pin: `os_spawn_with` inherits
-/// stdio and captures nothing): `/bin/sh -c` runs `id -u` and exits 0
-/// for an unprivileged uid, 1 for root, 2 when it cannot tell. Answers
-/// 1 (unprivileged), 0 (root) or -1 (no answer — no shell, no `id`, a
-/// spawn the host refused). Never traps. exec tier.
-fn host_root_probe() -> int {
-    var args = List[str]()
-    (mut args).push("-c")
-    (mut args).push(
-        "u=$(id -u 2>/dev/null) || exit 2; [ -n \"$u\" ] || exit 2; [ \"$u\" -eq 0 ] && exit 1; exit 0",
-    )
-    let h = os_spawn_with("/bin/sh", args, List[int]()) else |_| {
-        return -1
-    }
-    let code = os_wait(h) else |_| {
-        return -1
-    }
-    if code == 0 {
-        return 1
-    }
-    if code == 1 {
-        return 0
-    }
-    -1
+    env.euid() else |_| { -1 }
 }
 
 /// The first `user` row in the main context, or -1. Total.
@@ -110,10 +94,10 @@ fn user_row(c: Conf) -> int {
 
 /// The `user` directive's verdict for a process whose effective uid is
 /// `euid` (-1 = unknown): "" when the config has no `user`;
-/// `warn:<line>` when the process is unprivileged (nginx's warning,
-/// the config loads); `emerg:<line>` when it is root or the uid is
-/// unknown (refused by name — lobo cannot drop privileges). Pure.
-/// Total.
+/// `warn:<line>` when the process is not root (nginx's warning, the
+/// config loads); `drop:<file>:<line>` when it is root — the drop is
+/// asked for, `user_ids` resolves it and the hands make it (ws67);
+/// `emerg:<line>` when the host answers no uid. Pure. Total.
 pub fn user_verdict(c: Conf, euid: int) -> str {
     let r = user_row(c)
     if r < 0 {
@@ -124,15 +108,128 @@ pub fn user_verdict(c: Conf, euid: int) -> str {
         return "warn:the \"user\" directive makes sense only if the master process runs with super-user privileges, ignored in {at}"
     }
     if euid == 0 {
-        return "emerg:the \"user\" directive asks for a privilege drop and lobo cannot drop privileges at this pin (wolf has no setuid surface) — run lobo unprivileged, as the target user, in {at}"
+        return "drop:{at}"
     }
-    "emerg:the \"user\" directive cannot be checked on this host: lobo reads its effective uid from /proc/self/status, which is absent, and asking the host (`id -u` through /bin/sh) gave no answer; lobo cannot drop privileges — remove the directive and run lobo as the target user, in {at}"
+    "emerg:the \"user\" directive cannot be checked on this host: it answers no user ids (os_euid is unsupported), so lobo cannot drop privileges here — remove the directive and run lobo as the target user, in {at}"
+}
+
+/// The ids a `user` row asks for (ws67, lobo#96): `ok` false with the
+/// refusal in `err` (nginx's words) when an account is missing.
+/// `name` and `group` are the names as configured (the group defaults
+/// to the user's NAME, nginx's rule), `uid` and `gid` their ids, and
+/// `groups` the supplementary list `os_set_ids` takes — the group and
+/// every group that lists the user as a member, in the file's order.
+pub struct UserIds {
+    ok: bool,
+    err: str,
+    name: str,
+    group: str,
+    uid: int,
+    gid: int,
+    groups: List[int],
+}
+
+fn ids_refused(err: str) -> UserIds {
+    UserIds { ok: false, err: err, name: "", group: "", uid: -1, gid: -1, groups: List[int]() }
+}
+
+/// Resolve the `user` row against the account files' texts (`passwd`,
+/// `group`): the user by name (`std.os.users.user_named`), the group
+/// by name — the row's second argument, else the group NAMED like the
+/// user, as nginx (its `user lw;` worker reads `Gid: 1500`, lw's own
+/// group, and not lw's `passwd` gid when the two differ) — and the
+/// supplementary groups by `std.os.users.groups_of(group, name, gid)`,
+/// the list nginx's workers read (`Groups:`). No `user` row answers ok
+/// with no ids (-1). Pure. Total.
+pub fn user_ids(c: Conf, passwd: str, group: str) -> UserIds {
+    let r = user_row(c)
+    if r < 0 {
+        return UserIds {
+            ok: true,
+            err: "",
+            name: "",
+            group: "",
+            uid: -1,
+            gid: -1,
+            groups: List[int](),
+        }
+    }
+    let at = "{c.files[r]}:{c.lines[r]}"
+    let base = c.args_at[r]
+    let name = c.argp[base]
+    let gname = if c.args_n[r] > 1 { c.argp[base + 1] } else { name }
+    let u = users.user_named(passwd, name) else |_| {
+        return ids_refused("getpwnam(\"{name}\") failed in {at}")
+    }
+    let g = users.group_named(group, gname) else |_| {
+        return ids_refused("getgrnam(\"{gname}\") failed in {at}")
+    }
+    UserIds {
+        ok: true,
+        err: "",
+        name: name,
+        group: gname,
+        uid: u.uid,
+        gid: g.gid,
+        groups: users.groups_of(group, name, g.gid),
+    }
+}
+
+/// `user_ids` against this host's `/etc/passwd` and `/etc/group` (the
+/// files nginx's getpwnam and getgrnam read where no other name
+/// service is configured; `std.os.users` reads no directory service,
+/// named in its header). A file that cannot be read is a refusal by
+/// name. fs tier. Total.
+pub fn user_ids_host(c: Conf) -> UserIds {
+    if user_row(c) < 0 {
+        return user_ids(c, "", "")
+    }
+    let p = fs_read_text("/etc/passwd") else |_| {
+        return ids_refused("the \"user\" directive needs /etc/passwd, which could not be read")
+    }
+    let g = fs_read_text("/etc/group") else |_| {
+        return ids_refused("the \"user\" directive needs /etc/group, which could not be read")
+    }
+    user_ids(c, p, g)
+}
+
+/// Whether this host can make the drop: `std.process.set_ids` is
+/// linux's at this pin (every other host answers `unsupported`, by
+/// name: macOS has no way to read a drop back), and the one linux fact
+/// lobo already reads is `/proc/self/status`. Asked before any hand is
+/// started, so a host that cannot drop refuses at `-t` and at start
+/// rather than in every hand. fs tier. Total.
+pub fn drop_host() -> bool {
+    fs_exists("/proc/self/status")
+}
+
+/// Whether this configuration, in a process with effective uid `euid`,
+/// asks for the drop: root, and a `user` row. Then the process that
+/// ran `lobo serve` is a master (with `worker_processes 1` too: nginx
+/// has a master unless `master_process off`, which lobo refuses by
+/// name) and its hands drop. Pure. Total.
+pub fn user_drops(c: Conf, euid: int) -> bool {
+    user_verdict(c, euid).starts_with("drop:")
+}
+
+/// The one line a root process with NO `user` row prints at start
+/// (ws67, a NAMED DELTA): nginx's default is `user nobody nobody`, and
+/// lobo does not apply it — it keeps the one root process it ran
+/// through 0.1.4, so a root deployment that serves keeps serving (its
+/// logs, its ACME store). "" otherwise. Pure. Total.
+pub fn root_note(c: Conf, euid: int) -> str {
+    if euid != 0 || user_row(c) >= 0 {
+        return ""
+    }
+    "running as root with no \"user\" directive: nginx would run its workers as nobody:nobody (its default), lobo keeps root (a named delta) — add `user <name> [<group>];` to drop"
 }
 
 /// The `user` gate every entry that loads a config for serving runs
 /// (`-t`, the single-process server, the master): prints the verdict
 /// in nginx's stream (`[warn]` or `[emerg]`) and answers false on a
-/// refusal. fs tier (the uid read).
+/// refusal. As root it resolves the ids too, so an unknown account is
+/// refused here, at `-t` and at start, as nginx refuses it, and a host
+/// that cannot drop refuses by name. fs and env tiers. Total.
 pub fn user_gate(c: Conf) -> bool {
     let v = user_verdict(c, self_euid())
     if v.starts_with("warn:") {
@@ -142,6 +239,19 @@ pub fn user_gate(c: Conf) -> bool {
     if v.starts_with("emerg:") {
         eprint("lobo: [emerg] {v[6..v.len]}")
         return false
+    }
+    if v.starts_with("drop:") {
+        if !drop_host() {
+            eprint(
+                "lobo: [emerg] the \"user\" directive asks for a privilege drop and this host cannot make one (std.process.set_ids answers unsupported off linux at this pin) — run lobo as the target user, in {v[5..v.len]}",
+            )
+            return false
+        }
+        let ids = user_ids_host(c)
+        if !ids.ok {
+            eprint("lobo: [emerg] {ids.err}")
+            return false
+        }
     }
     true
 }
