@@ -65,6 +65,8 @@ def say(ok, what):
 
 
 # --- this repository's -------------------------------------------------------------
+NIGHTLY = None            # (its tier, its jobs); None: the full tier
+FULL_LEG_TIERS = ("full",)  # the tiers that run every leg
 WORKFLOW_FILE = "ci.yml"
 WORKFLOW_NAME = "ci"
 WORKFLOW_JOBS = ["plan", "gauntlet", "gauntlet-macos", "tier", "nightly-red"]
@@ -117,6 +119,7 @@ def extra_checks(say, plan, expect, blocks, wf):
         "T4 the linux job's own steps still choose the measurement over the gauntlet")
 # --- end of this repository's ------------------------------------------------------
 WORKFLOW = os.path.join(ROOT, ".github", "workflows", WORKFLOW_FILE)
+NIGHTLY = NIGHTLY or ("full", FULL_JOBS)
 
 
 def clean_env(**more):
@@ -150,10 +153,11 @@ def expect(name, got, tier, jobs):
         why.append("tier %s, wanted %s" % (got["tier"], tier))
     if got["jobs"] != jobs:
         why.append("jobs %s, wanted %s" % (" ".join(got["jobs"]) or "none", " ".join(jobs) or "none"))
-    hosts = ALL_HOSTS if tier == "full" else PR_HOSTS
+    hosts = ALL_HOSTS if tier in FULL_LEG_TIERS else PR_HOSTS
     if not got["tier"].startswith("ERROR") and got.get("matrix") != hosts:
         why.append("hosts %s, wanted %s" % (json.dumps(got.get("matrix")), json.dumps(hosts)))
     shown = "every job (%d), every host" % len(jobs) if tier == "full" else (" ".join(jobs) or "no job")
+    shown += ", every host" if tier in FULL_LEG_TIERS and tier != "full" else ""
     say(not why, "%s: %s%s" % (name, tier, (" (" + "; ".join(why) + ")") if why else ", " + shown))
 
 
@@ -164,7 +168,7 @@ def in_order(jobs):
 # --- T1 the tiers by event ---------------------------------------------------
 say(JOBS == WORKFLOW_JOBS, "T1 the workflow's jobs: %s" % " ".join(JOBS))
 expect("T1 a push to trunk", plan(event="push"), "full", FULL_JOBS)
-expect("T1 the nightly", plan(event="schedule"), "full", FULL_JOBS)
+expect("T1 the nightly", plan(event="schedule"), NIGHTLY[0], NIGHTLY[1])
 expect("T1 a dispatch, no tier", plan(event="workflow_dispatch"), "full", FULL_JOBS)
 expect("T1 a dispatch, tier full", plan(event="workflow_dispatch", tier="full"), "full", FULL_JOBS)
 say(plan(event="workflow_dispatch", tier="partial")["tier"].startswith("ERROR rc=2"), "T1 a dispatch's tier is full or pr, nothing else")
