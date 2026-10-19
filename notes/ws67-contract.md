@@ -384,6 +384,17 @@ head; at trunk 6 of 8 red (every `user` row refused to start,
   next park (wolf-lang#683's shape), where nginx closes the connection.
 - `keepalive_requests` (1000) ends a membudget drive of 2,000 on one
   connection; the proxied row drives five connections.
+- **The proxied membudget row's backend stopped the CI runner.** The
+  PR's first run (39324995657, attempts 1 and 2) lost its linux job to
+  "The runner has received a shutdown signal" 27–40 s into that row,
+  both times. Run alone on kasumi with a memory monitor, the row's
+  rigback grew to 24,461,756 kB resident (MemAvailable 30 GB → 5.6 GB):
+  rigback appends to its record by reading it back and writing it whole,
+  so 2,400 padded requests are quadratic, and the 16 GB runner's host
+  stopped the runner. The record goes to /dev/null now (`a0c384b`):
+  MemAvailable stayed at 30.4 GB and the row grew lobo 20 kB. lobo's
+  memory was flat throughout; the earlier green kasumi runs had the
+  room.
 
 ### Slips, named
 
