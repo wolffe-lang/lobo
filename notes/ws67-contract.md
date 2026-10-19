@@ -244,3 +244,196 @@ Three deliverables:
   would show.
 - `set_ids` refusing inside rootless podman for an id outside the
   user namespace's map (1500 and 1600 are inside it).
+
+## 3. The prediction against the measurement
+
+Measured on kasumi (16 cpus; other lanes beside it, load 14–17 from
+19:50Z on, written beside each number), the toolchains of §2; logs under
+`kasumi:~/lanes/ws67/ev/` and `logs/` (digests in §4). §3 above is as it
+was committed (`1a2521d`).
+
+### lobo#94
+
+**Held.**
+- The undo: at `ulimit -n 12` the start exits 1 with `could not write
+  pid file` and `logs/` holds nothing; the plain start after it serves
+  (trunk: `c.sock` left, then exit 1, `something already exists`).
+  Walking the limit up from 8, every start that fails leaves nothing
+  (8–9 exit 71, 10–11 exit 1 before or at the bind, 12 the pid file,
+  13 serves). A master of two hands whose pid file cannot be written
+  leaves no socket either.
+- The takeover: a lobo ended by SIGKILL leaves `c.sock` and its pid
+  file; the next start prints the stale pid file's `[warn]` and then
+  `[warn] removing stale control socket "<path>" (no lobo answers on
+  it)`, and serves (trunk: exit 1).
+- Never: a second start of a live lobo's configuration is refused (`a
+  lobo master is already running`), a second configuration on the live
+  socket is refused (`something already exists`), a socket nobody
+  answers on whose pid file names a live process (the test's own) is
+  refused and left, an ordinary file is refused and left untouched; the
+  live lobo keeps answering throughout.
+- `tests/shell/stale_socket_e2e.lu`: red at trunk on both lanes at the
+  limit-12 assertion (`c.sock` left; `t94-trunk.log`), green at the
+  head on both, under `taskset -c 0-3` (`t94-h94.log`).
+
+**Wrong / not predicted.**
+- The limit is 12 here where ws66 read 11: this shell holds one
+  inherited socket more (ws66's own note on its fd 8).
+- A pid file in a directory that does not exist is no failure at all:
+  `shell.pid_write` makes the directory. The test's limit-free shape
+  puts the pid file under an ordinary FILE instead, where no directory
+  can be made.
+- A failed pid write can leave `<pid>.new` (the write's sibling); the
+  undo removes it too.
+
+### lobo#96
+
+**Held, to the line** (as root in podman, `ng96-h96-lobo.log`,
+`user-h96.log`): the master `Uid: 0 0 0 0`; under `user lw lwx;` the
+hand `Uid: 1500 1500 1500 1500`, `Gid: 1600 1600 1600 1600`, `Groups:
+1600`; under `user lw;` `Gid: 1500 ×4`, `Groups: 1500 1600` — nginx's
+workers' lines; `worker_processes 1` is a master and one hand,
+`worker_processes 2` two dropped hands; port 80 answers 200 and the
+root-only 0600 file 403 (trunk with no `user`: 200); the logs are
+`lw:root` from the start (the named delta: nginx's are `root:root`
+until the first reopen) and after `-s reopen` with the access log moved
+away the fresh one is `lw:root` and holds the request; `user nosuch;`
+is `[emerg] getpwnam("nosuch") failed in <file>:1` at `-t` and at
+start; not root, `-t` warns and exits 0; root with no `user` line is
+one root process with its `[warn]`. `tools/lobo-user` 14/14 at the
+head; at trunk 6 of 8 red (every `user` row refused to start,
+`user-trunk.log`).
+
+**Not predicted.**
+- A reload whose configuration only root may read (0600) is refused by
+  every dropped hand, which keeps serving its generation, while the
+  master answers `reload complete (generation 2) workers=0/2`
+  (`reload96-h96.log`): a named delta now (the directive table and
+  `docs/WORKERS.md`), and the master's "complete" beside `workers=0/2`
+  is misleading.
+
+### lobo#81
+
+**Held.**
+- The shape (`silent81.py`, the release binary, the client on cpus
+  8–15): one request to a silent upstream and 50 concurrent clients for
+  10 s: **179,588 answered, 0 not, p50 2.6 ms, p99 6.1 ms, max 12.8
+  ms** (trunk 0 of 250; the pinned nginx 328,903, p99 3.0 ms); with
+  **eight** silent requests out, 179,213 and 0, p99 6.0 ms. `-s stop`
+  exits 0 and the server is gone at once (trunk: still running 15 s
+  later). The proxied clients see their connections end at the stop.
+- `tests/serve/silent_upstream_e2e.lu`: red at trunk on both lanes (0
+  of 20 answered, `-s stop` exit 1, the server still running 2 s later;
+  `t81-trunk.log`), green at the head (60 of 60, the slowest read 1
+  ms, stopped in 20 ms; `t81-h81.log`).
+- `worker_connections`: `tools/lobo-shell`'s new row at 16 with one
+  listener and eight proxied requests: both servers `map=00000001
+  held=closed` and both log the `[alert]` (oracle 2, lobo 3); at trunk
+  the row is red (`map=00000000 held=none`: the first exchange held the
+  loop; `shell-trunk.log`). 44 probes, 42 parity, 2 named deltas.
+- The proxy suite unchanged: `proxy-differential` 8/8, the log
+  differential, `lobo-resolver` 9/9 (the access line names the resolved
+  `$upstream_addr`, so the record's round trip holds), `lobo-metrics`
+  (`tools-h81.log`); corpus 372/372.
+- At rest the process holds one descriptor more, the job listener (20
+  by a harness that hands lobo no inherited socket; trunk 19).
+- The drain: with `worker_shutdown_timeout 1s`, a reload while an
+  exchange waits on a silent upstream ends it 1.25 s later, the
+  upstream connection is closed by the loop from the proc's notes, and
+  the descriptors return to 20 (`drain81-h81.log`). `-s quit` with an
+  exchange out ends at the generation's shutdown timeout (1.27 s).
+- Membudget 25/25: `flat, proxied` grew −1,572 KB over 2,000 proxied
+  requests (`membudget-h81c.log`).
+
+**Wrong.**
+- **Throughput**: proxied requests a second against a prompt upstream
+  are about HALF trunk's, not 0.6–1.0x. One client in turn, 20,000
+  requests, three alternating runs: 6,601 / 7,109 / 6,811 (trunk)
+  against 3,140 / 3,443 / 3,241 (head), 0.48x (`px81-tput.log`).
+  `ab -k -c 32`, the pinned nginx as the upstream: 11,550 / 11,040 /
+  10,264 against 6,590 / 6,124 / 4,492, 0.44–0.57x (`abpx-c32.log`);
+  nginx as the proxy in the same shape 14,201 / 13,397 / 14,126
+  (`abpx-ng-c32.log`). Load 15–17 throughout. Reusing an exchange's
+  job socket for the next (an experiment, not kept: it holds idle
+  descriptors at rest) gave 1.21x and 1.26x on two runs of three.
+- One exchange out holds four descriptors more (24 against 20), not
+  five.
+- A client that closes while its exchange waits is not noticed: nginx
+  (`proxy_ignore_client_abort off`) drops the exchange and frees both
+  connections at once; lobo's proc is parked on its upstream, so the
+  exchange (and its two connections) lasts until `proxy_read_timeout`.
+  `lobo-shell` records it as a named delta (oracle `after=200`, lobo
+  `after=closed`).
+
+**Not predicted.**
+- **A proc kept what it allocated outside a region block**: each
+  exchange left about 27.5 kB behind (2,000 proxied requests grew the
+  process 55 MB; threads and descriptors flat), with the proc joined at
+  its report or not. Every allocation of `job_run` now lives in a
+  `region job { }` block, and the growth is +12 kB. Suspected a wolf
+  defect (a proc's ambient region not returned at its end); not reduced
+  to a repro here.
+- `spawn proc proxy.job_run(…)` does not compile (`a dotted proc
+  path`, wolf-lang#655); main spawns a one-line trampoline.
+- `net_deadline(fd, 0)` CLEARS a socket's budget: the first kill-path
+  read of the job socket parked the whole loop (the drain measurement
+  found it: `status`, `quit` and `stop` unanswered). The kill path asks
+  `net_wait` with no wait before each read now.
+- A killed exchange answers its client `502 Bad Gateway` before it is
+  gone: the kill unparks its upstream read and the proc runs on to its
+  next park (wolf-lang#683's shape), where nginx closes the connection.
+- `keepalive_requests` (1000) ends a membudget drive of 2,000 on one
+  connection; the proxied row drives five connections.
+
+### Slips, named
+
+- One scratch file was written to `/tmp` on nomad-1 and removed at
+  once; one rigback helper of this lane's was stopped by a `pgrep -f`
+  on this lane's own scratch path rather than by its recorded pid.
+  Neither touched anything else.
+
+## 4. Evidence index
+
+kasumi `~/lanes/ws67/` (sha256 prefixes): `toolchains.txt`,
+`dl/digest-check.txt`; the gauntlets `logs/g-trunk.log` 20a9c93e7e55…
+(trunk, GREEN, 368/368), `logs/g-h81.log` fe93516e0a7f… (the #81 tree
+before the shell row, GREEN, 372/372, 25/25, user 14/14, 0 SKIP),
+`logs/g-head.log` (the head, see the PR); #94 `ev/s94-trunk-rel.log`
+6f0da9872c4f…, `ev/s94-h94-rel.log` 0790e2eb2734…, `ev/ng94.log`
+1fc65e7c17be…, `ev/t94-trunk.log` ddfefce974cf…, `ev/t94-h94.log`
+c87859d2670c…; #96 `ev/ng96-trunk.log` 97d0ab397517…,
+`ev/ng96-h96-lobo.log` 52acdd2b666e…, `ev/user-h96.log` de298ad5be33…,
+`ev/user-trunk.log` e794a5992d91…, `ev/reload96-h96.log` cef5b831de41…;
+#81 `ev/s81-trunk-rel.log` 6368615e7648…, `ev/s81-nginx.log`
+99a421d9bf73…, `ev/s81-h81-rel.log` c5f5f83a71e5…,
+`ev/s81-h81-rel-8.log` e9ec3405982c…, `ev/t81-trunk.log`
+314d9733fdd7…, `ev/t81-h81.log` e00018453928…, `ev/ngwc.log`
+dfffde7911a0…, `ev/shell-h81.log` 36df3039733f…, `ev/shell-trunk.log`
+2112dfaf8990…, `ev/membudget-h81c.log` 6de3f2f4716d…,
+`ev/drain81-h81.log` ad881aa85d19…, `ev/px81-tput.log` 06c7c25455fd…,
+`ev/abpx-c32.log` 89624ee0b36d…, `ev/abpx-ng-c32.log` aec1c3d04ece…,
+`ev/tools-h81.log` c13c891f2ec7…. Scripts: `scripts/` (stage, build,
+g, t, q, sock94, ng94, ng96, reload96, silent81, ngwc, drain81, px81,
+abpx, abpxng).
+
+CI: the PR's runs, the plants `ws67-plant` (trunk's src and the two new
+e2e tests) and `ws67-plant-user` (trunk's src and the `user` step) —
+their ids and verdicts are in the PR.
+
+## Not verified
+
+macOS beyond CI (the drop is linux's; the stale socket's limit walk and
+the silent upstream on the runner only); a master with hands at its
+descriptor limit with exchanges out; an https upstream that never
+answers (the same proc; not driven); a TLS listener's proxied request
+(still a named 502); `cert auto` under `user` (the ACME store must be
+the user's to write); a rootless engine without a subordinate id map;
+the proc-memory finding in isolation.
+
+## 5. Done-when
+
+Branch `ws67`, the PR open and unmerged, CI green at its head with the
+gauntlet's log read, `wolf/tools/lane-audit.sh lobo ws67 <PR>` run from
+the org directory. lobo#94, #96 and #81 are the orchestrator's to close
+by hand at the merge. `ws67-plant` and `ws67-plant-user` stay on origin
+as evidence.
