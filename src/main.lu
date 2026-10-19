@@ -93,6 +93,7 @@ use proxy
 use resolver
 use serve
 use shell
+use std.process
 use tls
 
 /// The no-argument banner: identity (the release stamp — shell's,
@@ -1300,6 +1301,14 @@ fn serve_main(
     if worker == 0 && !config.user_gate(c0) {
         return 1
     }
+    // ws67 (lobo#96): nginx's default `user nobody nobody` is a named
+    // delta — lobo keeps root, and says so once
+    if worker == 0 {
+        let rn = config.root_note(c0, config.self_euid())
+        if !rn.is_empty() {
+            eprint("lobo: [warn] {rn}")
+        }
+    }
     // ws64 (lobo#84): `worker_connections` is applied, so a value the
     // oracle refuses refuses the start as it refuses -t; and nginx's
     // start warning when the process may not have that many
@@ -1980,6 +1989,11 @@ fn serve_main(
         )
     }
     var gens = List[GenRow]()
+    // ws67 (lobo#96): whether this hand drops, and to whom — resolved
+    // here, before the generation table takes the model; the drop itself
+    // is made just before the start-up's first log line (below)
+    let hand_drops = worker > 0 && config.user_drops(c0, config.self_euid())
+    let drop_ids = if hand_drops { config.user_ids_host(c0) } else { config.user_ids(c0, "", "") }
     (mut gens).push(take GenRow {
         conf: c0,
         gen: g1,
@@ -2138,6 +2152,22 @@ fn serve_main(
         pipe_r: opts.pipe_r,
         stream_w: opts.stream_w,
         proc_room: false,
+    }
+
+    // ws67 (lobo#96): THE DROP. A hand of a master started as root with
+    // a `user` line becomes that user here, after everything that needs
+    // root is done — its listeners adopted (a port below 1024 was bound
+    // by the master), its control endpoint bound, its certificates and
+    // keys read — and before the first log line is written or a
+    // connection served. nginx's workers drop in the same place. A drop
+    // that cannot be made ends the hand with exit 2, which the master
+    // reads as fatal and does not respawn (nginx: "exited with fatal
+    // code 2 and cannot be respawned").
+    if hand_drops {
+        if !drop_privileges(drop_ids, mut elog_st) {
+            elog_st = flush_elog(elog_st)
+            return 2
+        }
     }
 
     // ws57: the lines the start-up wrote are flushed here, once, so
@@ -4165,6 +4195,104 @@ fn start_undo(pidp: str, cl: int, have_ctrl: bool, listeners: List[int]) {
     }
 }
 
+/// lobo#96 (ws67): make this hand the configured user, for good —
+/// `std.process.set_ids(uid, gid, groups)`, one call (the groups, the
+/// group ids, the user ids, read back; `[os.proc.ids.set]`), with the
+/// ids `config.user_ids_host` resolved at the hand's start: nginx's
+/// worker lines exactly (notes/ws67-contract.md §2). One `[notice]` when it took; one
+/// `[emerg]` and false when it did not (an account gone since the
+/// master's check, or a host that refuses the change). exec and fs
+/// tiers. Total.
+fn drop_privileges(ids: config.UserIds, mut el: ELog) -> bool {
+    if !ids.ok {
+        ev_log(mut el, "emerg", ids.err)
+        return false
+    }
+    var why = ""
+    process.set_ids(ids.uid, ids.gid, ids.groups) else |e| match e {
+        denied => {
+            why = "the host refused it (denied)"
+        },
+        invalid => {
+            why = "an id the host has no mapping for (invalid)"
+        },
+        unsupported => {
+            why = "this host cannot change a process's ids (unsupported)"
+        },
+        io => {
+            why = "io"
+        },
+    }
+    if !why.is_empty() {
+        ev_log(
+            mut el,
+            "emerg",
+            "the privilege drop to \"{ids.name}\" (uid {ids.uid}, gid {ids.gid}, groups {join_ints(ids.groups)}) failed: {why}",
+        )
+        return false
+    }
+    ev_log(
+        mut el,
+        "notice",
+        "running as {ids.name}:{ids.group} (uid {ids.uid}, gid {ids.gid}, groups {join_ints(ids.groups)})",
+    )
+    true
+}
+
+/// lobo#96 (ws67): every log file `c` names — each access output and
+/// the error log — made if absent and given to `uid` (the owner only;
+/// the group stays, nginx's `lw:root` after a reopen), so a hand that
+/// is no longer root can open it for append. nginx's master does this
+/// at every reopen; lobo's does it before its first hands start too,
+/// because they are exec'd and open their own files (nginx's are
+/// forked and inherit the master's) — a named delta. A file that
+/// cannot be made or given is one `[warn]`. fs tier. Total.
+fn give_logs(c: config.Conf, prefix: str, uid: int, mut el: ELog) {
+    var paths = List[str]()
+    for r in build_sinks(c, prefix) {
+        (mut paths).push(r.s.path)
+    }
+    let e = build_elog(c, prefix, 0, 0)
+    if e.have {
+        (mut paths).push(e.s.path)
+    }
+    for p in paths {
+        if p.is_empty() {
+            continue
+        }
+        var made = true
+        let fd = fs_open_mode(p, 2) else |_| {
+            made = false
+            -1
+        }
+        if made {
+            fs_close(fd) else |_| {}
+        }
+        var given = made
+        if made {
+            fs_set_owner(p, uid, -1, true) else |_| {
+                given = false
+            }
+        }
+        if !given {
+            ev_log(mut el, "warn", "could not give the log file \"{p}\" to uid {uid}")
+        }
+    }
+}
+
+/// `1500 1600` from a list of ids ("-" for none), for a log line.
+/// Total.
+fn join_ints(xs: List[int]) -> str {
+    var out = ""
+    for x in xs {
+        out = if out.is_empty() { "{x}" } else { "{out} {x}" }
+    }
+    if out.is_empty() {
+        return "-"
+    }
+    out
+}
+
 /// Bind a control endpoint, TCP or unix, by the shape of its address
 /// (ws17, wolf-lang#227). The answer is an ordinary net listener
 /// either way; `net_port` is `io` on the unix one, which is why the
@@ -5262,6 +5390,22 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     // and the probe governs how fast the slot is REFILLED, not how
     // fast service returns.
     var wprobe = List[int]()
+    // ws67 (lobo#96): the hands will not be root, so the master — which
+    // is — makes every log file the configuration names and gives it to
+    // the user before the first hand starts, and again before a reopen
+    // reaches them (`give_logs`). The ids were resolved by the gate.
+    let drops = config.user_drops(c0, config.self_euid())
+    var drop_uid = -1
+    if drops {
+        let ids = config.user_ids_host(c0)
+        drop_uid = ids.uid
+        give_logs(c0, prefix, drop_uid, mut elog_st)
+        ev_log(
+            mut elog_st,
+            "notice",
+            "workers run as {ids.name}:{ids.group} (uid {ids.uid}, gid {ids.gid}, groups {join_ints(ids.groups)}); the master keeps root (user directive)",
+        )
+    }
     var i: int = 0
     while i < n {
         let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, 1, "", lset, mut elog_st)
@@ -5392,6 +5536,12 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     reply(cc, "quit: draining then exiting (generation {mgen}) workers={k}/{n}\n")
                     quitting = true
                 } else if verb == "reopen" {
+                    // ws67 (lobo#96): nginx's order ("Controlling nginx"):
+                    // the master re-opens the logs and gives them to the
+                    // workers' user, then the workers re-open them
+                    if drops {
+                        give_logs(mconf, prefix, drop_uid, mut elog)
+                    }
                     let k = fan_out("reopen", wctl, ctok)
                     // the error log's pending lines go to the file they
                     // were meant for, then the file is closed so the next
@@ -5556,8 +5706,21 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     continue
                 }
                 let reason = if quitting { "" } else { "unreachable" }
-                let _code = reap_worker(wslot[j], j + 1, reason, mut elog)
+                let code = reap_worker(wslot[j], j + 1, reason, mut elog)
                 forget_endpoint(ep)
+                if code == 2 && !quitting {
+                    // ws67 (lobo#96): a hand that could not become its
+                    // user ended itself with exit 2; another would too
+                    ev_log(
+                        mut elog,
+                        "alert",
+                        "worker {j + 1} exited with fatal code 2 and cannot be respawned",
+                    )
+                    wgone[j] = true
+                    wslot[j] = -1
+                    j = j + 1
+                    continue
+                }
                 if quitting {
                     wgone[j] = true
                     wslot[j] = -1
@@ -6189,7 +6352,11 @@ fn main() -> int {
                 }
             }
         }
-        if n > 1 {
+        // ws67 (lobo#96): root with a `user` line is a master and its
+        // hands, with one hand too — nginx's shape (it has a master
+        // unless `master_process off`, which lobo refuses by name): the
+        // master keeps root for what needs it and the hands drop
+        if n > 1 || config.ok(c) && config.user_drops(c, config.self_euid()) {
             return master_main(cli.prefix, cli.conf, n)
         }
         return serve_main(cli.prefix, cli.conf, 0, "", 0, 0, "", "")

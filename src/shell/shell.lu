@@ -1105,8 +1105,11 @@ pub fn reload(prefix: str, conf_rel: str, take prev: Gen) -> Gen {
     // ws41: a reload refuses what a start refuses — a `named_error`
     // row (the -t refusal) and a `user` lobo cannot honour as root
     // ws64: and a `worker_connections` the oracle refuses
+    // ws67 (lobo#96): and, as root, a `user` naming no account
+    let euid = config.self_euid()
     let refused = !config.delta_refusal(c).is_empty() ||
-        config.user_verdict(c, config.self_euid()).starts_with("emerg:") ||
+        config.user_verdict(c, euid).starts_with("emerg:") ||
+        config.user_drops(c, euid) && !config.user_ids_host(c).ok ||
         !config.conn_check(c).is_empty()
     if config.ok(c) && !refused {
         let g = prev.gen + 1
