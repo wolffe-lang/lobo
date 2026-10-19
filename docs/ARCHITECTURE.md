@@ -80,6 +80,36 @@ streams now is `worker_connections`, applied since ws64 (lobo#84),
 and behind it the host: two descriptors and two threads each (README,
 Limits).
 
+ws67 (lobo#81) adds the third: a proxied EXCHANGE leaves the loop too.
+Through 0.1.4 `proxy.run` ran inside the step, so an upstream that
+accepted and never answered held the whole process for
+`proxy_read_timeout` (ws61: 48 of 49 static GETs timed out beside it;
+ws67: 0 of 250, and the process still running 15 s after `-s stop`).
+The exchange is connect, write, read and relay under deadlines, with
+peer failover and an https leg whose handshake is several blocking
+reads, so the loop does not multiplex it (the resolver's shape, which
+re-serves its request from the top, would need a state machine per leg
+and would still write the relay inside the loop): the step PREPARES it
+(`proxy.prepare`: the plan's refusals, the trust anchors, the peers
+through the resolver, the upstream request per peer) and hands its job
+back as text, and the loop starts ONE proc per exchange
+(`proxy.job_run`) in a `StreamSlot`, as it starts a stream. Nothing a
+loop region owns may cross into a proc that outlives its spawner
+(`[conc.proc.arg]`), so the job crosses as BYTES, down a loopback
+connection the loop makes to its own job listener (made once at start,
+beside the stream pipe, never in the wait set); the proc answers the
+client, writes its account back on the same socket — with the access
+record the loop sent as its tail, so the loop keeps only ints for the
+row — and reports the stream line. The request is logged and counted
+when the line arrives, at its end, as nginx logs it. A drain past
+`worker_shutdown_timeout` kills the proc as it kills a stream, and
+closes the upstream descriptor the proc noted open. Where no job
+socket can be made the exchange runs in the step, as before. A proxied
+request counts two connections against `worker_connections` while its
+exchange is out (nginx's count). `spawn proc proxy.job_run(…)` does not
+compile at this pin (wolf-lang#655), so main spawns a one-line
+trampoline.
+
 The readiness set is made before `main`. Through wolf 0.2.30 the
 runtime made it at the first call that parked, and asserted on the
 descriptors it asked for. The loop itself never parks (`net_wait` is a
