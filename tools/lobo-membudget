@@ -421,6 +421,67 @@ kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 
 # ---------------------------------------------------------------
+# ws67 (lobo#81): THE EXCHANGE BESIDE THE LOOP. Since ws67 every
+# proxied request is one proc beside the loop, handed its job down a
+# loopback connection of its own and reporting down the stream pipe;
+# the loop keeps ints for the row and reuses the slot. The row: a
+# proxied location to the rig's backend (rigback, answering every
+# exchange from one reply file), 2,000 proxied keepalive requests on
+# five connections after a warm-up of 400 (keepalive_requests, 1000 by
+# default, would end one connection at its thousandth), RSS growth
+# under 512 KB.
+# ---------------------------------------------------------------
+pxrep="$scratch/px-reply.txt"
+printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\nPROXIED-BODY-16\n' > "$pxrep"
+# rigback serves exactly the 2,400 exchanges below and then exits on
+# its own (`$!` is the `wolf run` driver: killing it would orphan the
+# server, lobo#1)
+"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu "$scratch/px-record.txt" "$pxrep" 2400 > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
+bpid=$!
+bp=""
+i=0
+while [ $i -lt 100 ]; do
+    bp=$(head -1 "$scratch/px-back.port" 2>/dev/null)
+    case "$bp" in '' | *[!0-9]*) sleep 0.1 ;; *) break ;; esac
+    i=$((i + 1))
+done
+hp3=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+conf3="$scratch/lobo-px.conf"
+printf 'pid %s/lobo-px.pid;\nhttp {\n  types { text/html html; }\n  server {\n    listen 127.0.0.1:%s;\n    root %s/w;\n    location /up/ { proxy_pass http://127.0.0.1:%s/; }\n  }\n}\n' \
+    "$scratch" "$hp3" "$scratch" "$bp" > "$conf3"
+"$LOBO" serve -p . -c "$conf3" 2> "$scratch/lobo-px.log" &
+pid=$!
+i=0
+while [ $i -lt 80 ]; do
+    if grep -q "generation-activated gen=1" "$scratch/lobo-px.log" 2>/dev/null; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+hp="$hp3"
+pok=0
+quiet_drive 400 /up/x || pok=1
+pb=$(rss_kb)
+i=0
+while [ $i -lt 5 ]; do
+    quiet_drive 400 /up/x || pok=1
+    i=$((i + 1))
+done
+flat "flat, proxied" "$pb" "$(rss_kb)" "$pok" "2,000 proxied keepalive requests on five connections, each exchanged by a proc beside the loop (ws67)"
+kill "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+# the backend ends after its last exchange; a row that failed short of
+# them leaves it waiting, and then it is reaped by this checkout's rule
+i=0
+while kill -0 "$bpid" 2>/dev/null && [ $i -lt 50 ]; do
+    sleep 0.1
+    i=$((i + 1))
+done
+if kill -0 "$bpid" 2>/dev/null; then
+    rig_reap "the proxied row's backend, still waiting after a short drive"
+fi
+wait "$bpid" 2>/dev/null
+
+# ---------------------------------------------------------------
 # ws62 (px25's finding (c)): THE MASTER under supervision. Through
 # 0.1.3 the master rebuilt two lists per hand per pass and built every
 # pass's wait set, probe endpoints and log lines in its root region,
@@ -457,4 +518,4 @@ if [ "$red" != 0 ]; then
     echo "lobo-membudget: RED — $red of $total checks failed (logs under $scratch/)" >&2
     exit 1
 fi
-echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; memory flat over requests, connections and idle time, lobo#66; the master flat under supervision, ws62)"
+echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; memory flat over requests, connections and idle time, lobo#66; flat over proxied requests, ws67; the master flat under supervision, ws62)"
