@@ -1658,7 +1658,11 @@ fn serve_main(
                 return 1
             }
         }
-        let cb = bind_control(ctrl)
+        // ws67 (lobo#94): a hand's path is the master's to mint
+        // (`worker_endpoint` removes a dead predecessor's), so only the
+        // process that owns the pid file asks it whether a socket left
+        // at the path is stale
+        let cb = bind_control(ctrl, if worker == 0 { pidp } else { "" })
         if cb.0 < 0 {
             eprint("lobo: [emerg] {cb.1}")
             return 1
@@ -1676,6 +1680,26 @@ fn serve_main(
         let text = shell.pid_text(self_pid, shell.pid_endpoint(ctrl_ep, c0), pid_derived(c0))
         shell.pid_write(pidp, text) else |_| {
             eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
+            // ws67 (lobo#94): a start that fails here takes back what
+            // it made, in reverse: whatever the failed write left at
+            // the pid path, the control socket (a unix listener's
+            // close unlinks its path), the listeners. Until ws67 the
+            // socket stayed and the next start refused on it
+            // (measured at `ulimit -n 12`, notes/ws67-contract.md §2)
+            var made = List[int]()
+            if have_http {
+                (mut made).push(hl)
+            }
+            for x in xls {
+                (mut made).push(x)
+            }
+            if have_tls {
+                (mut made).push(tls_l)
+            }
+            for x in xtls {
+                (mut made).push(x)
+            }
+            start_undo(pidp, cl, have_ctrl, made)
             return 1
         }
     }
@@ -4122,67 +4146,68 @@ fn arm_accept(l: int) {
     net_deadline(l, 5) else |_| {}
 }
 
+/// lobo#94 (ws67): what a start that fails after its control bind
+/// takes back, in the reverse of the order it made it: the pid file
+/// (or whatever a failed write of it left), the control endpoint (the
+/// close of a unix listener unlinks its path, `[os.net.unix]`), and
+/// the listeners it bound. No log output is open at any such failure:
+/// they open at the first flush, which is past the last of them.
+/// Total.
+fn start_undo(pidp: str, cl: int, have_ctrl: bool, listeners: List[int]) {
+    shell.pid_remove(pidp) else |_| {}
+    // `shell.pid_write` writes a sibling and renames it into place
+    shell.pid_remove("{pidp}.new") else |_| {}
+    if have_ctrl {
+        net_close(cl) else |_| {}
+    }
+    for l in listeners {
+        net_close(l) else |_| {}
+    }
+}
+
 /// Bind a control endpoint, TCP or unix, by the shape of its address
 /// (ws17, wolf-lang#227). The answer is an ordinary net listener
 /// either way; `net_port` is `io` on the unix one, which is why the
 /// caller takes the ENDPOINT STRING back rather than a port.
 ///
 /// A unix bind that finds something already at the path is `exists`
-/// and lobo REFUSES rather than unlinking: the path may be another
-/// master's live socket, or an operator's own file, and a library
-/// cannot make that call ([os.net.unix]'s own note; the stale-socket
-/// case is handled one layer up, where the pid file already says
-/// whether a master is alive). A host with no unix family refuses BY
-/// NAME here — that is the whole reason the row is `unsupported` and
-/// not a bare `io` (ws15 filed #227 because it could not tell the two
-/// apart).
+/// and lobo refuses rather than unlinking: the path may be another
+/// master's live socket, or an operator's own file ([os.net.unix]'s
+/// own note). ws67 (lobo#94) takes over ONE case, a stale socket,
+/// under the rule lobo already applies to a stale pid file
+/// (`stale_control`): a socket nobody answers on, whose pid file
+/// (`pidp`, "" for a hand) names no live process, is removed with one
+/// `[warn]` and bound. Until ws67 a lobo ended by SIGKILL, or a start
+/// that failed after its bind, left the socket and every later start
+/// refused on it until an operator removed it by hand. A host with no
+/// unix family refuses BY NAME here — that is the whole reason the row
+/// is `unsupported` and not a bare `io` (ws15 filed #227 because it
+/// could not tell the two apart).
 ///
 /// Answers (fd, endpoint-string) or (-1, reason) — the caller prints
 /// the reason as an `emerg` and exits 1.
-fn bind_control(addr: str) -> (int, str) {
+fn bind_control(addr: str, pidp: str) -> (int, str) {
     if shell.is_unix_addr(addr) {
         let path = shell.unix_path_of(addr)
         if path.is_empty() {
             return (-1, "the \"control\" address \"{addr}\" names an empty socket path")
         }
-        let l = net_listen_unix(path) else |e| match e {
-            unsupported => {
-                return (
-                    -1,
-                    "this host has no unix-domain sockets, so \"control {addr}\" cannot be served (refused by name, not by silence — [os.net.unix]); use a loopback address with the token arm instead",
-                )
-            },
-            exists => {
-                return (
-                    -1,
-                    "something already exists at \"{path}\" — lobo never clobbers a path it did not bind (a live master, a stale socket, or an ordinary file: remove it yourself if you know which)",
-                )
-            },
-            not_found => {
-                return (-1, "the directory holding \"{path}\" does not exist")
-            },
-            denied => {
-                return (-1, "permission denied creating the control socket \"{path}\"")
-            },
-            io => {
-                // the row is coarse by design ([os.net.unix] keeps the
-                // NAMED rows for the conditions a program can act on),
-                // so lobo names the one cause an operator hits and
-                // cannot see: `sun_path` is about a hundred bytes on
-                // every unix — 104 on macOS, 108 on linux — and a
-                // control socket under a long prefix silently exceeds
-                // it. MEASURED at ws17 with a 126-byte scratch path.
-                if path.len > 100 {
-                    return (
-                        -1,
-                        "bind() to control {addr} failed — the path is {path.len} bytes and a unix socket address holds about a hundred (sun_path: 104 on macOS, 108 on linux); put the socket somewhere shorter",
-                    )
-                }
-                return (-1, "bind() to control {addr} failed")
-            },
+        let b = bind_control_unix(addr, path)
+        if b.0 != -2 {
+            return b
         }
-        arm_accept(l)
-        return (l, addr)
+        if !stale_control(path, pidp) {
+            return (-1, b.1)
+        }
+        fs_remove(path) else |_| {
+            return (-1, b.1)
+        }
+        eprint("lobo: [warn] removing stale control socket \"{path}\" (no lobo answers on it)")
+        let again = bind_control_unix(addr, path)
+        if again.0 == -2 {
+            return (-1, again.1)
+        }
+        return again
     }
     let l = net_listen(addr) else |_| {
         return (-1, "bind() to control {addr} failed")
@@ -4192,6 +4217,120 @@ fn bind_control(addr: str) -> (int, str) {
         return (-1, "could not read the control port")
     }
     (l, "127.0.0.1:{port}")
+}
+
+/// lobo#94 (ws67): may a start take over the unix control path `path`,
+/// which its bind found occupied? Only a STALE SOCKET: the path is a
+/// socket (`fs_lstat` kind 5, `[os.fs.stat]` — an ordinary file, a
+/// directory or a link is the operator's and is never removed), a dial
+/// is refused (`net_connect_unix` → `refused`: no listener holds it; a
+/// live lobo answers its own socket, so a live lobo's path is never
+/// taken), and the pid file names no live process (`pid_alive`). The
+/// pinned nginx refuses every path that exists at `listen unix:`
+/// (measured, notes/ws67-contract.md §2); this is the rule both servers
+/// apply to a stale PID FILE, applied to lobo's own endpoint, which
+/// nginx has no twin of. fs, net and exec tiers. Total.
+fn stale_control(path: str, pidp: str) -> bool {
+    let st = fs_lstat(path) else |_| {
+        return false
+    }
+    if st.len == 0 || st[0] != 5 {
+        return false
+    }
+    var refused = false
+    let c = net_connect_unix(path) else |e| match e {
+        refused => {
+            refused = true
+            -1
+        },
+        unsupported => { -1 },
+        not_found => { -1 },
+        denied => { -1 },
+        io => { -1 },
+    }
+    if c >= 0 {
+        net_close(c) else |_| {}
+        return false
+    }
+    refused && !pid_alive(pidp)
+}
+
+/// lobo#94 (ws67): whether the pid file at `pidp` names a process that
+/// is alive. `os_signal_send(pid, 0)` sends nothing and answers whether
+/// the process exists (`[os.signal.send]`, XCU kill's signal 0):
+/// `not_found` is no such process, `denied` a live one of another
+/// user's. No file, no pid in it, or this process's own pid (a
+/// container that restarts its server as the same pid) names none.
+/// A host that cannot ask answers alive, so nothing is removed there.
+/// fs and exec tiers. Total.
+fn pid_alive(pidp: str) -> bool {
+    if pidp.is_empty() {
+        return false
+    }
+    let raw = shell.pid_read(pidp) else |_| {
+        return false
+    }
+    let pid = shell.pid_of(raw)
+    if pid <= 0 || pid == os_pid() {
+        return false
+    }
+    var alive = true
+    os_signal_send(pid, 0) else |e| match e {
+        not_found => {
+            alive = false
+        },
+        invalid => {
+            alive = false
+        },
+        denied => {},
+        unsupported => {},
+        io => {},
+    }
+    alive
+}
+
+/// One unix bind of the control endpoint (ws17, split out at ws67):
+/// (fd, endpoint) bound, (-2, reason) when something exists at the
+/// path, (-1, reason) for every other refusal. Total.
+fn bind_control_unix(addr: str, path: str) -> (int, str) {
+    let l = net_listen_unix(path) else |e| match e {
+        unsupported => {
+            return (
+                -1,
+                "this host has no unix-domain sockets, so \"control {addr}\" cannot be served (refused by name, not by silence — [os.net.unix]); use a loopback address with the token arm instead",
+            )
+        },
+        exists => {
+            return (
+                -2,
+                "something already exists at \"{path}\" — lobo never clobbers a path it did not bind (a live master, a socket a live process holds, or an ordinary file: remove it yourself if you know which)",
+            )
+        },
+        not_found => {
+            return (-1, "the directory holding \"{path}\" does not exist")
+        },
+        denied => {
+            return (-1, "permission denied creating the control socket \"{path}\"")
+        },
+        io => {
+            // the row is coarse by design ([os.net.unix] keeps the
+            // NAMED rows for the conditions a program can act on),
+            // so lobo names the one cause an operator hits and
+            // cannot see: `sun_path` is about a hundred bytes on
+            // every unix — 104 on macOS, 108 on linux — and a
+            // control socket under a long prefix silently exceeds
+            // it. MEASURED at ws17 with a 126-byte scratch path.
+            if path.len > 100 {
+                return (
+                    -1,
+                    "bind() to control {addr} failed — the path is {path.len} bytes and a unix socket address holds about a hundred (sun_path: 104 on macOS, 108 on linux); put the socket somewhere shorter",
+                )
+            }
+            return (-1, "bind() to control {addr} failed")
+        },
+    }
+    arm_accept(l)
+    (l, addr)
 }
 
 /// The pause after an accept the host refused: nginx's half second
@@ -4931,7 +5070,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     var cl: int = 0
     var ctrl_ep = serve.listen_addr_plain(c0)
     if !ctrl.is_empty() {
-        let cb = bind_control(ctrl)
+        let cb = bind_control(ctrl, pidp)
         if cb.0 < 0 {
             eprint("lobo: [emerg] {cb.1}")
             return 1
@@ -4946,6 +5085,8 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     let mtext = shell.pid_text(mpid, shell.pid_endpoint(ctrl_ep, c0), pid_derived(c0))
     shell.pid_write(pidp, mtext) else |_| {
         eprint("lobo: [emerg] could not write pid file \"{pidp}\"")
+        // ws67 (lobo#94): the master's start takes back what it made
+        start_undo(pidp, cl, have_ctrl, List[int]())
         return 1
     }
 
@@ -5015,10 +5156,9 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         }
         if !bad.is_empty() {
             eprint("lobo: [emerg] {bad}")
-            for l in lfds {
-                net_close(l) else |_| {}
-            }
-            shell.pid_remove(pidp) else |_| {}
+            // ws67 (lobo#94): until ws67 this took back the listeners
+            // and the pid file and left the control socket
+            start_undo(pidp, cl, have_ctrl, lfds)
             return 1
         }
     }
