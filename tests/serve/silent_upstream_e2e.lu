@@ -1,0 +1,224 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws67 (lobo#81): A SILENT UPSTREAM HOLDS ITS OWN EXCHANGE, NOT THE
+//! SERVER. Through 0.1.4 a proxied request ran inside the serving loop's
+//! step, so an upstream that accepts and never answers held the whole
+//! process until `proxy_read_timeout`: ws61 measured 48 of 49 static GETs
+//! timed out and `-s stop` not obeyed within 10 s; ws67 measured 0 of 250
+//! answered beside one such request, and the process still running 15 s
+//! after `-s stop` (notes/ws67-contract.md §2). Since ws67 the exchange
+//! runs in a proc beside the loop. Against the real binary (`LOBO_BIN`,
+//! default target/lobo-debug): an upstream that never answers (a listener
+//! this test never accepts on — the kernel completes each dial in its
+//! backlog, so the request is written and the read waits), two proxied
+//! requests to it under `proxy_read_timeout 30s`, then three rounds of
+//! twenty static GETs open at once, every one answered 200 inside its own
+//! second; then `-s stop`, obeyed inside 2 s, and the two proxied clients
+//! see their connections end. RED at trunk: the first round's first GET
+//! gets no answer in its second. The server is put down by its handle
+//! before any assertion can fail, so a red run leaves nothing running.
+//! Loopback only, OS-chosen ports; the scratch tree is cleared at the
+//! START and the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// A request written on a fresh connection: the handle, or -1. Total.
+fn send(port: int, path: str) -> int {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return -1
+    }
+    net_write(c, "GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return -1
+    }
+    c
+}
+
+/// Read `c` to its end within `ms` (one budget for the whole read):
+/// the reply, or "" when nothing whole came. Total.
+fn reply_in(c: int, ms: int) -> str {
+    net_deadline(c, ms) else |_| {}
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            out = "{out}{piece}"
+        }
+    }
+    out
+}
+
+/// `bin -p d -c conf -s stop`, to its end: its exit code, or -1. Total.
+fn stop(bin: str, d: str, conf: str, out: int) -> int {
+    var args = List[str]()
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    (mut args).push("-s")
+    (mut args).push("stop")
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    let h = os_spawn_fds(bin, args, map) else |_| {
+        return -1
+    }
+    os_wait(h) else |_| { -1 }
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws67_silent_upstream"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    // the silent upstream: bound and listening, never accepted on
+    let up = net_listen("127.0.0.1:0")?
+    let uport = net_port(up)?
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    root {d}/www;\n    location /up/ {{ proxy_pass http://127.0.0.1:{uport}; proxy_read_timeout 30s; }}\n  }}\n}}\n",
+    )?
+    let so = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds(bin, args, map)?
+    let came = wait_up(hp)
+
+    // two proxied requests to the silent upstream, left waiting
+    let p1 = send(hp, "/up/a")
+    let p2 = send(hp, "/up/b")
+    time_sleep_ms(300)
+
+    // three rounds of twenty static GETs open at once
+    var answered = 0
+    var missed = 0
+    var worst = 0
+    var round = 0
+    while came && round < 3 && missed == 0 {
+        var cs = List[int]()
+        var i = 0
+        while i < 20 {
+            (mut cs).push(send(hp, "/index.html"))
+            i = i + 1
+        }
+        for c in cs {
+            if missed == 0 {
+                // one second for each read, from when it begins: after a
+                // miss the rest are only closed, so a red run is short
+                let t0 = time_now_ms()
+                let r = if c >= 0 { reply_in(c, 1000) } else { "" }
+                let ms = time_now_ms() - t0
+                if ms > worst {
+                    worst = ms
+                }
+                if r.starts_with("HTTP/1.1 200") && r.ends_with("small-page\n") {
+                    answered = answered + 1
+                } else {
+                    missed = missed + 1
+                }
+            }
+            if c >= 0 {
+                net_close(c) else |_| {}
+            }
+        }
+        round = round + 1
+    }
+    print(
+        "with two proxied requests waiting on a silent upstream: {answered} of {round * 20} static GETs answered, {missed} not, the slowest read {worst} ms",
+    )
+
+    // -s stop, and the time to the server's end
+    let sc = stop(bin, d, conf, so)
+    let t0 = time_now_ms()
+    var gone = false
+    var rc = -1
+    while !gone && time_now_ms() - t0 < 2000 {
+        let w = os_wait_poll() else |_| { (0, 0) }
+        if w.0 == h {
+            gone = true
+            rc = w.1
+        } else {
+            time_sleep_ms(20)
+        }
+    }
+    let stop_ms = time_now_ms() - t0
+    if !gone {
+        // a red run must leave nothing running: put it down by its handle
+        os_kill(h) else |_| {}
+        let _k = os_wait(h) else |_| { 0 }
+    }
+    let e1 = if p1 >= 0 { reply_in(p1, 1000) } else { "?" }
+    let e2 = if p2 >= 0 { reply_in(p2, 1000) } else { "?" }
+    let how = if gone { "ended" } else { "was STILL RUNNING" }
+    print(
+        "-s stop exit {sc}: the server {how} {stop_ms} ms after it (exit {rc}); the proxied clients read [{e1.len} bytes] [{e2.len} bytes] and their ends",
+    )
+    if p1 >= 0 {
+        net_close(p1) else |_| {}
+    }
+    if p2 >= 0 {
+        net_close(p2) else |_| {}
+    }
+    net_close(up) else |_| {}
+    fs_close(so) else |_| {}
+    assert(came, "the server came up")
+    assert(p1 >= 0 && p2 >= 0, "the two proxied requests were sent")
+    assert(
+        missed == 0,
+        "every static GET was answered inside its second: {missed} were not (trunk: the first)",
+    )
+    assert(answered == 60, "sixty static GETs answered: {answered}")
+    assert(sc == 0, "-s stop reached the server: exit {sc}")
+    assert(gone, "the server obeyed -s stop inside 2 s (it took {stop_ms} ms)")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}

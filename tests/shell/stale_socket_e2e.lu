@@ -1,0 +1,330 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws67 (lobo#94): A START THAT FAILS TAKES BACK WHAT IT MADE, AND A
+//! STALE CONTROL SOCKET IS TAKEN OVER — NEVER A LIVE ONE. Until ws67 a
+//! start that failed after binding its `unix:` control socket (ws66
+//! measured it under `ulimit -n 11`: the pid file write fails) left the
+//! socket behind, and so did a lobo ended by SIGKILL; every later start
+//! then refused, `something already exists at "…/c.sock"`, until an
+//! operator removed the file by hand. Now a failed start removes the pid
+//! file, the control socket and the listeners it made, in that order,
+//! and a start that finds at its control path a SOCKET nobody answers
+//! on, with no live process in the pid file, removes it with one
+//! `[warn]` and binds. Against the real binary (`LOBO_BIN`, default
+//! target/lobo-debug), its output in a file of this test's:
+//!   1. the ws66 shape: a start under a descriptor limit that fails at
+//!      the pid file (the limit is found by walking up from 8; the child
+//!      `/bin/sh` lowers its own limit and execs lobo, nobody else's):
+//!      exit 1, `could not write pid file`, nothing left in `logs/`, and
+//!      the plain start after it serves (trunk: `c.sock` left, exit 1);
+//!   2. the same failure without a limit (the pid file under a path
+//!      whose parent is an ordinary file), one process and a master of
+//!      two hands: exit 1, nothing left;
+//!   3. a lobo ended by SIGKILL (its own handle), then a start: served,
+//!      with the stale socket's `[warn]` (trunk: exit 1);
+//!   4. the refusals, each with the path checked after: a live lobo and
+//!      a second start of its configuration (`already running`), a
+//!      second configuration on the live socket, a stale socket whose
+//!      pid file names a live process (this test), an ordinary file at
+//!      the path; the live lobo still answers.
+//! Loopback only, OS-chosen ports; the scratch tree is cleared at the
+//! START and the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Whether something accepts on `127.0.0.1:port`. Total.
+fn listening(port: int) -> bool {
+    let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+    if c < 0 {
+        return false
+    }
+    net_close(c) else |_| {}
+    true
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if listening(port) {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// Start `bin serve -p d -c conf` through `/bin/sh` under `ulimit -n
+/// nofile` (0: no limit), its stdout and stderr onto the file `out`.
+/// The spawn handle, or -1. Total.
+fn start(bin: str, d: str, conf: str, nofile: int, out: int) -> int {
+    var args = List[str]()
+    (mut args).push("-c")
+    if nofile > 0 {
+        (mut args).push("ulimit -n \"$1\" || exit 97; exec \"$2\" serve -p \"$4\" -c \"$3\"")
+    } else {
+        (mut args).push("exec \"$2\" serve -p \"$4\" -c \"$3\"")
+    }
+    (mut args).push("sh")
+    (mut args).push("{nofile}")
+    (mut args).push(bin)
+    (mut args).push(conf)
+    (mut args).push(d)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    os_spawn_fds("/bin/sh", args, map) else |_| { -1 }
+}
+
+/// `bin -p d -c conf -s stop`, to its end. Its exit code, or -1. Total.
+fn stop(bin: str, d: str, conf: str, out: int) -> int {
+    var args = List[str]()
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    (mut args).push("-s")
+    (mut args).push("stop")
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    let h = os_spawn_fds(bin, args, map) else |_| {
+        return -1
+    }
+    os_wait(h) else |_| { -1 }
+}
+
+/// What a start that should END did: its exit code, polled for up to
+/// 3 s (`os_wait_poll` never blocks). A start that serves instead (or
+/// is still running at 3 s) is put down by its own handle and answers
+/// 999 (998). Total.
+fn ended(h: int, port: int) -> int {
+    if h < 0 {
+        return -1
+    }
+    var i: int = 0
+    while i < 60 {
+        let w = os_wait_poll() else |_| { (0, 0) }
+        if w.0 == h {
+            return w.1
+        }
+        if port > 0 && listening(port) {
+            os_kill(h) else |_| {}
+            let _k = os_wait(h) else |_| { 0 }
+            return 999
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    os_kill(h) else |_| {}
+    let _k = os_wait(h) else |_| { 0 }
+    998
+}
+
+/// A fresh output file for one child, at `{d}/out-<n>.txt`. Total but
+/// for the create's own row.
+fn out_file(d: str, n: int) -> (int, str) ! {io} {
+    let p = "{d}/out-{n}.txt"
+    let f = fs_create(p) else |_| {
+        return io
+    }
+    (f, p)
+}
+
+/// The text a child wrote to `p` ("" when unreadable). Total.
+fn said(p: str) -> str {
+    fs_read_text(p) else |_| { "" }
+}
+
+/// The names in `dir`, joined, for the record. Total.
+fn names(dir: str) -> str {
+    let es = fs_read_dir_entries(dir) else |_| {
+        return "?"
+    }
+    var out = ""
+    for e in es {
+        let n = str_from_utf8(e) else |_| { "?" }
+        out = if out.is_empty() { n } else { "{out} {n}" }
+    }
+    out
+}
+
+fn conf_text(d: str, pid: str, hp: int, extra: str) -> str {
+    "{extra}pid {pid};\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; }}\n}}\n"
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws67_stale_socket"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let sock = "{d}/logs/c.sock"
+    let pidf = "{d}/logs/lobo.pid"
+    let logs = "{d}/logs"
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(conf, conf_text(d, pidf, hp, ""))?
+    var k = 0
+
+    // 1. the ws66 shape: walk the limit up from 8 until lobo serves; every
+    // start that fails on the way leaves nothing, and one of them is the
+    // pid file's failure after the control bind
+    var found = 0
+    var n = 8
+    while n <= 40 {
+        k = k + 1
+        let o = out_file(d, k)?
+        let h = start(bin, d, conf, n, o.0)
+        let rc = ended(h, hp)
+        fs_close(o.0) else |_| {}
+        if rc == 999 {
+            // it serves at this limit: past the shape. Put down by its handle,
+            // so its socket and pid file are left: removed here, by hand
+            fs_remove(sock) else |_| {}
+            fs_remove(pidf) else |_| {}
+            print("1. ulimit -n {n}: serves (the walk ends)")
+            n = 41
+        } else {
+            let out = said(o.1)
+            let ls = names(logs)
+            let pidw = out.contains("could not write pid file")
+            print("1. ulimit -n {n}: exit {rc}, pid-file failure {pidw}; logs/ holds [{ls}]")
+            assert(!fs_exists(sock), "a failed start at ulimit -n {n} took its control socket back")
+            assert(!fs_exists(pidf), "a failed start at ulimit -n {n} left no pid file")
+            if pidw {
+                assert(rc == 1, "the pid file's failure exits 1: {rc}")
+                found = n
+            }
+            n = n + 1
+        }
+    }
+    assert(found > 0, "a limit at which the pid file write fails after the control bind was found")
+    k = k + 1
+    let o1 = out_file(d, k)?
+    let h1 = start(bin, d, conf, 0, o1.0)
+    assert(h1 >= 0 && wait_up(hp), "the plain start after the failed one serves")
+    k = k + 1
+    let s1 = out_file(d, k)?
+    assert(stop(bin, d, conf, s1.0) == 0, "it stops over its endpoint")
+    let r1 = os_wait(h1) else |_| { -1 }
+    let ls1 = names(logs)
+    print("   the plain start after it served; stopped, exit {r1}; logs/ holds [{ls1}]")
+    assert(!fs_exists(sock), "a stopped lobo leaves no socket")
+
+    // 2. the pid file under an ordinary file, so no directory can be made
+    // for it: one process, then a master of two hands (its own pid write,
+    // after its control bind)
+    fs_write_text("{d}/blocker", "an ordinary file\n")?
+    let bad1 = "{d}/bad1.conf"
+    fs_write_text(bad1, conf_text(d, "{d}/blocker/lobo.pid", hp, ""))?
+    let bad2 = "{d}/bad2.conf"
+    fs_write_text(bad2, conf_text(d, "{d}/blocker/lobo.pid", hp, "worker_processes 2;\n"))?
+    for bc in [bad1, bad2] {
+        k = k + 1
+        let o = out_file(d, k)?
+        let hb = start(bin, d, bc, 0, o.0)
+        let rb = ended(hb, hp)
+        fs_close(o.0) else |_| {}
+        let out = said(o.1)
+        let ls = names(logs)
+        print("2. {bc}: exit {rb}; logs/ holds [{ls}]")
+        assert(rb == 1, "a start whose pid file cannot be written exits 1: {rb}")
+        assert(out.contains("could not write pid file"), "it says why: [{out}]")
+        assert(!fs_exists(sock), "and takes its control socket back")
+    }
+
+    // 3. a lobo ended by SIGKILL leaves its socket; the next start takes it
+    k = k + 1
+    let ok3 = out_file(d, k)?
+    let hk = start(bin, d, conf, 0, ok3.0)
+    assert(hk >= 0 && wait_up(hp), "the lobo to be killed serves")
+    os_kill(hk) else |_| {}
+    let _rk = os_wait(hk) else |_| { 0 }
+    assert(fs_exists(sock), "a SIGKILLed lobo leaves its socket (the shape lobo#94 names)")
+    k = k + 1
+    let o3 = out_file(d, k)?
+    let h3 = start(bin, d, conf, 0, o3.0)
+    assert(
+        h3 >= 0 && wait_up(hp),
+        "the start after a SIGKILL serves (trunk: exit 1, the socket exists)",
+    )
+    let t3 = said(o3.1)
+    assert(
+        t3.contains("[warn] removing stale control socket \"{sock}\" (no lobo answers on it)"),
+        "it says it took the stale socket over: [{t3}]",
+    )
+    print("3. after SIGKILL: the next start served, with the stale socket's [warn]")
+
+    // 4. the refusals, h3 alive throughout
+    k = k + 1
+    let o4 = out_file(d, k)?
+    let h4 = start(bin, d, conf, 0, o4.0)
+    let r4 = ended(h4, 0)
+    let t4 = said(o4.1)
+    assert(r4 == 1, "a second start of a live lobo's configuration is refused: {r4}")
+    assert(t4.contains("a lobo master is already running"), "by the pid file's rule: [{t4}]")
+    let hp2 = free_port()?
+    let other = "{d}/other.conf"
+    fs_write_text(other, conf_text(d, "{d}/logs/other.pid", hp2, ""))?
+    k = k + 1
+    let o5 = out_file(d, k)?
+    let h5 = start(bin, d, other, 0, o5.0)
+    let r5 = ended(h5, hp2)
+    let t5 = said(o5.1)
+    assert(r5 == 1, "a second configuration on the live socket is refused: {r5}")
+    assert(t5.contains("something already exists at \"{sock}\""), "on the socket: [{t5}]")
+    assert(fs_exists(sock) && listening(hp), "the live lobo keeps its socket and serves")
+    print(
+        "4. a live lobo: its configuration again refused, another on its socket refused; it serves",
+    )
+    // a stale socket whose pid file names a LIVE process (this test)
+    os_kill(h3) else |_| {}
+    let _r3 = os_wait(h3) else |_| { 0 }
+    assert(fs_exists(sock), "the second SIGKILL leaves the socket too")
+    fs_write_text(pidf, "{os_pid()}\n")?
+    k = k + 1
+    let o6 = out_file(d, k)?
+    let h6 = start(bin, d, conf, 0, o6.0)
+    let r6 = ended(h6, hp)
+    let t6 = said(o6.1)
+    assert(r6 == 1, "a stale socket whose pid file names a live process is not taken: {r6}")
+    assert(t6.contains("something already exists at \"{sock}\""), "it refuses on it: [{t6}]")
+    assert(fs_exists(sock), "and leaves it where it was")
+    print("   a socket nobody answers on, the pid file naming a live process: refused, left")
+    // an ordinary file at the path
+    fs_remove(sock)?
+    fs_remove(pidf) else |_| {}
+    fs_write_text(sock, "not-a-socket\n")?
+    k = k + 1
+    let o7 = out_file(d, k)?
+    let h7 = start(bin, d, conf, 0, o7.0)
+    let r7 = ended(h7, hp)
+    let t7 = said(o7.1)
+    let kept = fs_read_text(sock) else |_| { "" }
+    assert(r7 == 1, "an ordinary file at the path is refused: {r7}")
+    assert(t7.contains("something already exists at \"{sock}\""), "by name: [{t7}]")
+    assert(kept == "not-a-socket\n", "and is not touched")
+    print("   an ordinary file at the path: refused, untouched")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
