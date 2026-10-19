@@ -435,8 +435,12 @@ pxrep="$scratch/px-reply.txt"
 printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\nPROXIED-BODY-16\n' > "$pxrep"
 # rigback serves exactly the 2,400 exchanges below and then exits on
 # its own (`$!` is the `wolf run` driver: killing it would orphan the
-# server, lobo#1)
-"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu "$scratch/px-record.txt" "$pxrep" 2400 > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
+# server, lobo#1). Its record goes to /dev/null: rigback appends by
+# reading the whole record back and writing it out again, so 2,400
+# padded requests recorded to a file grew it past 24 GB resident
+# (measured on kasumi), and on the 16 GB CI runner the host stopped the
+# runner
+"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" 2400 > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
 bpid=$!
 bp=""
 i=0
