@@ -29,11 +29,12 @@
 //!   - no user ids at all (`os_euid` unsupported): refused by name;
 //!   - root with NO `user` line (ws68; the default, ruled at audit as
 //!     "match nginx"): nginx's `user nobody nobody`, resolved as the
-//!     pinned nginx resolves it (`default_ids`), so the master keeps
-//!     root and the hands drop — except on a host that cannot drop and
-//!     with `cert auto` (lobo#102), which keep root and say so
-//!     (`root_note`). Through ws67 root with no `user` line kept one
-//!     root process (a named delta).
+//!     pinned nginx resolves it on each distribution (`default_ids`), so
+//!     the master keeps root and the hands drop — except where no
+//!     account named `nobody` exists (nginx refuses to start there), on
+//!     a host that cannot drop, and with `cert auto` (lobo#102), which
+//!     keep root and say so (`root_note`). Through ws67 root with no
+//!     `user` line kept one root process (a named delta).
 //! The verdict and the id resolution are pure (`user_verdict`,
 //! `user_ids`, the uid and the account texts passed in) so they run on
 //! every lane; `self_euid`, `user_ids_host` and `drop_host` are the
@@ -220,98 +221,119 @@ pub fn user_drops(c: Conf, euid: int) -> bool {
 }
 
 /// The ids nginx's workers take when no `user` line names any (ws68):
-/// its documented default `user nobody nobody`, resolved as the pinned
-/// nginx/1.30.4 was MEASURED to resolve it, as root in a container
-/// (notes/ws68-contract.md §2) — the uid is the account NAMED
-/// `nobody`'s, else 65534; the gid is the group NAMED `nobody`'s, else
-/// 65534 (not the account's own gid: an account `nobody` of 65000:65000
-/// and no group of that name gave `Gid: 65534`); the groups are that
-/// gid and every group listing `nobody` (`std.os.users.groups_of`).
-/// Never a refusal: nginx starts and drops with no such account, no
-/// such group and no account files at all. `passwd` and `group` are
-/// the account files' texts ("" for a file that cannot be read). Pure.
+/// its default `user nobody nobody` (the documented default), measured
+/// on the pinned nginx/1.30.4 as root in containers
+/// (notes/ws68-contract.md §3): the names are resolved when it starts,
+/// through the host's name service — the account `nobody` renumbered to
+/// 99:99 gives `Uid: 99`, `Gid: 99` — and with no such account, or no
+/// such group, it refuses to start (`[emerg] getpwnam("nobody")
+/// failed`, `getgrnam`). The group is the BUILD's: the oracle built on
+/// arch asks for the group `nobody`, CI's built on ubuntu (which has
+/// none, and `nogroup` at 65534) starts there with `Gid: 65534`. lobo
+/// is one binary for every linux, so it takes the group named `nobody`,
+/// else the group named `nogroup`: on each distribution what that
+/// distribution's nginx takes. The groups are that gid and every group
+/// listing `nobody` (`std.os.users.groups_of`). `ok` false, `err`
+/// saying which is missing, where nginx would refuse: lobo then keeps
+/// root and warns (`root_note`). `passwd` and `group` are the account
+/// files' texts ("" for a file that cannot be read); `std.os.users`
+/// reads no other name service (an arch host's `systemd` module answers
+/// `nobody` with no line in `/etc/passwd`; lobo does not see it). Pure.
 /// Total.
 pub fn default_ids(passwd: str, group: str) -> UserIds {
-    var uid = 65534
-    var found = false
+    var uid = -1
     for u in users.users(passwd) {
-        if !found && u.name == "nobody" {
+        if uid < 0 && u.name == "nobody" {
             uid = u.uid
-            found = true
         }
     }
-    var gid = 65534
-    var gfound = false
+    if uid < 0 {
+        return ids_refused("no account named \"nobody\" in /etc/passwd")
+    }
+    var gid = -1
+    var gname = ""
     for g in users.groups(group) {
-        if !gfound && g.name == "nobody" {
+        if gid < 0 && g.name == "nobody" {
             gid = g.gid
-            gfound = true
+            gname = "nobody"
         }
+    }
+    if gid < 0 {
+        for g in users.groups(group) {
+            if gid < 0 && g.name == "nogroup" {
+                gid = g.gid
+                gname = "nogroup"
+            }
+        }
+    }
+    if gid < 0 {
+        return ids_refused("no group named \"nobody\" or \"nogroup\" in /etc/group")
     }
     UserIds {
         ok: true,
         err: "",
         name: "nobody",
-        group: "nobody",
+        group: gname,
         uid: uid,
         gid: gid,
         groups: users.groups_of(group, "nobody", gid),
     }
 }
 
-/// Whether the account file's text names an account `nobody`. Pure.
-/// Total.
-pub fn nobody_named(passwd: str) -> bool {
-    for u in users.users(passwd) {
-        if u.name == "nobody" {
-            return true
-        }
-    }
-    false
+/// `default_ids` off this host's `/etc/passwd` and `/etc/group`, a file
+/// that cannot be read being an empty text. fs tier. Total.
+pub fn default_ids_host() -> UserIds {
+    let p = fs_read_text("/etc/passwd") else |_| { "" }
+    let g = fs_read_text("/etc/group") else |_| { "" }
+    default_ids(p, g)
 }
 
 /// Whether the hands drop to nginx's DEFAULT (ws68, the `user` default
-/// ruled at audit; the recommendation, "match nginx"): a root process
-/// (`euid` 0) with no `user` line, on a host that can drop
-/// (`can_drop`: `drop_host`), and no `cert auto` — the hand that owns
-/// the renewal writes lobo's own certificate store, which a drop has
-/// not been verified against (lobo#102), so such a configuration keeps
-/// root and says so (`root_note`). Then, as with a `user` line, the
-/// process that ran `lobo serve` is a master that keeps root and its
-/// hands drop, one hand with `worker_processes 1`. Pure. Total.
-pub fn default_drops(c: Conf, euid: int, can_drop: bool) -> bool {
-    euid == 0 && user_row(c) < 0 && can_drop && !auto_on(c)
+/// ruled at audit; the recommendation, "match nginx", with the warning
+/// kept where `nobody` does not exist): a root process (`euid` 0) with
+/// no `user` line, on a host that can drop (`can_drop`: `drop_host`),
+/// whose account files resolve the default (`ids_ok`: `default_ids`),
+/// and no `cert auto` — the hand that owns the renewal writes lobo's
+/// own certificate store, which a drop has not been verified against
+/// (lobo#102). Otherwise root is kept and said (`root_note`). Then, as
+/// with a `user` line, the process that ran `lobo serve` is a master
+/// that keeps root and its hands drop, one hand with `worker_processes
+/// 1`. Pure. Total.
+pub fn default_drops(c: Conf, euid: int, can_drop: bool, ids_ok: bool) -> bool {
+    euid == 0 && user_row(c) < 0 && can_drop && ids_ok && !auto_on(c)
 }
 
 /// Whether this configuration's hands drop, in a process with effective
 /// uid `euid` on this host: a `user` row as root (`user_drops`), or
 /// nginx's default (`default_drops`). fs tier. Total.
 pub fn hands_drop(c: Conf, euid: int) -> bool {
-    user_drops(c, euid) || default_drops(c, euid, drop_host())
+    if user_drops(c, euid) {
+        return true
+    }
+    if euid != 0 || user_row(c) >= 0 {
+        return false
+    }
+    default_drops(c, euid, drop_host(), default_ids_host().ok)
 }
 
 /// The ids the hands drop to: the `user` row's (`user_ids_host`), or,
-/// with no row, nginx's default (`default_ids`) off this host's
-/// `/etc/passwd` and `/etc/group`, a file that cannot be read being an
-/// empty text (nginx starts without either). fs tier. Total.
+/// with no row, nginx's default (`default_ids_host`). fs tier. Total.
 pub fn hand_ids_host(c: Conf) -> UserIds {
     if user_row(c) >= 0 {
         return user_ids_host(c)
     }
-    let p = fs_read_text("/etc/passwd") else |_| { "" }
-    let g = fs_read_text("/etc/group") else |_| { "" }
-    default_ids(p, g)
+    default_ids_host()
 }
 
 /// The one line a root process with NO `user` row prints at start, or
 /// "" (ws67's named delta, ws68's default). nginx prints nothing and
-/// drops; lobo drops as nginx does and stays as silent, except: no
-/// account named `nobody` — it drops to nginx's ids all the same, and
-/// says so (the contract's warning, kept); a host that cannot drop
-/// (`can_drop` false: `set_ids` is linux's at this pin) — it keeps
-/// root (a named delta); `cert auto` — it keeps root (`default_drops`,
-/// lobo#102). `passwd` and `group` are the account files' texts. Pure.
-/// Total.
+/// drops, or refuses to start; lobo drops as nginx does and stays as
+/// silent, and keeps root with one line where it cannot follow: no
+/// account named `nobody` (or no group for it) — nginx refuses to start
+/// there, lobo keeps root (the contract's warning, kept); a host that
+/// cannot drop (`can_drop` false: `set_ids` is linux's at this pin);
+/// `cert auto` (`default_drops`, lobo#102). `passwd` and `group` are the
+/// account files' texts. Pure. Total.
 pub fn root_note(c: Conf, euid: int, can_drop: bool, passwd: str, group: str) -> str {
     if euid != 0 || user_row(c) >= 0 {
         return ""
@@ -322,9 +344,9 @@ pub fn root_note(c: Conf, euid: int, can_drop: bool, passwd: str, group: str) ->
     if auto_on(c) {
         return "running as root with no \"user\" directive and `cert auto`: nginx would run its workers as nobody (its default); lobo keeps root, because the hand that owns the renewal writes the certificate store (a named delta, lobo#102) — add `user <name> [<group>];` once the store is that user's, or `user root;` to keep root and silence this"
     }
-    if !nobody_named(passwd) {
-        let d = default_ids(passwd, group)
-        return "no \"user\" directive and no account named \"nobody\" (nginx's default user): the workers run as uid {d.uid}, gid {d.gid}, as nginx's do — add `user <name> [<group>];` to choose"
+    let d = default_ids(passwd, group)
+    if !d.ok {
+        return "running as root with no \"user\" directive and {d.err}: nginx would refuse to start here (its default is user nobody, getpwnam(\"nobody\") failed); lobo keeps root (a named delta) — add `user <name> [<group>];` to drop, or `user root;` to keep root and silence this"
     }
     ""
 }
