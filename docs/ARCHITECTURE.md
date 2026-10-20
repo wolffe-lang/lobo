@@ -108,7 +108,16 @@ socket can be made the exchange runs in the step, as before. A proxied
 request counts two connections against `worker_connections` while its
 exchange is out (nginx's count). `spawn proc proxy.job_run(…)` does not
 compile at this pin (wolf-lang#655), so main spawns a one-line
-trampoline.
+trampoline. ws68 (lobo#99): while a plaintext exchange waits on its
+upstream — the head, a length- or close-delimited body — it waits with
+`net_wait` over the upstream AND its client (the loop has the client's
+row out of its wait set, so the proc is its only reader), and a client
+that closes or half-closes ends the exchange at once (499, the upstream
+closed), as nginx's `proxy_ignore_client_abort off`; bytes from the
+client meanwhile, a pipelined request, cannot be handed back to the
+loop's carry from the proc, so they stop the watch and the reply closes
+the connection. An https leg's reads are `std.x.tls.client`'s and are
+not watched.
 
 The readiness set is made before `main`. Through wolf 0.2.30 the
 runtime made it at the first call that parked, and asserted on the
