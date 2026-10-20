@@ -276,17 +276,58 @@ fn csr_pubkey(der: List[byte]) -> List[byte] {
     List[byte]()
 }
 
-/// The space-joined dNSName list from a CSR's SAN attribute (each
-/// dNSName is a 0x82 context-primitive run). Best-effort over our own
-/// encoder's output. Total.
+/// The dNSNames of a CSR DER's subjectAltName extension (OID
+/// 2.5.29.17), space-joined, in their order; "" when it has none (the
+/// caller falls back to the order's names). ws68: only the extension's
+/// value is read. Through ws67 the whole DER was scanned for a dNSName
+/// tag (0x82), so the random public key, which comes before the
+/// extensions, could carry a stray "name" ahead of the real ones and
+/// become the leaf's CN (166 CSRs in 200,000; lobo-acme's renewal row
+/// saw `subject=CN=M2`, run 39385848432) or jump the scan past them.
+/// `--csr-check` holds it. Total.
 fn csr_names(der: List[byte]) -> str {
-    var out = ""
-    var i = 0
     let n = der.len
-    while i < n {
-        if der[i] as int == 130 && i + 1 < n {
+    var at = -1
+    var k = 0
+    while at < 0 && k + 5 <= n {
+        if der[k] as int == 6 &&
+            der[k + 1] as int == 3 &&
+            der[k + 2] as int == 85 &&
+            der[k + 3] as int == 29 &&
+            der[k + 4] as int == 17 {
+            at = k + 5
+        }
+        k = k + 1
+    }
+    if at < 0 {
+        return ""
+    }
+    // an optional `critical` BOOLEAN, then the extnValue OCTET STRING
+    if at + 3 <= n && der[at] as int == 1 {
+        at = at + 3
+    }
+    if at + 2 > n || der[at] as int != 4 {
+        return ""
+    }
+    var len = der[at + 1] as int
+    var i = at + 2
+    if len > 127 {
+        let nb = len - 128
+        len = 0
+        var b = 0
+        while b < nb && i < n {
+            len = len * 256 + der[i] as int
+            i = i + 1
+            b = b + 1
+        }
+    }
+    let end = if i + len < n { i + len } else { n }
+    // GeneralNames: a dNSName is [2] IMPLICIT IA5String (0x82, length, bytes)
+    var out = ""
+    while i < end {
+        if der[i] as int == 130 && i + 1 < end {
             let ln = der[i + 1] as int
-            if ln > 0 && ln < 64 && i + 2 + ln <= n {
+            if ln > 0 && ln < 64 && i + 2 + ln <= end {
                 var nm = ""
                 var j = 0
                 while j < ln {
