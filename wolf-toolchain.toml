@@ -14,6 +14,44 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
+# wolf-lang at the **v0.2.33 RELEASE TAG** (85dab5d, r38), the release
+# stamp `wolf 0.2.33 (wolfgang, pin 85dab5d)`. Staged from the RELEASE
+# ARCHIVE by digest, NAMED MEMBERS ONLY (the std note below stands), as
+# below:
+#   gh release download v0.2.33 -R wolffe-lang/wolf-lang \
+#       --pattern 'wolf-0.2.33-<host>.tar.gz'
+#   sha256 4f955e8dfe6eaafa441903eeba43c009c4ec2b45a8da09fe13431e8b12340af8
+#       (x86_64-unknown-linux-gnu, measured at ws68 on kasumi, checked
+#        twice; the release asset's own digest, release 417610226)
+#   sha256 9152dbd136d858539100088394cbaa97cf23f7ddd2816512cd9b48c70a9f40eb
+#       (aarch64-apple-darwin, the release asset's digest)
+# Members BY NAME (linux x86-64): `wolf` 81bdf8d4… -> 58e4ade4…,
+# `libwolf_rt.a` 74d55d5f… -> 5321ce86…, `wolf-cimport-worker`
+# 0498e8e1… -> 57c41e39…. Highest glibc symbol: GLIBC_2.34
+# (kasumi:~/lanes/ws68/toolchains.txt). The archive's own std is
+# wolf-std cceda63; lobo stages its [std] pin over named members.
+#
+# WHAT THE BUMP CHANGES HERE (ws68; notes/ws68-contract.md has the
+# numbers). One compiler lane, s246, and the std it bundles. NOTHING is
+# refused: trunk's `src/` (9e4ce7f) built at this pin on both tiers
+# exits 0 with ZERO diagnostics at --error-limit=0, against std d37c911
+# and cceda63, and none of the five new prelude names
+# (`os_signal_ignore_one`, `os_signal_default_one`, `os_exit_signal`,
+# `os_wait_status_core`, `os_wait_poll_core`) is declared here (W0304).
+# What reaches lobo:
+#   #784 — a SIGSEGV another process SENDS ends a lobo process at the
+#     first, as the host's default (nginx's too); at 0.2.32 a process
+#     that had run a task lived through the first one (measured in a
+#     container: 0.2.32 ended at the second, 0.2.33 at the first).
+#   #781 — the shared wake pipe is made only for a program that names
+#     `os_signal_wait_fd`; lobo does not, so at rest it still holds 20
+#     descriptors at both pins, the same targets, both tiers.
+#   #787 — `os_signal_text(0)`: lobo does not call it.
+# The binaries change by the runtime: release 14,750,688 -> 14,804,112
+# bytes (text 1,873,554 -> 1,875,382), dev 16,982,528 -> 17,036,912
+# (kasumi:~/lanes/ws68/logs/build-t32.log, build-t33-sd3.log).
+#
+# (ws66, the previous bump:)
 # wolf-lang at the **v0.2.32 RELEASE TAG** (72de141, r37), the release
 # stamp `wolf 0.2.32 (wolfgang, pin 72de141)`. Staged from the RELEASE
 # ARCHIVE by digest, NAMED MEMBERS ONLY (the std note below stands), as
@@ -652,10 +690,18 @@
 # both ways and docs/BUDGET.md and docs/PARITY.md following. The
 # shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "72de141f624662fdff522e8beba459fab7c5cf66"
-version_line = "wolf 0.2.32 (wolfgang, pin 72de141)"
+rev = "85dab5d7e597680d6fd7034f1d7ed2acb9a92f97"
+version_line = "wolf 0.2.33 (wolfgang, pin 85dab5d)"
 
 [lupin]
+# (ws68:) lupin STAYS at 0.1.54: wolf@v0.2.33 still declares 0.1.54
+# (its PAIRING; s246 has no lupin half and 0.1.54 does not resolve the
+# five new names, wolf-interp#261–#263), so the pairing gap is ZERO at
+# this pin too. The archive was re-read by digest at ws68 (175df238…,
+# twice) and `lupin` is a9856dd4…, the same bytes. No lobo test names
+# the five calls, so no declared lane changes.
+#
+# (ws66:)
 # lupin at the **v0.1.54 RELEASE TAG** (0e536e8, r36), staged from the
 # release archive by digest as [wolf] is:
 #   gh release download v0.1.54 -R wolffe-lang/wolf-interp \
