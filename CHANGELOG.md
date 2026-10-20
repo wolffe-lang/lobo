@@ -20,8 +20,8 @@ same (ws68, the default ruled "match nginx"): the process that ran
 `lobo serve` is a master that keeps root (it binds port 80 and 443 as
 before), and its workers — one with `worker_processes 1` — run as the
 account named `nobody` (uid 65534 on Debian, Ubuntu and Arch) and the
-group named `nobody`, else 65534 (`nogroup` on Debian and Ubuntu), the
-same ids nginx's workers take on the same host. What that changes:
+group named `nobody`, else `nogroup` (Debian and Ubuntu), the same ids
+nginx's workers take on the same host. What that changes:
 
 - a file only root may read is no longer served: `403`, as nginx;
 - the log files the configuration names become the workers' user's
@@ -32,10 +32,11 @@ same ids nginx's workers take on the same host. What that changes:
   open). nginx's master reads them as root. Give such files to the
   workers' group, or keep root (below), until lobo#101 is fixed.
 
-Where lobo keeps root, and says so in one `[warn]` at start: with `cert
-auto` (the worker that renews writes lobo's certificate store, which
-has not been verified under a dropped user: lobo#102), and on macOS
-(the drop is linux's). **To keep 0.1.4's posture, say `user root;`**:
+Where lobo keeps root, and says so in one `[warn]` at start: with no
+account named `nobody` (nginx refuses to start there), with `cert auto`
+(the worker that renews writes lobo's certificate store, which has not
+been verified under a dropped user: lobo#102), and on macOS (the drop
+is linux's). **To keep 0.1.4's posture, say `user root;`**:
 the workers then stay root, as nginx's do. To choose the user, say
 `user <name> [<group>];`, which 0.1.5 honours as nginx does.
 
@@ -59,10 +60,11 @@ new one (`-s reload` keeps the running binary).
 
 - **Root with no `user` line drops to nginx's default** (ws68). Above.
   The ids are resolved as the pinned nginx 1.30.4 was measured to
-  resolve them, as root in a container: the account named `nobody`'s
-  uid, else 65534; the group named `nobody`'s gid, else 65534; that gid
-  and every group listing `nobody`. Through 0.1.4 lobo kept one root
-  process and, from ws67, warned.
+  resolve them, as root in containers: the account named `nobody`; the
+  group named `nobody`, else `nogroup` (nginx's default group is its
+  build's: arch's `nobody`, ubuntu's `nogroup`); that gid and every
+  group listing `nobody`. Through 0.1.4 lobo kept one root process and,
+  from ws67, warned.
 - **`user` drops privilege, as nginx** (ws67, lobo#96). Through 0.1.4
   root with a `user` line refused to start. Now the master keeps root
   and each worker becomes the user before it serves (`user lw lwx;`:
@@ -1028,24 +1030,27 @@ prediction: `notes/ws68-contract.md`.
   the binaries change by the runtime and the std (release 14,750,688 →
   14,805,592 bytes).
 - **Root with no `user` line drops to nginx's default.** The ruling
-  asked at audit, "match nginx", implemented. Measured on the pinned
-  nginx as root in a container: its workers take the account named
-  `nobody`'s uid, else 65534; the group named `nobody`'s gid, else
-  65534 (not the account's own gid); that gid and every group listing
-  `nobody` — renumbered to 99:99 they read `Uid: 99`, with no account
-  and no group they read 65534:65534, and nginx says nothing. lobo
-  resolves the same (`config.default_ids`): the master keeps root and
-  its hands — one with `worker_processes 1` — drop, so in `ubuntu:24.04`
-  and in arch a hand reads `Uid: 65534 65534 65534 65534`, `Gid: 65534
-  65534 65534 65534`, `Groups: 65534`, the same lines as nginx's worker
-  in the same container (`tools/lobo-user` rows 6–9, recorded against
-  the oracle where it runs); a root-only file is 403 (0.1.4: 200).
-  **The contract's premise did not hold**: it asked for the warning to
-  be kept where `nobody` does not exist, as if nginx then refused;
-  nginx drops to 65534 all the same, so lobo does too and keeps one
-  `[warn]` saying so. Kept root, one `[warn]` each (named deltas): a
-  host that cannot drop (macOS) and `cert auto` (lobo#102). `user
-  root;` keeps the hands root, as nginx's workers.
+  asked at audit, "match nginx", with the warning kept where `nobody`
+  does not exist, implemented. Measured on the pinned nginx as root in
+  containers: its workers take the account named `nobody` and the
+  group named `nobody` — names resolved when it starts (renumbered to
+  99:99 they read `Uid: 99`) — and with neither in the name service it
+  refuses to start (`[emerg] getpwnam("nobody") failed`); its default
+  GROUP is its build's (CI's oracle, built on ubuntu, takes `nogroup`).
+  A first reading said nginx fell back to 65534 with no account: that
+  was the arch image's `systemd` name service answering `nobody`, and
+  cut to `files` nginx refused (`ev/ng68d-oracle.log`). lobo resolves
+  the account named `nobody` and the group named `nobody`, else
+  `nogroup` (`config.default_ids`): the master keeps root and its hands
+  — one with `worker_processes 1` — drop, so in `ubuntu:24.04` and in
+  arch a hand reads `Uid: 65534 65534 65534 65534`, `Gid: 65534 65534
+  65534 65534`, `Groups: 65534`, the same lines as nginx's worker in the
+  same container (`tools/lobo-user` rows 6–9, recorded against the
+  oracle where it runs; CI's runs in ubuntu); a root-only file is 403
+  (0.1.4: 200). Kept root, one `[warn]` each (named deltas): no account
+  named `nobody` (nginx refuses to start), a host that cannot drop
+  (macOS) and `cert auto` (lobo#102). `user root;` keeps the hands root,
+  as nginx's workers.
 - **A client that closes ends its exchange** (lobo#99), without
   0.2.34's `os_signal_wait_fds`: `net_wait` already waits on several
   sockets, and the client and the upstream are both sockets. A
