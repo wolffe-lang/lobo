@@ -1,5 +1,132 @@
 # Changelog
 
+## 0.1.5 — unreleased — as root with no `user` line the workers run as nginx's default user; `user` drops privilege; a proxied request holds only itself and ends when its client closes; built with wolf 0.2.33
+
+**Not released.** Trunk is `0.1.4+dev`; this entry is what 0.1.5
+carries as of ws68, written ahead of the release lane, which stamps the
+version, measures it on the release workflow's binary (the archives,
+the upgrade, the parity row), fills the date, and is cut on the
+maintainer's word (the checklist: `notes/ws68-contract.md` §6). The
+lane entries below (ws66, ws67, ws68) have each change's numbers.
+
+### Upgrading from 0.1.4
+
+**As root with no `user` line, the workers are no longer root. Check
+this before you upgrade a root deployment.** 0.1.0 to 0.1.4 refused a
+`user` line as root, so every root deployment of a release has none and
+ran one root process. nginx, as root with no `user` line, runs its
+workers as its default user, `nobody nobody`; from 0.1.5 lobo does the
+same (ws68, the default ruled "match nginx"): the process that ran
+`lobo serve` is a master that keeps root (it binds port 80 and 443 as
+before), and its workers — one with `worker_processes 1` — run as the
+account named `nobody` (uid 65534 on Debian, Ubuntu and Arch) and the
+group named `nobody`, else 65534 (`nogroup` on Debian and Ubuntu), the
+same ids nginx's workers take on the same host. What that changes:
+
+- a file only root may read is no longer served: `403`, as nginx;
+- the log files the configuration names become the workers' user's
+  (the owner; the group stays), as nginx's do after a reopen;
+- **a reload whose configuration or key only root may read is refused
+  by every worker**, which keeps serving the configuration it had,
+  while the master answers `reload complete … workers=0/N` (lobo#101,
+  open). nginx's master reads them as root. Give such files to the
+  workers' group, or keep root (below), until lobo#101 is fixed.
+
+Where lobo keeps root, and says so in one `[warn]` at start: with `cert
+auto` (the worker that renews writes lobo's certificate store, which
+has not been verified under a dropped user: lobo#102), and on macOS
+(the drop is linux's). **To keep 0.1.4's posture, say `user root;`**:
+the workers then stay root, as nginx's do. To choose the user, say
+`user <name> [<group>];`, which 0.1.5 honours as nginx does.
+
+Three smaller changes an operator may notice:
+
+- A proxied request now counts **two** connections against
+  `worker_connections` while its upstream exchange is out (nginx's
+  count): at `worker_connections 16` with one `listen`, seven are held
+  and the eighth is closed with nginx's `[alert]`.
+- Proxied requests a second against a prompt upstream are **about half
+  0.1.4's** (each exchange runs in a proc beside the serving loop; the
+  price of a silent upstream no longer holding the process: lobo#100).
+- A `SIGSEGV` another process sends ends lobo at the first, as the
+  host's default does (nginx's too); 0.1.4 lived through the first.
+
+Then the upgrade itself is 0.1.4's: install, `lobo -t -c
+conf/lobo.conf` with the new binary, then `lobo -s stop` and start the
+new one (`-s reload` keeps the running binary).
+
+### What changed since 0.1.4
+
+- **Root with no `user` line drops to nginx's default** (ws68). Above.
+  The ids are resolved as the pinned nginx 1.30.4 was measured to
+  resolve them, as root in a container: the account named `nobody`'s
+  uid, else 65534; the group named `nobody`'s gid, else 65534; that gid
+  and every group listing `nobody`. Through 0.1.4 lobo kept one root
+  process and, from ws67, warned.
+- **`user` drops privilege, as nginx** (ws67, lobo#96). Through 0.1.4
+  root with a `user` line refused to start. Now the master keeps root
+  and each worker becomes the user before it serves (`user lw lwx;`:
+  `Uid: 1500 ×4`, `Gid: 1600 ×4`, `Groups: 1600`, nginx's worker
+  lines), with the group named like the user when none is given and
+  every group listing the user; an unknown account is `getpwnam("x")
+  failed` at `-t`, start and reload; not root, nginx's `[warn]`.
+- **A proxied request holds only itself** (ws67, lobo#81). Through
+  0.1.4 a silent upstream held the whole serving process for
+  `proxy_read_timeout`: no other client was answered and `-s stop` was
+  not obeyed. Now each exchange runs beside the loop: every other
+  client is served (179,588 answered and none missed in 10 s beside
+  one silent upstream, ws67) and `-s stop` ends the process at once.
+- **A client that closes ends its exchange** (ws68, lobo#99). nginx
+  drops a proxied exchange the moment its client closes or half-closes
+  (`proxy_ignore_client_abort off`): the upstream connection closed at
+  once, the request logged `499` with no upstream status. lobo does the
+  same now, for a plaintext upstream, while it waits for the head and
+  while the body comes.
+- **A failed start leaves nothing; a stale control socket is taken
+  over** (ws67, lobo#94). A start that fails after binding its `unix:`
+  control socket removes what it made, and a lobo ended by `kill -9`
+  restarts (the socket nobody answers on is removed with one
+  `[warn]`); a live lobo's socket is never touched.
+- **A start with too few descriptors for the runtime is refused in one
+  line** (ws66, lobo#92): `wolf: the runtime could not make its
+  readiness set …; the program did not start`, exit 71, nothing left
+  behind. The startup park 0.1.4 used for lobo#90 is retired: the
+  runtime makes its readiness set before `main`.
+- **Built with wolf 0.2.33** (ws66: 0.2.32; ws68: 0.2.33), lupin
+  0.1.54, wolf-std `cceda63` (0.1.4: 0.2.29, 0.1.52, `9e5bd6b`).
+
+### Against nginx
+
+Not re-taken for 0.1.5 yet; the release lane takes the release row.
+The last runner-VM set (ws66, at 0.2.32, four workers, run 39170446495):
+nginx ÷ lobo **1.031x** with a connection per request and **0.949x** on
+keepalive, inside the 1.10 bar. Proxied throughput is not in the bar
+(above, and lobo#100).
+
+### The hosts, and what is still known wrong or limited
+
+The hosts are 0.1.4's: `x86_64-unknown-linux-gnu` and
+`aarch64-apple-darwin` archives; windows and linux aarch64 not built.
+
+- **Proxied throughput** is about half 0.1.4's (lobo#100).
+- **A reload of files only root may read** is refused by dropped
+  workers, and the master's reply says `complete` (lobo#101).
+- **`cert auto` under `user`** is unverified (lobo#102); with no `user`
+  line lobo keeps root for it.
+- **A client that closes behind an `https` upstream** is not seen until
+  `proxy_read_timeout` (the TLS client's reads wait alone); a client
+  that pipelines a request while its exchange waits gets the reply with
+  `Connection: close`, where nginx answers the next request too.
+- **Per-server limits, logs and metrics** (lobo#82) and the **limits
+  follow-ups** (lobo#87), as 0.1.4.
+- **A proxied exchange's memory**: each exchange's allocations live in
+  a region of their own (ws67) because a proc's allocations outside one
+  are kept by the runtime (wolf-lang#804).
+- An idle lobo makes about 2,100 system calls a second across a master
+  and four workers (wolf-lang#710); `memory_budget` keeps a word for
+  each finished response proc (wolf-lang#671); lobo#72 and lobo#68 as
+  0.1.4.
+
 ## 0.1.4 — 2026-10-14 — a process at its descriptor limit no longer ends; a master with no `control` directive hears its signals; `worker_connections` is applied; built with wolf 0.2.29
 
 The fifth release, and a security release: read the first section and
