@@ -250,7 +250,7 @@ Three deliverables:
 Measured on kasumi (16 cpus; other lanes beside it, load 14–17 from
 19:50Z on, written beside each number), the toolchains of §2; logs under
 `kasumi:~/lanes/ws67/ev/` and `logs/` (digests in §4). §3 above is as it
-was committed (`1a2521d`).
+was committed (`54ec373`; the branch was rebased onto trunk `52a2ae7`, tl28's tiered CI, after the measurements, and every sha in these notes is the rebased one).
 
 ### lobo#94
 
@@ -391,7 +391,7 @@ head; at trunk 6 of 8 red (every `user` row refused to start,
   rigback grew to 24,461,756 kB resident (MemAvailable 30 GB → 5.6 GB):
   rigback appends to its record by reading it back and writing it whole,
   so 2,400 padded requests are quadratic, and the 16 GB runner's host
-  stopped the runner. The record goes to /dev/null now (`a0c384b`):
+  stopped the runner. The record goes to /dev/null now (`1d126d8`):
   MemAvailable stayed at 30.4 GB and the row grew lobo 20 kB. lobo's
   memory was flat throughout; the earlier green kasumi runs had the
   room.
