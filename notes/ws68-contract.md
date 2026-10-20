@@ -379,6 +379,37 @@ the pin's proxied requests a second (`ev/tput-watch.log`).
   report, with the pass's clock (ws67's account), so a report that
   wakes a waiting pass is timed at the wait's start. Found, not fixed.
 
+### After the hand-back: the macOS `tier full` red (an ACME rig flake)
+
+`tier full` run 39385848432 at `7ffdbbb` went red on `gauntlet-macos`
+(job 118505466137) at one row: `acme: FAILED — renewal: served subject
+was "subject=CN=M2"`; every other row, `tls-renewal` and the linux
+gauntlet green. **Not this lane's change, and not macOS's**: the CA rig
+(`tests/rig/acmeca`, untouched by ws68 until here) took a CSR's names by
+scanning the WHOLE DER for a dNSName tag (0x82, a length, host-like
+bytes), and lobo's CSR (`acme.csr_build`) puts the certificate key's 32
+random bytes (`keygen()`, fresh for every order) before the
+subjectAltName. A key whose bytes read `82 02 'M' '2'` gives `[M2
+localhost]`, and the first name is the leaf's CN. Measured on kasumi
+with lobo's own `csr_build` and the rig's parser verbatim
+(`ev/csrscan-200k.log` 025d4dcca3cf…): **166 of 200,000** CSRs read a
+stray name AHEAD of `localhost` (e.g. `[Nc localhost]`, `[z4
+localhost]`), 1,679 jumped the scan past the SAN (empty: the rig then
+falls back to the order's names, harmless), 354 had one after; a
+parser that reads only the subjectAltName extension read `localhost`
+in all 200,000. About 1 in 1,200 orders, a few orders a gauntlet: a
+rare red on any host.
+- **Red first**: `acmeca --csr-check` (a CSR for `localhost` with the
+  tag planted in its key) and a `lobo-acme` row expecting exactly
+  `[localhost]`: with the rig's parser `[M2 localhost]`, exit 1, three of
+  three (`ev/cacheck-plant.log`), and in CI on plant `ws68-plant-acme`
+  `442bf24` (the run is in the PR).
+- **The fix** (`tests/rig/acmeca/acmeca.lu`): `csr_names` reads only the
+  subjectAltName extension's value (OID 2.5.29.17). `--csr-check`
+  `[localhost]` three of three (`ev/cacheck-fix.log`); the whole
+  `lobo-acme` GREEN at the head on kasumi, 0 red (`ev/acme-fix.log`
+  7378a4028d8d…).
+
 ### lobo#100
 
 **Held**: left for its own lane (§3 of the prediction gives why);
