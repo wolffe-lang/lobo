@@ -1,7 +1,7 @@
 module pkg :: proxy
   wolfi v0 · toolchain 0.2.33 · edition v1
-  export_hash 8e6a6eb98e66874ac204eca135a16ffc3a1ca972fb912c1afffc2928e8e3e086
-  pkg_hash    8e6a6eb98e66874ac204eca135a16ffc3a1ca972fb912c1afffc2928e8e3e086
+  export_hash 2bc003b9b07102bca372a2f0cb0cd6beb4a8be4a9eb072067b23ea73cdcf8727
+  pkg_hash    2bc003b9b07102bca372a2f0cb0cd6beb4a8be4a9eb072067b23ea73cdcf8727
   deps:
     config  ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
     http  7ee1eadde9554ff066159f14587f5fd0d45231a2050947b06eee3ef4b2d7572a
@@ -43,7 +43,7 @@ module pkg :: proxy
     [28] pub Need — struct Need { host: str, addr: str, timeout_ms: int, valid_ms: int }
     [29] pub PassTarget — struct PassTarget { scheme: str, authority: str, is_pool: bool, has_uri: bool, uri: str, err: str }
     [30] pub Plan — struct Plan { is_proxy: bool, loc: int, srv: int, http_blk: int, matched: str, pt: self.PassTarget, connect_ms: int, read_ms: int, trust_path: str, ssl_name: str, resolver: str, resolver_valid_ms: int, resolver_timeout_ms: int }
-    [31] pub RunAcc — struct RunAcc { addr: str, status: int, body_bytes: int, up_ms: int }
+    [31] pub RunAcc — struct RunAcc { addr: str, status: int, body_bytes: int, up_ms: int, carry: str }
     [32] pub Swrr — struct Swrr { current: prelude.List[int] }
     [33] pub UpPool — struct UpPool { name: str, hosts: prelude.List[str], ports: prelude.List[int], weights: prelude.List[int], max_fails: prelude.List[int], fail_ms: prelude.List[int], backup: prelude.List[bool], rows: prelude.List[int] }
     [34] pub UpResponse — struct UpResponse { status_line: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int }
