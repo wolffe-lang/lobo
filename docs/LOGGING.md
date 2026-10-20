@@ -213,5 +213,11 @@ way nginx's is.
   footer (the documented body delta); logdiff's error round omits
   the bytes field.
 - `$request_time` is start-of-request to completion in ms
-  precision, the three decimals nginx prints.
+  precision, the three decimals nginx prints: from the clock read
+  after the wait that brought the request's first bytes, to the
+  response's end — for a proxied request, the clock its exchange read
+  when it ended, the reply written or the client's close seen (ws69,
+  lobo#105; through ws68 both ends were the loop's pass clock, read
+  before its wait, so a request on an idle keepalive connection logged
+  up to 0.250 where nginx logs 0.000).
 - `access_log ... gzip=`/`if=` are named post-v1 refusals at -t.

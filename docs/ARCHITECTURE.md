@@ -92,32 +92,42 @@ re-serves its request from the top, would need a state machine per leg
 and would still write the relay inside the loop): the step PREPARES it
 (`proxy.prepare`: the plan's refusals, the trust anchors, the peers
 through the resolver, the upstream request per peer) and hands its job
-back as text, and the loop starts ONE proc per exchange
-(`proxy.job_run`) in a `StreamSlot`, as it starts a stream. Nothing a
-loop region owns may cross into a proc that outlives its spawner
-(`[conc.proc.arg]`), so the job crosses as BYTES, down a loopback
-connection the loop makes to its own job listener (made once at start,
-beside the stream pipe, never in the wait set); the proc answers the
+back as text, and the loop gives it to a proc of its EXCHANGE POOL
+(ws69, lobo#100: `proxy.job_loop`, an idle proc, else a new one; ws67
+started one proc per exchange, and the socket, the spawn and the task's
+end were half the proxied throughput with one client in turn). Nothing
+a loop region owns may cross into a proc that outlives its spawner
+(`[conc.proc.arg]`), so the job crosses as BYTES, down the proc's JOB
+SOCKET — a loopback connection the loop made to its own job listener
+(made once at start, beside the stream pipe, never in the wait set)
+when it made the proc, kept across its exchanges; the proc answers the
 client, writes its account back on the same socket — with the access
 record the loop sent as its tail, so the loop keeps only ints for the
-row — and reports the stream line. The request is logged and counted
-when the line arrives, at its end, as nginx logs it. A drain past
-`worker_shutdown_timeout` kills the proc as it kills a stream, and
-closes the upstream descriptor the proc noted open. Where no job
+row — reports the stream line, and waits for its next job. A proc idle
+five seconds leaves (`q`), and so do the idle ones when an accept is
+refused for want of a descriptor. The request is logged and counted
+when the line arrives, at its end, as nginx logs it. Where no job
 socket can be made the exchange runs in the step, as before. A proxied
 request counts two connections against `worker_connections` while its
-exchange is out (nginx's count). `spawn proc proxy.job_run(…)` does not
-compile at this pin (wolf-lang#655), so main spawns a one-line
-trampoline. ws68 (lobo#99): while a plaintext exchange waits on its
-upstream — the head, a length- or close-delimited body — it waits with
+exchange is out (nginx's count). `spawn proc proxy.job_loop(…)` does
+not compile at this pin (wolf-lang#655), so main spawns a one-line
+trampoline. ws68 (lobo#99): while an exchange waits on its upstream —
+the head, a length- or close-delimited body, and since ws69 (lobo#104)
+the https leg's first flight and each record — it waits with
 `net_wait` over the upstream AND its client (the loop has the client's
 row out of its wait set, so the proc is its only reader), and a client
 that closes or half-closes ends the exchange at once (499, the upstream
 closed), as nginx's `proxy_ignore_client_abort off`; bytes from the
-client meanwhile, a pipelined request, cannot be handed back to the
-loop's carry from the proc, so they stop the watch and the reply closes
-the connection. An https leg's reads are `std.x.tls.client`'s and are
-not watched.
+client meanwhile, a pipelined request, stop the watch and go back with
+the account (ws69), and the loop answers them next. A std.x.tls.client
+read that meets a post-handshake message waits for the next record
+inside std, unwatched. Every such wait has the proc's job socket in its
+set too (ws69): `net_wait` is a poll, which a kill cannot reach, so a
+drain past `worker_shutdown_timeout` stops an exchange with one byte
+there (the upstream closed, nothing written, the client closed by the
+loop), and kills the proc as it kills a stream only when the byte has
+not landed in 100 ms (a write parked on a client that does not read),
+then closes the upstream descriptor the proc noted open.
 
 The readiness set is made before `main`. Through wolf 0.2.30 the
 runtime made it at the first call that parked, and asserted on the
