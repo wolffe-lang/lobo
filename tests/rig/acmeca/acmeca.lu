@@ -333,6 +333,40 @@ fn looks_like_host(s: str) -> bool {
     true
 }
 
+/// `--csr-check` (ws68): a CSR that lobo's own `acme.csr_build` makes for
+/// "localhost", its public key's first four bytes overwritten with a
+/// dNSName tag, a length and two host characters (82 02 'M' '2'); the
+/// names `csr_names` reads must be "localhost" alone. The key is random
+/// in every real order, so through ws67 about 1 CSR in 1,200 read a
+/// stray name AHEAD of localhost — the leaf's CN — (measured: 166 of
+/// 200,000, notes/ws68-contract.md), which is how lobo-acme's renewal
+/// row once saw `subject=CN=M2` (run 39385848432, macOS). Prints the
+/// names and exits 0 when they are right, 1 otherwise. The signature no
+/// longer matches the key; `csr_names` never checks it.
+fn check_csr_names() -> int {
+    var csr = acme.csr_build(acme.keygen(), "localhost")
+    var k = 0
+    var at = -1
+    while at < 0 && k + 3 <= csr.len {
+        // the Ed25519 key's BIT STRING: 03 21 00 <32 bytes>
+        if csr[k] as int == 3 && csr[k + 1] as int == 33 && csr[k + 2] as int == 0 {
+            at = k + 3
+        }
+        k = k + 1
+    }
+    if at < 0 || at + 4 > csr.len {
+        print("csr-check: no Ed25519 key in the CSR")
+        return 1
+    }
+    csr[at] = 130 as byte
+    csr[at + 1] = 2 as byte
+    csr[at + 2] = 77 as byte
+    csr[at + 3] = 50 as byte
+    let names = csr_names(csr)
+    print("csr-check: [{names}]")
+    if names == "localhost" { 0 } else { 1 }
+}
+
 // ------------------------------------------------------------------
 // the CA server
 // ------------------------------------------------------------------
@@ -346,8 +380,12 @@ fn main() -> !int {
     var tls_mode = false
     var max_issue = 1
     var want = ""
+    var csr_check = false
     var i = 0
     for a in env_args() {
+        if a == "--csr-check" {
+            csr_check = true
+        }
         if !want.is_empty() {
             if want == "bad" {
                 bad_nonce_at = intof(a)
@@ -373,6 +411,9 @@ fn main() -> !int {
             validity_s = intof(a)
             i = 3
         }
+    }
+    if csr_check {
+        return check_csr_names()
     }
     if cacert_out.is_empty() || portfile.is_empty() {
         eprint(
