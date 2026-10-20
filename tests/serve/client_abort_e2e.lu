@@ -1,0 +1,297 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws68 (lobo#99): A CLIENT THAT CLOSES ENDS ITS EXCHANGE. nginx, with
+//! `proxy_ignore_client_abort off` (its default), drops a proxied
+//! exchange the moment its client closes: the upstream connection is
+//! closed at once and the request is logged `499 0 … ust=-` (measured on
+//! the pinned 1.30.4, notes/ws68-contract.md §2). Through ws67 lobo's
+//! exchange, beside the loop since lobo#81, waited in a blocking upstream
+//! read and saw nothing: the upstream kept its connection until it
+//! answered or `proxy_read_timeout`, and the request was logged with the
+//! upstream's later status. Since ws68 the exchange waits on the
+//! upstream AND its client (`net_wait` over both). Against the real
+//! binary (`LOBO_BIN`, default target/lobo-debug), an upstream this test
+//! accepts on and never answers, `proxy_read_timeout 30s`:
+//!   1. the head: a client asks, the upstream reads the request, the
+//!      client closes 300 ms later — the upstream sees its connection
+//!      end inside 1 s of the close (trunk: not in 3 s);
+//!   2. the body: the upstream answers a head and 10 of its 1,000 body
+//!      bytes, the client closes — the same;
+//!   3. the access log: both requests `499 0 … ust=-`;
+//!   4. a fresh GET beside them is answered.
+//! RED at trunk on 1–3. The server is put down by its handle before any
+//! assertion can fail, so a red run leaves nothing running. Loopback
+//! only, OS-chosen ports; the scratch tree is cleared at the START and
+//! the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// A request written on a fresh connection: the handle, or -1. Total.
+fn send(port: int, path: str) -> int {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return -1
+    }
+    net_write(c, "GET {path} HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return -1
+    }
+    c
+}
+
+/// The upstream's side of one exchange: accept on `up` within 3 s and
+/// read the request's head. The connection, or -1. Total.
+fn accept_up(up: int) -> int {
+    net_deadline(up, 3000) else |_| {}
+    let uc = net_accept(up) else |_| {
+        return -1
+    }
+    net_deadline(uc, 3000) else |_| {}
+    var got = ""
+    while !got.contains("\r\n\r\n") {
+        let piece = net_read(uc, 4096) else |_| {
+            return uc
+        }
+        got = "{got}{piece}"
+    }
+    uc
+}
+
+/// Close the client `c`, then wait up to 3 s for the upstream end `uc`
+/// to see its connection end: the milliseconds from the close to the
+/// end, or -1 when it did not end. Total.
+fn close_and_watch(c: int, uc: int) -> int {
+    let t0 = time_now_ms()
+    net_close(c) else |_| {}
+    net_deadline(uc, 3000) else |_| {}
+    loop {
+        var ended = false
+        var waited = false
+        let piece = net_read(uc, 4096) else |e| match e {
+            closed => {
+                ended = true
+                ""
+            },
+            timeout => {
+                waited = true
+                ""
+            },
+            utf8 => { "" },
+            io => {
+                ended = true
+                ""
+            },
+        }
+        if ended {
+            return time_now_ms() - t0
+        }
+        if waited || piece.is_empty() {
+            return -1
+        }
+    }
+}
+
+/// Read `c` to its end within `ms`: the reply, or "". Total.
+fn reply_in(c: int, ms: int) -> str {
+    net_deadline(c, ms) else |_| {}
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            out = "{out}{piece}"
+        }
+    }
+    out
+}
+
+/// The access log's lines naming `path`, after up to 2 s for them. Total.
+fn log_lines(f: str, path: str, want: int) -> List[str] {
+    var i = 0
+    while i < 40 {
+        let text = fs_read_text(f) else |_| { "" }
+        var got = List[str]()
+        for l in text.lines() {
+            if l.contains(path) {
+                (mut got).push(l)
+            }
+        }
+        if got.len >= want {
+            return got
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    List[str]()
+}
+
+/// `bin -p d -c conf -s stop`, to its end: its exit code, or -1. Total.
+fn stop(bin: str, d: str, conf: str, out: int) -> int {
+    var args = List[str]()
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    (mut args).push("-s")
+    (mut args).push("stop")
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    let h = os_spawn_fds(bin, args, map) else |_| {
+        return -1
+    }
+    os_wait(h) else |_| { -1 }
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws68_client_abort"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    // the upstream: this test accepts on it and never finishes an answer
+    let up = net_listen("127.0.0.1:0")?
+    let uport = net_port(up)?
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status $body_bytes_sent \"$request\" ust=$upstream_status';\n  access_log {d}/logs/access.log t;\n  server {{\n    listen 127.0.0.1:{hp};\n    root {d}/www;\n    location /up/ {{ proxy_pass http://127.0.0.1:{uport}; proxy_read_timeout 30s; }}\n  }}\n}}\n",
+    )?
+    let so = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds(bin, args, map)?
+    let came = wait_up(hp)
+
+    // 1. the head: the client closes while the exchange waits for it
+    var head_ms = -1
+    var u1 = -1
+    let c1 = if came { send(hp, "/up/head") } else { -1 }
+    if c1 >= 0 {
+        u1 = accept_up(up)
+        time_sleep_ms(300)
+        head_ms = if u1 >= 0 { close_and_watch(c1, u1) } else { -1 }
+    }
+    // 2. the body: a head and 10 of 1,000 bytes, then the client closes
+    var body_ms = -1
+    var u2 = -1
+    let c2 = if came { send(hp, "/up/body") } else { -1 }
+    if c2 >= 0 {
+        u2 = accept_up(up)
+        if u2 >= 0 {
+            net_write(
+                u2,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 1000\r\n\r\n0123456789",
+            ) else |_| {}
+            time_sleep_ms(300)
+            body_ms = close_and_watch(c2, u2)
+        }
+    }
+    print(
+        "a client that closes mid-exchange: the upstream saw its connection end {head_ms} ms after the close while the head was awaited, {body_ms} ms while the body came (-1: not within 3 s)",
+    )
+    // 3. the access log, and 4. a fresh GET beside them
+    let lines = log_lines("{d}/logs/access.log", "/up/", 2)
+    for l in lines {
+        print("access: {l}")
+    }
+    let g = send(hp, "/index.html")
+    let gr = if g >= 0 { reply_in(g, 2000) } else { "" }
+    if g >= 0 {
+        net_close(g) else |_| {}
+    }
+
+    let sc = stop(bin, d, conf, so)
+    let t0 = time_now_ms()
+    var gone = false
+    while !gone && time_now_ms() - t0 < 3000 {
+        let w = os_wait_poll() else |_| { (0, 0) }
+        if w.0 == h {
+            gone = true
+        } else {
+            time_sleep_ms(20)
+        }
+    }
+    if !gone {
+        // a red run must leave nothing running: put it down by its handle
+        os_kill(h) else |_| {}
+        let _k = os_wait(h) else |_| { 0 }
+    }
+    if u1 >= 0 {
+        net_close(u1) else |_| {}
+    }
+    if u2 >= 0 {
+        net_close(u2) else |_| {}
+    }
+    net_close(up) else |_| {}
+    fs_close(so) else |_| {}
+    assert(came, "the server came up")
+    assert(u1 >= 0 && u2 >= 0, "both exchanges dialled the upstream and wrote their requests")
+    assert(
+        head_ms >= 0 && head_ms < 1000,
+        "the head awaited: the upstream connection ended inside 1 s of the client's close: {head_ms} ms (trunk: not in 3 s)",
+    )
+    assert(
+        body_ms >= 0 && body_ms < 1000,
+        "the body coming: the upstream connection ended inside 1 s of the client's close: {body_ms} ms (trunk: not in 3 s)",
+    )
+    var logged = 0
+    for l in lines {
+        if l.starts_with("499 0 ") && l.ends_with(" ust=-") {
+            logged = logged + 1
+        }
+    }
+    assert(logged == 2, "both requests logged 499 0 … ust=- as nginx logs them: {lines}")
+    assert(
+        gr.starts_with("HTTP/1.1 200") && gr.ends_with("small-page\n"),
+        "a fresh GET beside them is answered",
+    )
+    assert(sc == 0, "-s stop reached the server: exit {sc}")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
