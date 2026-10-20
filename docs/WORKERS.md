@@ -745,10 +745,57 @@ call fails.
   fatal code 2 and cannot be respawned`, nginx's line). The drop is
   linux's at this pin (`set_ids` answers `unsupported` elsewhere), so
   root with `user` on macOS is refused by name.
-- **Named deltas.** Root with NO `user` line keeps lobo's one root
-  process and says so in one `[warn]`; nginx drops to its default
-  `nobody nobody`. A hand reads a reload's files as the user, so a
+- **Named deltas.** Root with NO `user` line kept lobo's one root
+  process and said so in one `[warn]`; nginx drops to its default
+  `nobody nobody` (ws68 retires this one: below). A hand reads a
+  reload's files as the user, so a
   reload whose configuration or key only root may read is refused by
   every hand: the master answers `reload complete (generation 2)
   workers=0/2` and the hands keep serving the generation they had
   (measured, `kasumi:~/lanes/ws67/ev/reload96-h96.log`).
+
+## ws68 — root with no `user` line drops to nginx's default
+
+The `user` default was a ruling asked at audit; the recommendation,
+"match nginx", is what lobo does since ws68. nginx documents its default
+as `user nobody nobody;`, and as root with no `user` line its workers
+take ids by a rule measured on the pinned 1.30.4 as root in a container
+(notes/ws68-contract.md §2), never read from its source:
+
+- the uid is the account NAMED `nobody`'s, else 65534 (no such
+  account: nginx still starts and drops, and says nothing);
+- the gid is the group NAMED `nobody`'s, else 65534 — not the account's
+  own gid (an account `nobody` of 65000:65000 and no group of that name
+  gave `Gid: 65534`);
+- the supplementary groups are that gid and every group listing
+  `nobody` as a member.
+
+lobo resolves the same off `/etc/passwd` and `/etc/group`
+(`config.default_ids`, pure, held row by row in
+`tests/config/user_directive.lu`), so root with no `user` line is a
+master that keeps root and its hands (one with `worker_processes 1`)
+drop exactly as a `user` line's do (above): the logs are given to the
+user, a root-only file is 403, port 80 still answers. On ubuntu 24.04
+and arch alike that is `Uid: 65534 ×4`, `Gid: 65534 ×4`, `Groups:
+65534`, the same lines as nginx's worker in the same container
+(`tools/lobo-user` rows 6–9, against the oracle where it runs). lobo
+prints nothing about it, as nginx, except where nginx is silently
+different from what an operator may expect or lobo cannot follow:
+
+- **No account named `nobody`**: the hands drop to 65534 all the same
+  (nginx's ids), and lobo says so in one `[warn]` (nginx prints none).
+- **A host that cannot drop** (macOS: `set_ids` is linux's at this pin):
+  root kept, one `[warn]` (a named delta).
+- **`cert auto`**: root kept, one `[warn]` (a named delta). Hand 1 owns
+  the renewal and writes lobo's own certificate store, which a drop has
+  not been verified against (lobo#102); nginx has no `cert auto`.
+- **`user root;`** keeps root in the hands, as it keeps nginx's workers
+  root: the way to say 0.1.4's posture in the configuration.
+
+What changes for an operator who ran lobo as root with no `user` line
+(every root deployment of 0.1.0–0.1.4, which refused `user` as root):
+the hands are not root, so a file only root may read is no longer
+served (403), the log files become the user's, and a reload whose
+configuration or key only root may read is refused by every hand
+(lobo#101, above), where it took before.
+
