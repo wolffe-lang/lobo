@@ -1878,19 +1878,22 @@ fn gw_body(code: int, token: str) -> str {
 /// otherwise), `body_bytes` the response body length, `up_ms` the
 /// upstream leg's wall time in ms, and `carry` what the client
 /// pipelined while the exchange waited (ws69, lobo#104): bytes a
-/// caller that keeps the connection must put in front of its next read.
-/// Filled by `run`; a caller that does not log passes a fresh one.
+/// caller that keeps the connection must put in front of its next read,
+/// and `end_ms` the wall clock where the exchange ended (ws69, lobo#105:
+/// `job_serve`'s, the end of `$request_time`). Filled by `run`; a
+/// caller that does not log passes a fresh one.
 pub struct RunAcc {
     addr: str,
     status: int,
     body_bytes: int,
     up_ms: int,
     carry: str,
+    end_ms: int,
 }
 
 /// A fresh, empty RunAcc (the caller's constructor). Total.
 pub fn run_acc() -> RunAcc {
-    RunAcc { addr: "", status: 0, body_bytes: 0, up_ms: 0, carry: "" }
+    RunAcc { addr: "", status: 0, body_bytes: 0, up_ms: 0, carry: "", end_ms: 0 }
 }
 
 /// The status code of an upstream status line ("HTTP/1.1 200 OK" ->
@@ -2661,8 +2664,9 @@ pub fn job_parse(s: str) -> Job ! {bad} {
 ///     on `jr`, and `jr` WATCHED while it waits: a byte from the loop
 ///     there means stop), the account goes back on `jr` — `r <dlen>
 ///     <taillen>\n`, then `<status> <body_bytes> <up_ms> <close 0|1>
-///     <addrlen>:<addr><carrylen>:<carry>` (the carry: what the client
-///     pipelined meanwhile), then the tail as it came — and the stream
+///     <end_ms> <addrlen>:<addr><carrylen>:<carry>` (the end: the clock
+///     where the exchange ended; the carry: what the client pipelined
+///     meanwhile), then the tail as it came — and the stream
 ///     line `<client> 0 <wcode> 0 <id>` down `out` (`wcode` 0 clean, 1
 ///     the client closed, 2 io or a frame that did not read). The
 ///     account is written before the line, so a loop that has the line
@@ -2804,7 +2808,7 @@ pub fn job_loop(jr: int, out: int) -> int {
                 if job_s.len != jl || tail.len != tl {
                     wcode = 2
                 } else if stop_now {
-                    let det = "497 0 0 1 0:0:"
+                    let det = "497 0 0 1 {time_unix_ms()} 0:0:"
                     answer = "r {det.len} {tail.len}\n{det}{tail}"
                 } else {
                     let r = job_serve(cfd, job_s, tail, jr)
@@ -2812,7 +2816,7 @@ pub fn job_loop(jr: int, out: int) -> int {
                     wcode = r.1
                 }
                 if answer.is_empty() {
-                    let det = "0 0 0 1 0:0:"
+                    let det = "0 0 0 1 0 0:0:"
                     answer = "r {det.len} 0\n{det}"
                 }
                 net_write(jr, answer) else |_| {}
@@ -2830,7 +2834,7 @@ pub fn job_loop(jr: int, out: int) -> int {
 
 /// The exchange a job's text asks for, answered on `client` (ws67):
 /// the account `job_loop` writes back — `r <dlen> <taillen>\n`, then
-/// `<status> <body_bytes> <up_ms> <close 0|1> <addrlen>:<addr><carrylen>:<carry>`, then
+/// `<status> <body_bytes> <up_ms> <close 0|1> <end_ms> <addrlen>:<addr><carrylen>:<carry>`, then
 /// `tail` as it came — and the stream line's `wcode` (0 clean, 1 the
 /// client closed, 2 io or a job that did not parse). The proc's body,
 /// and the loop's own when it cannot make a job socket. Total.
@@ -2857,7 +2861,11 @@ pub fn job_serve(client: int, job_s: str, tail: str, notes: int) -> (str, int) {
             },
         }
     }
+    // ws69 (lobo#105): the clock is read where the exchange ended — the
+    // reply written, or the client's close seen — and the loop logs
+    // `$request_time` to it, not to the pass that hears the report
+    acc.end_ms = time_unix_ms()
     let cl = if close { 1 } else { 0 }
-    let det = "{acc.status} {acc.body_bytes} {acc.up_ms} {cl} {acc.addr.len}:{acc.addr}{acc.carry.len}:{acc.carry}"
+    let det = "{acc.status} {acc.body_bytes} {acc.up_ms} {cl} {acc.end_ms} {acc.addr.len}:{acc.addr}{acc.carry.len}:{acc.carry}"
     ("r {det.len} {tail.len}\n{det}{tail}", wcode)
 }

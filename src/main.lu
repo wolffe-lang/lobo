@@ -2461,6 +2461,14 @@ fn serve_main(
                         // means to sleep, and the clause says so.
                         time_sleep_ms(wms)
                     }
+                    // ws69 (lobo#105): the clock AFTER the wait. `now` was read
+                    // before it, so a request that arrived during the wait was
+                    // timed from up to `wait_budget` (250 ms) earlier — a static
+                    // GET on a keepalive connection idle a second logged
+                    // `$request_time` 0.250 where nginx logs 0.000. A request's
+                    // first bytes read in this pass start at `tw`, and a request
+                    // served in it ends there
+                    let tw = time_unix_ms()
 
                     // 0. ws13: one resolver pass — every pending query socket
                     // gets a 1 ms read under its deadline; settled names become
@@ -3412,6 +3420,7 @@ fn serve_main(
                                 // proc is idle again, its job socket kept
                                 var px_close = false
                                 var px_carry = ""
+                                var px_end = now
                                 if pxw >= 0 {
                                     let rep = px_reply(pxw)
                                     pxs[pi].sock = -1
@@ -3422,7 +3431,13 @@ fn serve_main(
                                     let d = px_account(rep)
                                     px_close = d.close || !d.ok
                                     px_carry = d.carry
-                                    var span = now - cs0
+                                    // ws69 (lobo#105): the request ends where the
+                                    // exchange's own clock read its end — the reply
+                                    // written or the client's close seen — not at
+                                    // this pass, which may have begun before it
+                                    let t_end = if d.end_ms > 0 { d.end_ms } else { tw }
+                                    px_end = t_end
+                                    var span = t_end - cs0
                                     if span < 0 {
                                         span = 0
                                     }
@@ -3458,7 +3473,7 @@ fn serve_main(
                                         // ws68 (lobo#99): 499, the client gone: no upstream status (`-`)
                                         a3.up_status = if d.status == 499 { 0 } else { d.status }
                                         a3.up_ms = d.up_ms
-                                        a3.unix_ms = now
+                                        a3.unix_ms = t_end
                                         a3.req_ms = span
                                         (mut pass_accs).push(take AccRow { a: a3 })
                                     }
@@ -3479,7 +3494,7 @@ fn serve_main(
                                     closed_abort = sabort
                                 } else {
                                     n_idle = now
-                                    n_start = now
+                                    n_start = px_end
                                     n_wait = -1
                                     n_stream = 0
                                     if !px_carry.is_empty() {
@@ -3531,6 +3546,10 @@ fn serve_main(
                             var proxying_now = false
                             var px_job = ""
                             var px_tail = ""
+                            // ws69 (lobo#105): where this row's request started:
+                            // a row with no carry read its first bytes in this
+                            // pass's wait
+                            let cs_eff = if clen0 == 0 { tw } else { cs0 }
                             if !(must_step || ready_has(ready, fd)) {
                                 // nothing to read and nothing owed: the row keeps
                                 // its carry and its counters, and only the timers
@@ -3825,11 +3844,11 @@ fn serve_main(
                                 // clock, and the span since this request's first
                                 // byte)
                                 if st.logged {
-                                    var span = now - cs0
+                                    var span = tw - cs_eff
                                     if span < 0 {
                                         span = 0
                                     }
-                                    n_start = now
+                                    n_start = tw
                                     // ws10: the budget observability — a refusal is a
                                     // LOUD error event (the ws09 seam) and the
                                     // generation's counters move; every served
@@ -3910,12 +3929,12 @@ fn serve_main(
                                         var a2 = copy st.rare[0].acc
                                         a2.status = a_status
                                         a2.body_bytes = a_bytes
-                                        a2.unix_ms = now
+                                        a2.unix_ms = tw
                                         a2.req_ms = span
                                         (mut pass_accs).push(take AccRow { a: a2 })
                                     }
                                 } else if !st.active && st.carry.is_empty() {
-                                    n_start = now
+                                    n_start = tw
                                 }
                                 if !close_it &&
                                     !st.active &&
@@ -3977,6 +3996,9 @@ fn serve_main(
                                     }
                                     if pi >= 0 {
                                         snext = snext + 1
+                                        // the request's start rides in the row
+                                        // until its exchange reports
+                                        n_start = cs_eff
                                         pxs[pi].sock = fd
                                         pxs[pi].id = snext
                                         pxs[pi].since = now
@@ -3991,7 +4013,8 @@ fn serve_main(
                                     } else {
                                         let rep = proxy.job_serve(fd, px_job, px_tail, -1)
                                         let d = px_account(rep.0)
-                                        var span = now - cs0
+                                        let t_end = if d.end_ms > 0 { d.end_ms } else { tw }
+                                        var span = t_end - cs_eff
                                         if span < 0 {
                                             span = 0
                                         }
@@ -4020,11 +4043,11 @@ fn serve_main(
                                                 d.status
                                             }
                                             a4.up_ms = d.up_ms
-                                            a4.unix_ms = now
+                                            a4.unix_ms = t_end
                                             a4.req_ms = span
                                             (mut pass_accs).push(take AccRow { a: a4 })
                                         }
-                                        n_start = now
+                                        n_start = t_end
                                         if close_it || d.close || !d.ok || rep.1 != 0 {
                                             net_close(fd) else |_| {}
                                             keep = false
@@ -4806,15 +4829,17 @@ fn px_reap(jw: int, jr: int) {
 /// An exchange's account, read back (`px_account`): `ok` false when it
 /// did not arrive whole (the row closes, nothing is logged); the
 /// status relayed, the body's bytes, the upstream leg's ms, whether the
-/// connection closes, `$upstream_addr`, what the client pipelined
-/// meanwhile (`carry`, ws69); and from the tail the access record
-/// (`has_acc`) and the step's two high waters.
+/// connection closes, the clock where it ended (`end_ms`, ws69),
+/// `$upstream_addr`, what the client pipelined meanwhile (`carry`,
+/// ws69); and from the tail the access record (`has_acc`) and the
+/// step's two high waters.
 struct PxDone {
     ok: bool,
     status: int,
     body_bytes: int,
     up_ms: int,
     close: bool,
+    end_ms: int,
     addr: str,
     carry: str,
     has_acc: bool,
@@ -4830,6 +4855,7 @@ fn px_bad() -> PxDone {
         body_bytes: 0,
         up_ms: 0,
         close: true,
+        end_ms: 0,
         addr: "",
         carry: "",
         has_acc: false,
@@ -4858,11 +4884,11 @@ fn px_account(t: str) -> PxDone {
     }
     let det = t.get(nl + 1..nl + 1 + hv[0]) else { "" }
     let tail = t.get(nl + 1 + hv[0]..nl + 1 + hv[0] + hv[1]) else { "" }
-    // `<status> <body_bytes> <up_ms> <close> <addrlen>:<addr><carrylen>:<carry>`
+    // `<status> <body_bytes> <up_ms> <close> <end_ms> <addrlen>:<addr><carrylen>:<carry>`
     var c = 0
     var nums = List[int]()
     var at = 0
-    while c < 4 {
+    while c < 5 {
         let rest = det[at..det.len]
         let sp = rest.find(" ") else -1
         if sp < 0 {
@@ -4874,7 +4900,7 @@ fn px_account(t: str) -> PxDone {
     }
     let ta = tail_str(det, at)
     let tc = tail_str(det, ta.1)
-    if ta.1 < 0 || tc.1 != det.len || nums[0] < 0 || nums[1] < 0 || nums[2] < 0 {
+    if ta.1 < 0 || tc.1 != det.len || nums[0] < 0 || nums[1] < 0 || nums[2] < 0 || nums[4] < 0 {
         return px_bad()
     }
     let addr = ta.0
@@ -4885,6 +4911,7 @@ fn px_account(t: str) -> PxDone {
         body_bytes: nums[1],
         up_ms: nums[2],
         close: nums[3] != 0,
+        end_ms: nums[4],
         addr: addr,
         carry: tc.0,
         has_acc: back.has,
