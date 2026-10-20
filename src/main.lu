@@ -2979,6 +2979,11 @@ fn serve_main(
                                     acc_off = now + accept_pause_ms()
                                     let why = descriptor_reason()
                                     ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
+                                    // ws69: the exchange pool's idle procs
+                                    // give their job sockets back first
+                                    in life {
+                                        px_retire(mut pxs, now, -1)
+                                    }
                                 }
                                 if !got_conn {
                                     draining = false
@@ -3137,6 +3142,9 @@ fn serve_main(
                                 acc_off = now + accept_pause_ms()
                                 let why = descriptor_reason()
                                 ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
+                                in life {
+                                    px_retire(mut pxs, now, -1)
+                                }
                             }
                             if got_tls && crows - cdead >= croom {
                                 let picks = idle_pick(cfds, cwait, cstream, cclen, cidle, crows)
@@ -4674,8 +4682,10 @@ fn px_kill(mut pxs: List[PxSlot], i: int) {
 }
 
 /// Idle procs past `ms` of idleness leave the pool (`ms` < 0: every
-/// idle one): `q` and the loop's end closed — the proc closes its own
-/// end when it reads them, and the entry is free. Total.
+/// idle one — at the loop's end, and when an accept was refused for
+/// want of a descriptor): `q` and the loop's end closed — the proc
+/// closes its own end when it reads them, and the entry is free.
+/// Total.
 fn px_retire(mut pxs: List[PxSlot], now: int, ms: int) {
     var i = 0
     while i < pxs.len {
