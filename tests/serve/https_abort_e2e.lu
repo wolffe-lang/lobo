@@ -1,0 +1,236 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws69 (lobo#104): A CLIENT THAT CLOSES ENDS ITS HTTPS EXCHANGE TOO.
+//! nginx (`proxy_ignore_client_abort off`, its default) drops a proxied
+//! exchange the moment its client closes whatever the upstream's
+//! scheme: with an https upstream that accepts and never answers its
+//! ClientHello, the upstream connection is closed +0.000 s after the
+//! client's close and the request is logged `499 0 … ust=-` (measured
+//! on the pinned 1.30.4, notes/ws69-contract.md §2). ws68 (lobo#99)
+//! watched the client on the plaintext leg only: the https leg's waits
+//! are reads inside std.x.tls.client, so lobo saw nothing until the
+//! read deadline. Since ws69 the https leg waits with the plaintext
+//! leg's watch in front of the handshake's first read and of every
+//! record it asks for. Against the real binary (`LOBO_BIN`, default
+//! target/lobo-debug), an upstream this test accepts on, reads the
+//! ClientHello from and never answers, `proxy_read_timeout 30s`:
+//!   1. a client asks, the upstream reads the ClientHello, the client
+//!      closes 300 ms later — the upstream sees its connection end
+//!      inside 1 s of the close (trunk: not in 3 s);
+//!   2. the access log: `499 0 … ust=-`;
+//!   3. a fresh GET beside it is answered.
+//! RED at trunk on 1 and 2. The server is put down by its handle before
+//! any assertion can fail. Loopback only, OS-chosen ports; the scratch
+//! tree is cleared at the START and the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// The https upstream's side: accept on `up` within 3 s and read the
+/// first bytes the proxy writes (its ClientHello). The connection, or
+/// -1. Total.
+fn accept_hello(up: int) -> int {
+    net_deadline(up, 3000) else |_| {}
+    let uc = net_accept(up) else |_| {
+        return -1
+    }
+    net_deadline(uc, 3000) else |_| {}
+    let b = net_read_bytes(uc, 4096) else |_| {
+        return uc
+    }
+    let _n = b.len
+    uc
+}
+
+/// Close the client `c`, then wait up to 3 s for the upstream end `uc`
+/// to see its connection end: the ms from the close to the end, or -1.
+/// Total.
+fn close_and_watch(c: int, uc: int) -> int {
+    let t0 = time_now_ms()
+    net_close(c) else |_| {}
+    net_deadline(uc, 3000) else |_| {}
+    loop {
+        var ended = false
+        var waited = false
+        let piece = net_read_bytes(uc, 4096) else |e| match e {
+            closed => {
+                ended = true
+                List[byte]()
+            },
+            timeout => {
+                waited = true
+                List[byte]()
+            },
+            io => {
+                ended = true
+                List[byte]()
+            },
+        }
+        if ended {
+            return time_now_ms() - t0
+        }
+        if waited || piece.len == 0 {
+            return -1
+        }
+    }
+}
+
+/// Read `c` to its end within `ms`: the reply, or "". Total.
+fn reply_in(c: int, ms: int) -> str {
+    net_deadline(c, ms) else |_| {}
+    var out = ""
+    var more = true
+    while more {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        } else {
+            out = "{out}{piece}"
+        }
+    }
+    out
+}
+
+/// The access log's lines naming `path`, after up to 2 s for them. Total.
+fn log_lines(f: str, path: str, want: int) -> List[str] {
+    var i = 0
+    while i < 40 {
+        let text = fs_read_text(f) else |_| { "" }
+        var got = List[str]()
+        for l in text.lines() {
+            if l.contains(path) {
+                (mut got).push(l)
+            }
+        }
+        if got.len >= want {
+            return got
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    List[str]()
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws69_https_abort"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    // any PEM CERTIFICATE block loads as the trust anchors: the upstream
+    // never answers, so no chain is ever checked against them
+    let pem = fs_read_text(
+        "{root}/tests/config-corpus/certbot-vhost/live/example.org/fullchain.pem",
+    )?
+    fs_write_text("{d}/ca.pem", pem)?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let up = net_listen("127.0.0.1:0")?
+    let uport = net_port(up)?
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status $body_bytes_sent \"$request\" ust=$upstream_status';\n  access_log {d}/logs/access.log t;\n  server {{\n    listen 127.0.0.1:{hp};\n    root {d}/www;\n    location /tls/ {{ proxy_pass https://127.0.0.1:{uport}; proxy_read_timeout 30s; proxy_ssl_trusted_certificate {d}/ca.pem; }}\n  }}\n}}\n",
+    )?
+    let so = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds(bin, args, map)?
+    let came = wait_up(hp)
+
+    // 1. the client closes while the exchange waits for the server's
+    // first flight
+    var ms = -1
+    var uc = -1
+    var c = -1
+    if came {
+        c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+    }
+    if c >= 0 {
+        net_write(c, "GET /tls/x HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n") else |_| {}
+        uc = accept_hello(up)
+        time_sleep_ms(300)
+        ms = if uc >= 0 { close_and_watch(c, uc) } else { -1 }
+    }
+    print(
+        "a client that closes while its https exchange waits: the upstream saw its connection end {ms} ms after the close (-1: not within 3 s)",
+    )
+    // 2. the access log, and 3. a fresh GET beside it
+    let lines = log_lines("{d}/logs/access.log", "/tls/", 1)
+    for l in lines {
+        print("access: {l}")
+    }
+    let g = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+    var gr = ""
+    if g >= 0 {
+        net_write(g, "GET /index.html HTTP/1.1\r\nHost: t\r\nConnection: close\r\n\r\n") else |_| {}
+        gr = reply_in(g, 2000)
+        net_close(g) else |_| {}
+    }
+
+    os_kill(h) else |_| {}
+    let _k = os_wait(h) else |_| { 0 }
+    if uc >= 0 {
+        net_close(uc) else |_| {}
+    }
+    net_close(up) else |_| {}
+    fs_close(so) else |_| {}
+    assert(came, "the server came up")
+    assert(uc >= 0, "the exchange dialled the https upstream and wrote its ClientHello")
+    assert(
+        ms >= 0 && ms < 1000,
+        "the upstream connection ended inside 1 s of the client's close: {ms} ms (trunk: not in 3 s)",
+    )
+    var logged = 0
+    for l in lines {
+        if l.starts_with("499 0 ") && l.ends_with(" ust=-") {
+            logged = logged + 1
+        }
+    }
+    assert(logged == 1, "the request logged 499 0 … ust=- as nginx logs it: {lines}")
+    assert(
+        gr.starts_with("HTTP/1.1 200") && gr.ends_with("small-page\n"),
+        "a fresh GET beside it is answered",
+    )
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
