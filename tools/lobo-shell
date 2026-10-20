@@ -216,7 +216,7 @@ qprobe "-t -q bad config still prints its failure" "$qbad" 1 failed
 if [ "$(id -u)" != 0 ]; then
     qprobe "-t -q unprivileged \`user\` still prints the [warn]" "$quser" 0 warn
 else
-    echo "lobo-shell: SKIP — [-t -q user warn] runs only unprivileged (root: nginx drops privileges and lobo refuses by name, a different row); named skip" >&2
+    echo "lobo-shell: SKIP — [-t -q user warn] runs only unprivileged (as root both drop privileges and print no [warn]: tools/lobo-user's rows, in a container); named skip" >&2
 fi
 
 # ------------------------------------------------------------------
