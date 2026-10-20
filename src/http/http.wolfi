@@ -1,9 +1,9 @@
 module pkg :: http
   wolfi v0 · toolchain 0.2.33 · edition v1
-  export_hash ed4c22513f11e430d02bb406960086d83d1bb6e6e6638a8d420e0e487e5a738f
-  pkg_hash    ed4c22513f11e430d02bb406960086d83d1bb6e6e6638a8d420e0e487e5a738f
+  export_hash 7ee1eadde9554ff066159f14587f5fd0d45231a2050947b06eee3ef4b2d7572a
+  pkg_hash    7ee1eadde9554ff066159f14587f5fd0d45231a2050947b06eee3ef4b2d7572a
   deps:
-    config  a081d0eae54b9cb9b0bc73d4a9bef39029de462abc3413a94c93394f797b860d
+    config  ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:

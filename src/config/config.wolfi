@@ -1,7 +1,7 @@
 module pkg :: config
   wolfi v0 · toolchain 0.2.33 · edition v1
-  export_hash a081d0eae54b9cb9b0bc73d4a9bef39029de462abc3413a94c93394f797b860d
-  pkg_hash    a081d0eae54b9cb9b0bc73d4a9bef39029de462abc3413a94c93394f797b860d
+  export_hash ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
+  pkg_hash    ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
   deps:
     std.env  a9f78f9e3d9a3e1423a0cce830cc3029e02c1f8dbc8070c2e8dbf20bb6b799d5
     std.list  b867c3c66c3aa0dbae1cef22897684da1333874100bc1412d65681a5c310cfc9
@@ -39,55 +39,55 @@ module pkg :: config
     [25] pub conn_check — fn conn_check(c: self.Conf) -> str · regions (ρ1) -> -
     [26] pub control_check — fn control_check(c: self.Conf) -> str · regions (ρ1) -> -
     [27] pub count — fn count(c: self.Conf) -> int · regions (ρ1) -> -
-    [28] pub default_drops — fn default_drops(c: self.Conf, euid: int, can_drop: bool) -> bool · regions (ρ1, -, -) -> -
+    [28] pub default_drops — fn default_drops(c: self.Conf, euid: int, can_drop: bool, ids_ok: bool) -> bool · regions (ρ1, -, -, -) -> -
     [29] pub default_ids — fn default_ids(passwd: str, group: str) -> self.UserIds · regions (-, -) -> ρ_caller
-    [30] pub delta_count — fn delta_count(c: self.Conf) -> int · regions (ρ1) -> -
-    [31] pub delta_refusal — fn delta_refusal(c: self.Conf) -> str · regions (ρ1) -> -
-    [32] pub directives_markdown — fn directives_markdown() -> str
-    [33] pub drop_host — fn drop_host() -> bool
-    [34] pub errlog_json — fn errlog_json(c: self.Conf) -> bool · regions (ρ1) -> -
-    [35] pub errlog_level — fn errlog_level(c: self.Conf) -> str · regions (ρ1) -> -
-    [36] pub errlog_path — fn errlog_path(c: self.Conf) -> str · regions (ρ1) -> -
-    [37] pub find — fn find(t: self.Table, name: str, ctx: str) -> int · regions (ρ1, -, -) -> -
-    [38] pub first_http — fn first_http(c: self.Conf) -> int · regions (ρ1) -> -
-    [39] pub first_server — fn first_server(c: self.Conf) -> int · regions (ρ1) -> -
-    [40] pub fmt_vars — fn fmt_vars(f: str) -> str
-    [41] pub hand_ids_host — fn hand_ids_host(c: self.Conf) -> self.UserIds · regions (ρ1) -> ρ_caller
-    [42] pub hands_drop — fn hands_drop(c: self.Conf, euid: int) -> bool · regions (ρ1, -) -> -
-    [43] pub header_buffers — fn header_buffers(c: self.Conf) -> (int, int) · regions (ρ1) -> ρ_caller
-    [44] pub host_key — fn host_key(host: str) -> str
-    [45] pub kid_count — fn kid_count(c: self.Conf, blk: int) -> int · regions (ρ1, -) -> -
-    [46] pub kid_first — fn kid_first(c: self.Conf, blk: int) -> int · regions (ρ1, -) -> -
-    [47] pub lex — fn lex(src: str) -> self.Toks · regions (-) -> ρ_caller
-    [48] pub limits_check — fn limits_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [49] pub limits_nofile — fn limits_nofile(text: str) -> int
-    [50] pub lint — fn lint(c: self.Conf) -> str · regions (ρ1) -> -
-    [51] pub listen_bind_addr — fn listen_bind_addr(key: str) -> str
-    [52] pub listen_is_loopback — fn listen_is_loopback(addr: str) -> bool
-    [53] pub listen_norm — fn listen_norm(a: str) -> str
-    [54] pub listen_plain_addrs — fn listen_plain_addrs(c: self.Conf) -> prelude.List[str] · regions (ρ1) -> ρ_caller
-    [55] pub listen_ssl_addrs — fn listen_ssl_addrs(c: self.Conf) -> prelude.List[str] · regions (ρ1) -> ρ_caller
-    [56] pub listener_addr — fn listener_addr(c: self.Conf, i: int) -> str · regions (ρ1, -) -> -
-    [57] pub listener_count — fn listener_count(c: self.Conf) -> int · regions (ρ1) -> -
-    [58] pub listener_default — fn listener_default(c: self.Conf, i: int) -> int · regions (ρ1, -) -> -
-    [59] pub listener_index — fn listener_index(c: self.Conf, addr: str) -> int · regions (ρ1, -) -> -
-    [60] pub listener_ssl — fn listener_ssl(c: self.Conf, i: int) -> bool · regions (ρ1, -) -> -
-    [61] pub listening_sockets — fn listening_sockets(c: self.Conf) -> int · regions (ρ1) -> -
-    [62] pub load — fn load(prefix: str, conf_rel: str) -> self.Conf · regions (-, -) -> ρ_caller
-    [63] pub loc_count — fn loc_count(c: self.Conf) -> int · regions (ρ1) -> -
-    [64] pub loc_count_at — fn loc_count_at(c: self.Conf, s: int) -> int · regions (ρ1, -) -> -
-    [65] pub loc_first — fn loc_first(c: self.Conf, s: int) -> int · regions (ρ1, -) -> -
-    [66] pub log_check — fn log_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [67] pub log_headers_join — fn log_headers_join(c: self.Conf) -> str · regions (ρ1) -> -
-    [68] pub logfmt_esc — fn logfmt_esc(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
-    [69] pub logfmt_row — fn logfmt_row(c: self.Conf, name: str) -> int · regions (ρ1, -) -> -
-    [70] pub logfmt_text — fn logfmt_text(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
-    [71] pub match_glob — fn match_glob(pat: str, name: str) -> bool
-    [72] pub mem_budget — fn mem_budget(c: self.Conf) -> int · regions (ρ1) -> -
-    [73] pub metrics_check — fn metrics_check(c: self.Conf) -> str · regions (ρ1) -> -
-    [74] pub metrics_on — fn metrics_on(c: self.Conf) -> bool · regions (ρ1) -> -
-    [75] pub nearest — fn nearest(t: self.Table, name: str) -> str · regions (ρ1, -) -> -
-    [76] pub nobody_named — fn nobody_named(passwd: str) -> bool
+    [30] pub default_ids_host — fn default_ids_host() -> self.UserIds · regions () -> ρ_caller
+    [31] pub delta_count — fn delta_count(c: self.Conf) -> int · regions (ρ1) -> -
+    [32] pub delta_refusal — fn delta_refusal(c: self.Conf) -> str · regions (ρ1) -> -
+    [33] pub directives_markdown — fn directives_markdown() -> str
+    [34] pub drop_host — fn drop_host() -> bool
+    [35] pub errlog_json — fn errlog_json(c: self.Conf) -> bool · regions (ρ1) -> -
+    [36] pub errlog_level — fn errlog_level(c: self.Conf) -> str · regions (ρ1) -> -
+    [37] pub errlog_path — fn errlog_path(c: self.Conf) -> str · regions (ρ1) -> -
+    [38] pub find — fn find(t: self.Table, name: str, ctx: str) -> int · regions (ρ1, -, -) -> -
+    [39] pub first_http — fn first_http(c: self.Conf) -> int · regions (ρ1) -> -
+    [40] pub first_server — fn first_server(c: self.Conf) -> int · regions (ρ1) -> -
+    [41] pub fmt_vars — fn fmt_vars(f: str) -> str
+    [42] pub hand_ids_host — fn hand_ids_host(c: self.Conf) -> self.UserIds · regions (ρ1) -> ρ_caller
+    [43] pub hands_drop — fn hands_drop(c: self.Conf, euid: int) -> bool · regions (ρ1, -) -> -
+    [44] pub header_buffers — fn header_buffers(c: self.Conf) -> (int, int) · regions (ρ1) -> ρ_caller
+    [45] pub host_key — fn host_key(host: str) -> str
+    [46] pub kid_count — fn kid_count(c: self.Conf, blk: int) -> int · regions (ρ1, -) -> -
+    [47] pub kid_first — fn kid_first(c: self.Conf, blk: int) -> int · regions (ρ1, -) -> -
+    [48] pub lex — fn lex(src: str) -> self.Toks · regions (-) -> ρ_caller
+    [49] pub limits_check — fn limits_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [50] pub limits_nofile — fn limits_nofile(text: str) -> int
+    [51] pub lint — fn lint(c: self.Conf) -> str · regions (ρ1) -> -
+    [52] pub listen_bind_addr — fn listen_bind_addr(key: str) -> str
+    [53] pub listen_is_loopback — fn listen_is_loopback(addr: str) -> bool
+    [54] pub listen_norm — fn listen_norm(a: str) -> str
+    [55] pub listen_plain_addrs — fn listen_plain_addrs(c: self.Conf) -> prelude.List[str] · regions (ρ1) -> ρ_caller
+    [56] pub listen_ssl_addrs — fn listen_ssl_addrs(c: self.Conf) -> prelude.List[str] · regions (ρ1) -> ρ_caller
+    [57] pub listener_addr — fn listener_addr(c: self.Conf, i: int) -> str · regions (ρ1, -) -> -
+    [58] pub listener_count — fn listener_count(c: self.Conf) -> int · regions (ρ1) -> -
+    [59] pub listener_default — fn listener_default(c: self.Conf, i: int) -> int · regions (ρ1, -) -> -
+    [60] pub listener_index — fn listener_index(c: self.Conf, addr: str) -> int · regions (ρ1, -) -> -
+    [61] pub listener_ssl — fn listener_ssl(c: self.Conf, i: int) -> bool · regions (ρ1, -) -> -
+    [62] pub listening_sockets — fn listening_sockets(c: self.Conf) -> int · regions (ρ1) -> -
+    [63] pub load — fn load(prefix: str, conf_rel: str) -> self.Conf · regions (-, -) -> ρ_caller
+    [64] pub loc_count — fn loc_count(c: self.Conf) -> int · regions (ρ1) -> -
+    [65] pub loc_count_at — fn loc_count_at(c: self.Conf, s: int) -> int · regions (ρ1, -) -> -
+    [66] pub loc_first — fn loc_first(c: self.Conf, s: int) -> int · regions (ρ1, -) -> -
+    [67] pub log_check — fn log_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [68] pub log_headers_join — fn log_headers_join(c: self.Conf) -> str · regions (ρ1) -> -
+    [69] pub logfmt_esc — fn logfmt_esc(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
+    [70] pub logfmt_row — fn logfmt_row(c: self.Conf, name: str) -> int · regions (ρ1, -) -> -
+    [71] pub logfmt_text — fn logfmt_text(c: self.Conf, row: int) -> str · regions (ρ1, -) -> -
+    [72] pub match_glob — fn match_glob(pat: str, name: str) -> bool
+    [73] pub mem_budget — fn mem_budget(c: self.Conf) -> int · regions (ρ1) -> -
+    [74] pub metrics_check — fn metrics_check(c: self.Conf) -> str · regions (ρ1) -> -
+    [75] pub metrics_on — fn metrics_on(c: self.Conf) -> bool · regions (ρ1) -> -
+    [76] pub nearest — fn nearest(t: self.Table, name: str) -> str · regions (ρ1, -) -> -
     [77] pub nodelay — fn nodelay(c: self.Conf) -> int · regions (ρ1) -> -
     [78] pub nofile_limit — fn nofile_limit() -> int
     [79] pub nofile_note — fn nofile_note(c: self.Conf, limit: int) -> str · regions (ρ1, -) -> -
