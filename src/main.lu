@@ -2531,8 +2531,10 @@ fn serve_main(
                                 sbuf = sbuf[nl + 1..sbuf.len]
                                 let sr = budget.stream_line(ln)
                                 if sr.0 >= 0 &&
-                                    (budget.stream_slot(sslots, sr.0, sr.4) >= 0 ||
-                                        px_of(pxs, sr.0, sr.4) >= 0) {
+                                    (
+                                        budget.stream_slot(sslots, sr.0, sr.4) >= 0 ||
+                                            px_of(pxs, sr.0, sr.4) >= 0
+                                    ) {
                                     (mut sdone).push(sr.0)
                                     (mut sline).push(ln)
                                 } else if ln.starts_with("acme ") {
@@ -3453,7 +3455,8 @@ fn serve_main(
                                     // request served: nothing logged or counted,
                                     // as ws67's kill logged nothing
                                     let px_logs = d.ok && d.status != 497
-                                    if px_logs && note_needed(gens, cg, d.admitted, d.mem_rt, false) {
+                                    if px_logs &&
+                                        note_needed(gens, cg, d.admitted, d.mem_rt, false) {
                                         in life {
                                             gen_note(mut gens, cg, d.admitted, d.mem_rt, false)
                                         }

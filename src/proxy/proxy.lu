@@ -2763,7 +2763,11 @@ pub fn job_loop(jr: int, out: int) -> int {
                         for w in h.words() {
                             (mut parts).push(w.to_int() else |_| { -1 })
                         }
-                        if parts.len != 4 || parts[0] < 0 || parts[1] < 0 || parts[2] < 0 || parts[3] < 0 {
+                        if parts.len != 4 ||
+                            parts[0] < 0 ||
+                            parts[1] < 0 ||
+                            parts[2] < 0 ||
+                            parts[3] < 0 {
                             reading = false
                             bad = true
                         } else {
