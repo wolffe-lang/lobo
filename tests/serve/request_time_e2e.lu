@@ -18,11 +18,18 @@
 //! binary (`LOBO_BIN`, default target/lobo-debug), an upstream this test
 //! answers itself, `log_format t '$status "$request" rt=$request_time'`:
 //!   1. a static GET, a second's idleness, a static GET on the same
-//!      connection: the second logs `rt` under 0.050 (trunk 0.250);
+//!      connection: the second's `rt` is no longer than the client saw
+//!      it take (trunk: 0.250 for a GET answered in a millisecond);
 //!   2. a proxied GET on it, answered 500 ms after the upstream read it:
-//!      `rt` 0.450–0.650 (trunk 0.750);
+//!      `rt` at least 0.450 and no longer than the client saw it take
+//!      (trunk: 0.750 for a reply the client had in about 0.505);
 //!   3. a proxied GET on a fresh connection, its client closing 1.0 s
-//!      later: `499`, `rt` 0.950–1.150 (trunk 0.751).
+//!      later: `499`, `rt` no shorter than the client's request-to-close
+//!      span less 0.100 and at most 0.500 past it (trunk: 0.751).
+//! The bounds are the test's own client-side clock, not fixed numbers:
+//! lobo's span lies inside the client's, so a hosted runner that is slow
+//! (macOS: 0.653 for the 500 ms reply, 1.090 for the close, run
+//! 39500506590) stays green, and the pass clock's 0.250 does not.
 //! The server is put down by its handle before any assertion can fail.
 //! Loopback only, OS-chosen ports; the scratch tree is cleared at the
 //! START and the end.
@@ -159,6 +166,10 @@ fn main() -> !int {
     var u2 = -1
     var u3 = -1
     var r2 = ""
+    // what the client saw each take, on its own clock (ms)
+    var idle_seen = -1
+    var up_seen = -1
+    var closed_seen = -1
     if came {
         // 1. two static GETs on one connection, a second apart
         let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
@@ -166,9 +177,12 @@ fn main() -> !int {
             net_write(c, "GET /index.html HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
             let _a = read_to(c, "small-page\n")
             time_sleep_ms(1000)
+            let t1 = time_now_ms()
             net_write(c, "GET /index.html?again HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
             let _b = read_to(c, "small-page\n")
+            idle_seen = time_now_ms() - t1
             // 2. a proxied GET on it, answered 500 ms after it is read
+            let t2 = time_now_ms()
             net_write(c, "GET /up/answered HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
             u2 = accept_up(up)
             if u2 >= 0 {
@@ -178,15 +192,18 @@ fn main() -> !int {
                     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n",
                 ) else |_| {}
                 r2 = read_to(c, "ok\n")
+                up_seen = time_now_ms() - t2
             }
             net_close(c) else |_| {}
         }
         // 3. a proxied GET whose client closes 1.0 s later
         let c3 = net_connect("127.0.0.1:{hp}") else |_| { -1 }
         if c3 >= 0 {
+            let t3 = time_now_ms()
             net_write(c3, "GET /up/closed HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
             u3 = accept_up(up)
             time_sleep_ms(1000)
+            closed_seen = time_now_ms() - t3
             net_close(c3) else |_| {}
         }
     }
@@ -194,6 +211,9 @@ fn main() -> !int {
     for l in lines {
         print("access: {l}")
     }
+    print(
+        "the client saw: the idle GET {idle_seen} ms, the proxied GET {up_seen} ms, its request to its close {closed_seen} ms",
+    )
     os_kill(h) else |_| {}
     let _k = os_wait(h) else |_| { 0 }
     if u2 >= 0 {
@@ -221,17 +241,22 @@ fn main() -> !int {
     assert(came, "the server came up")
     assert(u2 >= 0 && u3 >= 0, "both exchanges dialled the upstream and wrote their requests")
     assert(r2.ends_with("ok\n"), "the proxied GET was answered")
+    // lobo's span lies inside the client's: 15 ms for the two clocks'
+    // millisecond rounding
     assert(
-        idle_rt >= 0 && idle_rt < 50,
-        "a static GET after a second's idleness: rt {idle_rt} ms, nginx 0 (trunk: 250)",
+        idle_rt >= 0 && idle_seen >= 0 && idle_rt <= idle_seen + 15,
+        "a static GET after a second's idleness: rt {idle_rt} ms, the client saw {idle_seen} ms, nginx 0 (trunk: 250)",
     )
     assert(
-        up_rt >= 450 && up_rt <= 650,
-        "a proxied GET answered in 500 ms: rt {up_rt} ms, nginx 503 (trunk: 750)",
+        up_rt >= 450 && up_seen >= 0 && up_rt <= up_seen + 15,
+        "a proxied GET answered in 500 ms: rt {up_rt} ms, the client saw {up_seen} ms, nginx 503 (trunk: 750)",
     )
     assert(
-        closed_ok && closed_rt >= 950 && closed_rt <= 1150,
-        "a client that closed 1.0 s after its request: 499 at rt {closed_rt} ms, nginx 1000 (trunk: 751)",
+        closed_ok &&
+            closed_seen >= 0 &&
+            closed_rt >= closed_seen - 100 &&
+            closed_rt <= closed_seen + 500,
+        "a client that closed 1.0 s after its request: 499 at rt {closed_rt} ms, its request to its close {closed_seen} ms, nginx 1000 (trunk: 751)",
     )
     fs_remove_dir_all(d) else |_| {}
     0
