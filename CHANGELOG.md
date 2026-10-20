@@ -1069,6 +1069,13 @@ prediction: `notes/ws68-contract.md`.
 - **lobo#100 measured on the new pin**: 0.48–0.50x the pre-#81 tree's
   proxied requests a second, unmoved by the pin (0.99–1.01x), left for
   its own lane.
+- **The ACME test CA reads a CSR's names from its subjectAltName only**
+  (test infrastructure, `tests/rig/acmeca`). It scanned the whole CSR
+  for a dNSName tag, so the certificate key's random bytes, which come
+  first, could carry a stray name ahead of `localhost` and become the
+  minted leaf's CN: 166 of 200,000 CSRs from lobo's own `csr_build`, and
+  once in CI (the macOS renewal row, `subject=CN=M2`). A planted tag in
+  the key (`acmeca --csr-check`, a `lobo-acme` row) holds it.
 
 ## ws67 — 2026-10-19 — a silent upstream holds only its own request (lobo#81); `user` drops privilege (lobo#96); a stale control socket is taken over (lobo#94)
 
