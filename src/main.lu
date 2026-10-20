@@ -3403,7 +3403,8 @@ fn serve_main(
                                         a3.body_bytes = d.body_bytes
                                         a3.proxied = true
                                         a3.up_addr = d.addr
-                                        a3.up_status = d.status
+                                        // ws68 (lobo#99): 499, the client gone: no upstream status (`-`)
+                                        a3.up_status = if d.status == 499 { 0 } else { d.status }
                                         a3.up_ms = d.up_ms
                                         a3.unix_ms = now
                                         a3.req_ms = span
@@ -3946,7 +3947,12 @@ fn serve_main(
                                             a4.body_bytes = d.body_bytes
                                             a4.proxied = true
                                             a4.up_addr = d.addr
-                                            a4.up_status = d.status
+                                            // ws68 (lobo#99): 499, the client gone: no upstream status (`-`)
+                                            a4.up_status = if d.status == 499 {
+                                                0
+                                            } else {
+                                                d.status
+                                            }
                                             a4.up_ms = d.up_ms
                                             a4.unix_ms = now
                                             a4.req_ms = span

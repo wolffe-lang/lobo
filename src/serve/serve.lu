@@ -3776,7 +3776,9 @@ pub fn serve_request(
         }
         acc.proxied = true
         acc.up_addr = pacc.addr
-        acc.up_status = pacc.status
+        // ws68 (lobo#99): a client that closed mid-exchange is 499 with
+        // no upstream status (nginx logs `$upstream_status` as `-`)
+        acc.up_status = if pacc.status == 499 { 0 } else { pacc.status }
         acc.up_ms = pacc.up_ms
         acc.status = pacc.status
         acc.body_bytes = pacc.body_bytes
