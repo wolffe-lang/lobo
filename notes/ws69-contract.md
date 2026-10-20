@@ -456,6 +456,26 @@ head; red at trunk on both lanes in run 39484785843 and on kasumi
   their threads are kept rather than made per exchange), but three
   rounds are not ws68's seven-round census, and #106 stays open.
 
+### After the hand-back: the macOS `tier full` red (a bound too tight)
+
+`tier full` run 39500506590 at `3c7f358` went red on `gauntlet-macos`
+alone (job 118896582115) at one corpus row: `request_time_e2e`
+[native], `rt=0.653` for the proxied GET answered in 500 ms (the bound
+was 0.450–0.650) and `rt=1.090` for the close at 1.0 s; the checked
+lane and the linux gauntlet green. The clock was right and the hosted
+runner slow; the fixed bounds were the fault. They are the test's own
+client-side clock now: each `rt` no longer than the client saw the
+request take (lobo's span lies inside the client's; 15 ms for the two
+clocks' rounding), the 500 ms reply at least 0.450, the close no
+shorter than the client's request-to-close span less 0.100 and at most
+0.500 past it. On kasumi: green at the head (0.000 / 0.501 / 1.001
+against the client's 0 / 501 / 1,000 ms, `ev/t-rt2-h69.log`), red at
+trunk (0.250 against 0 ms, 0.751 against 501 ms, 0.752 against 1,000
+ms, `ev/t-rt2-trunk.log`). The runner's numbers were not reproduced on
+kasumi: two busy loops on the test's and the server's one cpu left them
+at 0.500–0.504 and 1.000–1.003 (`ev/rtload.log`), so the red against
+the old bound is the macOS job's own.
+
 ### Slips, named
 
 - The Bash tool's shell is zsh: a `set -- $pair` loop compared nothing
