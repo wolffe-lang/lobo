@@ -883,6 +883,61 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws68 — 2026-10-20 — built with wolf 0.2.33; as root with no `user` line the hands drop to nginx's default (the `user` default, ruled at audit); a client that closes ends its exchange (lobo#99)
+
+Unreleased (trunk). Contract, inputs, the oracle's measurements and the
+prediction: `notes/ws68-contract.md`.
+
+- **The pin**: wolf 0.2.32 → **0.2.33** (`85dab5d`), from the release
+  archive by digest; lupin stays **0.1.54** (`0e536e8`; wolf 0.2.33
+  declares it); wolf-std `d37c911` → **`cceda63`**, the std 0.2.33's
+  archive bundles. Nothing is refused: both tiers build with zero
+  diagnostics against both std trees, and none of the five prelude
+  names 0.2.33 adds is declared here. What moves for lobo: a `SIGSEGV`
+  another process sends ends it at the first (s246's #784; measured in
+  a container, 0.2.32 lived through the first and ended at the second);
+  nothing else: at rest it still holds 20 descriptors (lobo names no
+  `os_signal_wait_fd`, so 0.2.33's shared wake pipe is not made), and
+  the binaries change by the runtime and the std (release 14,750,688 →
+  14,805,592 bytes).
+- **Root with no `user` line drops to nginx's default.** The ruling
+  asked at audit, "match nginx", implemented. Measured on the pinned
+  nginx as root in a container: its workers take the account named
+  `nobody`'s uid, else 65534; the group named `nobody`'s gid, else
+  65534 (not the account's own gid); that gid and every group listing
+  `nobody` — renumbered to 99:99 they read `Uid: 99`, with no account
+  and no group they read 65534:65534, and nginx says nothing. lobo
+  resolves the same (`config.default_ids`): the master keeps root and
+  its hands — one with `worker_processes 1` — drop, so in `ubuntu:24.04`
+  and in arch a hand reads `Uid: 65534 65534 65534 65534`, `Gid: 65534
+  65534 65534 65534`, `Groups: 65534`, the same lines as nginx's worker
+  in the same container (`tools/lobo-user` rows 6–9, recorded against
+  the oracle where it runs); a root-only file is 403 (0.1.4: 200).
+  **The contract's premise did not hold**: it asked for the warning to
+  be kept where `nobody` does not exist, as if nginx then refused;
+  nginx drops to 65534 all the same, so lobo does too and keeps one
+  `[warn]` saying so. Kept root, one `[warn]` each (named deltas): a
+  host that cannot drop (macOS) and `cert auto` (lobo#102). `user
+  root;` keeps the hands root, as nginx's workers.
+- **A client that closes ends its exchange** (lobo#99), without
+  0.2.34's `os_signal_wait_fds`: `net_wait` already waits on several
+  sockets, and the client and the upstream are both sockets. A
+  plaintext exchange waits on both while it reads the upstream's head
+  and body; a client that closes or half-closes ends it at once — the
+  upstream connection closed (+0.000 s, as nginx), nothing written,
+  `499 0 … ust=-` in the access log (nginx's line; through ws67 the
+  request was logged with the upstream's later `200`). Bytes from the
+  client meanwhile (a pipelined request) stop the watch and the reply
+  closes the connection: a named delta (nginx answers it). Not watched:
+  an `https` upstream's wait (std.x.tls.client's reads), named.
+  `tests/serve/client_abort_e2e.lu` holds it (the head 0 ms, the body
+  1 ms after the close; trunk: not in 3 s); `lobo-shell`'s row of eight
+  proxied requests after the clients close is parity now (`after=200`
+  on both): 44 probes, 43 parity, 1 named delta.
+- **lobo#100 measured on the new pin**: 0.48–0.50x the pre-#81 tree's
+  proxied requests a second, unmoved by the pin (0.99–1.01x), left for
+  its own lane.
+
 ## ws67 — 2026-10-19 — a silent upstream holds only its own request (lobo#81); `user` drops privilege (lobo#96); a stale control socket is taken over (lobo#94)
 
 Unreleased (trunk). Contract, inputs, the oracle's measurements and the
