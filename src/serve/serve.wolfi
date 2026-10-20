@@ -1,5 +1,5 @@
 module pkg :: serve
-  wolfi v0 · toolchain 0.2.32 · edition v1
+  wolfi v0 · toolchain 0.2.33 · edition v1
   export_hash 1853dc35cde7c9993149b24abe4cdbbda101abf86694cd0c0fc4c90e952398ec
   pkg_hash    1853dc35cde7c9993149b24abe4cdbbda101abf86694cd0c0fc4c90e952398ec
   deps:

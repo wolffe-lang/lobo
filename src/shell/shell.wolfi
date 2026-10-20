@@ -1,5 +1,5 @@
 module pkg :: shell
-  wolfi v0 · toolchain 0.2.32 · edition v1
+  wolfi v0 · toolchain 0.2.33 · edition v1
   export_hash 8d44afdb09a6491750a1b86e6eae1907be454012b5ac694a8dd0b79ff38244c8
   pkg_hash    8d44afdb09a6491750a1b86e6eae1907be454012b5ac694a8dd0b79ff38244c8
   deps:
