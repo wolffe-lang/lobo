@@ -16,10 +16,11 @@
 //! name. A host with no uid answer is still refused. ws68 (the `user`
 //! default, ruled at audit "match nginx"): root with NO `user` line drops
 //! to nginx's default `user nobody nobody`, resolved as the pinned nginx
-//! was measured to resolve it (notes/ws68-contract.md §2: the account
-//! named nobody's uid, else 65534; the group named nobody's gid, else
-//! 65534; that gid and every group listing nobody), except on a host that
-//! cannot drop and with `cert auto`, which keep root and say so. The
+//! was measured to resolve it (notes/ws68-contract.md §3: the account
+//! named nobody; the group named nobody, else nogroup — the group is the
+//! nginx build's; that gid and every group listing nobody), except where
+//! no account named nobody exists (nginx refuses to start), on a host
+//! that cannot drop and with `cert auto`, which keep root and say so. The
 //! verdict and the resolution are pure (the uid and the texts passed in),
 //! so all three lanes run them; the drop itself is tools/lobo-user's, as
 //! root in a container.
@@ -103,25 +104,25 @@ fn main() -> !int {
     let none = config.user_ids(c0, pw, gr)
     assert(none.ok && none.uid == -1, "no user line: nothing to resolve")
 
-    // ---- ws68: nginx's default, as measured (notes/ws68-contract.md §2)
+    // ---- ws68: nginx's default, as measured (notes/ws68-contract.md §3)
     let nb_pw = "root:x:0:0::/root:/bin/sh\nnobody:x:65534:65534:Kernel Overflow User:/:/usr/bin/nologin\n"
     let arch_gr = "root:x:0:\nnobody:x:65534:\n"
     let ubu_gr = "root:x:0:\nnogroup:x:65534:\n"
     let d1 = config.default_ids(nb_pw, arch_gr)
     assert(
         d1.ok && d1.uid == 65534 && d1.gid == 65534 && d1.groups.len == 1 && d1.groups[0] == 65534,
-        "arch's accounts: 65534:65534, groups 65534 (nginx's worker lines): {d1}",
+        "arch's accounts: nobody:nobody, 65534:65534, groups 65534 (the arch-built nginx's worker): {d1}",
     )
-    assert(d1.name == "nobody" && d1.group == "nobody", "the names are nginx's default's: {d1}")
+    assert(d1.name == "nobody" && d1.group == "nobody", "the group named nobody first: {d1}")
     let d2 = config.default_ids(nb_pw, ubu_gr)
     assert(
-        d2.uid == 65534 && d2.gid == 65534 && d2.groups.len == 1 && d2.groups[0] == 65534,
-        "ubuntu's (no group named nobody): 65534:65534 all the same: {d2}",
+        d2.ok && d2.uid == 65534 && d2.gid == 65534 && d2.group == "nogroup" && d2.groups.len == 1,
+        "ubuntu's (no group named nobody): nogroup, 65534 (the ubuntu-built nginx's worker): {d2}",
     )
     let d3 = config.default_ids("nobody:x:99:99::/:/sbin/nologin\n", "nobody:x:99:\n")
     assert(
         d3.uid == 99 && d3.gid == 99 && d3.groups[0] == 99,
-        "renumbered 99:99: read at run time, as nginx: {d3}",
+        "renumbered 99:99: read when it starts, as nginx: {d3}",
     )
     let d4 = config.default_ids(
         "nobody:x:65000:65000::/:/sbin/nologin\n",
@@ -133,46 +134,63 @@ fn main() -> !int {
     )
     let d5 = config.default_ids("nobody:x:65000:65000::/:/sbin/nologin\n", ubu_gr)
     assert(
-        d5.uid == 65000 && d5.gid == 65534,
-        "no group named nobody: gid 65534, not the account's 65000: {d5}",
+        d5.ok && d5.uid == 65000 && d5.gid == 65534,
+        "no group named nobody: nogroup's gid, not the account's: {d5}",
     )
-    let d6 = config.default_ids("root:x:0:0::/root:/bin/sh\n", "nobody:x:65001:\n")
-    assert(d6.uid == 65534 && d6.gid == 65001, "no account named nobody: uid 65534: {d6}")
+    let d6 = config.default_ids("root:x:0:0::/root:/bin/sh\n", "nobody:x:65534:\n")
+    assert(
+        !d6.ok && d6.err.contains("no account named \"nobody\""),
+        "no account named nobody: unresolved (nginx: getpwnam(\"nobody\") failed): {d6.err}",
+    )
     let d7 = config.default_ids(nb_pw, "{arch_gr}extra:x:1700:nobody\n")
     assert(
         d7.groups.len == 2 && d7.groups[0] == 65534 && d7.groups[1] == 1700,
         "a group listing nobody joins the groups (nginx: Groups: 1700 65534): {d7.groups}",
     )
     let d8 = config.default_ids("", "")
+    assert(!d8.ok, "no account files at all: unresolved, as nginx with no name service: {d8.err}")
+    let d9 = config.default_ids(nb_pw, "root:x:0:\nusers:x:100:\n")
     assert(
-        d8.ok && d8.uid == 65534 && d8.gid == 65534 && d8.groups.len == 1,
-        "no account files at all: 65534:65534, never a refusal: {d8}",
+        !d9.ok && d9.err.contains("no group named \"nobody\" or \"nogroup\""),
+        "the account, no group for it: unresolved (nginx: getgrnam failed): {d9.err}",
     )
+    // who drops to it: root, no user line, a host that can drop, the default resolved, no cert auto
     assert(
-        config.nobody_named(nb_pw) && !config.nobody_named("root:x:0:0::/:/bin/sh\n"),
-        "nobody_named",
+        config.default_drops(c0, 0, true, true),
+        "root, no user line, linux, nobody resolved: the default drops",
     )
-    // who drops to it: root, no user line, a host that can drop, no cert auto
-    assert(config.default_drops(c0, 0, true), "root, no user line, linux: the default drops")
-    assert(!config.default_drops(c0, 1000, true), "not root: no drop")
-    assert(!config.default_drops(c1, 0, true), "a user line: the row's drop, not the default's")
-    assert(!config.default_drops(c0, 0, false), "a host that cannot drop: root kept")
+    assert(!config.default_drops(c0, 1000, true, true), "not root: no drop")
+    assert(
+        !config.default_drops(c1, 0, true, true),
+        "a user line: the row's drop, not the default's",
+    )
+    assert(!config.default_drops(c0, 0, false, true), "a host that cannot drop: root kept")
+    assert(
+        !config.default_drops(c0, 0, true, false),
+        "no account named nobody: root kept (nginx would refuse)",
+    )
     let ca = config.parse_str(
         "events {{\n}}\nhttp {{\n    server {{\n        listen 127.0.0.1:0 ssl;\n        server_name auto.test;\n        cert auto;\n        cert_ca http://127.0.0.1:14000/dir;\n    }}\n}}\n",
         "t.conf",
     )
     assert(config.ok(ca) && config.auto_on(ca), "a cert auto config parses")
-    assert(!config.default_drops(ca, 0, true), "cert auto: root kept (lobo#102)")
+    assert(!config.default_drops(ca, 0, true, true), "cert auto: root kept (lobo#102)")
     // the one line at start, or none (nginx prints none)
     assert(
         config.root_note(c0, 0, true, nb_pw, arch_gr).is_empty(),
-        "root, nobody exists: silent, as nginx",
+        "root, nobody resolved: silent, as nginx",
+    )
+    assert(
+        config.root_note(c0, 0, true, nb_pw, ubu_gr).is_empty(),
+        "root, ubuntu's accounts: silent",
     )
     let rn_none = config.root_note(c0, 0, true, "root:x:0:0::/:/bin/sh\n", ubu_gr)
     assert(
-        rn_none.starts_with("no \"user\" directive and no account named \"nobody\"") &&
-            rn_none.contains("uid 65534, gid 65534"),
-        "no account named nobody: dropped all the same, said once: {rn_none}",
+        rn_none.starts_with(
+            "running as root with no \"user\" directive and no account named \"nobody\"",
+        ) &&
+            rn_none.contains("lobo keeps root"),
+        "no account named nobody: root kept, said once (nginx refuses to start): {rn_none}",
     )
     let rn_mac = config.root_note(c0, 0, false, nb_pw, arch_gr)
     assert(
