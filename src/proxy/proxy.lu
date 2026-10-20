@@ -1517,9 +1517,22 @@ fn tls_read_str(mut cli: tlsc.Client) -> str ! {timeout, closed, io} {
 }
 
 /// The upstream response head off the TLS session (read_up_head's
-/// twin over decrypted records). Rows: `timeout` (→504), `closed`
-/// (→502), `io`.
-fn tls_read_head(mut cli: tlsc.Client) -> (str, str) ! {timeout, closed, io} {
+/// twin over decrypted records), watching the client and the loop
+/// before each record it asks std for (`up_wait` on the upstream
+/// socket `up`, ws69: lobo#104). std.x.tls.client reads a record
+/// exactly and keeps nothing past it, so the socket readable is the
+/// right gate — but a call that meets a post-handshake message (a
+/// NewSessionTicket) reads on for the next record inside std, where
+/// nothing is watched (a named residue). Rows: `timeout` (→504),
+/// `closed` (→502), `gone` (the client closed, 499), `stopped` (the
+/// loop's stop, 497), `io`.
+fn tls_read_head(mut cli: tlsc.Client, up: int, mut w: Watch) -> (str, str) ! {
+    timeout,
+    closed,
+    gone,
+    stopped,
+    io,
+} {
     var buf = ""
     loop {
         let m = buf.find("\r\n\r\n") else -1
@@ -1529,16 +1542,37 @@ fn tls_read_head(mut cli: tlsc.Client) -> (str, str) ! {timeout, closed, io} {
         if buf.len > 65536 {
             return io
         }
-        let piece = tls_read_str(mut cli)?
+        up_wait(up, mut w) else |e| match e {
+            timeout => { return timeout },
+            gone => { return gone },
+            stopped => { return stopped },
+            io => { return io },
+        }
+        let piece = tls_read_str(mut cli) else |e| match e {
+            timeout => { return timeout },
+            closed => { return closed },
+            io => { return io },
+        }
         buf = "{buf}{piece}"
     }
 }
 
-/// Exactly `want` body bytes beyond `carry` (read_up_length's twin).
-/// Row: io.
-fn tls_read_len(mut cli: tlsc.Client, carry: str, want: int) -> str ! {io} {
+/// Exactly `want` body bytes beyond `carry` (read_up_length's twin),
+/// watching as `tls_read_head` does. Rows: io; `gone`, `stopped`
+/// (ws69).
+fn tls_read_len(mut cli: tlsc.Client, up: int, mut w: Watch, carry: str, want: int) -> str ! {
+    gone,
+    stopped,
+    io,
+} {
     var buf = carry
     while buf.len < want {
+        up_wait(up, mut w) else |e| match e {
+            gone => { return gone },
+            stopped => { return stopped },
+            timeout => { return io },
+            io => { return io },
+        }
         let piece = tls_read_str(mut cli) else |_| {
             return io
         }
@@ -1553,12 +1587,27 @@ fn tls_read_len(mut cli: tlsc.Client, carry: str, want: int) -> str ! {io} {
 /// Body to end-of-stream, bounded (read_up_close's twin — a TLS
 /// close_notify or clean EOF ends it; a deadline expiry on a
 /// close-delimited body ends it too, the plaintext leg's own
-/// posture). Row: io.
-fn tls_read_close(mut cli: tlsc.Client, carry: str, cap: int) -> str ! {io} {
+/// posture), watching as `tls_read_head` does. Rows: io; `gone`,
+/// `stopped` (ws69).
+fn tls_read_close(mut cli: tlsc.Client, up: int, mut w: Watch, carry: str, cap: int) -> str ! {
+    gone,
+    stopped,
+    io,
+} {
     var buf = carry
     loop {
         if buf.len > cap {
             return io
+        }
+        var waited = true
+        up_wait(up, mut w) else |e| match e {
+            gone => { return gone },
+            stopped => { return stopped },
+            timeout => { waited = false },
+            io => { return io },
+        }
+        if !waited {
+            return buf
         }
         let piece = tls_read_str(mut cli) else |e| match e {
             closed => { return buf },
@@ -1618,6 +1667,24 @@ fn attempt_tls(
         up_close(notes, up)
         return 502
     }
+    // ws69 (lobo#104): the waits watch the client and the loop, as the
+    // plaintext leg's do (ws68, lobo#99) — first the wait for the
+    // server's first flight, where an upstream that accepts and never
+    // answers holds an exchange (the handshake's reads are
+    // std.x.tls.client's own, which the watch can only stand in front
+    // of)
+    var w = Watch { client: client, stop: notes, ms: read_ms, piped: false }
+    var ww: int = 0
+    up_wait(up, mut w) else |e| match e {
+        timeout => { ww = 504 },
+        gone => { ww = 499 },
+        stopped => { ww = 497 },
+        io => { ww = 502 },
+    }
+    if ww != 0 {
+        up_close(notes, up)
+        return ww
+    }
     // ws12 (wolf-std#3/sc31): the row NAMES itself. What stood here
     // was a twenty-arm match that re-listed std.x.tls.client's whole
     // refusal vocabulary — a list lobo had to keep in step with a
@@ -1652,13 +1719,21 @@ fn attempt_tls(
         return 502
     }
     var hgw: int = 0
-    let hr = tls_read_head(mut cli) else |e| match e {
+    let hr = tls_read_head(mut cli, up, mut w) else |e| match e {
         timeout => {
             hgw = 504
             ("", "")
         },
         closed => {
             hgw = 502
+            ("", "")
+        },
+        gone => {
+            hgw = 499
+            ("", "")
+        },
+        stopped => {
+            hgw = 497
             ("", "")
         },
         io => {
@@ -1682,14 +1757,34 @@ fn attempt_tls(
     var bgw: int = 0
     var body = ""
     if parsed.body_mode == "length" {
-        body = tls_read_len(mut cli, rest, parsed.content_length) else |_| {
-            bgw = 599
-            ""
+        body = tls_read_len(mut cli, up, mut w, rest, parsed.content_length) else |e| match e {
+            gone => {
+                bgw = 499
+                ""
+            },
+            stopped => {
+                bgw = 497
+                ""
+            },
+            io => {
+                bgw = 599
+                ""
+            },
         }
     } else if parsed.body_mode == "chunked" {
-        let whole = tls_read_close(mut cli, rest, 8388608) else |_| {
-            bgw = 599
-            ""
+        let whole = tls_read_close(mut cli, up, mut w, rest, 8388608) else |e| match e {
+            gone => {
+                bgw = 499
+                ""
+            },
+            stopped => {
+                bgw = 497
+                ""
+            },
+            io => {
+                bgw = 599
+                ""
+            },
         }
         if bgw == 0 {
             body = http.decode_chunked(whole, http.default_limits()) else |_| {
@@ -1698,20 +1793,43 @@ fn attempt_tls(
             }
         }
     } else {
-        body = tls_read_close(mut cli, rest, 8388608) else |_| {
-            bgw = 599
-            ""
+        body = tls_read_close(mut cli, up, mut w, rest, 8388608) else |e| match e {
+            gone => {
+                bgw = 499
+                ""
+            },
+            stopped => {
+                bgw = 497
+                ""
+            },
+            io => {
+                bgw = 599
+                ""
+            },
         }
     }
     up_note(notes, "x", up)
     tlsc.close(take cli) else |_| {}
+    if bgw == 497 || bgw == 499 {
+        // ws69: the client closed (499) or the loop stopped the exchange
+        // (497) while the response came: nothing is written to the client
+        pacc.status = bgw
+        pacc.body_bytes = 0
+        return bgw
+    }
     if bgw != 0 {
         return bgw
     }
     pacc.status = status_code_of(parsed.status_line)
     pacc.body_bytes = body.len
-    let out = relay_response(parsed, body, token, date, keep)
+    // ws68's posture on the plaintext leg: a client that pipelined a
+    // request while this one waited has lost those bytes to the watch,
+    // so this reply closes the connection
+    let out = relay_response(parsed, body, token, date, keep && !w.piped)
     net_write(client, out)?
+    if w.piped {
+        return -1
+    }
     0
 }
 
