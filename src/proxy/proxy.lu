@@ -1210,13 +1210,15 @@ fn relay_name(lname: str) -> str {
 /// asking the exchange to end; -1: nothing), the read budget `ms`
 /// (`proxy_read_timeout`, between two successive reads), and whether
 /// the client has sent bytes meanwhile (`piped`: a pipelined request,
-/// read and so no longer the loop's — the reply then closes the
-/// connection).
+/// read and so no longer the loop's) and what they were (`carry`, ws69:
+/// lobo#104 — handed back to the caller, which puts them in front of
+/// the connection's next read).
 struct Watch {
     client: int,
     stop: int,
     ms: int,
     piped: bool,
+    carry: str,
 }
 
 /// Wait until the upstream `conn` can be read, watching the client
@@ -1229,9 +1231,10 @@ struct Watch {
 /// `net_wait` takes the sockets at once, so no new wait is needed
 /// (`os_signal_wait_fds` is for a descriptor that is not a socket). The
 /// client readable is a close (`closed`, or an error: `gone`) or bytes:
-/// a pipelined request, which nginx answers next and this proc cannot
-/// hand back to the loop's carry, so the watch stops (`piped`) and the
-/// reply closes the connection after it (a named delta). The upstream
+/// a pipelined request, which nginx answers next: the watch keeps the
+/// bytes (`carry`), stops watching the client (`piped`), and the
+/// exchange hands them back with its account (ws69, lobo#104; through
+/// ws68 they were lost and the reply closed the connection). The upstream
 /// readable first wins: the client's bytes are then left unread. ws69:
 /// `net_wait` is one poll(2), which a kill cannot reach (only the
 /// reactor's parks see one), so the loop's way to end an exchange that
@@ -1288,6 +1291,7 @@ fn up_wait(conn: int, mut w: Watch) -> () ! {timeout, gone, stopped, io} {
             }
             if !spurious && !piece.is_empty() {
                 w.piped = true
+                w.carry = "{w.carry}{piece}"
                 w.client = -1
             }
         }
@@ -1673,7 +1677,7 @@ fn attempt_tls(
     // answers holds an exchange (the handshake's reads are
     // std.x.tls.client's own, which the watch can only stand in front
     // of)
-    var w = Watch { client: client, stop: notes, ms: read_ms, piped: false }
+    var w = Watch { client: client, stop: notes, ms: read_ms, piped: false, carry: "" }
     var ww: int = 0
     up_wait(up, mut w) else |e| match e {
         timeout => { ww = 504 },
@@ -1822,14 +1826,10 @@ fn attempt_tls(
     }
     pacc.status = status_code_of(parsed.status_line)
     pacc.body_bytes = body.len
-    // ws68's posture on the plaintext leg: a client that pipelined a
-    // request while this one waited has lost those bytes to the watch,
-    // so this reply closes the connection
-    let out = relay_response(parsed, body, token, date, keep && !w.piped)
+    // ws69 (lobo#104): what the client pipelined meanwhile goes back
+    pacc.carry = w.carry
+    let out = relay_response(parsed, body, token, date, keep)
     net_write(client, out)?
-    if w.piped {
-        return -1
-    }
     0
 }
 
@@ -1876,18 +1876,21 @@ fn gw_body(code: int, token: str) -> str {
 /// $upstream_addr shape; the LAST one answered), `status` the status
 /// relayed to the client (upstream's on success, the gateway error
 /// otherwise), `body_bytes` the response body length, `up_ms` the
-/// upstream leg's wall time in ms. Filled by `run`; a caller that
-/// does not log passes a fresh one and ignores it.
+/// upstream leg's wall time in ms, and `carry` what the client
+/// pipelined while the exchange waited (ws69, lobo#104): bytes a
+/// caller that keeps the connection must put in front of its next read.
+/// Filled by `run`; a caller that does not log passes a fresh one.
 pub struct RunAcc {
     addr: str,
     status: int,
     body_bytes: int,
     up_ms: int,
+    carry: str,
 }
 
 /// A fresh, empty RunAcc (the caller's constructor). Total.
 pub fn run_acc() -> RunAcc {
-    RunAcc { addr: "", status: 0, body_bytes: 0, up_ms: 0 }
+    RunAcc { addr: "", status: 0, body_bytes: 0, up_ms: 0, carry: "" }
 }
 
 /// The status code of an upstream status line ("HTTP/1.1 200 OK" ->
@@ -1957,7 +1960,7 @@ fn attempt(
     }
     // ws68 (lobo#99): the waits that follow watch the client too, and
     // (ws69) the loop's stop on the job socket the notes go to
-    var w = Watch { client: client, stop: notes, ms: read_ms, piped: false }
+    var w = Watch { client: client, stop: notes, ms: read_ms, piped: false, carry: "" }
     let hr = read_up_head(up, mut w) else |e| match e {
         timeout => {
             up_close(notes, up)
@@ -2062,13 +2065,12 @@ fn attempt(
     }
     pacc.status = status_code_of(parsed.status_line)
     pacc.body_bytes = body.len
-    // ws68: a client that pipelined a request while this one waited has
-    // lost those bytes to the watch: this reply closes the connection
-    let out = relay_response(parsed, body, token, date, keep && !w.piped)
+    // ws69 (lobo#104): what the client pipelined while this exchange
+    // waited goes back to the caller, which puts it in front of the
+    // connection's next read: the connection is kept, as nginx's
+    pacc.carry = w.carry
+    let out = relay_response(parsed, body, token, date, keep)
     net_write(client, out)?
-    if w.piped {
-        return -1
-    }
     0
 }
 
@@ -2427,11 +2429,6 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
         if st == 0 {
             return !j.keep
         }
-        if st == -1 {
-            // ws68: served, and the client pipelined while it waited:
-            // the reply said `Connection: close`
-            return true
-        }
         if st == 497 {
             // ws69: stopped by the loop (its generation passed
             // worker_shutdown_timeout): the upstream is closed and nothing
@@ -2664,7 +2661,8 @@ pub fn job_parse(s: str) -> Job ! {bad} {
 ///     on `jr`, and `jr` WATCHED while it waits: a byte from the loop
 ///     there means stop), the account goes back on `jr` — `r <dlen>
 ///     <taillen>\n`, then `<status> <body_bytes> <up_ms> <close 0|1>
-///     <addrlen>:<addr>`, then the tail as it came — and the stream
+///     <addrlen>:<addr><carrylen>:<carry>` (the carry: what the client
+///     pipelined meanwhile), then the tail as it came — and the stream
 ///     line `<client> 0 <wcode> 0 <id>` down `out` (`wcode` 0 clean, 1
 ///     the client closed, 2 io or a frame that did not read). The
 ///     account is written before the line, so a loop that has the line
@@ -2806,7 +2804,7 @@ pub fn job_loop(jr: int, out: int) -> int {
                 if job_s.len != jl || tail.len != tl {
                     wcode = 2
                 } else if stop_now {
-                    let det = "497 0 0 1 0:"
+                    let det = "497 0 0 1 0:0:"
                     answer = "r {det.len} {tail.len}\n{det}{tail}"
                 } else {
                     let r = job_serve(cfd, job_s, tail, jr)
@@ -2814,7 +2812,7 @@ pub fn job_loop(jr: int, out: int) -> int {
                     wcode = r.1
                 }
                 if answer.is_empty() {
-                    let det = "0 0 0 1 0:"
+                    let det = "0 0 0 1 0:0:"
                     answer = "r {det.len} 0\n{det}"
                 }
                 net_write(jr, answer) else |_| {}
@@ -2832,7 +2830,7 @@ pub fn job_loop(jr: int, out: int) -> int {
 
 /// The exchange a job's text asks for, answered on `client` (ws67):
 /// the account `job_loop` writes back — `r <dlen> <taillen>\n`, then
-/// `<status> <body_bytes> <up_ms> <close 0|1> <addrlen>:<addr>`, then
+/// `<status> <body_bytes> <up_ms> <close 0|1> <addrlen>:<addr><carrylen>:<carry>`, then
 /// `tail` as it came — and the stream line's `wcode` (0 clean, 1 the
 /// client closed, 2 io or a job that did not parse). The proc's body,
 /// and the loop's own when it cannot make a job socket. Total.
@@ -2860,6 +2858,6 @@ pub fn job_serve(client: int, job_s: str, tail: str, notes: int) -> (str, int) {
         }
     }
     let cl = if close { 1 } else { 0 }
-    let det = "{acc.status} {acc.body_bytes} {acc.up_ms} {cl} {acc.addr.len}:{acc.addr}"
+    let det = "{acc.status} {acc.body_bytes} {acc.up_ms} {cl} {acc.addr.len}:{acc.addr}{acc.carry.len}:{acc.carry}"
     ("r {det.len} {tail.len}\n{det}{tail}", wcode)
 }

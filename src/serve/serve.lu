@@ -3334,6 +3334,9 @@ pub fn serve_conn_cn(
                 conn.conn_close(mut cn)
                 return
             }
+            // ws69 (lobo#104): what the client pipelined while the
+            // exchange waited is the front of the next request
+            rest = "{rest}{pacc0.carry}"
         } else {
             var acc0 = obs.access_new()
             // ws57: the request notes what it would memoize and this
@@ -3783,7 +3786,9 @@ pub fn serve_request(
         acc.status = pacc.status
         acc.body_bytes = pacc.body_bytes
         let pclose = raised || should_close || !keep
-        var pro = req_out(pclose, if pclose { "" } else { rest }, take acc, chg)
+        // ws69 (lobo#104): what the client pipelined while the exchange
+        // waited is the front of the next request
+        var pro = req_out(pclose, if pclose { "" } else { "{rest}{pacc.carry}" }, take acc, chg)
         pro.rs_rot = resolver.rot_diff(rs, rsx)
         if resolver.muts(rsx) != resolver.muts(rs) {
             (mut pro.rs_new).push(take rsx)

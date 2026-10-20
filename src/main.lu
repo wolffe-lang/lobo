@@ -3400,6 +3400,7 @@ fn serve_main(
                                 // now, as nginx logs it, at its end. ws69: its
                                 // proc is idle again, its job socket kept
                                 var px_close = false
+                                var px_carry = ""
                                 if pxw >= 0 {
                                     let rep = px_reply(pxw)
                                     pxs[pi].sock = -1
@@ -3409,6 +3410,7 @@ fn serve_main(
                                     pxlive = pxlive - 1
                                     let d = px_account(rep)
                                     px_close = d.close || !d.ok
+                                    px_carry = d.carry
                                     var span = now - cs0
                                     if span < 0 {
                                         span = 0
@@ -3469,6 +3471,19 @@ fn serve_main(
                                     n_start = now
                                     n_wait = -1
                                     n_stream = 0
+                                    if !px_carry.is_empty() {
+                                        // ws69 (lobo#104): what the client
+                                        // pipelined while its exchange waited,
+                                        // behind what the row already carried
+                                        let was = if clen0 == 0 {
+                                            ""
+                                        } else {
+                                            carry_str(cbufs[cbuf0], clen0)
+                                        }
+                                        carry_set = true
+                                        carry_new = "{was}{px_carry}"
+                                        n_head = if serve.carry_has_head(carry_new) { 1 } else { 0 }
+                                    }
                                 }
                             }
                         } else {
@@ -4005,6 +4020,16 @@ fn serve_main(
                                             closed_now = true
                                         } else {
                                             n_stream = 0
+                                            if !d.carry.is_empty() {
+                                                // ws69 (lobo#104): what was pipelined
+                                                // during the exchange
+                                                carry_new = "{carry_new}{d.carry}"
+                                                n_head = if serve.carry_has_head(carry_new) {
+                                                    1
+                                                } else {
+                                                    0
+                                                }
+                                            }
                                         }
                                     }
                                 }
@@ -4770,8 +4795,9 @@ fn px_reap(jw: int, jr: int) {
 /// An exchange's account, read back (`px_account`): `ok` false when it
 /// did not arrive whole (the row closes, nothing is logged); the
 /// status relayed, the body's bytes, the upstream leg's ms, whether the
-/// connection closes, `$upstream_addr`; and from the tail the access
-/// record (`has_acc`) and the step's two high waters.
+/// connection closes, `$upstream_addr`, what the client pipelined
+/// meanwhile (`carry`, ws69); and from the tail the access record
+/// (`has_acc`) and the step's two high waters.
 struct PxDone {
     ok: bool,
     status: int,
@@ -4779,6 +4805,7 @@ struct PxDone {
     up_ms: int,
     close: bool,
     addr: str,
+    carry: str,
     has_acc: bool,
     acc: obs.Access,
     admitted: int,
@@ -4793,6 +4820,7 @@ fn px_bad() -> PxDone {
         up_ms: 0,
         close: true,
         addr: "",
+        carry: "",
         has_acc: false,
         acc: obs.access_new(),
         admitted: 0,
@@ -4819,7 +4847,7 @@ fn px_account(t: str) -> PxDone {
     }
     let det = t.get(nl + 1..nl + 1 + hv[0]) else { "" }
     let tail = t.get(nl + 1 + hv[0]..nl + 1 + hv[0] + hv[1]) else { "" }
-    // `<status> <body_bytes> <up_ms> <close> <addrlen>:<addr>`
+    // `<status> <body_bytes> <up_ms> <close> <addrlen>:<addr><carrylen>:<carry>`
     var c = 0
     var nums = List[int]()
     var at = 0
@@ -4833,16 +4861,12 @@ fn px_account(t: str) -> PxDone {
         at = at + sp + 1
         c = c + 1
     }
-    let rest = det[at..det.len]
-    let colon = rest.find(":") else -1
-    if colon < 0 {
+    let ta = tail_str(det, at)
+    let tc = tail_str(det, ta.1)
+    if ta.1 < 0 || tc.1 != det.len || nums[0] < 0 || nums[1] < 0 || nums[2] < 0 {
         return px_bad()
     }
-    let alen = rest[0..colon].to_int() else |_| { -1 }
-    let addr = rest.get(colon + 1..rest.len) else { "" }
-    if alen != addr.len || nums[0] < 0 || nums[1] < 0 || nums[2] < 0 {
-        return px_bad()
-    }
+    let addr = ta.0
     let back = acc_unpack(tail)
     PxDone {
         ok: true,
@@ -4851,6 +4875,7 @@ fn px_account(t: str) -> PxDone {
         up_ms: nums[2],
         close: nums[3] != 0,
         addr: addr,
+        carry: tc.0,
         has_acc: back.has,
         acc: back.a,
         admitted: back.mem_hw,
