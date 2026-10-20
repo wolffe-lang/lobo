@@ -489,6 +489,79 @@ if [ "$lim_ready" = 1 ]; then
         red=$((red + 1))
     fi
 
+    # G. ws69 (lobo#104): the same eight requests to an upstream reached
+    # over HTTPS that never answers its ClientHello (the wedge again: the
+    # dial completes in its backlog, the hello waits there). nginx drops
+    # each exchange when its client closes, whatever the scheme. Through
+    # ws68 lobo watched the client on the plaintext leg only — the https
+    # leg's waits were reads inside std.x.tls.client — so its eight
+    # exchanges held their connections until proxy_read_timeout and the
+    # fresh GET after the clients closed found none free: after=closed.
+    # Since ws69 the https leg waits behind the same watch: parity. Any
+    # PEM CERTIFICATE serves as the trust anchors, since no chain is ever
+    # checked (lobo refuses an https proxy_pass without them)
+    cp "$rig_root/tests/config-corpus/certbot-vhost/live/example.org/fullchain.pem" "$lim/ca.pem"
+    gloc="location /up/ { proxy_pass https://127.0.0.1:$wp; proxy_read_timeout 10s; proxy_ssl_trusted_certificate $limroot/ca.pem; }"
+    lim_one ng g 16 - proxied 8 300 "$gloc"
+    lim_one lb g 16 - proxied 8 300 "$gloc"
+    want="climit mode=proxied n=8 map=00000001 held=closed after=200"
+    ok=1
+    [ "$ng_line" = "$want" ] && [ "$lb_line" = "$want" ] && ok=0
+    lim_row "worker_connections 16, 8 proxied requests to a silent https upstream, then the clients close" "$ok" "both hold seven, close the eighth, and drop every exchange when its client closes: after=200 (through ws68 lobo's https exchanges held until proxy_read_timeout: after=closed)"
+
+    # H. ws69 (lobo#104): a static GET PIPELINED while a proxied request
+    # waits (tests/rig/pipewait.lu is the client and the upstream: it
+    # pipelines 200 ms into the wait and answers 300 ms later). nginx
+    # answers both, the second right after the first, keeps the
+    # connection and serves a third request on it. Through ws68 lobo's
+    # exchange read the pipelined bytes while it watched its client and
+    # could not hand them back: its reply said Connection: close and the
+    # second request was never answered. Since ws69 they go back with the
+    # exchange's account and the loop answers them next: parity
+    pw_one() {
+        _side=$1
+        _port=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+        _up=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+        _log="$lim/$_side-h.log"
+        : > "$_log"
+        _loc="location /up/ { proxy_pass http://127.0.0.1:$_up; proxy_read_timeout 10s; }"
+        if [ "$_side" = ng ]; then
+            printf 'daemon off;\nmaster_process on;\nworker_processes 1;\npid logs/ng-h.pid;\nerror_log ng-h.log info;\nevents { worker_connections 64; }\nhttp {\n  access_log off;\n  server { listen 127.0.0.1:%s; root html; %s }\n}\n' \
+                "$_port" "$_loc" > "$lim/ng-h.conf"
+            set -- "$NGINX" -p "$limroot" -c "ng-h.conf" -e "ng-h.log"
+        else
+            printf 'pid logs/lb-h.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root html; %s }\n}\n' \
+                "$_port" "$_loc" > "$lim/lb-h.conf"
+            set -- "$LOBO" serve -p "$limroot" -c "lb-h.conf"
+        fi
+        "$@" >> "$_log" 2>&1 &
+        _pid=$!
+        _i=0
+        while [ "$_i" -lt 50 ]; do
+            curl -s -o /dev/null -m 1 "http://127.0.0.1:$_port/index.html" 2> /dev/null && break
+            sleep 0.1
+            _i=$((_i + 1))
+        done
+        _line=$("$PIPEWAIT" "$_port" "$_up" 2>> "$_log")
+        kill "$_pid" 2> /dev/null
+        wait "$_pid" 2> /dev/null
+        eval "${_side}_line=\$_line"
+    }
+    PIPEWAIT="$(pwd)/$scratch/pipewait"
+    if "$WOLF" build "$rig_root"/tests/rig/pipewait.lu -o "$PIPEWAIT" > "$scratch/pipewait-build.err" 2>&1; then
+        pw_one ng
+        pw_one lb
+        want="pipewait responses=2 close_in_first=0 second=lt150 third=200"
+        ok=1
+        [ "$ng_line" = "$want" ] && [ "$lb_line" = "$want" ] && ok=0
+        lim_row "a static GET pipelined during a proxied wait" "$ok" "both answer it right after the proxied reply, keep the connection and serve a third request (through ws68 lobo said Connection: close and never answered it)"
+    else
+        echo "lobo-shell: FAILED — the pipelined row's rig (tests/rig/pipewait.lu) does not build:" >&2
+        sed 's/^/lobo-shell:   /' "$scratch/pipewait-build.err" >&2
+        red=$((red + 1))
+        total=$((total + 1))
+    fi
+
     # E. `-t` under a lowered limit prints the start warning too. The
     # configuration sets `error_log … info`: nginx prints this warning
     # only when its error log's level admits one (its default level is
