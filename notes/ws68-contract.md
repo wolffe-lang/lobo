@@ -248,3 +248,263 @@ Logs under `kasumi:~/lanes/ws68/` (digests in §4).
 - The proc's `net_wait` on the client racing the loop: the loop must
   not poll a client whose exchange is out (it does not: the row's fd
   leaves the poll set while `proxying`).
+
+## 3. The prediction against the measurement
+
+Measured on kasumi (16 cpus; other lanes beside it, load 2–12), the
+toolchains of §2; logs under `kasumi:~/lanes/ws68/ev/` and `logs/`
+(digests in §4). §3 above is as committed (`7ad7278`).
+
+### The pin
+
+**Held.**
+- Commits as predicted: `[wolf]` alone (`5f8ab74`), the stamp
+  constants (`d171aec`), the fourteen headers (`0a27acd`), `[std]` with
+  `std_rev` (`3fb259d`), and the surfaces whose std hashes move —
+  exactly `shell` and `root` (`9b6285b`; `std.signal` and `std.process`).
+- The bare pin (0.2.33 with std `d37c911`, `0a27acd`): GREEN, exit 0,
+  847 s under `taskset -c 0-3`, 0 SKIP lines (`logs/g-pin33.log`), with
+  trunk-at-0.2.32's verdicts row for row: corpus 372/372,
+  `proxy-differential` 8/8, `lobo-shell` 44 / 42 / 2 / 0,
+  `lobo-signal` 22/22, `lobo-user` 14/14, `lobo-membudget` 25/25,
+  `lobo-resolver` 9/9. Every `ok` line of the two logs is the same row
+  but for timings, counts of a spread and paths.
+- The std move (`9b6285b`, std `cceda63`): GREEN, exit 0, 1,172 s under
+  `taskset -c 0-3`, 0 SKIP lines (`logs/g-std33b.log`), the same rows.
+- The head (`3a8028e`): GREEN, exit 0, 871 s under `taskset -c 0-3`,
+  0 SKIP lines (`logs/g-head.log`): corpus **374/374** (the two new
+  tests' five lane-runs added), `proxy-differential` 8/8, `lobo-shell`
+  **44 probes / 43 parity / 1 named delta** / 0 red, `lobo-signal` 22/22,
+  `lobo-user` **25/25**, `lobo-membudget` 25/25, `lobo-resolver` 9/9. On
+  every cpu: `logs/g-headall.log` RED at one row, membudget's `flat,
+  proxied` (616 KB over 2,000 proxied requests, bound 512 KB), and a
+  second run `logs/g-headall2.log` (in the PR). **Not this lane's**:
+  `tools/lobo-membudget` alone on all 16 cpus, the std move's tree (no
+  client watch) and the head alternating, seven rounds each
+  (`ev/mb-all.log`, `mb-all2.log`): the pin's tree 416, 312, 204,
+  **824**, 212, 308, **524** KB (2 of 7 red), the head **1000**, 420,
+  436, 340, 320, 220, 320 KB (1 of 7 red); under `taskset -c 0-3` every
+  tree reads 16–144 KB and CI's 4 vcpus 68 KB. Longer drives grow both
+  trees alike and sub-linearly (+650…+1,580 KB over 20,000 and 60,000
+  requests, `ev/grow-all.log`, `grow-fast.log`): a bounded warm-up
+  across the 16-cpu pool's threads, which the row's 2,000 requests
+  straddle. An experiment that read a prompt upstream without
+  `net_wait` (the watch armed after 50 ms) changed nothing and was not
+  kept. Found, not fixed: the row's bound does not hold on 16 cpus at
+  the pin either.
+- `wolf audit --ci --dir src` holds with the manifest unchanged at
+  every step; the bare pin reads what trunk read (net +194, fs +124,
+  exec +18, env +9), the std move net +195, env +10.
+- What moves, by name: #784 (a sent SIGSEGV ends lobo at the first;
+  `ev/segv-pins.log`), the binaries; at rest 20 descriptors at both pins.
+
+### The `user` default
+
+**Wrong, and corrected before the PR's last code commit.** §2's rule
+— "else 65534", "the gid … not the account's own", "no account … it
+still starts and drops, silently" — was the ARCH IMAGE'S NAME SERVICE,
+not nginx. `archlinux:base-devel`'s `nsswitch.conf` is `passwd: files
+systemd` / `group: files [SUCCESS=merge] systemd`, and the `systemd`
+module answers `nobody` (65534) when `/etc/passwd` has no such line.
+Cut to `files`, the same oracle refuses: no account, `[emerg]
+getpwnam("nobody") failed`, exit 1; no group named `nobody` (even with
+`nogroup`), `[emerg] getgrnam("nobody") failed` (`ev/ng68d-oracle.log`).
+CI's oracle, built on the ubuntu runner, says the same from the other
+side: in `ubuntu:24.04` (no group `nobody`, `nogroup` 65534, `files`
+only) it starts with `Gid: 65534` — its default group is `nogroup` —
+and with no account named `nobody` it does not start (run 39364256511:
+`nginx's worker: none`, the plant's lobo-user log). So:
+
+- nginx's default is the account `nobody` and the BUILD's group
+  (`nobody` on arch, `nogroup` on ubuntu), both resolved by name when it
+  starts (renumbered to 99:99 → `Uid: 99`), and with either missing it
+  refuses to start. **The contract's premise held**: where `nobody`
+  does not exist nginx refuses, and the warning kept there is the
+  right middle (neither nginx's refusal, which would stop a root
+  deployment that serves today, nor ids nobody named).
+- lobo now takes the account named `nobody` and the group named
+  `nobody`, else `nogroup` — on each distribution what its own nginx
+  takes — and keeps root with one `[warn]` where neither resolves
+  (`eea5a7d`; the first version, `fbed9fe`, dropped to 65534 there).
+
+**Held** (the corrected head, `ev/user-h3-arch.log`,
+`user-h3-ubuntu.log`, 25/25 in both; CI in the PR): as root in the
+container the master `Uid: 0 0 0 0`; the hand **`Uid: 65534 65534 65534
+65534`, `Gid: 65534 65534 65534 65534`, `Groups: 65534`** — in the arch
+image equal to the pinned nginx's worker read in the same container
+(`nginx's worker: Uid: 65534 ×4|Gid: 65534 ×4|Groups: 65534|`), in
+ubuntu equal to CI's oracle's (the PR's run); one hand under
+`worker_processes 1`; a root-only file 403 (trunk 200); the logs
+`nobody:root`; nothing printed. A group listing `nobody`: `Groups: 1700
+65534`, nginx's line. `user root;`: the hand root, as nginx's worker.
+No account named `nobody`: one root process and its `[warn]` (in arch
+the name service still answers `nobody` and nginx drops there: lobo
+reads the files only, named). Red first: trunk's `src/` keeps one root
+process — rows 6–8, 9 of 25 checks red on kasumi
+(`ev/user-trunk-arch.log`, `user-trunk-ubuntu.log`) and in CI (plant
+`ws68-plant-user` `e9b1b29`, run 39364256511, job 118437431254).
+`tests/config/user_directive.lu` on native, checked and lupin: green.
+
+**Not predicted.**
+- The default GROUP depends on how nginx was built (above); nginx's
+  configure documentation says the default group is the user's name.
+- The CI runner has podman: `lobo-user` runs there in podman, not
+  docker (ws67's notes say docker).
+- The "lobo-shell row re-recorded against nginx" the contract names is
+  `tools/lobo-user`'s row (root runs are lobo-user's, in a container;
+  `lobo-shell` runs unprivileged and its one `user` row, the `-t -q`
+  warning, is unchanged). Its stale SKIP reason was fixed (`9b5170f`).
+
+### lobo#99
+
+**Held.** `os_signal_wait_fds` is not needed: `net_wait` over the
+upstream and the client. The close and the half-close end the exchange
+at +0.000 s, as nginx's (`ev/abort99-h1.log` against
+`abort99-nginx.log`), `499 0 … up=<peer> ust=-`; pipelined requests in
+one segment unchanged (both answered). `client_abort_e2e`: the head
+0 ms, the body 1 ms after the close, both logged `499 0 … ust=-`
+(`ev/t99-h1.log`); trunk: `-1` (not in 3 s), red at line 275 on kasumi
+(`ev/t99-trunk.log`) and in CI (the PR's own run 39364220020 at
+`404bab8`, job 118437370235: native and checked, corpus 372/374).
+`lobo-shell`'s row F: both `after=200`, 44 probes, 43 parity, 1 named
+delta; red with trunk's `src/` in plant `ws68-plant-shell` `5bf939a`
+(run 39366375880, job 118444820471: `lobo after=closed, oracle
+after=200`, 44 / 42 / 1 / 1 red). The watch costs nothing measurable: 0.97–1.02x
+the pin's proxied requests a second (`ev/tput-watch.log`).
+
+**Not predicted.**
+- `$request_time` of an aborted exchange read 0.751 s where the client
+  closed 1.0 s after its request (the half-close 0.997 s; nginx 1.000
+  for both): the loop logs the exchange at the pass that hears the
+  report, with the pass's clock (ws67's account), so a report that
+  wakes a waiting pass is timed at the wait's start. Found, not fixed.
+
+### lobo#100
+
+**Held**: left for its own lane (§3 of the prediction gives why);
+0.48–0.50x the pre-#81 tree at both pins.
+
+### Slips, named
+
+- One `wolf build -o /tmp/ws68-cab` on kasumi wrote a file outside
+  `~/lanes/ws68/` and removed it (my own, at once); later outputs went
+  under the lane's tree.
+- The first throughput script ran five connections (crossing
+  `keepalive_requests 1000`) and left one server of mine running in a
+  removed directory; it was stopped by its recorded pid
+  (`logs/stray-tput-t32.pid`), TERM.
+- A launched gauntlet ran in a worktree holding a copied, not yet
+  committed test file; it went red on that file (`logs/g-std33.log`)
+  and was re-run in a clean tree (`g-std33b`).
+- A chained commit ran after a failed split (a heredoc ended the `&&`
+  chain); it was undone before any push and re-made as two commits.
+- The session was cut by an API usage limit (429) after the growth
+  drive; on resuming, the worktree, the branch, the PR, its runs and
+  kasumi's pid files were re-read first (nothing was running) and the
+  uncommitted fast-path experiment was reverted, kept as a patch.
+
+## 4. Evidence index
+
+kasumi `~/lanes/ws68/` (sha256 prefixes): `toolchains.txt`
+95e2113d0030…, `dl/digest-check.txt` 197c551c0936…; builds
+`logs/build-t32.log` 7695411359c9…, `build-t33-sd3.log` 20ecd0cba870…,
+`build-t33.log` 2bb266d683ce…, `build-h3.log` 21bd6318bc73…; gauntlets
+`logs/g-t32.log` ab92b2f1f4d1… (trunk at 0.2.32, GREEN),
+`logs/g-pin33.log` 645ecbb59478… (the bare pin, GREEN),
+`logs/g-std33b.log` d4b11f422210… (the std move, GREEN),
+`logs/g-head.log` 2ce09185938c… (the head, GREEN), `logs/g-headall.log`
+(the head on every cpu, red at the 16-cpu memory row) and `g-headall2.log`
+(in the PR); the memory row on 16 cpus `ev/mb-all.log` a3aa8c105c59…,
+`mb-all2.log` 9ee39062d43c…, `grow-all.log`, `grow-fast.log` 672af3c56ec8…; the `user` default `ev/ng68-oracle.log`
+61ff7fa1870e…, `ng68b-oracle.log` 60a18204921c…, `ng68c-oracle.log`
+d8b7333fb79f…, `ng68d-oracle.log` 8e425fa87318… (the name service),
+`user-trunk-arch.log` 5be592d6bf2b…, `user-trunk-ubuntu.log`
+34166415579c…, `user-h3-arch.log` 10dd2e48ed2c…, `user-h3-ubuntu.log`
+26a28316f7c7…; #99 `ev/abort99-nginx.log` 739005565408…,
+`abort99-t33.log` d39bc2c7df71…, `abort99-h1.log` c5438c44e974…,
+`t99-trunk.log` f9097f9a5e83…, `t99-h1.log` 7e7f0f2207a0…; #100
+`ev/tput-pins.log` a6fc76f16c95…, `tput-watch.log` b06eaf891076…; the
+pin `ev/rest-pins.log` 5cf60112fb5a…, `segv-pins.log` 893a112bea2b….
+Scripts: `scripts/` (stage, build, inputs, g, launch, chain, chain2,
+rest, tput, grow, mb, px81 (ws67's, by digest), segv, ng68, ng68b,
+ng68c, ng68d, abort99, imgprobe).
+
+CI: the PR's runs and the two plants (`ws68-plant-user`,
+`ws68-plant-shell`, trunk's `src/` at this pin with one new gate each)
+— their ids and verdicts are in the PR; the PR's own first run is the
+plant for `client_abort_e2e`.
+
+## Not verified
+
+macOS beyond CI (the drop is linux's; the client watch on the runner
+only); a host whose name service answers `nobody` from somewhere other
+than the files with the files lacking it (lobo keeps root there; nginx
+drops); `cert auto` under any drop (lobo#102); an https upstream's
+client abort (named, not watched); a pipelined request to a slow
+proxied location in a real client; PAX (§6's note); the release
+workflow at this tree (the release lane's).
+
+## 5. Done-when
+
+Branch `ws68`, PR #103 open and unmerged, `tier pr` green at its head,
+the `full-matrix` label added at that head, `wolf/tools/lane-audit.sh
+lobo ws68 103` run from the org directory and passing but for `tier
+full`'s green; then the hand-back with the full run's id (RULES.md §6).
+lobo#99 is the orchestrator's to close at the merge (the https and
+pipelined residues are named, for a follow-up issue). `ws68-plant-user`
+and `ws68-plant-shell` stay on origin as evidence.
+
+## 6. The 0.1.5 release checklist (ws61's shape, ws65's steps)
+
+For the release lane, on the maintainer's word. Each step with its
+check; nothing here is done by ws68.
+
+1. **Inputs.** Trunk at the merge of this PR (or later); every change
+   since `v0.1.4` by PR (#89 the `+dev` flip, #93 ws66, #97 tl28, #98
+   ws67, #103 ws68, and any after) against the `## 0.1.5` entry, which
+   this lane wrote ahead; the open issues the notes must name (#82,
+   #87, #100, #101, #102, and #99's residues). *Check:* every PR's
+   user-visible change has its line in the entry.
+2. **The stamp** (`tools/lobo-stamp`): version `0.1.5`, channel `""`,
+   every version site (`src/wolf.pkg`, `shell.lu`'s constants and doc
+   example, `serve.lu`'s wire token, `tests/shell/version_text.lu`);
+   the entry's heading dated (`## 0.1.5 — <date> — …`, the word
+   "unreleased" and its first paragraph out); README's `-v` line and
+   upgrade note; `docs/GETTING-STARTED.md`'s version lines;
+   `docs/PARITY.md`'s release row. *Check:* `tools/lobo-stamp --check`
+   ok, the gauntlet GREEN, `tools/lobo-release-notes 0.1.5` cuts a
+   non-empty body.
+3. **The rehearsal**: the release workflow dispatched without a tag.
+   *Check:* both hosts' archives packed twice and byte-identical, both
+   learner smokes serve the stock page; the gates on the packed linux
+   binary: the smoke, `tools/lobo-membudget`, `client_abort_e2e`,
+   `silent_upstream_e2e`, `control_exhausted_e2e`, and `tools/lobo-user`
+   (as root in a container) against the archive's `lobo`.
+4. **The upgrade, measured on the released binaries**: 0.1.4's shipped
+   configurations load the same on 0.1.5 (`-t`); as root in a
+   container with no `user` line 0.1.4 is one root process and 0.1.5 a
+   master and a hand as `nobody` (`Uid: 65534 ×4`); a root-only file
+   200 → 403; a root-only configuration reload refused by the hands
+   (lobo#101); `user root;` keeps 0.1.4's posture. *Check:* the
+   upgrade note's every claim has its transcript line.
+5. **Parity**: a runner-VM dispatch with `ref_tree=v0.1.4`. *Check:*
+   nginx ÷ 0.1.5 inside 1.10 on both shapes, 0.1.5 ÷ 0.1.4 named.
+6. **Staged, not landed**: the homebrew-wolf formula and `aur/lobo-bin`
+   at 0.1.5 with placeholder digests (`tools/lobo-fill-digests` fills
+   them after the tag); the AUR container install proof ready; the
+   `+dev` flip on its own branch. *Check:* the tap PR red by
+   construction until the fill; the proof red with the placeholder.
+7. **The orchestrator, in order**: audit and fast-forward; tag
+   `v0.1.5` at the merge; the release run green with four assets;
+   `tools/lobo-fill-digests` (sidecar, API and anonymous download agree,
+   `--check` 0); the tap PR audited and merged; the AUR push on the
+   maintainer's word; `doors-fresh`; the `+dev` flip merged. *Check:*
+   each step's run id, as at 0.1.4 (`sprints/wws/index.md`'s ws65 lines).
+
+**Note for PAX** (not this lane's): pax's lobo runs (`notes/px24`,
+`px25`'s `strace-lobo.sh`) start lobo with the stock configuration as
+PAX's user, which is root; from this tree such a run is a master whose
+hands drop to `nobody` through PAX's `setresuid`/`setgroups`
+(`kernel/cred/`), or keeps root with a `[warn]` where PAX's
+`/etc/passwd` has no `nobody`. A pax lane bumping its lobo pin should
+expect that, or write `user root;`.
