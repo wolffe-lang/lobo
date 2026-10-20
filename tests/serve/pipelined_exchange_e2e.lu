@@ -1,0 +1,222 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws69 (lobo#104): A REQUEST PIPELINED DURING A PROXIED WAIT IS
+//! ANSWERED. A client may send its next request before the answer to
+//! its last: nginx answers a static GET pipelined 0.3 s into a proxied
+//! request's 1 s wait right after the proxied reply, with no
+//! `Connection: close`, and the connection serves a third request
+//! (measured on the pinned 1.30.4, notes/ws69-contract.md §2). Since
+//! ws68 (lobo#99) the exchange's proc watches its client while it waits,
+//! and the pipelined bytes it read could not go back to the loop: the
+//! reply said `Connection: close` and the second request was never
+//! answered. Since ws69 they go back with the exchange's account and the
+//! loop answers them next, at once. Against the real binary (`LOBO_BIN`,
+//! default target/lobo-debug), an upstream this test answers itself:
+//!   1. a proxied GET; the upstream reads it; 200 ms later the client
+//!      pipelines a static GET; 300 ms later the upstream answers;
+//!   2. the client reads TWO responses inside 1 s of the answer — the
+//!      second inside 150 ms of the first — and the first says nothing
+//!      of `Connection: close`;
+//!   3. a third request on the same connection is answered.
+//! RED at trunk on 2 and 3. The server is put down by its handle before
+//! any assertion can fail. Loopback only, OS-chosen ports; the scratch
+//! tree is cleared at the START and the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// The upstream's side of one exchange: accept on `up` within 3 s and
+/// read the request's head. The connection, or -1. Total.
+fn accept_up(up: int) -> int {
+    net_deadline(up, 3000) else |_| {}
+    let uc = net_accept(up) else |_| {
+        return -1
+    }
+    net_deadline(uc, 3000) else |_| {}
+    var got = ""
+    while !got.contains("\r\n\r\n") {
+        let piece = net_read(uc, 4096) else |_| {
+            return uc
+        }
+        got = "{got}{piece}"
+    }
+    uc
+}
+
+/// How many responses `s` holds (status lines). Pure. Total.
+fn responses(s: str) -> int {
+    var n = 0
+    var at = 0
+    while at < s.len {
+        let rest = s[at..s.len]
+        let k = rest.find("HTTP/1.1 ") else -1
+        if k < 0 {
+            return n
+        }
+        n = n + 1
+        at = at + k + 9
+    }
+    n
+}
+
+/// Read `c` until it holds `want` responses whose last ends with `tail`,
+/// or `ms` pass, or it ends: (what it read, the ms from `t0` at which
+/// each response's status line was first seen, joined by commas).
+/// Total.
+fn read_responses(c: int, want: int, tail: str, t0: int, ms: int) -> (str, str) {
+    net_deadline(c, ms) else |_| {}
+    var out = ""
+    var seen = 0
+    var times = ""
+    loop {
+        if responses(out) >= want && out.ends_with(tail) {
+            return (out, times)
+        }
+        let piece = net_read(c, 4096) else |_| {
+            return (out, times)
+        }
+        if piece.is_empty() {
+            return (out, times)
+        }
+        out = "{out}{piece}"
+        let now_seen = responses(out)
+        while seen < now_seen {
+            times = if times.is_empty() {
+                "{time_now_ms() - t0}"
+            } else {
+                "{times},{time_now_ms() - t0}"
+            }
+            seen = seen + 1
+        }
+    }
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws69_pipelined_exchange"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let up = net_listen("127.0.0.1:0")?
+    let uport = net_port(up)?
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    root {d}/www;\n    location /up/ {{ proxy_pass http://127.0.0.1:{uport}; proxy_read_timeout 30s; }}\n  }}\n}}\n",
+    )?
+    let so = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds(bin, args, map)?
+    let came = wait_up(hp)
+
+    // 1. a proxied GET, a static GET pipelined during its wait, then the
+    // upstream's answer
+    var uc = -1
+    var c = -1
+    var got = ""
+    var times = ""
+    var third = ""
+    if came {
+        c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+    }
+    if c >= 0 {
+        net_write(c, "GET /up/p HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+        uc = accept_up(up)
+        time_sleep_ms(200)
+        net_write(c, "GET /index.html HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+        time_sleep_ms(300)
+        let t0 = time_now_ms()
+        if uc >= 0 {
+            net_write(
+                uc,
+                "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n",
+            ) else |_| {}
+        }
+        // 2. both answers
+        let r = read_responses(c, 2, "small-page\n", t0, 1000)
+        got = r.0
+        times = r.1
+        // 3. a third request on the same connection
+        net_write(c, "GET /index.html HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+        let r3 = read_responses(c, 1, "small-page\n", time_now_ms(), 1000)
+        third = r3.0
+    }
+    let hm = got.find("\r\n\r\n") else -1
+    let first_head = if hm >= 0 { got[0..hm] } else { got }
+    print(
+        "a static GET pipelined during a proxied wait: {responses(got)} responses, at {times} ms after the upstream's answer; Connection: close in the first: {first_head.contains("Connection: close")}; a third request read {third.len} bytes",
+    )
+    os_kill(h) else |_| {}
+    let _k = os_wait(h) else |_| { 0 }
+    if uc >= 0 {
+        net_close(uc) else |_| {}
+    }
+    if c >= 0 {
+        net_close(c) else |_| {}
+    }
+    net_close(up) else |_| {}
+    fs_close(so) else |_| {}
+    assert(came, "the server came up")
+    assert(uc >= 0, "the exchange dialled the upstream and wrote its request")
+    assert(
+        responses(got) == 2 && got.starts_with("HTTP/1.1 200") && got.ends_with("small-page\n"),
+        "both requests answered, the proxied one first: {responses(got)} responses (trunk: one)",
+    )
+    assert(
+        !first_head.contains("Connection: close"),
+        "the proxied reply keeps the connection, as nginx's (trunk: Connection: close)",
+    )
+    var ts = List[int]()
+    for t in times.split(",") {
+        (mut ts).push(t.to_int() else |_| { -1 })
+    }
+    assert(
+        ts.len == 2 && ts[0] >= 0 && ts[1] >= 0 && ts[1] - ts[0] < 150,
+        "the pipelined request answered right after the proxied one (inside 150 ms): {times} ms",
+    )
+    assert(
+        third.starts_with("HTTP/1.1 200") && third.ends_with("small-page\n"),
+        "a third request on the same connection is answered (trunk: the connection closed)",
+    )
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
