@@ -3,11 +3,11 @@
 ## 0.1.5 — unreleased — as root with no `user` line the workers run as nginx's default user; `user` drops privilege; a proxied request holds only itself and ends when its client closes; built with wolf 0.2.33
 
 **Not released.** Trunk is `0.1.4+dev`; this entry is what 0.1.5
-carries as of ws68, written ahead of the release lane, which stamps the
+carries as of ws69, written ahead of the release lane, which stamps the
 version, measures it on the release workflow's binary (the archives,
 the upgrade, the parity row), fills the date, and is cut on the
 maintainer's word (the checklist: `notes/ws68-contract.md` §6). The
-lane entries below (ws66, ws67, ws68) have each change's numbers.
+lane entries below (ws66 to ws69) have each change's numbers.
 
 ### Upgrading from 0.1.4
 
@@ -40,15 +40,22 @@ is linux's). **To keep 0.1.4's posture, say `user root;`**:
 the workers then stay root, as nginx's do. To choose the user, say
 `user <name> [<group>];`, which 0.1.5 honours as nginx does.
 
-Three smaller changes an operator may notice:
+Four smaller changes an operator may notice:
 
 - A proxied request now counts **two** connections against
   `worker_connections` while its upstream exchange is out (nginx's
   count): at `worker_connections 16` with one `listen`, seven are held
   and the eighth is closed with nginx's `[alert]`.
-- Proxied requests a second against a prompt upstream are **about half
-  0.1.4's** (each exchange runs in a proc beside the serving loop; the
-  price of a silent upstream no longer holding the process: lobo#100).
+- Proxied requests a second **with one client at a time** are below
+  0.1.4's — 0.62–0.88x on kasumi (ws69; ws67's first shape was half) —
+  and above it with many clients at once (1.70x at 32): each exchange
+  runs in a proc beside the serving loop, the price of a silent upstream
+  no longer holding the process (lobo#100).
+- `$request_time` is the request's own time (ws69, lobo#105): through
+  0.1.4 a request on a keepalive connection that had been idle logged
+  up to 0.25 s more than it took (0.250 for a static GET nginx logs
+  0.000). A log pipeline that alarmed on those numbers will see them
+  drop.
 - A `SIGSEGV` another process sends ends lobo at the first, as the
   host's default does (nginx's too); 0.1.4 lived through the first.
 
@@ -78,12 +85,31 @@ new one (`-s reload` keeps the running binary).
   not obeyed. Now each exchange runs beside the loop: every other
   client is served (179,588 answered and none missed in 10 s beside
   one silent upstream, ws67) and `-s stop` ends the process at once.
-- **A client that closes ends its exchange** (ws68, lobo#99). nginx
-  drops a proxied exchange the moment its client closes or half-closes
-  (`proxy_ignore_client_abort off`): the upstream connection closed at
-  once, the request logged `499` with no upstream status. lobo does the
-  same now, for a plaintext upstream, while it waits for the head and
-  while the body comes.
+  A drain past `worker_shutdown_timeout` ends an exchange that still
+  waits — the upstream connection closed, the client's closed with
+  nothing written — as nginx does (ws69; nginx logs it `000 0`, lobo
+  does not log it).
+- **Proxied throughput: ws67's halving undone where it can be** (ws69,
+  lobo#100). ws67's exchange made a job socket and a proc for every
+  proxied request (44.6 system calls a request against the inline
+  exchange's 9.25); the serving loop now keeps a pool of exchange procs,
+  each on its own job socket, across exchanges (24.7 calls; a proc idle
+  five seconds leaves). On kasumi, against the tree before ws67: 0.62x
+  and 0.88x with one client in turn (ws67: 0.50x, 0.69x), 1.70x with 32
+  clients. What is left with one client is the cost of an exchange
+  beside the loop — two thread wakes a request, and the runtime's
+  compensation for each wait — measured, with its cause, in
+  `notes/ws69-contract.md`.
+- **A client that closes ends its exchange** (ws68, lobo#99; ws69,
+  lobo#104). nginx drops a proxied exchange the moment its client
+  closes or half-closes (`proxy_ignore_client_abort off`): the upstream
+  connection closed at once, the request logged `499` with no upstream
+  status. lobo does the same now, while it waits for the head and while
+  the body comes — for an `https` upstream too since ws69, from the
+  wait for the server's first flight on.
+- **A request pipelined while a proxied one waits is answered** (ws69,
+  lobo#104), right after the proxied reply and with the connection
+  kept, as nginx; ws68's exchange closed the connection instead.
 - **A failed start leaves nothing; a stale control socket is taken
   over** (ws67, lobo#94). A start that fails after binding its `unix:`
   control socket removes what it made, and a lobo ended by `kill -9`
@@ -102,23 +128,23 @@ new one (`-s reload` keeps the running binary).
 Not re-taken for 0.1.5 yet; the release lane takes the release row.
 The last runner-VM set (ws66, at 0.2.32, four workers, run 39170446495):
 nginx ÷ lobo **1.031x** with a connection per request and **0.949x** on
-keepalive, inside the 1.10 bar. Proxied throughput is not in the bar
-(above, and lobo#100).
+keepalive, inside the 1.10 bar. Proxied throughput is not in the bar;
+ws69 measured it on kasumi (above, and `notes/ws69-contract.md`).
 
 ### The hosts, and what is still known wrong or limited
 
 The hosts are 0.1.4's: `x86_64-unknown-linux-gnu` and
 `aarch64-apple-darwin` archives; windows and linux aarch64 not built.
 
-- **Proxied throughput** is about half 0.1.4's (lobo#100).
 - **A reload of files only root may read** is refused by dropped
   workers, and the master's reply says `complete` (lobo#101).
 - **`cert auto` under `user`** is unverified (lobo#102); with no `user`
   line lobo keeps root for it.
-- **A client that closes behind an `https` upstream** is not seen until
-  `proxy_read_timeout` (the TLS client's reads wait alone); a client
-  that pipelines a request while its exchange waits gets the reply with
-  `Connection: close`, where nginx answers the next request too.
+- **A client that closes behind an `https` upstream** is seen at every
+  wait lobo makes, but not inside a read of the TLS client's that meets
+  a post-handshake message (a NewSessionTicket, which an OpenSSL server
+  sends after every handshake) and waits for the next record: there the
+  exchange lasts until the upstream answers or `proxy_read_timeout`.
 - **Per-server limits, logs and metrics** (lobo#82) and the **limits
   follow-ups** (lobo#87), as 0.1.4.
 - **A proxied exchange's memory**: each exchange's allocations live in
