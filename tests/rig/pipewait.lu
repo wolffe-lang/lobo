@@ -1,0 +1,151 @@
+//! check: run(exit=2)
+//! phase: run
+//! lanes: native checked
+//! conforms: err.propagate
+//!
+//! pipewait — rig DRIVER (the corpus lane runs it bare, which exercises
+//! exactly the no-argument usage path: exit 2). ws69 (lobo#104): the
+//! client AND the upstream `tools/lobo-shell` puts beside BOTH servers —
+//! the pinned nginx and lobo — to see what each does with a request
+//! pipelined while a proxied one waits. argv is `<port> <upport>`: it
+//! listens on 127.0.0.1:<upport> (the server's `/up/` upstream), asks
+//! the server on <port> for `/up/p`, reads the request the server sends
+//! upstream, pipelines `GET /index.html` 200 ms later, answers the
+//! proxied request 300 ms after that, reads what comes back for a
+//! second, then asks for `/index.html` once more on the same connection.
+//! It prints ONE line:
+//!   pipewait responses=<n> close_in_first=<0|1> second=<lt150|late|none> third=<probe>
+//! `responses` counts the status lines read in that second, `second`
+//! says whether the second response came inside 150 ms of the first, a
+//! probe is the status code of the third answer or `closed`/`none`. The
+//! line is what the harness compares between the two servers. Loopback
+//! only, forever.
+
+/// A decimal port from argv, or `io`. Total.
+fn to_port(s: str) -> int ! {io} {
+    if s.is_empty() || s.len > 5 {
+        return io
+    }
+    var n: int = 0
+    for b_raw in s.bytes() {
+        let b = b_raw as int
+        if b < 48 || b > 57 {
+            return io
+        }
+        n = n * 10 + b - 48
+    }
+    if n < 1 || n > 65535 {
+        return io
+    }
+    n
+}
+
+/// How many status lines `s` holds. Pure. Total.
+fn responses(s: str) -> int {
+    var n = 0
+    var at = 0
+    while at < s.len {
+        let rest = s[at..s.len]
+        let k = rest.find("HTTP/1.1 ") else -1
+        if k < 0 {
+            return n
+        }
+        n = n + 1
+        at = at + k + 9
+    }
+    n
+}
+
+fn main() -> !int {
+    let args = env_args()
+    if args.len != 2 {
+        eprint("usage: pipewait <port> <upport>")
+        return 2
+    }
+    let port = to_port(args[0])?
+    let uport = to_port(args[1])?
+    let up = net_listen("127.0.0.1:{uport}")?
+    let c = net_connect("127.0.0.1:{port}")?
+    net_write(c, "GET /up/p HTTP/1.1\r\nHost: x\r\n\r\n")?
+    net_deadline(up, 3000)?
+    let uc = net_accept(up)?
+    net_deadline(uc, 3000)?
+    var asked = ""
+    while !asked.contains("\r\n\r\n") {
+        let piece = net_read(uc, 4096)?
+        asked = "{asked}{piece}"
+    }
+    time_sleep_ms(200)
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n")?
+    time_sleep_ms(300)
+    net_write(
+        uc,
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n",
+    )?
+    let t0 = time_now_ms()
+    net_deadline(c, 1000)?
+    var got = ""
+    var first_at = -1
+    var second_at = -1
+    var more = true
+    while more && !(responses(got) >= 2 && got.ends_with("small-page\n")) {
+        let piece = net_read(c, 4096) else |_| {
+            more = false
+            ""
+        }
+        if piece.is_empty() {
+            more = false
+        }
+        got = "{got}{piece}"
+        let n = responses(got)
+        if n >= 1 && first_at < 0 {
+            first_at = time_now_ms() - t0
+        }
+        if n >= 2 && second_at < 0 {
+            second_at = time_now_ms() - t0
+        }
+    }
+    let hm = got.find("\r\n\r\n") else -1
+    let first = if hm >= 0 { got[0..hm] } else { got }
+    let cif = if first.contains("Connection: close") { 1 } else { 0 }
+    let second = if second_at < 0 {
+        "none"
+    } else if second_at - first_at < 150 {
+        "lt150"
+    } else {
+        "late"
+    }
+    var third = "none"
+    var wrote = true
+    net_write(c, "GET /index.html HTTP/1.1\r\nHost: x\r\n\r\n") else |_| {
+        wrote = false
+    }
+    if !wrote {
+        third = "closed"
+    } else {
+        net_deadline(c, 1500)?
+        var closed = false
+        let r = net_read(c, 4096) else |e| match e {
+            closed => {
+                closed = true
+                ""
+            },
+            timeout => { "" },
+            utf8 => { "" },
+            io => {
+                closed = true
+                ""
+            },
+        }
+        if closed {
+            third = "closed"
+        } else if r.starts_with("HTTP/1.1 ") && r.len >= 12 {
+            third = r[9..12]
+        }
+    }
+    net_close(c) else |_| {}
+    net_close(uc) else |_| {}
+    net_close(up) else |_| {}
+    print("pipewait responses={responses(got)} close_in_first={cif} second={second} third={third}")
+    0
+}
