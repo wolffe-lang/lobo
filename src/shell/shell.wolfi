@@ -1,9 +1,9 @@
 module pkg :: shell
   wolfi v0 · toolchain 0.2.33 · edition v1
-  export_hash b3f1ed4b225b7d7a77bc7ea69494e1e482b78f82dc205535d0eedd65705dc207
-  pkg_hash    b3f1ed4b225b7d7a77bc7ea69494e1e482b78f82dc205535d0eedd65705dc207
+  export_hash b4cd2d580cf26748117464719ba9b537b6dc77d14485f315ef295fbe36097c15
+  pkg_hash    b4cd2d580cf26748117464719ba9b537b6dc77d14485f315ef295fbe36097c15
   deps:
-    config  5f4ae6eab3717a492df9c10648aa9ff799d1471454cbc3bc01d41b859a2aa1e8
+    config  a081d0eae54b9cb9b0bc73d4a9bef39029de462abc3413a94c93394f797b860d
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
     std.signal  317bd1b1038f045993eae2ec688cd01a114edc243181826abbe7e2857a662cd1
   items:
