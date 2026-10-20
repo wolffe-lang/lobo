@@ -1205,64 +1205,91 @@ fn relay_name(lname: str) -> str {
 }
 
 /// What a plaintext exchange watches while it waits on its upstream
-/// (ws68, lobo#99): its `client` (-1: nothing), the read budget `ms`
+/// (ws68, lobo#99): its `client` (-1: nothing), the loop's `stop`
+/// socket (ws69: the proc's job socket — a byte there is the loop
+/// asking the exchange to end; -1: nothing), the read budget `ms`
 /// (`proxy_read_timeout`, between two successive reads), and whether
 /// the client has sent bytes meanwhile (`piped`: a pipelined request,
 /// read and so no longer the loop's — the reply then closes the
 /// connection).
 struct Watch {
     client: int,
+    stop: int,
     ms: int,
     piped: bool,
 }
 
 /// Wait until the upstream `conn` can be read, watching the client
-/// beside it (ws68, lobo#99). nginx (`proxy_ignore_client_abort off`,
-/// its default) ends an exchange the moment its client closes or
-/// half-closes — the upstream connection closed at once and the request
-/// logged 499 (measured: notes/ws68-contract.md §2); through ws67
-/// lobo's exchange waited in a blocking upstream read and saw nothing
-/// until `proxy_read_timeout`. `net_wait` takes both sockets at once,
-/// so no new wait is needed (`os_signal_wait_fds` is for a descriptor
-/// that is not a socket). The client readable is a close (`closed`, or
-/// an error: `gone`) or bytes: a pipelined request, which nginx answers
-/// next and this proc cannot hand back to the loop's carry, so the
-/// watch stops (`piped`) and the reply closes the connection after it
-/// (a named delta). The upstream readable first wins: the client's
-/// bytes are then left unread. Rows: `timeout` (the budget passed with
-/// neither), `gone`, `io`. With no watch it returns at once and the
-/// upstream read's own deadline applies. net tier. Total.
-fn up_wait(conn: int, mut w: Watch) -> () ! {timeout, gone, io} {
+/// beside it (ws68, lobo#99) and the loop's stop (ws69). nginx
+/// (`proxy_ignore_client_abort off`, its default) ends an exchange the
+/// moment its client closes or half-closes — the upstream connection
+/// closed at once and the request logged 499 (measured:
+/// notes/ws68-contract.md §2); through ws67 lobo's exchange waited in a
+/// blocking upstream read and saw nothing until `proxy_read_timeout`.
+/// `net_wait` takes the sockets at once, so no new wait is needed
+/// (`os_signal_wait_fds` is for a descriptor that is not a socket). The
+/// client readable is a close (`closed`, or an error: `gone`) or bytes:
+/// a pipelined request, which nginx answers next and this proc cannot
+/// hand back to the loop's carry, so the watch stops (`piped`) and the
+/// reply closes the connection after it (a named delta). The upstream
+/// readable first wins: the client's bytes are then left unread. ws69:
+/// `net_wait` is one poll(2), which a kill cannot reach (only the
+/// reactor's parks see one), so the loop's way to end an exchange that
+/// waits here is a byte on `stop`, read as `stopped` — and never read
+/// here: it stays for the proc's next wait, which reads it. Rows:
+/// `timeout` (the budget passed with nothing), `gone`, `stopped`, `io`.
+/// With nothing to watch it returns at once and the upstream read's own
+/// deadline applies. net tier. Total.
+fn up_wait(conn: int, mut w: Watch) -> () ! {timeout, gone, stopped, io} {
     let until = time_unix_ms() + w.ms
-    while w.client >= 0 {
+    while w.client >= 0 || w.stop >= 0 {
         var left = until - time_unix_ms()
         if left < 0 {
             left = 0
         }
-        let ready = net_wait([conn, w.client], left) else |_| {
+        var set = [conn]
+        if w.client >= 0 {
+            (mut set).push(w.client)
+        }
+        if w.stop >= 0 {
+            (mut set).push(w.stop)
+        }
+        let ready = net_wait(set, left) else |_| {
             return io
         }
         if ready.is_empty() {
             return timeout
         }
+        var up_ready = false
+        var cl_ready = false
         for f in ready {
+            if w.stop >= 0 && f == w.stop {
+                return stopped
+            }
             if f == conn {
-                return
+                up_ready = true
+            } else if f == w.client {
+                cl_ready = true
             }
         }
-        var spurious = false
-        let piece = net_read(w.client, 4096) else |e| match e {
-            closed => { return gone },
-            timeout => {
-                spurious = true
-                ""
-            },
-            utf8 => { "?" },
-            io => { return gone },
+        if up_ready {
+            return
         }
-        if !spurious && !piece.is_empty() {
-            w.piped = true
-            w.client = -1
+        if cl_ready {
+            var spurious = false
+            let piece = net_read(w.client, 4096) else |e| match e {
+                closed => { return gone },
+                timeout => {
+                    spurious = true
+                    ""
+                },
+                utf8 => { "?" },
+                io => { return gone },
+            }
+            if !spurious && !piece.is_empty() {
+                w.piped = true
+                w.client = -1
+            }
         }
     }
 }
@@ -1272,8 +1299,9 @@ fn up_wait(conn: int, mut w: Watch) -> () ! {timeout, gone, io} {
 /// (`up_wait`). The read deadline must be armed on `conn` before
 /// calling. Rows: `timeout` (deadline fired before a full head — 504 at
 /// the caller), `closed` (peer closed before a head — a broken
-/// upstream, 502), `gone` (the client closed — 499, ws68), `io`.
-fn read_up_head(conn: int, mut w: Watch) -> (str, str) ! {timeout, closed, gone, io} {
+/// upstream, 502), `gone` (the client closed — 499, ws68), `stopped`
+/// (the loop's stop — 497, ws69), `io`.
+fn read_up_head(conn: int, mut w: Watch) -> (str, str) ! {timeout, closed, gone, stopped, io} {
     var buf = ""
     loop {
         let m = buf.find("\r\n\r\n") else -1
@@ -1286,6 +1314,7 @@ fn read_up_head(conn: int, mut w: Watch) -> (str, str) ! {timeout, closed, gone,
         up_wait(conn, mut w) else |e| match e {
             timeout => { return timeout },
             gone => { return gone },
+            stopped => { return stopped },
             io => { return io },
         }
         let piece = net_read(conn, 4096) else |e| match e {
@@ -1301,12 +1330,14 @@ fn read_up_head(conn: int, mut w: Watch) -> (str, str) ! {timeout, closed, gone,
 /// Read exactly `want` bytes of body beyond `carry` from `conn`,
 /// watching the client (`up_wait`). Rows: net `io`/`timeout` folded to
 /// `io` (a broken read mid-body is a truncation the caller must close
-/// on); `gone` (the client closed, ws68). str-only (D8).
-fn read_up_length(conn: int, mut w: Watch, carry: str, want: int) -> str ! {gone, io} {
+/// on); `gone` (the client closed, ws68); `stopped` (ws69). str-only
+/// (D8).
+fn read_up_length(conn: int, mut w: Watch, carry: str, want: int) -> str ! {gone, stopped, io} {
     var buf = carry
     while buf.len < want {
         up_wait(conn, mut w) else |e| match e {
             gone => { return gone },
+            stopped => { return stopped },
             timeout => { return io },
             io => { return io },
         }
@@ -1328,8 +1359,9 @@ fn read_up_length(conn: int, mut w: Watch, carry: str, want: int) -> str ! {gone
 
 /// Read an upstream body to EOF (the 1.0-style close-delimited body),
 /// bounded so a peer dribbling forever cannot pin memory, watching the
-/// client (`up_wait`). Rows: io; `gone` (the client closed, ws68).
-fn read_up_close(conn: int, mut w: Watch, carry: str, cap: int) -> str ! {gone, io} {
+/// client (`up_wait`). Rows: io; `gone` (the client closed, ws68);
+/// `stopped` (ws69).
+fn read_up_close(conn: int, mut w: Watch, carry: str, cap: int) -> str ! {gone, stopped, io} {
     var buf = carry
     loop {
         if buf.len > cap {
@@ -1338,6 +1370,7 @@ fn read_up_close(conn: int, mut w: Watch, carry: str, cap: int) -> str ! {gone, 
         var waited = true
         up_wait(conn, mut w) else |e| match e {
             gone => { return gone },
+            stopped => { return stopped },
             timeout => { waited = false },
             io => { return io },
         }
@@ -1804,8 +1837,9 @@ fn attempt(
         up_close(notes, up)
         return 502
     }
-    // ws68 (lobo#99): the waits that follow watch the client too
-    var w = Watch { client: client, ms: read_ms, piped: false }
+    // ws68 (lobo#99): the waits that follow watch the client too, and
+    // (ws69) the loop's stop on the job socket the notes go to
+    var w = Watch { client: client, stop: notes, ms: read_ms, piped: false }
     let hr = read_up_head(up, mut w) else |e| match e {
         timeout => {
             up_close(notes, up)
@@ -1818,6 +1852,10 @@ fn attempt(
         gone => {
             up_close(notes, up)
             return 499
+        },
+        stopped => {
+            up_close(notes, up)
+            return 497
         },
         io => {
             up_close(notes, up)
@@ -1833,10 +1871,15 @@ fn attempt(
     }
     var body = ""
     var gone_mid = false
+    var stop_mid = false
     if parsed.body_mode == "length" {
         body = read_up_length(up, mut w, rest, parsed.content_length) else |e| match e {
             gone => {
                 gone_mid = true
+                ""
+            },
+            stopped => {
+                stop_mid = true
                 ""
             },
             io => {
@@ -1853,12 +1896,16 @@ fn attempt(
                 gone_mid = true
                 ""
             },
+            stopped => {
+                stop_mid = true
+                ""
+            },
             io => {
                 up_close(notes, up)
                 return 599
             },
         }
-        if !gone_mid {
+        if !gone_mid && !stop_mid {
             body = http.decode_chunked(whole, http.default_limits()) else |_| {
                 up_close(notes, up)
                 return 599
@@ -1870,6 +1917,10 @@ fn attempt(
                 gone_mid = true
                 ""
             },
+            stopped => {
+                stop_mid = true
+                ""
+            },
             io => {
                 up_close(notes, up)
                 return 599
@@ -1877,6 +1928,13 @@ fn attempt(
         }
     }
     up_close(notes, up)
+    if stop_mid {
+        // ws69: the loop stopped the exchange (its generation passed
+        // worker_shutdown_timeout): nothing is written to the client
+        pacc.status = 497
+        pacc.body_bytes = 0
+        return 497
+    }
     if gone_mid {
         // ws68 (lobo#99): the client closed while the body came: nothing
         // was written to it, and the upstream status is the upstream's
@@ -1943,8 +2001,9 @@ fn selection_order(p: UpPool, mut s: Swrr) -> (List[str], List[int]) {
 /// the serving loop (the differential, the rig, a TLS-less test): it is
 /// `prepare` and `exchange` back to back, on the caller's thread. The
 /// serving loop takes the two halves apart (ws67, lobo#81): the step
-/// prepares, and `job_run` exchanges in a proc beside the loop, so an
-/// upstream that never answers holds that proc and not the loop.
+/// prepares, and a proc of the loop's exchange pool (`job_loop`, ws69)
+/// exchanges beside it, so an upstream that never answers holds that
+/// proc and not the loop.
 /// Selects a peer, builds the upstream request (rewrite + header
 /// discipline), tries peers in selection order on a connect-time
 /// failure (the retry-safety rule: only while NO response byte has
@@ -1988,10 +2047,12 @@ pub fn run(
 // the process still running 15 s after `-s stop`
 // (notes/ws67-contract.md §2). The exchange is connect → write → read
 // → relay under deadlines, with failover and an https leg whose
-// handshake is several blocking reads, so it runs as ONE PROC per
-// exchange beside the loop — the shape the loop already has for a
-// large body (ws49's streams) and the ACME daemon (ws56) — and reports
-// one line down the stream pipe when it is done.
+// handshake is several blocking reads, so it runs in a PROC beside the
+// loop — the shape the loop already has for a large body (ws49's
+// streams) and the ACME daemon (ws56) — and reports one line down the
+// stream pipe when it is done. ws67 spawned one proc per exchange;
+// since ws69 (lobo#100) the loop keeps a POOL of them, each on its own
+// job socket, across exchanges (`job_loop`).
 //
 // What crosses into the proc is bytes, never a view: the loop's
 // strings live in regions a pass frees, and a proc that outlives its
@@ -1999,10 +2060,10 @@ pub fn run(
 // PREPARES the exchange (`prepare`: the plan's refusals, the trust
 // anchors, the peers through the resolver, the upstream request per
 // peer) into a `Job`, `job_text` writes it as text, the loop sends
-// that text down a loopback connection of its own (the JOB SOCKET)
-// and spawns `job_run` with four ints; the proc reads the job into its
-// own region, exchanges, and writes its account back on the same
-// socket before it reports. The account carries the opaque tail the
+// that text down a loopback connection of its own (the proc's JOB
+// SOCKET, the proc handed its two ints when it was made); the proc
+// reads the job into its own region, exchanges, and writes its account
+// back on the same socket before it reports. The account carries the opaque tail the
 // loop sent after the job (its access record, packed), so the loop
 // keeps nothing but ints for a row whose exchange is out.
 // ------------------------------------------------------------------
@@ -2253,6 +2314,14 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
             // the reply said `Connection: close`
             return true
         }
+        if st == 497 {
+            // ws69: stopped by the loop (its generation passed
+            // worker_shutdown_timeout): the upstream is closed and nothing
+            // was written; the loop closes the client, as nginx does
+            acc.status = 497
+            acc.body_bytes = 0
+            return true
+        }
         if st == 499 {
             // ws68 (lobo#99): the client closed while the exchange
             // waited: the upstream is closed, nothing is written, and
@@ -2458,97 +2527,193 @@ pub fn job_parse(s: str) -> Job ! {bad} {
     }
 }
 
-/// THE PROC (ws67, lobo#81): one exchange beside the serving loop.
-/// `client` is the connection it answers (the loop does not touch it
-/// until this proc reports), `jr` its end of the job socket, `out` the
-/// loop's stream pipe, `id` the slot's id. It reads the frame the loop
-/// wrote — `<joblen> <taillen>\n`, the job's text, an opaque tail —
-/// into its own region, runs `exchange` (its notes on `jr`), writes
-/// its account on `jr` — `r <dlen> <taillen>\n`, then `<status>
-/// <body_bytes> <up_ms> <close 0|1> <addrlen>:<addr>`, then the tail
-/// as it came — and reports `<client> 0 <wcode> 0 <id>` down the
-/// stream pipe, the line a stream writes (`wcode` 0 clean, 1 the
-/// client closed, 2 io or a frame that did not read). The account is
-/// written before the line, so a loop that has the line has the
-/// account. The proc closes nothing it was handed. Total.
-pub fn job_run(client: int, jr: int, out: int, id: int) -> int {
-    // everything the exchange makes lives in this block and dies at its
-    // brace — the job's bytes, the upstream reads, the relayed reply,
-    // the account — as a stream's chunks die in theirs (ws49). Without
-    // it each exchange left about 27 kB behind (2,000 proxied requests
-    // grew the process 55 MB, notes/ws67-contract.md §3)
-    region job {
-        net_deadline(jr, 10000) else |_| {}
-        var wcode = 0
-        var buf = List[byte]()
-        var want = -1
-        var hdr = 0
-        var jl = 0
-        var tl = 0
-        var reading = true
-        while reading {
-            let piece = net_read_bytes(jr, 65536) else |_| {
-                wcode = 2
-                reading = false
-                List[byte]()
-            }
-            for b in piece {
-                (mut buf).push(b)
-                if hdr == 0 && b as int == 10 {
-                    hdr = buf.len
-                }
-            }
-            if want < 0 && hdr > 0 {
-                let h = str_from_utf8(buf[0..hdr - 1]) else |_| { "" }
-                var parts = List[int]()
-                for w in h.words() {
-                    (mut parts).push(w.to_int() else |_| { -1 })
-                }
-                if parts.len != 2 || parts[0] < 0 || parts[1] < 0 {
-                    wcode = 2
+/// THE POOL'S PROC (ws69, lobo#100; ws67's one-proc-per-exchange
+/// shape, kept): one proc of the loop's EXCHANGE POOL. It lives across
+/// exchanges, on one job socket (`jr` its end, made once with it), and
+/// reports down the loop's stream pipe `out`. ws67 spawned a proc and
+/// made a job socket for every proxied request, and that was half the
+/// proxied throughput with one client in turn (lobo#100: a socket, a
+/// connect, an accept, two closes, a task and its scope, and a worker's
+/// steal scan when it ended — 44.6 syscalls a request against the
+/// inline exchange's 9.25, and 2.5 times its user instructions,
+/// notes/ws69-contract.md §2).
+///
+/// What the loop writes on the job socket, and what each means here:
+///   * `j <client> <id> <joblen> <taillen>\n` then the job's text and
+///     an opaque tail: an exchange, answered on `client` (the loop does
+///     not touch it until this proc reports). The frame is read into
+///     the iteration's own region, `exchange` runs (its upstream notes
+///     on `jr`, and `jr` WATCHED while it waits: a byte from the loop
+///     there means stop), the account goes back on `jr` — `r <dlen>
+///     <taillen>\n`, then `<status> <body_bytes> <up_ms> <close 0|1>
+///     <addrlen>:<addr>`, then the tail as it came — and the stream
+///     line `<client> 0 <wcode> 0 <id>` down `out` (`wcode` 0 clean, 1
+///     the client closed, 2 io or a frame that did not read). The
+///     account is written before the line, so a loop that has the line
+///     has the account.
+///   * `s`: stop the exchange in flight (its generation passed
+///     `worker_shutdown_timeout`): the wait it is in ends, the upstream
+///     is closed, nothing more is written to the client and the account
+///     says 497. A stop that finds no exchange (it ended as the byte
+///     was written) is read and dropped here. A stop is never read
+///     while an exchange runs — the wait sees the byte and leaves it —
+///     so one written just before a kill is still here afterwards.
+///   * `q`: leave the pool (idle too long, or the loop is ending): this
+///     proc closes `jr` and returns.
+///   * `k`: the loop is about to KILL this proc (a stop that did not
+///     land: a write parked on a client that does not read): return
+///     without closing anything, the loop closes both ends after its
+///     join. Written before the kill so that a proc that runs on past
+///     a kill (wolf-lang#683, native) finds it at its next wait and
+///     returns rather than waiting for a job forever.
+///   * end of stream (the loop closed its end): as `q`.
+/// A wait here is `net_wait` (one poll, woken by the kernel) rather
+/// than a parked read: a poll cannot be reached by a kill, which is
+/// why every one of them has `jr` in its set. Total.
+pub fn job_loop(jr: int, out: int) -> int {
+    var going = true
+    var close_end = true
+    while going {
+        // everything one exchange makes lives in this block and dies at
+        // its brace — the frame's bytes, the upstream reads, the relayed
+        // reply, the account (ws67: without a block each exchange left
+        // about 27 kB behind)
+        region job {
+            let ready = net_wait([jr], -1) else |_| { List[int]() }
+            var buf = List[byte]()
+            var hdr = 0
+            var want = -1
+            var jl = 0
+            var tl = 0
+            var cfd = -1
+            var xid = 0
+            var reading = ready.len > 0
+            var bad = !reading
+            var at = 0
+            while reading {
+                let piece = net_read_bytes(jr, 65536) else |_| {
                     reading = false
+                    bad = true
+                    List[byte]()
+                }
+                if piece.len == 0 {
+                    reading = false
+                    bad = true
+                }
+                // a frame comes in one read nearly always: take the read
+                // whole, and copy only what follows a short one
+                if buf.is_empty() {
+                    buf = piece
                 } else {
-                    jl = parts[0]
-                    tl = parts[1]
-                    want = hdr + jl + tl
+                    for b in piece {
+                        (mut buf).push(b)
+                    }
+                }
+                // leading control bytes: stale stops are dropped, `q`
+                // and `k` end the proc
+                while want < 0 && hdr == 0 && at < buf.len && buf[at] as int != 106 {
+                    let c = buf[at] as int
+                    if c == 113 {
+                        going = false
+                    } else if c == 107 {
+                        going = false
+                        close_end = false
+                    }
+                    at = at + 1
+                }
+                if !going {
+                    reading = false
+                    bad = false
+                } else if at >= buf.len && want < 0 && hdr == 0 {
+                    // only control bytes: wait for the next frame
+                    reading = false
+                    bad = false
+                }
+                if reading && want < 0 && hdr == 0 {
+                    var i = at
+                    while i < buf.len && hdr == 0 {
+                        if buf[i] as int == 10 {
+                            hdr = i + 1
+                        }
+                        i = i + 1
+                    }
+                    if hdr > 0 {
+                        let h = str_from_utf8(buf[at + 1..hdr - 1]) else |_| { "" }
+                        var parts = List[int]()
+                        for w in h.words() {
+                            (mut parts).push(w.to_int() else |_| { -1 })
+                        }
+                        if parts.len != 4 || parts[0] < 0 || parts[1] < 0 || parts[2] < 0 || parts[3] < 0 {
+                            reading = false
+                            bad = true
+                        } else {
+                            cfd = parts[0]
+                            xid = parts[1]
+                            jl = parts[2]
+                            tl = parts[3]
+                            want = hdr + jl + tl
+                        }
+                    }
+                }
+                if want >= 0 && buf.len >= want {
+                    reading = false
                 }
             }
             if want >= 0 && buf.len >= want {
-                reading = false
-            }
-            if piece.len == 0 {
-                reading = false
-                if want < 0 || buf.len < want {
-                    wcode = 2
+                // bytes past the frame are the loop's control bytes,
+                // written after the job: a stop (the exchange is answered
+                // stopped, unstarted), a leave or a kill (after it)
+                var stop_now = false
+                var k = want
+                while k < buf.len {
+                    let c = buf[k] as int
+                    if c == 115 {
+                        stop_now = true
+                    } else if c == 113 {
+                        stop_now = true
+                        going = false
+                    } else if c == 107 {
+                        stop_now = true
+                        going = false
+                        close_end = false
+                    }
+                    k = k + 1
                 }
+                var wcode = 0
+                var answer = ""
+                let all = str_from_utf8(buf) else |_| { "" }
+                let text = all.get(hdr..want) else { "" }
+                let job_s = text.get(0..jl) else { "" }
+                let tail = text.get(jl..text.len) else { "" }
+                if job_s.len != jl || tail.len != tl {
+                    wcode = 2
+                } else if stop_now {
+                    let det = "497 0 0 1 0:"
+                    answer = "r {det.len} {tail.len}\n{det}{tail}"
+                } else {
+                    let r = job_serve(cfd, job_s, tail, jr)
+                    answer = r.0
+                    wcode = r.1
+                }
+                if answer.is_empty() {
+                    let det = "0 0 0 1 0:"
+                    answer = "r {det.len} 0\n{det}"
+                }
+                net_write(jr, answer) else |_| {}
+                net_write(out, "{cfd} 0 {wcode} 0 {xid}\n") else |_| {}
+            } else if bad {
+                going = false
             }
         }
-        var answer = ""
-        if wcode == 0 {
-            let all = str_from_utf8(buf) else |_| { "" }
-            let text = all.get(hdr..want) else { "" }
-            let job_s = text.get(0..jl) else { "" }
-            let tail = text.get(jl..text.len) else { "" }
-            if job_s.len != jl || tail.len != tl {
-                wcode = 2
-            } else {
-                let r = job_serve(client, job_s, tail, jr)
-                answer = r.0
-                wcode = r.1
-            }
-        }
-        if answer.is_empty() {
-            let det = "0 0 0 1 0:"
-            answer = "r {det.len} 0\n{det}"
-        }
-        net_write(jr, answer) else |_| {}
-        net_write(out, "{client} 0 {wcode} 0 {id}\n") else |_| {}
+    }
+    if close_end {
+        net_close(jr) else |_| {}
     }
     0
 }
 
 /// The exchange a job's text asks for, answered on `client` (ws67):
-/// the account `job_run` writes back — `r <dlen> <taillen>\n`, then
+/// the account `job_loop` writes back — `r <dlen> <taillen>\n`, then
 /// `<status> <body_bytes> <up_ms> <close 0|1> <addrlen>:<addr>`, then
 /// `tail` as it came — and the stream line's `wcode` (0 clean, 1 the
 /// client closed, 2 io or a job that did not parse). The proc's body,

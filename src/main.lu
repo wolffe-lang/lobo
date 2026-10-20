@@ -1765,13 +1765,14 @@ fn serve_main(
         net_deadline(stream_r, 50) else |_| {}
     }
     // ws67 (lobo#81): the JOB listener. A proxied exchange runs in a
-    // proc beside this loop (`proxy.job_run`), and the loop hands it its
-    // job down a loopback connection it makes to this listener, one per
-    // exchange; the listener is made once, here, beside the stream pipe
-    // the proc reports down, and is never in the wait set. A host that
-    // refuses it keeps the exchange inside the step (the loop then
-    // holds for a silent upstream, as every lobo before ws67 did), said
-    // out loud.
+    // proc beside this loop, and the loop hands it its job down a
+    // loopback connection it makes to this listener; since ws69
+    // (lobo#100) one per proc of the exchange pool (`proxy.job_loop`),
+    // kept across its exchanges. The listener is made once, here, beside
+    // the stream pipe the procs report down, and is never in the wait
+    // set. A host that refuses it keeps the exchange inside the step
+    // (the loop then holds for a silent upstream, as every lobo before
+    // ws67 did), said out loud.
     var job_l = -1
     var job_port = 0
     if stream_w >= 0 {
@@ -2141,14 +2142,13 @@ fn serve_main(
     // the id the next stream takes
     var sslots = List[budget.StreamSlot]()
     var snext: int = 0
-    // ws67 (lobo#81): a slot whose proc is a proxied EXCHANGE (not a
-    // stream) has its job socket's two ends here, by the slot's index
-    // (-1 for a stream's slot); `pxlive` counts the exchanges out, each
-    // a second connection against `worker_connections` (nginx's count:
-    // the directive "includes all connections (e.g. connections with
-    // proxied servers)")
-    var sjw = List[int]()
-    var sjr = List[int]()
+    // ws69 (lobo#100): the EXCHANGE POOL — every proc that runs proxied
+    // exchanges beside this loop, each on its own job socket, kept
+    // across exchanges (ws67 made both for every request); `pxlive`
+    // counts the exchanges out, each a second connection against
+    // `worker_connections` (nginx's count: the directive "includes all
+    // connections (e.g. connections with proxied servers)")
+    var pxs = List[PxSlot]()
     var pxlive: int = 0
 
     // ws13: the resolver — the cache and the pending query table the
@@ -2511,7 +2511,9 @@ fn serve_main(
                                 let ln = sbuf[0..nl]
                                 sbuf = sbuf[nl + 1..sbuf.len]
                                 let sr = budget.stream_line(ln)
-                                if sr.0 >= 0 && budget.stream_slot(sslots, sr.0, sr.4) >= 0 {
+                                if sr.0 >= 0 &&
+                                    (budget.stream_slot(sslots, sr.0, sr.4) >= 0 ||
+                                        px_of(pxs, sr.0, sr.4) >= 0) {
                                     (mut sdone).push(sr.0)
                                     (mut sline).push(ln)
                                 } else if ln.starts_with("acme ") {
@@ -3322,26 +3324,54 @@ fn serve_main(
                                         // close. `false` is the stream that ran to
                                         // its end in the same instant: its line is
                                         // in the pipe and the row waits for it.
-                                        let si = budget.stream_slot(sslots, fd, -1)
-                                        in life {
-                                            killed = budget.stream_kill(mut sslots, si)
+                                        // ws69: an EXCHANGE is asked to stop first —
+                                        // one byte on its job socket, which every wait
+                                        // of its proc watches (since ws68 those waits
+                                        // are polls, which a kill cannot reach: the
+                                        // kill's join held this loop for the poll's
+                                        // budget, proxy_read_timeout) — and its line
+                                        // then arrives as any other, the row aborted
+                                        let pi = px_of(pxs, fd, -1)
+                                        if pi >= 0 {
+                                            in life {
+                                                px_stop(mut pxs, pi, now)
+                                            }
+                                        } else {
+                                            let si = budget.stream_slot(sslots, fd, -1)
+                                            in life {
+                                                killed = budget.stream_kill(mut sslots, si)
+                                            }
                                         }
                                         if killed {
-                                            // ws67 (lobo#81): an exchange's job socket,
-                                            // and any upstream its proc left open (its
-                                            // own notes say which), are the loop's now
-                                            if si >= 0 && si < sjw.len && sjw[si] >= 0 {
-                                                px_reap(sjw[si], sjr[si])
-                                                sjw[si] = -1
-                                                sjr[si] = -1
-                                                pxlive = pxlive - 1
-                                            }
                                             net_close(fd) else |_| {}
                                             keep = false
                                             closed_now = true
                                             closed_abort = true
                                         }
                                         nst = sst + 10
+                                    }
+                                }
+                                if sst >= 10 && !killed {
+                                    // ws69: a stop that has not landed in
+                                    // `px_stop_ms` is a proc parked where no byte
+                                    // reaches it (a write to a client that does
+                                    // not read): it is killed, as ws67 killed
+                                    // every exchange, and the job socket and any
+                                    // upstream its proc left open (its own notes
+                                    // say which) are the loop's
+                                    let pi = px_of(pxs, fd, -1)
+                                    if pi >= 0 &&
+                                        pxs[pi].stop_at > 0 &&
+                                        now - pxs[pi].stop_at >= px_stop_ms() {
+                                        in life {
+                                            px_kill(mut pxs, pi)
+                                        }
+                                        pxlive = pxlive - 1
+                                        net_close(fd) else |_| {}
+                                        keep = false
+                                        closed_now = true
+                                        closed_abort = true
+                                        killed = true
                                     }
                                 }
                                 if !killed {
@@ -3353,11 +3383,13 @@ fn serve_main(
                                 let sr = budget.stream_line(sline[di])
                                 // ws56: the stream reported, so its file is closed
                                 // and its slot freed here (the loop owns both)
-                                let dsi = budget.stream_slot(sslots, fd, sr.4)
-                                let pxw = if dsi >= 0 && dsi < sjw.len { sjw[dsi] } else { -1 }
-                                let pxr = if pxw >= 0 { sjr[dsi] } else { -1 }
-                                in life {
-                                    budget.stream_done(mut sslots, dsi)
+                                let pi = px_of(pxs, fd, sr.4)
+                                let pxw = if pi >= 0 { pxs[pi].jw } else { -1 }
+                                if pi < 0 {
+                                    let dsi = budget.stream_slot(sslots, fd, sr.4)
+                                    in life {
+                                        budget.stream_done(mut sslots, dsi)
+                                    }
                                 }
                                 let scls = sr.1
                                 let swc = sr.2
@@ -3365,14 +3397,15 @@ fn serve_main(
                                 // ws67 (lobo#81): an EXCHANGE reported. Its
                                 // account is on the job socket (written before
                                 // the line); the request is logged and counted
-                                // now, as nginx logs it, at its end
+                                // now, as nginx logs it, at its end. ws69: its
+                                // proc is idle again, its job socket kept
                                 var px_close = false
                                 if pxw >= 0 {
                                     let rep = px_reply(pxw)
-                                    net_close(pxw) else |_| {}
-                                    net_close(pxr) else |_| {}
-                                    sjw[dsi] = -1
-                                    sjr[dsi] = -1
+                                    pxs[pi].sock = -1
+                                    pxs[pi].id = 0
+                                    pxs[pi].since = now
+                                    pxs[pi].stop_at = 0
                                     pxlive = pxlive - 1
                                     let d = px_account(rep)
                                     px_close = d.close || !d.ok
@@ -3380,24 +3413,30 @@ fn serve_main(
                                     if span < 0 {
                                         span = 0
                                     }
-                                    if note_needed(gens, cg, d.admitted, d.mem_rt, false) {
+                                    // ws69: a stopped exchange (497) is not a
+                                    // request served: nothing logged or counted,
+                                    // as ws67's kill logged nothing
+                                    let px_logs = d.ok && d.status != 497
+                                    if px_logs && note_needed(gens, cg, d.admitted, d.mem_rt, false) {
                                         in life {
                                             gen_note(mut gens, cg, d.admitted, d.mem_rt, false)
                                         }
                                     }
-                                    in life {
-                                        note_served(
-                                            mut counters,
-                                            d.status,
-                                            d.body_bytes,
-                                            span,
-                                            true,
-                                            d.status,
-                                            d.up_ms,
-                                            d.admitted,
-                                        )
+                                    if px_logs {
+                                        in life {
+                                            note_served(
+                                                mut counters,
+                                                d.status,
+                                                d.body_bytes,
+                                                span,
+                                                true,
+                                                d.status,
+                                                d.up_ms,
+                                                d.admitted,
+                                            )
+                                        }
                                     }
-                                    if !asinks.is_empty() && d.has_acc {
+                                    if px_logs && !asinks.is_empty() && d.has_acc {
                                         var a3 = d.acc
                                         a3.status = d.status
                                         a3.body_bytes = d.body_bytes
@@ -3887,37 +3926,38 @@ fn serve_main(
                                 // ws67 (lobo#81): the EXCHANGE leaves the loop. A
                                 // generation already past its worker_shutdown_timeout
                                 // starts none (nothing was written: the row closes as
-                                // aborted). Otherwise the job socket is made (a
-                                // connect to the loop's own listener, and its accept),
-                                // the proc is spawned with four ints, and the job and
-                                // the record go down the socket; the row is out of the
-                                // wait set until the proc's line. A pair the host
-                                // refuses (out of descriptors) runs the exchange here,
-                                // inside the step, as trunk did.
+                                // aborted). Otherwise (ws69, lobo#100) an idle proc of
+                                // the pool takes it — else a new one on a new job
+                                // socket (a connect to the loop's own listener, and
+                                // its accept) — and the job and the record go down its
+                                // socket in one write; the row is out of the wait set
+                                // until the proc's line. A pair the host refuses (out
+                                // of descriptors) runs the exchange here, inside the
+                                // step, as every lobo before ws67 did.
                                 if aborted_flag {
                                     net_close(fd) else |_| {}
                                     keep = false
                                     closed_now = true
                                     closed_abort = true
                                 } else {
-                                    let pair = px_pair(job_l, job_port)
-                                    if pair.0 >= 0 {
-                                        snext = snext + 1
-                                        in life {
-                                            px_open(
-                                                mut sslots,
-                                                mut sjw,
-                                                mut sjr,
-                                                fd,
-                                                pair.0,
-                                                pair.1,
-                                                stream_w,
-                                                snext,
-                                            )
+                                    var pi = px_idle(pxs)
+                                    if pi < 0 {
+                                        let pair = px_pair(job_l, job_port)
+                                        if pair.0 >= 0 {
+                                            in life {
+                                                pi = px_new(mut pxs, pair.0, pair.1, stream_w)
+                                            }
                                         }
+                                    }
+                                    if pi >= 0 {
+                                        snext = snext + 1
+                                        pxs[pi].sock = fd
+                                        pxs[pi].id = snext
+                                        pxs[pi].since = now
+                                        pxs[pi].stop_at = 0
                                         net_write(
-                                            pair.0,
-                                            "{px_job.len} {px_tail.len}\n{px_job}{px_tail}",
+                                            pxs[pi].jw,
+                                            "j {fd} {snext} {px_job.len} {px_tail.len}\n{px_job}{px_tail}",
                                         ) else |_| {}
                                         pxlive = pxlive + 1
                                         n_wait = -1
@@ -3993,8 +4033,6 @@ fn serve_main(
                                             stream_w,
                                             snext,
                                         )
-                                        // ws67: a stream's slot has no job socket
-                                        px_unmark(mut sjw, mut sjr, slot)
                                     }
                                     n_wait = -1
                                     n_stream = if close_it { 2 } else { 1 }
@@ -4190,6 +4228,14 @@ fn serve_main(
                         }
                     }
 
+                    // 3c. ws69 (lobo#100): pool procs idle past `px_idle_ms`
+                    // leave, and their job sockets close
+                    if pxs.len > pxlive {
+                        in life {
+                            px_retire(mut pxs, now, px_idle_ms())
+                        }
+                    }
+
                     // 4. retire drained generations (ws57: the table is rebuilt
                     // only when one has actually drained — it was rebuilt every
                     // pass), 5. finish a quit once empty
@@ -4261,6 +4307,8 @@ fn serve_main(
     if job_l >= 0 {
         net_close(job_l) else |_| {}
     }
+    // ws69: the exchange pool's idle procs leave with the loop
+    px_retire(mut pxs, 0, -1)
     if have_http {
         net_close(hl) else |_| {}
     }
@@ -4390,16 +4438,17 @@ fn arm_accept(l: int) {
 // ------------------------------------------------------------------
 // ws67 (lobo#81): the proxied EXCHANGE beside the loop. The step
 // prepares it (`proxy.prepare`) and hands back its job as text; the
-// loop makes a JOB SOCKET (a loopback connection to its own job
-// listener, and the accept of it), spawns `proxy.job_run` with four
-// ints in a `StreamSlot` (so a drain can kill it, as a stream's),
-// writes `<joblen> <taillen>\n<job><tail>` down the socket — the tail
-// being the request's access record, packed (`acc_pack`) — and keeps
-// the row out of the wait set. The proc answers the client, writes
-// its account on the job socket and reports the stream line; the loop
-// then reads the account (`px_reply`, `px_account`), logs and counts
-// the request, and closes or keeps the row. Nothing but ints is kept
-// for a row while its exchange is out.
+// loop gives it to a proc of its EXCHANGE POOL (ws69, lobo#100: an
+// idle one, else a new one on a new JOB SOCKET — a loopback connection
+// to its own job listener, and the accept of it), writing `j <client>
+// <id> <joblen> <taillen>\n<job><tail>` down that proc's socket — the
+// tail being the request's access record, packed (`acc_pack`) — and
+// keeps the row out of the wait set. The proc answers the client,
+// writes its account on the job socket and reports the stream line;
+// the loop then reads the account (`px_reply`, `px_account`), logs and
+// counts the request, closes or keeps the row, and the proc waits for
+// its next job. Nothing but ints is kept for a row while its exchange
+// is out.
 // ------------------------------------------------------------------
 
 /// The job socket for one exchange: a connect to the loop's own job
@@ -4422,72 +4471,166 @@ fn px_pair(jl: int, port: int) -> (int, int) {
     (w, r)
 }
 
-/// Start the exchange's proc in a slot of `slots` (a free one reused,
-/// as `budget.stream_open` reuses them) and mark the slot's job socket
-/// in `sjw`/`sjr`. Its file is -1: an exchange reads no file. The
-/// proc is handed four ints and nothing a region of the loop owns
-/// (`[conc.proc.arg]`). Total.
-fn px_open(
-    mut slots: List[budget.StreamSlot],
-    mut sjw: List[int],
-    mut sjr: List[int],
-    sock: int,
+/// One proc of the EXCHANGE POOL (ws69, lobo#100): its handle, its
+/// job socket's two ends (`jw` the loop's, `jr` the proc's; `jw` < 0
+/// marks a FREE entry, reused by the next proc made), the client of the
+/// exchange it runs (`sock`, -1 idle) and that exchange's id (the
+/// stream line's), when it last started or went idle (`since`), and
+/// when the loop asked it to stop (`stop_at`, 0 none). ws67 made a job
+/// socket and spawned a proc for every proxied request: the connect,
+/// the accept, the two closes, the task and its end were half the
+/// proxied throughput with one client in turn (notes/ws69-contract.md
+/// §2).
+struct PxSlot {
+    w: Proc[int],
     jw: int,
     jr: int,
-    out: int,
+    sock: int,
     id: int,
-) {
+    since: int,
+    stop_at: int,
+}
+
+/// How long a pool proc may sit idle before it leaves and its job
+/// socket closes: two descriptors and a parked proc held for a burst
+/// that may not come back. Total.
+fn px_idle_ms() -> int {
+    5000
+}
+
+/// How long a stop may take to land before the proc is killed: a stop
+/// is one byte the proc's every wait watches, so it lands at once
+/// unless the proc is parked in a write to a client that does not read
+/// (or inside a TLS record arriving in part), which only a kill
+/// reaches. Total.
+fn px_stop_ms() -> int {
+    100
+}
+
+/// The pool entry running the exchange on `sock` (with `id` >= 0, that
+/// exchange's id too — the test a stream line takes), or -1. Pure and
+/// total.
+fn px_of(pxs: List[PxSlot], sock: int, id: int) -> int {
+    if sock < 0 {
+        return -1
+    }
     var i = 0
-    var at = -1
-    while i < slots.len && at < 0 {
-        if slots[i].sock < 0 {
-            at = i
+    while i < pxs.len {
+        if pxs[i].jw >= 0 && pxs[i].sock == sock && (id < 0 || pxs[i].id == id) {
+            return i
         }
         i = i + 1
     }
-    if at >= 0 {
-        slots[at] = take budget.StreamSlot {
-            sock: sock,
-            id: id,
-            file: -1,
-            w: spawn proc px_body(sock, jr, out, id),
-        }
-    } else {
-        (mut slots).push(take budget.StreamSlot {
-            sock: sock,
-            id: id,
-            file: -1,
-            w: spawn proc px_body(sock, jr, out, id),
-        })
-        at = slots.len - 1
-    }
-    while sjw.len <= at {
-        (mut sjw).push(-1)
-        (mut sjr).push(-1)
-    }
-    sjw[at] = jw
-    sjr[at] = jr
+    -1
 }
 
-/// The exchange's proc: `proxy.job_run`, through a function of this
+/// An idle proc of the pool, the one idle the shortest time (its
+/// thread the likeliest warm), or -1. Pure and total.
+fn px_idle(pxs: List[PxSlot]) -> int {
+    var at = -1
+    var i = 0
+    while i < pxs.len {
+        if pxs[i].jw >= 0 && pxs[i].sock < 0 && pxs[i].stop_at == 0 {
+            if at < 0 || pxs[i].since > pxs[at].since {
+                at = i
+            }
+        }
+        i = i + 1
+    }
+    at
+}
+
+/// A new proc of the pool on the job socket (`jw`, `jr`) just made,
+/// in a free entry or a new one; its index. It is handed two ints and
+/// nothing a region of the loop owns (`[conc.proc.arg]`). Total.
+fn px_new(mut pxs: List[PxSlot], jw: int, jr: int, out: int) -> int {
+    var i = 0
+    while i < pxs.len {
+        if pxs[i].jw < 0 {
+            pxs[i] = take PxSlot {
+                w: spawn proc px_body(jr, out),
+                jw: jw,
+                jr: jr,
+                sock: -1,
+                id: 0,
+                since: 0,
+                stop_at: 0,
+            }
+            return i
+        }
+        i = i + 1
+    }
+    (mut pxs).push(take PxSlot {
+        w: spawn proc px_body(jr, out),
+        jw: jw,
+        jr: jr,
+        sock: -1,
+        id: 0,
+        since: 0,
+        stop_at: 0,
+    })
+    pxs.len - 1
+}
+
+/// The pool's proc: `proxy.job_loop`, through a function of this
 /// module because a spawn of another module's function does not
 /// compile at this pin (`spawn proc module.f(…)`, wolf-lang#655 — the
 /// conservatism ledger lobo#62 and #65 met). Total.
-fn px_body(client: int, jr: int, out: int, id: int) -> int {
-    proxy.job_run(client, jr, out, id)
+fn px_body(jr: int, out: int) -> int {
+    proxy.job_loop(jr, out)
 }
 
-/// Slot `i` is a stream's: no job socket. Total.
-fn px_unmark(mut sjw: List[int], mut sjr: List[int], i: int) {
-    if i < 0 {
+/// Ask entry `i`'s exchange to stop (its generation passed
+/// `worker_shutdown_timeout`): one byte on its job socket. Total.
+fn px_stop(mut pxs: List[PxSlot], i: int, now: int) {
+    if i < 0 || i >= pxs.len || pxs[i].jw < 0 || pxs[i].stop_at > 0 {
         return
     }
-    while sjw.len <= i {
-        (mut sjw).push(-1)
-        (mut sjr).push(-1)
+    net_write(pxs[i].jw, "s") else |_| {}
+    pxs[i].stop_at = if now > 0 { now } else { 1 }
+}
+
+/// KILL entry `i`'s proc (a stop that did not land) and free the entry:
+/// `k` first (a proc that runs on past the kill, wolf-lang#683, returns
+/// at its next wait), the kill and the join, then what its proc left
+/// open (its notes) and the job socket's two ends. The proc is gone
+/// when the join returns, so nothing else is using them. Total.
+fn px_kill(mut pxs: List[PxSlot], i: int) {
+    if i < 0 || i >= pxs.len || pxs[i].jw < 0 {
+        return
     }
-    sjw[i] = -1
-    sjr[i] = -1
+    net_write(pxs[i].jw, "k") else |_| {}
+    pxs[i].w.kill()
+    let _v = pxs[i].w.join() else |e| match e {
+        killed => { 0 },
+        cancelled => { 0 },
+        error => { 0 },
+        fault => { 0 },
+    }
+    px_reap(pxs[i].jw, pxs[i].jr)
+    pxs[i].jw = -1
+    pxs[i].jr = -1
+    pxs[i].sock = -1
+    pxs[i].stop_at = 0
+}
+
+/// Idle procs past `ms` of idleness leave the pool (`ms` < 0: every
+/// idle one): `q` and the loop's end closed — the proc closes its own
+/// end when it reads them, and the entry is free. Total.
+fn px_retire(mut pxs: List[PxSlot], now: int, ms: int) {
+    var i = 0
+    while i < pxs.len {
+        if pxs[i].jw >= 0 &&
+            pxs[i].sock < 0 &&
+            pxs[i].stop_at == 0 &&
+            (ms < 0 || now - pxs[i].since >= ms) {
+            net_write(pxs[i].jw, "q") else |_| {}
+            net_close(pxs[i].jw) else |_| {}
+            pxs[i].jw = -1
+            pxs[i].jr = -1
+        }
+        i = i + 1
+    }
 }
 
 /// What the job socket holds, as text ("" when it is not UTF-8). With
@@ -4514,10 +4657,17 @@ fn px_read(jw: int, ms: int, whole: bool) -> str {
                 more = false
                 List[byte]()
             }
-            for b in piece {
-                (mut buf).push(b)
+            // an account comes in one read nearly always: take the read
+            // whole, and copy only what follows a short one
+            let plen = piece.len
+            if buf.is_empty() {
+                buf = piece
+            } else {
+                for b in piece {
+                    (mut buf).push(b)
+                }
             }
-            if piece.len == 0 {
+            if plen == 0 {
                 more = false
             } else if whole {
                 let t = str_from_utf8(buf) else |_| { "" }
