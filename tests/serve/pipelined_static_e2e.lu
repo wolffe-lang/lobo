@@ -1,0 +1,147 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws69 (lobo#104): PIPELINED REQUESTS ARE ANSWERED AT ONCE. A client
+//! that writes three static GETs in one segment is answered all three
+//! as fast as nginx answers them. Through ws68 the loop answered the
+//! first, kept the rest in the row's carry with its "holds a whole head"
+//! flag, and stepped the row again only after its next wait — a wait no
+//! byte would end, so each request after the first waited out the wait's
+//! budget: three pipelined GETs took 500 ms at trunk `251b6db` and on
+//! the tree before ws67 (`52a2ae7`, 0.1.4's loop), and 0.1 ms since
+//! ws69, where such a row makes the wait's budget zero
+//! (notes/ws69-contract.md §3). Against the real binary (`LOBO_BIN`,
+//! default target/lobo-debug): three GETs in one write on a fresh
+//! connection, five times, each answered whole inside 100 ms. RED at
+//! trunk. The server is put down by its handle before any assertion can
+//! fail. Loopback only, OS-chosen ports; the scratch tree is cleared at
+//! the START and the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// How many status lines `s` holds. Pure. Total.
+fn responses(s: str) -> int {
+    var n = 0
+    var at = 0
+    while at < s.len {
+        let rest = s[at..s.len]
+        let k = rest.find("HTTP/1.1 200") else -1
+        if k < 0 {
+            return n
+        }
+        n = n + 1
+        at = at + k + 12
+    }
+    n
+}
+
+/// Three GETs in one write on a fresh connection: the ms until all three
+/// answers are read whole, or -1 (not inside 2 s). Total.
+fn three(port: int) -> int {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return -1
+    }
+    let t0 = time_now_ms()
+    net_write(
+        c,
+        "GET /index.html HTTP/1.1\r\nHost: t\r\n\r\nGET /index.html HTTP/1.1\r\nHost: t\r\n\r\nGET /index.html HTTP/1.1\r\nHost: t\r\n\r\n",
+    ) else |_| {
+        net_close(c) else |_| {}
+        return -1
+    }
+    net_deadline(c, 2000) else |_| {}
+    var got = ""
+    while !(responses(got) == 3 && got.ends_with("small-page\n")) {
+        let piece = net_read(c, 4096) else |_| {
+            net_close(c) else |_| {}
+            return -1
+        }
+        if piece.is_empty() {
+            net_close(c) else |_| {}
+            return -1
+        }
+        got = "{got}{piece}"
+    }
+    net_close(c) else |_| {}
+    time_now_ms() - t0
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws69_pipelined_static"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    root {d}/www;\n  }}\n}}\n",
+    )?
+    let so = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds(bin, args, map)?
+    let came = wait_up(hp)
+    var times = List[int]()
+    var k = 0
+    while came && k < 5 {
+        (mut times).push(three(hp))
+        time_sleep_ms(300)
+        k = k + 1
+    }
+    print("three static GETs pipelined in one write, answered in {times} ms (-1: not inside 2 s)")
+    os_kill(h) else |_| {}
+    let _k = os_wait(h) else |_| { 0 }
+    fs_close(so) else |_| {}
+    assert(came, "the server came up")
+    var slow = 0
+    for t in times {
+        if t < 0 || t >= 100 {
+            slow = slow + 1
+        }
+    }
+    assert(
+        times.len == 5 && slow == 0,
+        "every three were answered inside 100 ms: {times} ms (trunk: 500 each)",
+    )
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
