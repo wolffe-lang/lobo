@@ -1,7 +1,7 @@
 module pkg :: proxy
   wolfi v0 · toolchain 0.2.33 · edition v1
-  export_hash 847e29dcbe8f1cc697227d420c5ab04016153b57261b7cfa6e5d6eadbb636f90
-  pkg_hash    847e29dcbe8f1cc697227d420c5ab04016153b57261b7cfa6e5d6eadbb636f90
+  export_hash 8e6a6eb98e66874ac204eca135a16ffc3a1ca972fb912c1afffc2928e8e3e086
+  pkg_hash    8e6a6eb98e66874ac204eca135a16ffc3a1ca972fb912c1afffc2928e8e3e086
   deps:
     config  ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
     http  7ee1eadde9554ff066159f14587f5fd0d45231a2050947b06eee3ef4b2d7572a
@@ -16,8 +16,8 @@ module pkg :: proxy
     [1] pub exchange — fn exchange(client: int, j: self.Job, notes: int, mut acc: self.RunAcc) -> bool ! {closed, io} · regions (-, ρ1, -, ρ2) -> -
     [2] pub expand_var — fn expand_var(v: str, host: str, remote_addr: str, proxy_host: str, inbound_xff: str) -> str
     [3] pub is_hop_by_hop — fn is_hop_by_hop(lname: str) -> bool
-    [4] pub job_parse — fn job_parse(s: str) -> self.Job ! {bad} · regions (-) -> ρ_caller
-    [5] pub job_run — fn job_run(client: int, jr: int, out: int, id: int) -> int
+    [4] pub job_loop — fn job_loop(jr: int, out: int) -> int
+    [5] pub job_parse — fn job_parse(s: str) -> self.Job ! {bad} · regions (-) -> ρ_caller
     [6] pub job_serve — fn job_serve(client: int, job_s: str, tail: str, notes: int) -> (str, int) · regions (-, -, -, -) -> ρ_caller
     [7] pub job_text — fn job_text(j: self.Job) -> str · regions (ρ1) -> -
     [8] pub parse_pass — fn parse_pass(c: config.Conf, arg: str) -> self.PassTarget · regions (ρ1, -) -> ρ_caller
