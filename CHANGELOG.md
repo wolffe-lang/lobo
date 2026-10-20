@@ -46,9 +46,10 @@ Four smaller changes an operator may notice:
   `worker_connections` while its upstream exchange is out (nginx's
   count): at `worker_connections 16` with one `listen`, seven are held
   and the eighth is closed with nginx's `[alert]`.
-- Proxied requests a second **with one client at a time** are below
-  0.1.4's — 0.62–0.88x on kasumi (ws69; ws67's first shape was half) —
-  and above it with many clients at once (1.70x at 32): each exchange
+- Proxied requests a second **with one client at a time** are a little
+  below 0.1.4's — 0.82x and 0.96x on a quiet kasumi in two shapes,
+  0.62x and 0.88x under load (ws69; ws67's first shape was half) — and
+  at or above it with many clients at once (1.06x at 32): each exchange
   runs in a proc beside the serving loop, the price of a silent upstream
   no longer holding the process (lobo#100).
 - `$request_time` is the request's own time (ws69, lobo#105): through
@@ -94,9 +95,10 @@ new one (`-s reload` keeps the running binary).
   proxied request (44.6 system calls a request against the inline
   exchange's 9.25); the serving loop now keeps a pool of exchange procs,
   each on its own job socket, across exchanges (24.7 calls; a proc idle
-  five seconds leaves). On kasumi, against the tree before ws67: 0.62x
-  and 0.88x with one client in turn (ws67: 0.50x, 0.69x), 1.70x with 32
-  clients. What is left with one client is the cost of an exchange
+  five seconds leaves). On a quiet kasumi, against the tree before
+  ws67: 0.82x and 0.96x with one client in turn (ws67's shape: 0.51x,
+  0.79x), 1.06x with 32 clients (nginx's own number); under load 0.62x
+  and 0.88x. What is left with one client is the cost of an exchange
   beside the loop — two thread wakes a request, and the runtime's
   compensation for each wait — measured, with its cause, in
   `notes/ws69-contract.md`.
@@ -110,6 +112,10 @@ new one (`-s reload` keeps the running binary).
 - **A request pipelined while a proxied one waits is answered** (ws69,
   lobo#104), right after the proxied reply and with the connection
   kept, as nginx; ws68's exchange closed the connection instead.
+- **Pipelined requests are answered at once** (ws69). Through 0.1.4
+  each request after the first in one segment waited out the serving
+  loop's 250 ms wait before it was answered: three pipelined GETs took
+  500 ms. Now 0.1 ms, as nginx.
 - **A failed start leaves nothing; a stale control socket is taken
   over** (ws67, lobo#94). A start that fails after binding its `unix:`
   control socket removes what it made, and a lobo ended by `kill -9`
