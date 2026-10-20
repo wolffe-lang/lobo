@@ -1,0 +1,238 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws69 (lobo#105): `$request_time` IS THE REQUEST'S OWN TIME. nginx
+//! logs the time from the request's first bytes read to its end
+//! (measured on the pinned 1.30.4, notes/ws69-contract.md §2): a static
+//! GET on a keepalive connection idle a second logs 0.000, a proxied GET
+//! its upstream answers in 0.5 s logs 0.503, and a proxied request whose
+//! client closes 1.0 s after it logs `499` at 1.000. Through ws68 lobo
+//! read both ends off the loop's pass clock, which is read BEFORE the
+//! pass's wait: a request that arrived during a wait began up to the
+//! wait's budget (250 ms) early, and an exchange reported during one
+//! ended there — 0.250, 0.750 and 0.751 at trunk `251b6db`. Since ws69
+//! a request starts at the clock read after the wait that brought its
+//! first bytes, a request served in the step ends there, and an exchange
+//! ends at the clock its proc read when it finished. Against the real
+//! binary (`LOBO_BIN`, default target/lobo-debug), an upstream this test
+//! answers itself, `log_format t '$status "$request" rt=$request_time'`:
+//!   1. a static GET, a second's idleness, a static GET on the same
+//!      connection: the second logs `rt` under 0.050 (trunk 0.250);
+//!   2. a proxied GET on it, answered 500 ms after the upstream read it:
+//!      `rt` 0.450–0.650 (trunk 0.750);
+//!   3. a proxied GET on a fresh connection, its client closing 1.0 s
+//!      later: `499`, `rt` 0.950–1.150 (trunk 0.751).
+//! The server is put down by its handle before any assertion can fail.
+//! Loopback only, OS-chosen ports; the scratch tree is cleared at the
+//! START and the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// The upstream's side of one exchange: accept on `up` within 3 s and
+/// read the request's head. The connection, or -1. Total.
+fn accept_up(up: int) -> int {
+    net_deadline(up, 3000) else |_| {}
+    let uc = net_accept(up) else |_| {
+        return -1
+    }
+    net_deadline(uc, 3000) else |_| {}
+    var got = ""
+    while !got.contains("\r\n\r\n") {
+        let piece = net_read(uc, 4096) else |_| {
+            return uc
+        }
+        got = "{got}{piece}"
+    }
+    uc
+}
+
+/// Read `c` until what it read ends with `tail`, or 2 s pass. Total.
+fn read_to(c: int, tail: str) -> str {
+    net_deadline(c, 2000) else |_| {}
+    var out = ""
+    while !out.ends_with(tail) {
+        let piece = net_read(c, 4096) else |_| {
+            return out
+        }
+        if piece.is_empty() {
+            return out
+        }
+        out = "{out}{piece}"
+    }
+    out
+}
+
+/// The access log's lines, after up to 2 s for `want` of them. Total.
+fn log_lines(f: str, want: int) -> List[str] {
+    var i = 0
+    while i < 40 {
+        let text = fs_read_text(f) else |_| { "" }
+        var got = List[str]()
+        for l in text.lines() {
+            (mut got).push(l)
+        }
+        if got.len >= want {
+            return got
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    List[str]()
+}
+
+/// A line's `rt=` in milliseconds, or -1. Pure. Total.
+fn rt_ms(line: str) -> int {
+    let k = line.find(" rt=") else -1
+    if k < 0 {
+        return -1
+    }
+    let v = line[k + 4..line.len]
+    let dot = v.find(".") else -1
+    if dot < 0 {
+        return -1
+    }
+    let s = v[0..dot].to_int() else |_| { -1 }
+    let ms = v[dot + 1..v.len].to_int() else |_| { -1 }
+    if s < 0 || ms < 0 || v.len - dot - 1 != 3 {
+        return -1
+    }
+    s * 1000 + ms
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws69_request_time"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let up = net_listen("127.0.0.1:0")?
+    let uport = net_port(up)?
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status \"$request\" rt=$request_time';\n  access_log {d}/logs/access.log t;\n  server {{\n    listen 127.0.0.1:{hp};\n    root {d}/www;\n    location /up/ {{ proxy_pass http://127.0.0.1:{uport}; proxy_read_timeout 30s; }}\n  }}\n}}\n",
+    )?
+    let so = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds(bin, args, map)?
+    let came = wait_up(hp)
+
+    var u2 = -1
+    var u3 = -1
+    var r2 = ""
+    if came {
+        // 1. two static GETs on one connection, a second apart
+        let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+        if c >= 0 {
+            net_write(c, "GET /index.html HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+            let _a = read_to(c, "small-page\n")
+            time_sleep_ms(1000)
+            net_write(c, "GET /index.html?again HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+            let _b = read_to(c, "small-page\n")
+            // 2. a proxied GET on it, answered 500 ms after it is read
+            net_write(c, "GET /up/answered HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+            u2 = accept_up(up)
+            if u2 >= 0 {
+                time_sleep_ms(500)
+                net_write(
+                    u2,
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 3\r\nConnection: close\r\n\r\nok\n",
+                ) else |_| {}
+                r2 = read_to(c, "ok\n")
+            }
+            net_close(c) else |_| {}
+        }
+        // 3. a proxied GET whose client closes 1.0 s later
+        let c3 = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+        if c3 >= 0 {
+            net_write(c3, "GET /up/closed HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+            u3 = accept_up(up)
+            time_sleep_ms(1000)
+            net_close(c3) else |_| {}
+        }
+    }
+    let lines = log_lines("{d}/logs/access.log", 4)
+    for l in lines {
+        print("access: {l}")
+    }
+    os_kill(h) else |_| {}
+    let _k = os_wait(h) else |_| { 0 }
+    if u2 >= 0 {
+        net_close(u2) else |_| {}
+    }
+    if u3 >= 0 {
+        net_close(u3) else |_| {}
+    }
+    net_close(up) else |_| {}
+    fs_close(so) else |_| {}
+    var idle_rt = -2
+    var up_rt = -2
+    var closed_rt = -2
+    var closed_ok = false
+    for l in lines {
+        if l.contains("/index.html?again ") {
+            idle_rt = rt_ms(l)
+        } else if l.contains("/up/answered ") {
+            up_rt = rt_ms(l)
+        } else if l.contains("/up/closed ") {
+            closed_rt = rt_ms(l)
+            closed_ok = l.starts_with("499 ")
+        }
+    }
+    assert(came, "the server came up")
+    assert(u2 >= 0 && u3 >= 0, "both exchanges dialled the upstream and wrote their requests")
+    assert(r2.ends_with("ok\n"), "the proxied GET was answered")
+    assert(
+        idle_rt >= 0 && idle_rt < 50,
+        "a static GET after a second's idleness: rt {idle_rt} ms, nginx 0 (trunk: 250)",
+    )
+    assert(
+        up_rt >= 450 && up_rt <= 650,
+        "a proxied GET answered in 500 ms: rt {up_rt} ms, nginx 503 (trunk: 750)",
+    )
+    assert(
+        closed_ok && closed_rt >= 950 && closed_rt <= 1150,
+        "a client that closed 1.0 s after its request: 499 at rt {closed_rt} ms, nginx 1000 (trunk: 751)",
+    )
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
