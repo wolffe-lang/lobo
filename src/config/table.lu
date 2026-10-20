@@ -587,7 +587,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "upstream read deadline (expiry -> 504). Since ws67 (lobo#81) the exchange runs in a proc beside the serving loop, so an upstream that never answers holds its own request for this long and nothing else: every other client is served and `-s stop` is obeyed at once (through 0.1.4 it held the whole process). Since ws68 (lobo#99) a plaintext exchange waits on its upstream AND its client, so a client that closes or half-closes ends it at once — the upstream connection closed, nothing written, the request logged 499 with no upstream status — as nginx (`proxy_ignore_client_abort off`, its default). Named deltas: an https upstream's wait does not watch the client (its reads are std.x.tls.client's); a client that pipelines a request while its exchange waits gets this reply with `Connection: close` (nginx answers the pipelined request too)",
+        "upstream read deadline (expiry -> 504). Since ws67 (lobo#81) the exchange runs in a proc beside the serving loop, so an upstream that never answers holds its own request for this long and nothing else: every other client is served and `-s stop` is obeyed at once (through 0.1.4 it held the whole process). Since ws68 (lobo#99) a plaintext exchange waits on its upstream AND its client, so a client that closes or half-closes ends it at once — the upstream connection closed, nothing written, the request logged 499 with no upstream status — as nginx (`proxy_ignore_client_abort off`, its default). Since ws69 (lobo#104) an https exchange waits behind the same watch, for the server's first flight and before each record, and a request the client pipelines meanwhile is answered next with the connection kept, as nginx. Named residue: a read that meets a post-handshake message (a NewSessionTicket) waits for the next record inside std.x.tls.client, unwatched",
     )
     // ---- ws13 (wsc05 opens): the resolver — async upstream DNS
     row(
@@ -790,7 +790,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "drain deadline: a reloaded generation drains its held connections, and this is how long before the remainder are aborted and it retires anyway (ws08; nginx's semantics — 0/absent means drain fully, no forced timeout)",
+        "drain deadline: a reloaded generation drains its held connections, and this is how long before the remainder are aborted and it retires anyway (ws08; nginx's semantics — 0/absent means drain fully, no forced timeout). A proxied exchange still waiting then is stopped: its upstream connection closed, its client's closed with nothing written, as nginx (ws69; nginx logs the request `000 0`, lobo does not log it)",
     )
     row(
         mut t,
