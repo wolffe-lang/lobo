@@ -951,6 +951,23 @@ rev = "0e536e8fb4518eaa798ac426901ab81275db5c9f"
 version_line = "lupin 0.1.54 (wolf-interp, reference interpreter at pin 294d626)"
 
 [std]
+# wolf-std at **cceda63** (ws68, 2026-10-20; sc64 and sc65: the std
+# wolf 0.2.33's archive bundles, `std/STD-REV` cceda631…, ruling #85's
+# wrappers for 0.2.31's calls). Re-derived against 0.2.33 before any
+# source change (B151): trunk's lobo source (9e4ce7f) built at 0.2.33
+# against d37c911 and against cceda63, both tiers, exits 0 with zero
+# diagnostics at --error-limit=0
+# (kasumi:~/lanes/ws68/logs/build-t33-sd3.log, build-t33.log). The
+# digests DIFFER: of the two files d37c911 -> cceda63 touches under
+# std/ (process/process.lu +313, signal/signal.lu +186), lobo `use`s
+# both — `std.process` for the privilege drop (ws67's `set_ids`),
+# `std.signal` for its meanings (ws63) — and calls nothing new (the
+# new names are `Status`, `poll`, `Group`, the group sends, `text`,
+# `host`). The move keeps lobo on the std its compiler ships with, so
+# a reader of `-V` and of the archive sees one tree. Release
+# 14,804,112 -> 14,805,592 bytes, dev 17,036,912 -> 17,049,168.
+#
+# (ws66:)
 # wolf-std at **d37c911** (ws66, 2026-10-18; sc63: the std wolf 0.2.32's
 # archive bundles, `std/STD-REV` d37c911f…, pinned to 0.2.31 / 0.1.54).
 # Re-derived against 0.2.32 before any source change (B151): trunk's
@@ -1174,4 +1191,4 @@ version_line = "lupin 0.1.54 (wolf-interp, reference interpreter at pin 294d626)
 # WOLF_MIDEND=0" was written at the twentieth measurement. #146 closed
 # 2026-09-15; ws52 took the flip-back at 0.2.24 — see [wolf].)
 repo = "wolffe-lang/wolf-std"
-rev = "d37c911f12206c4bf5c8d3281a649bf31da3beef"
+rev = "cceda63151430eac07df895fdfffddfa4a0b92c1"
