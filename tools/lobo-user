@@ -26,12 +26,15 @@
 #      audit "match nginx"; ws67 kept one root process, a named delta):
 #      nginx's default `user nobody nobody` — a master that keeps root
 #      and ONE hand with the ids the pinned nginx's worker takes IN THIS
-#      CONTAINER (the account named nobody's uid, else 65534; the group
-#      named nobody's gid, else 65534; that gid and every group listing
-#      nobody: notes/ws68-contract.md §2), a root-only file 403, and no
-#      line about it (nginx prints none);
-#   7. …with no account named nobody: the same ids, and lobo's one
-#      `[warn]` (nginx drops and says nothing);
+#      CONTAINER (the account named nobody; the group named nobody, else
+#      nogroup — the group is the nginx build's: arch's asks for nobody,
+#      ubuntu's for nogroup; that gid and every group listing nobody:
+#      notes/ws68-contract.md §3), a root-only file 403, and no line
+#      about it (nginx prints none);
+#   7. …with no account named nobody: nginx refuses to start
+#      (`[emerg] getpwnam("nobody") failed`, where the name service has
+#      no such account), lobo keeps one root process and says so in one
+#      `[warn]` (the contract's warning, kept: a named delta);
 #   8. …with a group listing nobody: it joins the hand's groups;
 #   9. `user root;`: the hand keeps root, as nginx's worker does.
 # Rows 6–9 run the pinned oracle in the same container first, when it
@@ -119,12 +122,16 @@ if [ "${1:-}" = "--inside" ]; then
         wait "$MP" 2> /dev/null
     }
     owner() { stat -c '%U:%G' "$1" 2> /dev/null || echo none; }
-    # nginx's default, as measured (ws68): the lines a worker reads
+    # nginx's default, as measured (ws68): the lines a worker reads, or
+    # "unresolved" where nginx refuses to start
     rule_ids() {
         u=$(awk -F: '$1 == "nobody" { print $3; exit }' /etc/passwd)
         g=$(awk -F: '$1 == "nobody" { print $3; exit }' /etc/group)
-        u=${u:-65534}
-        g=${g:-65534}
+        [ -n "$g" ] || g=$(awk -F: '$1 == "nogroup" { print $3; exit }' /etc/group)
+        if [ -z "$u" ] || [ -z "$g" ]; then
+            echo unresolved
+            return
+        fi
         gs=$( (echo "$g"; awk -F: '{ n = split($4, m, ","); for (i = 1; i <= n; i++) if (m[i] == "nobody") print $3 }' /etc/group) | sort -un | tr '\n' ' ' | sed 's/ $//')
         echo "Uid: $u $u $u $u|Gid: $g $g $g $g|Groups: $gs|"
     }
@@ -132,7 +139,7 @@ if [ "${1:-}" = "--inside" ]; then
     ng_ids() {
         [ -n "$ORACLE" ] || { echo none; return; }
         printf '%s\npid logs/ng.pid;\nerror_log logs/ng-error.log;\nevents { worker_connections 64; }\nhttp { access_log logs/ng-access.log; server { listen 80; root html; } }\n' "$1" > "$D/n.conf"
-        "$ORACLE" -p "$D/" -c n.conf > "$D/ng.out" 2>&1 || { echo none; return; }
+        "$ORACLE" -p "$D/" -c n.conf > "$D/ng.out" 2>&1 || { echo "refused: $(head -1 "$D/ng.out" | cut -c1-120)"; return; }
         i=0
         while [ $i -lt 50 ] && [ ! -s "$D/logs/ng.pid" ]; do sleep 0.1; i=$((i + 1)); done
         NM=$(cat "$D/logs/ng.pid" 2> /dev/null)
@@ -153,7 +160,7 @@ if [ "${1:-}" = "--inside" ]; then
         member) echo 'extra:x:1700:nobody' >> /etc/group ;;
         esac
     }
-    # default_row <label> <accounts> <main-context line> <also-warn: yes|no>
+    # default_row <label> <accounts> <main-context line>
     default_row() {
         accounts "$2"
         fresh "$3"
@@ -161,7 +168,7 @@ if [ "${1:-}" = "--inside" ]; then
         ng=$(ng_ids "$3")
         say "$1: nginx's worker: $ng — the measured rule: $want"
         [ "$ng" = none ] || [ "$ng" = "$want" ]
-        check "$1: the pinned nginx's worker reads the measured rule (or the oracle does not run here)" $?
+        check "$1: the pinned nginx's worker reads the measured rule (or the oracle does not run here: none)" $?
         start
         if up; then
             KP=$MP; H=$(kids | head -1); NH=$(kids | wc -l | tr -d ' ')
@@ -179,13 +186,8 @@ if [ "${1:-}" = "--inside" ]; then
             esac
             [ "$(ids "${H:-0}" 2> /dev/null)" = "$want" ]
             check "$1: the hand reads nginx's worker's lines ($want)" $?
-            if [ "$4" = yes ]; then
-                check "$1: one [warn] says no account is named nobody" \
-                    "$(grep -q '\[warn\] no "user" directive and no account named "nobody"' "$D/serve.out" && echo 0 || echo 1)"
-            else
-                check "$1: no line about the user (nginx prints none)" \
-                    "$(grep -q '\[warn\].*"user"' "$D/serve.out" && echo 1 || echo 0)"
-            fi
+            check "$1: no line about the user (nginx prints none)" \
+                "$(grep -q '\[warn\].*"user"' "$D/serve.out" && echo 1 || echo 0)"
             stop
         else
             check "$1: the server came up on :80 ($(tr '\n' ' ' < "$D/serve.out" | cut -c1-300))" 1
@@ -277,10 +279,39 @@ if [ "${1:-}" = "--inside" ]; then
     check "not root: -t exits 0 ($rc) with nginx's [warn]" \
         "$([ "$rc" = 0 ] && grep -q '\[warn\] the "user" directive makes sense only if the master process runs with super-user privileges, ignored in' "$D/t.out" && echo 0 || echo 1)"
 
-    # 6–8. root, NO user line — nginx's default (ws68)
-    default_row "root, no user line" stock "worker_processes 1;" no
-    default_row "no user line, no account named nobody" nouser "worker_processes 1;" yes
-    default_row "no user line, a group listing nobody" member "worker_processes 1;" no
+    # 6, 8. root, NO user line — nginx's default (ws68); 7 below
+    default_row "root, no user line" stock "worker_processes 1;"
+
+    # 7. no account named nobody: nginx refuses; lobo keeps root, said once
+    accounts nouser
+    fresh "worker_processes 1;"
+    ng=$(ng_ids "worker_processes 1;")
+    syn=$(getent passwd nobody 2> /dev/null)
+    say "no account named nobody: nginx: $ng (the name service's nobody: ${syn:-none})"
+    if [ -z "$syn" ]; then
+        case "$ng" in "refused: "*'getpwnam("nobody") failed'* | none) ok7=0 ;; *) ok7=1 ;; esac
+    else
+        ok7=0
+        say "no account named nobody: this image's name service answers nobody without /etc/passwd (lobo reads the files only: a named delta)"
+    fi
+    check "no account named nobody: the pinned nginx refuses to start (getpwnam(\"nobody\") failed) — or this image's name service answers nobody, or the oracle does not run here" "$ok7"
+    start
+    if up; then
+        KP=$MP; NH=$(kids | wc -l | tr -d ' ')
+        say "no account named nobody: lobo $MP: $(ids "$MP"), $NH hand(s)"
+        [ "$(ids "$MP")" = "Uid: 0 0 0 0|Gid: 0 0 0 0|Groups: 0|" ] && [ "$NH" = 0 ]
+        check "no account named nobody: lobo keeps one root process (a named delta: nginx refuses to start)" $?
+        check "no account named nobody: its one [warn] says so" \
+            "$(grep -q '\[warn\] running as root with no "user" directive and no account named "nobody"' "$D/serve.out" && echo 0 || echo 1)"
+        stop
+    else
+        check "no account named nobody: the server came up on :80 ($(tr '\n' ' ' < "$D/serve.out" | cut -c1-300))" 1
+        kill "$MP" 2> /dev/null
+        wait "$MP" 2> /dev/null
+    fi
+    accounts stock
+
+    default_row "no user line, a group listing nobody" member "worker_processes 1;"
 
     # 9. user root — the hand keeps root, as nginx's worker
     fresh "user root;"
