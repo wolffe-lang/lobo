@@ -451,9 +451,12 @@ if [ "$lim_ready" = 1 ]; then
     # a fresh GET beside them is refused too. Through 0.1.4 lobo's loop
     # was held by the first exchange: nothing after it was even taken.
     # When the clients close, nginx drops their exchanges at once
-    # (proxy_ignore_client_abort off) and serves; lobo's proc does not
-    # see the close while it waits on its upstream, so its exchanges
-    # end at proxy_read_timeout (10 s here): a named delta.
+    # (proxy_ignore_client_abort off) and serves. Through ws67 lobo's
+    # proc did not see the close while it waited on its upstream, so its
+    # exchanges ended at proxy_read_timeout (10 s here): a named delta.
+    # Since ws68 (lobo#99) the proc waits on its upstream AND its client
+    # (`net_wait` over both), so a client's close ends the exchange at
+    # once and frees both connections, as nginx's: parity.
     "$WOLF" run "$rig_root"/tests/rig/wedge.lu 20000 > "$lim/wedge.port" 2> "$lim/wedge.err" &
     wp=""
     _i=0
@@ -478,11 +481,11 @@ if [ "$lim_ready" = 1 ]; then
     total=$((total + 1))
     case "$ng_line" in *" after=200") ngafter=200 ;; *) ngafter="${ng_line##*after=}" ;; esac
     lbafter="${lb_line##*after=}"
-    if [ "$ngafter" = 200 ] && [ "$lbafter" = closed ]; then
-        named=$((named + 1))
-        echo "lobo-shell: ok — [8 proxied requests, after the clients close] lobo after=$lbafter vs oracle after=$ngafter (named: lobo's exchange does not see its client close while it waits on the upstream — nginx's proxy_ignore_client_abort off — so it ends at proxy_read_timeout)"
+    if [ "$ngafter" = 200 ] && [ "$lbafter" = 200 ]; then
+        parity=$((parity + 1))
+        echo "lobo-shell: ok — [8 proxied requests, after the clients close] both after=200: each exchange sees its client close and is dropped at once, its two connections freed (nginx's proxy_ignore_client_abort off; lobo since ws68, lobo#99)"
     else
-        echo "lobo-shell: FAILED — [8 proxied requests, after the clients close] lobo after=$lbafter, oracle after=$ngafter (the named delta moved — re-measure)" >&2
+        echo "lobo-shell: FAILED — [8 proxied requests, after the clients close] lobo after=$lbafter, oracle after=$ngafter (through ws67 lobo's exchanges held until proxy_read_timeout: after=closed)" >&2
         red=$((red + 1))
     fi
 
