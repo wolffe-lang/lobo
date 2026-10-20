@@ -6037,7 +6037,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         let why = if config.user_drops(c0, config.self_euid()) {
             "user directive"
         } else {
-            "no user directive: nginx's default, user nobody nobody"
+            "no user directive: nginx's default user"
         }
         ev_log(
             mut elog_st,
