@@ -278,14 +278,15 @@ serve linux aarch64.
   each on its own loopback job socket. What it costs: about four
   descriptors and a thread while an exchange is out, two descriptors
   and a parked thread for each pool proc for five seconds after its
-  last exchange, and on kasumi, against a prompt upstream, 0.62–0.88x
-  0.1.4's proxied requests a second with one client in turn (ws67's
-  first shape: about half) — two thread wakes an exchange — and more
-  than 0.1.4's with 32 clients. A client that closes while its exchange
-  waits ends it at once, as nginx's does (since ws68, lobo#99; behind
-  an `https` upstream since ws69, but for a TLS read that meets a
-  post-handshake message and waits inside the TLS client for the next
-  record), and a request it pipelines meanwhile is answered next.
+  last exchange, and on a quiet kasumi, against a prompt upstream,
+  0.82–0.96x 0.1.4's proxied requests a second with one client in turn
+  (0.62–0.88x under load; ws67's first shape: about half) — two thread
+  wakes an exchange — and 1.06x with 32 clients. A client that closes
+  while its exchange waits ends it at once, as nginx's does (since
+  ws68, lobo#99; behind an `https` upstream since ws69, but for a TLS
+  read that meets a post-handshake message and waits inside the TLS
+  client for the next record), and a request it pipelines meanwhile is
+  answered next.
 - **Memory.** Built with wolf 0.2.28 or 0.2.29 a serving lobo is flat
   over requests and connections (0 KB over 4,000 keepalive requests
   and over 2,000 connections in the gate), and so is a master supervising
