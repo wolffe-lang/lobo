@@ -36,6 +36,17 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws68, 2026-10-20, wolf 0.2.33, std `cceda63`: the audit reads net
++197, fs +128, exec +18, env +10 (trunk `9e4ce7f` at 0.2.32: net +194,
+fs +124, exec +18, env +9; the bare pin moves nothing; the std move
+alone reads net +195, env +10: `std.process` at `cceda63` reaches one
+net and one env site more). No capability moves. The two new net
+calls are the proxied exchange's watch on its client (lobo#99: one
+`net_wait` over the upstream and the client, one `net_read` of the
+client when only it is ready); the four new fs calls read
+`/etc/passwd` and `/etc/group` for nginx's default user when there is
+no `user` line (`hand_ids_host`, `root_note_host`).)
+
 (ws67, 2026-10-19, wolf 0.2.32, std `d37c911`: the audit reads net
 +194, fs +124, exec +18, env +9 (trunk `9a4723c`: net +179, fs +116,
 exec +18, env +6). No capability moves. `config/userconf.lu` imports
