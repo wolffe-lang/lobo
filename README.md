@@ -278,8 +278,10 @@ serve linux aarch64.
   out, and on kasumi about half 0.1.4's proxied requests a second
   against a prompt upstream (one client in turn: 0.48x; `ab -c 32`:
   0.44-0.57x) — a proc and a loopback job socket per exchange. A
-  client that closes while its exchange waits is not noticed until
-  `proxy_read_timeout` (nginx drops the exchange at once).
+  client that closes while its exchange waits ends it at once, as
+  nginx's does (since ws68, lobo#99), except behind an `https`
+  upstream, whose wait is the TLS client's and lasts until
+  `proxy_read_timeout`.
 - **Memory.** Built with wolf 0.2.28 or 0.2.29 a serving lobo is flat
   over requests and connections (0 KB over 4,000 keepalive requests
   and over 2,000 connections in the gate), and so is a master supervising
