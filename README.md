@@ -272,16 +272,20 @@ serve linux aarch64.
   (lobo#81; through 0.1.4 `proxy_pass` asked the upstream inside the
   serving loop, so one silent upstream held every other client of
   that process for `proxy_read_timeout`) each exchange runs in a proc
-  of its own and reports when it is done: a silent upstream holds its
-  own request and nothing else, and `-s stop` is obeyed at once. What
-  it costs: about four descriptors and a thread while an exchange is
-  out, and on kasumi about half 0.1.4's proxied requests a second
-  against a prompt upstream (one client in turn: 0.48x; `ab -c 32`:
-  0.44-0.57x) — a proc and a loopback job socket per exchange. A
-  client that closes while its exchange waits ends it at once, as
-  nginx's does (since ws68, lobo#99), except behind an `https`
-  upstream, whose wait is the TLS client's and lasts until
-  `proxy_read_timeout`.
+  beside the loop and reports when it is done: a silent upstream holds
+  its own request and nothing else, and `-s stop` is obeyed at once.
+  Since ws69 (lobo#100) the procs are a pool kept across exchanges,
+  each on its own loopback job socket. What it costs: about four
+  descriptors and a thread while an exchange is out, two descriptors
+  and a parked thread for each pool proc for five seconds after its
+  last exchange, and on kasumi, against a prompt upstream, 0.62–0.88x
+  0.1.4's proxied requests a second with one client in turn (ws67's
+  first shape: about half) — two thread wakes an exchange — and more
+  than 0.1.4's with 32 clients. A client that closes while its exchange
+  waits ends it at once, as nginx's does (since ws68, lobo#99; behind
+  an `https` upstream since ws69, but for a TLS read that meets a
+  post-handshake message and waits inside the TLS client for the next
+  record), and a request it pipelines meanwhile is answered next.
 - **Memory.** Built with wolf 0.2.28 or 0.2.29 a serving lobo is flat
   over requests and connections (0 KB over 4,000 keepalive requests
   and over 2,000 connections in the gate), and so is a master supervising
