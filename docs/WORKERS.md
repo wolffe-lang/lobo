@@ -757,40 +757,49 @@ call fails.
 ## ws68 — root with no `user` line drops to nginx's default
 
 The `user` default was a ruling asked at audit; the recommendation,
-"match nginx", is what lobo does since ws68. nginx documents its default
-as `user nobody nobody;`, and as root with no `user` line its workers
-take ids by a rule measured on the pinned 1.30.4 as root in a container
-(notes/ws68-contract.md §2), never read from its source:
+"match nginx", with the warning kept where `nobody` does not exist, is
+what lobo does since ws68. nginx documents its default as `user nobody
+nobody;`. As root with no `user` line its workers take ids by a rule
+measured on the pinned 1.30.4 as root in containers
+(notes/ws68-contract.md §3), never read from its source:
 
-- the uid is the account NAMED `nobody`'s, else 65534 (no such
-  account: nginx still starts and drops, and says nothing);
-- the gid is the group NAMED `nobody`'s, else 65534 — not the account's
-  own gid (an account `nobody` of 65000:65000 and no group of that name
-  gave `Gid: 65534`);
-- the supplementary groups are that gid and every group listing
+- the names are resolved when nginx starts, through the host's name
+  service: `nobody` renumbered to 99:99 gives `Uid: 99`, `Gid: 99`;
+- the GROUP is the build's: the oracle built on arch asks for the group
+  `nobody`; CI's, built on ubuntu (which has no such group and `nogroup`
+  at 65534), starts there with `Gid: 65534`;
+- with no such account, or no such group, nginx refuses to start:
+  `[emerg] getpwnam("nobody") failed` (`getgrnam`), where the name
+  service has none (an arch host's `systemd` module answers `nobody`
+  with no line in `/etc/passwd`, and nginx then drops to its 65534);
+- the supplementary groups are the gid and every group listing
   `nobody` as a member.
 
-lobo resolves the same off `/etc/passwd` and `/etc/group`
-(`config.default_ids`, pure, held row by row in
-`tests/config/user_directive.lu`), so root with no `user` line is a
+lobo is one binary for every linux, so it takes the account named
+`nobody` and the group named `nobody`, else `nogroup` — on each
+distribution what that distribution's nginx takes — off `/etc/passwd`
+and `/etc/group` (`config.default_ids`, pure, held row by row in
+`tests/config/user_directive.lu`). So root with no `user` line is a
 master that keeps root and its hands (one with `worker_processes 1`)
 drop exactly as a `user` line's do (above): the logs are given to the
 user, a root-only file is 403, port 80 still answers. On ubuntu 24.04
 and arch alike that is `Uid: 65534 ×4`, `Gid: 65534 ×4`, `Groups:
 65534`, the same lines as nginx's worker in the same container
 (`tools/lobo-user` rows 6–9, against the oracle where it runs). lobo
-prints nothing about it, as nginx, except where nginx is silently
-different from what an operator may expect or lobo cannot follow:
+prints nothing about it, as nginx, and keeps root with one `[warn]`
+where it cannot follow (named deltas):
 
-- **No account named `nobody`**: the hands drop to 65534 all the same
-  (nginx's ids), and lobo says so in one `[warn]` (nginx prints none).
-- **A host that cannot drop** (macOS: `set_ids` is linux's at this pin):
-  root kept, one `[warn]` (a named delta).
-- **`cert auto`**: root kept, one `[warn]` (a named delta). Hand 1 owns
-  the renewal and writes lobo's own certificate store, which a drop has
-  not been verified against (lobo#102); nginx has no `cert auto`.
-- **`user root;`** keeps root in the hands, as it keeps nginx's workers
-  root: the way to say 0.1.4's posture in the configuration.
+- **No account named `nobody`** (or no group for it): nginx refuses to
+  start; lobo keeps root and says so — a root deployment in a minimal
+  image that served before keeps serving. lobo reads the files only, so
+  a `nobody` only the name service answers is not seen.
+- **A host that cannot drop** (macOS: `set_ids` is linux's at this pin).
+- **`cert auto`**: hand 1 owns the renewal and writes lobo's own
+  certificate store, which a drop has not been verified against
+  (lobo#102); nginx has no `cert auto`.
+
+**`user root;`** keeps root in the hands, as it keeps nginx's workers
+root: the way to say 0.1.4's posture in the configuration.
 
 What changes for an operator who ran lobo as root with no `user` line
 (every root deployment of 0.1.0–0.1.4, which refused `user` as root):
@@ -798,4 +807,3 @@ the hands are not root, so a file only root may read is no longer
 served (403), the log files become the user's, and a reload whose
 configuration or key only root may read is refused by every hand
 (lobo#101, above), where it took before.
-
