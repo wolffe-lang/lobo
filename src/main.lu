@@ -1301,10 +1301,12 @@ fn serve_main(
     if worker == 0 && !config.user_gate(c0) {
         return 1
     }
-    // ws67 (lobo#96): nginx's default `user nobody nobody` is a named
-    // delta — lobo keeps root, and says so once
+    // ws67 (lobo#96), ws68: root with no `user` line — nginx's default
+    // `user nobody nobody` is applied by a master (main), so a single
+    // root process here is one that keeps root (a host that cannot drop,
+    // or `cert auto`), and says so once
     if worker == 0 {
-        let rn = config.root_note(c0, config.self_euid())
+        let rn = config.root_note_host(c0)
         if !rn.is_empty() {
             eprint("lobo: [warn] {rn}")
         }
@@ -2025,8 +2027,9 @@ fn serve_main(
     // ws67 (lobo#96): whether this hand drops, and to whom — resolved
     // here, before the generation table takes the model; the drop itself
     // is made just before the start-up's first log line (below)
-    let hand_drops = worker > 0 && config.user_drops(c0, config.self_euid())
-    let drop_ids = if hand_drops { config.user_ids_host(c0) } else { config.user_ids(c0, "", "") }
+    // ws68: or to nginx's default, with no `user` line (`hands_drop`)
+    let hand_drops = worker > 0 && config.hands_drop(c0, config.self_euid())
+    let drop_ids = if hand_drops { config.hand_ids_host(c0) } else { config.user_ids(c0, "", "") }
     (mut gens).push(take GenRow {
         conf: c0,
         gen: g1,
@@ -5751,6 +5754,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     if !config.user_gate(c0) {
         return 1
     }
+    // ws68: root with no `user` line — the master prints the default's
+    // one line, once (no account named `nobody`; or, where its hands
+    // keep root, why)
+    let rn = config.root_note_host(c0)
+    if !rn.is_empty() {
+        eprint("lobo: [warn] {rn}")
+    }
     // ws64 (lobo#84): as serve_main's — the refusal and the start
     // warning are the master's to print, once
     let conn_err = config.conn_check(c0)
@@ -6011,16 +6021,22 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     // is — makes every log file the configuration names and gives it to
     // the user before the first hand starts, and again before a reopen
     // reaches them (`give_logs`). The ids were resolved by the gate.
-    let drops = config.user_drops(c0, config.self_euid())
+    // ws68: with no `user` line too, as nginx's default (`hands_drop`)
+    let drops = config.hands_drop(c0, config.self_euid())
     var drop_uid = -1
     if drops {
-        let ids = config.user_ids_host(c0)
+        let ids = config.hand_ids_host(c0)
         drop_uid = ids.uid
         give_logs(c0, prefix, drop_uid, mut elog_st)
+        let why = if config.user_drops(c0, config.self_euid()) {
+            "user directive"
+        } else {
+            "no user directive: nginx's default, user nobody nobody"
+        }
         ev_log(
             mut elog_st,
             "notice",
-            "workers run as {ids.name}:{ids.group} (uid {ids.uid}, gid {ids.gid}, groups {join_ints(ids.groups)}); the master keeps root (user directive)",
+            "workers run as {ids.name}:{ids.group} (uid {ids.uid}, gid {ids.gid}, groups {join_ints(ids.groups)}); the master keeps root ({why})",
         )
     }
     var i: int = 0
@@ -6973,7 +6989,10 @@ fn main() -> int {
         // hands, with one hand too — nginx's shape (it has a master
         // unless `master_process off`, which lobo refuses by name): the
         // master keeps root for what needs it and the hands drop
-        if n > 1 || config.ok(c) && config.user_drops(c, config.self_euid()) {
+        // ws68: and root with no `user` line, nginx's default
+        // (`hands_drop`: not where the drop cannot be made, nor with
+        // `cert auto`)
+        if n > 1 || config.ok(c) && config.hands_drop(c, config.self_euid()) {
             return master_main(cli.prefix, cli.conf, n)
         }
         return serve_main(cli.prefix, cli.conf, 0, "", 0, 0, "", "")
