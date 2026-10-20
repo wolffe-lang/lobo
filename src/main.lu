@@ -2421,15 +2421,26 @@ fn serve_main(
                     }
                     var wi: int = 0
                     var parked = false
+                    var owed = false
                     while wi < crows {
                         if cwait[wi] >= 0 {
                             parked = true
                         } else if cstream[wi] == 0 {
                             (mut wfds).push(cfds[wi])
+                            // ws69 (lobo#104): a carry that already holds a
+                            // whole head — a request pipelined behind one an
+                            // exchange answered — is owed its answer now, not
+                            // at the end of a wait no byte will end
+                            if chead[wi] == 1 {
+                                owed = true
+                            }
                         }
                         wi = wi + 1
                     }
                     var wms = wait_budget(parked)
+                    if owed {
+                        wms = 0
+                    }
                     // ws64: the wait ends when a sat-out endpoint is due back
                     if !acc_on && acc_off - now < wms {
                         wms = acc_off - now
