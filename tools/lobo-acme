@@ -86,6 +86,18 @@ red=0
 pass() { echo "acme: ok — $1"; }
 fail() { echo "acme: FAILED — $1" >&2; red=$((red + 1)); }
 
+# ws68: the CA reads a CSR's names from its subjectAltName and nowhere
+# else. Its parser scanned the whole DER for a dNSName tag, so a random
+# key could carry a stray name ahead of the real one — the leaf's CN
+# (1 CSR in about 1,200: the renewal row's `subject=CN=M2`, run
+# 39385848432). A planted tag in the key must change nothing.
+cc=$("$ACMECA" --csr-check 2>&1)
+if [ "$cc" = "csr-check: [localhost]" ]; then
+    pass "the CA reads a CSR's names from its subjectAltName only (a dNSName tag planted in the key is ignored)"
+else
+    fail "the CA read a planted tag in the CSR's key as a name: $cc"
+fi
+
 # poll a portfile for a numeric port
 wait_port() {
     for _ in $(seq 1 60); do
