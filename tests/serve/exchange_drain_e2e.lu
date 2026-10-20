@@ -1,0 +1,242 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws69: A DRAINING GENERATION ENDS AN EXCHANGE THAT WAITS. A reload
+//! drains the old generation, and `worker_shutdown_timeout` bounds the
+//! drain: nginx (measured on the pinned 1.30.4, notes/ws69-contract.md
+//! §2) ends a proxied request still waiting on a silent upstream when
+//! the timeout passes — the client reads end-of-stream and the upstream
+//! connection is closed, 1.10 s after a reload under a 1 s timeout — and
+//! goes on serving. ws67 killed the exchange's proc there. Since ws68
+//! (lobo#99) the proc waits in `net_wait`, one poll(2) a kill cannot
+//! reach, so the loop's kill waited in its join for the poll's budget
+//! (`proxy_read_timeout`): measured at trunk `251b6db`, the client read
+//! nothing for 10 s, the upstream connection was never closed, `status`
+//! got no answer and `-s stop` was not obeyed. Since ws69 the proc's
+//! every wait watches its job socket and the drain writes it a stop.
+//! Against the real binary (`LOBO_BIN`, default target/lobo-debug), an
+//! upstream this test accepts on and never answers,
+//! `proxy_read_timeout 30s`, `worker_shutdown_timeout 1s`:
+//!   1. one proxied request, its upstream dialled and its request read;
+//!   2. `-s reload`: the upstream connection ends inside 3 s of it, and
+//!      the client's connection ends with no response written;
+//!   3. `status` answers;
+//!   4. `-s stop` is obeyed: the server is gone inside 3 s.
+//! RED at trunk on 2–4. The server is put down by its handle before any
+//! assertion can fail, so a red run leaves nothing running. Loopback
+//! only, OS-chosen ports; the scratch tree is cleared at the START and
+//! the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Poll the port up to ~6 s. Total.
+fn wait_up(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// The upstream's side of one exchange: accept on `up` within 3 s and
+/// read the request's head. The connection, or -1. Total.
+fn accept_up(up: int) -> int {
+    net_deadline(up, 3000) else |_| {}
+    let uc = net_accept(up) else |_| {
+        return -1
+    }
+    net_deadline(uc, 3000) else |_| {}
+    var got = ""
+    while !got.contains("\r\n\r\n") {
+        let piece = net_read(uc, 4096) else |_| {
+            return uc
+        }
+        got = "{got}{piece}"
+    }
+    uc
+}
+
+/// Read `c` until it ends or `ms` pass: (what it read, the ms from
+/// `t0` to its end, -1 when it did not end). Total.
+fn end_of(c: int, t0: int, ms: int) -> (str, int) {
+    net_deadline(c, ms) else |_| {}
+    var out = ""
+    loop {
+        var ended = false
+        var waited = false
+        let piece = net_read(c, 4096) else |e| match e {
+            closed => {
+                ended = true
+                ""
+            },
+            timeout => {
+                waited = true
+                ""
+            },
+            utf8 => { "" },
+            io => {
+                ended = true
+                ""
+            },
+        }
+        if ended {
+            return (out, time_now_ms() - t0)
+        }
+        if waited {
+            return (out, -1)
+        }
+        out = "{out}{piece}"
+    }
+}
+
+/// `bin -p d -c conf <verb...>`, to its end: its exit code, or -1.
+/// Total.
+fn verb(bin: str, d: str, conf: str, v: List[str], out: int) -> int {
+    var args = List[str]()
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    for a in v {
+        (mut args).push(a)
+    }
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    let h = os_spawn_fds(bin, args, map) else |_| {
+        return -1
+    }
+    os_wait(h) else |_| { -1 }
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws69_exchange_drain"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www")?
+    fs_create_dir_all("{d}/logs")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    // the upstream: this test accepts on it and never answers
+    let up = net_listen("127.0.0.1:0")?
+    let uport = net_port(up)?
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/logs/lobo.pid;\nworker_shutdown_timeout 1s;\ncontrol unix:{d}/logs/c.sock;\nhttp {{\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    root {d}/www;\n    location /up/ {{ proxy_pass http://127.0.0.1:{uport}; proxy_read_timeout 30s; }}\n  }}\n}}\n",
+    )?
+    let so = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(so)
+    (mut map).push(2)
+    (mut map).push(so)
+    let h = os_spawn_fds(bin, args, map)?
+    let came = wait_up(hp)
+
+    // 1. one proxied request, left waiting on its upstream
+    var uc = -1
+    var c = -1
+    if came {
+        c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+        if c >= 0 {
+            net_write(c, "GET /up/x HTTP/1.1\r\nHost: t\r\n\r\n") else |_| {}
+            uc = accept_up(up)
+        }
+    }
+    // 2. the reload drains its generation; worker_shutdown_timeout 1s
+    var rl = -1
+    var up_end = -1
+    var cl_end = -1
+    var cl_read = ""
+    if uc >= 0 {
+        time_sleep_ms(300)
+        let t0 = time_now_ms()
+        var rv = List[str]()
+        (mut rv).push("-s")
+        (mut rv).push("reload")
+        rl = verb(bin, d, conf, rv, so)
+        let ue = end_of(uc, t0, 3000)
+        up_end = ue.1
+        let ce = end_of(c, t0, 1000)
+        cl_read = ce.0
+        cl_end = ce.1
+    }
+    print(
+        "a reload under worker_shutdown_timeout 1s, an exchange waiting on a silent upstream: -s reload exit {rl}; the upstream connection ended {up_end} ms after the reload, the client's {cl_end} ms (-1: not inside the wait), having read {cl_read.len} bytes",
+    )
+    // 3. status
+    var sv = List[str]()
+    (mut sv).push("status")
+    let st = verb(bin, d, conf, sv, so)
+    // 4. stop
+    var pv = List[str]()
+    (mut pv).push("-s")
+    (mut pv).push("stop")
+    let sc = verb(bin, d, conf, pv, so)
+    let t1 = time_now_ms()
+    var gone = false
+    while !gone && time_now_ms() - t1 < 3000 {
+        let w = os_wait_poll() else |_| { (0, 0) }
+        if w.0 == h {
+            gone = true
+        } else {
+            time_sleep_ms(20)
+        }
+    }
+    print("status exit {st}; -s stop exit {sc}; the server gone inside 3 s: {gone}")
+    if !gone {
+        // a red run must leave nothing running: put it down by its handle
+        os_kill(h) else |_| {}
+        let _k = os_wait(h) else |_| { 0 }
+    }
+    if uc >= 0 {
+        net_close(uc) else |_| {}
+    }
+    if c >= 0 {
+        net_close(c) else |_| {}
+    }
+    net_close(up) else |_| {}
+    fs_close(so) else |_| {}
+    assert(came, "the server came up")
+    assert(uc >= 0, "the exchange dialled the upstream and wrote its request")
+    assert(rl == 0, "-s reload answered: exit {rl}")
+    assert(
+        up_end >= 0 && up_end < 3000,
+        "the drain ended the exchange: the upstream connection closed inside 3 s of the reload: {up_end} ms (trunk: not inside the wait)",
+    )
+    assert(
+        cl_end >= 0 && cl_read.is_empty(),
+        "the client's connection ended with nothing written to it, as nginx's: {cl_end} ms, {cl_read.len} bytes",
+    )
+    assert(st == 0, "status answered after the drain: exit {st} (trunk: the loop held, no answer)")
+    assert(sc == 0 && gone, "-s stop was obeyed: exit {sc}, gone {gone} (trunk: not obeyed)")
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
