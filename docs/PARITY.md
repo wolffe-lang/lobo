@@ -169,6 +169,36 @@ in the closeout and in the entry below it, never the row that gates.
 Sets appended newest first. A row is here because its set was
 VALID; a refused set is named in the sprint's closeout, not here.
 
+### 2026-10-21 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws70: the 0.1.5 release tree against 0.1.4's, TWO trees on one VM · **VALID** · close **MET** (1.032x), keepalive **MET** (0.933x); 0.1.5 ÷ 0.1.4 **1.003x / 1.002x**
+
+The release's own measurement. This side is the 0.1.5 release tree
+(`09cd04e`: trunk `fc9f749` with the version sites moved; every later
+commit is a document), built with wolf 0.2.33; the reference is the
+`v0.1.4` tag (`570e2a9`), built with the toolchain its own pin file
+names, wolf 0.2.29, as that release was. workflow_dispatch,
+`parity=true`, `ref_tree=v0.1.4`, run **39656019826**, load(1m) 1.49,
+five interleaved pairs, three fresh servers a pair.
+
+| cell | shape | 0.1.5 req/s | 0.1.4 req/s | nginx req/s | nginx ÷ 0.1.5 median [min, max] | nginx ÷ 0.1.4 | **0.1.5 ÷ 0.1.4** median [min, max] |
+|---|---|---|---|---|---|---|---|
+| N=4 c=32 | close | 24,020 | 23,973 | 24,798 | **1.032x** [1.010, 1.048] | 1.039x [1.016, 1.050] | **1.003x** [0.992, 1.017] |
+| N=4 c=32 | keepalive | 96,529 | 96,341 | 90,082 | **0.933x** [0.928, 0.952] | 0.937x [0.930, 0.943] | **1.002x** [0.991, 1.007] |
+| N=1 c=32 | close | 20,765 | 20,369 | 15,290 | 0.734x [0.713, 0.755] | 0.745x [0.734, 0.760] | 1.008x [0.997, 1.037] |
+| N=1 c=32 | keepalive | 45,973 | 47,106 | 37,237 | 0.813x [0.743, 0.832] | 0.817x [0.762, 0.835] | 1.018x [0.956, 1.047] |
+
+Both shapes are inside the 1.10 bar at four workers, and 0.1.5 serves
+static files as 0.1.4 did (within a percent on both shapes). The same
+day on kasumi, the two released binaries (0.1.4's published, 0.1.5's
+from the release rehearsal) and the pinned nginx in turn, five rounds,
+in a throwaway container: the server on cpus 0-3, a prompt nginx
+upstream on 4-5, the clients on 6-7 (disjoint cores), not the bar's
+method — static keepalive 1.011x and connection-per-request 0.985x of
+0.1.4's at four workers; proxied, one client in turn 0.77x (a 4,000-byte
+header) and 0.96x (`ab -c 1`) of 0.1.4's, 32 clients 1.06x (the pool of
+exchange procs, lobo#100). The packed 0.1.5 binary's RSS after 400,000
+keepalive requests was 4,664–4,740 kB against 0.1.4's 4,588–4,636 kB,
+both flat (`kasumi:~/lanes/ws70/ev/rss.log`, `ev/tput-rel5.log`).
+
 ### 2026-10-14 · linux x86-64 · the CI runner (ubuntu-latest, 4 cpus) · ws65: the 0.1.4 release tree against 0.1.3's, TWO trees on one VM · **VALID** · close **MET** (1.034x), keepalive **MET** (0.920x); 0.1.4 ÷ 0.1.3 **1.009x / 0.992x**
 
 The release's own measurement. This side is the 0.1.4 release tree
