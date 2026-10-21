@@ -36,6 +36,14 @@ effective: [net, fs, exec, env]
   env: local/lobo (root) — declared; calls `os_cpus` at src/main.lu:1633:16 (+3 more)
 ```
 
+(ws71, 2026-10-21, wolf 0.2.34, std `e036bec`: the audit reads net
++201, fs +128, exec +18, env +10, the same at trunk `06b079b` on 0.2.33,
+at the bare pin (0.2.34 with std `cceda63`) and at the std move. No
+capability moves: lobo calls none of 0.2.34's seven new builtins, and
+the std's additions — `net.Addr`, `process`'s core reads and
+`exit_signal`, `signal.ignore_one` and `reset_one` — are not called, so
+they reach no site the audit counts.)
+
 (ws68, 2026-10-20, wolf 0.2.33, std `cceda63`: the audit reads net
 +197, fs +128, exec +18, env +10 (trunk `9e4ce7f` at 0.2.32: net +194,
 fs +124, exec +18, env +9; the bare pin moves nothing; the std move
