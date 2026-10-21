@@ -22,13 +22,21 @@ lobo -s stop -c conf/lobo.conf
 `lobo -v` prints the version and the compiler that built it:
 
 ```
-lobo version: lobo/0.1.4 (built with wolf 0.2.29, pin 6ffe7c6)
+lobo version: lobo/0.1.5 (built with wolf 0.2.33, pin 85dab5d)
 ```
 
-> **Version 0.1.4.** Static serving, reverse proxy, TLS, ACME, prefork
+> **Version 0.1.5.** Static serving, reverse proxy, TLS, ACME, prefork
 > workers, reload with connection draining, structured logs and a
 > control socket all work and are tested. It has not carried anyone's
 > production traffic. Please file what breaks.
+>
+> **Upgrade from 0.1.4: as root with no `user` line, the workers are no
+> longer root.** On linux they run as `nobody`, nginx's default, and
+> the master keeps root, so a file only root may read now answers 403
+> (macOS keeps root and says so at start); `user root;` keeps 0.1.4's
+> posture. A proxied request now runs beside the
+> serving loop, so a silent upstream no longer holds the process.
+> [`CHANGELOG.md`](CHANGELOG.md) has the upgrade steps.
 >
 > **Upgrade from 0.1.3 or earlier.** Two faults a client or operator
 > could trip are fixed in 0.1.4, both measured on the released
