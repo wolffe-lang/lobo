@@ -193,3 +193,223 @@ Each line carries what would show it wrong.
   the rehearsal's archive (`REHEARSAL-OK`) and red with the placeholder
   kept. The `+dev` flip on its own branch and PR: `lobo-stamp: ok`
   reads `lobo 0.1.5+dev`, nothing else moves.
+
+## 3. The prediction against the measurement
+
+Measured on kasumi (16 cpus, load 1.1–6.9 while measuring; other lanes
+beside it) and on GitHub's runners, the toolchains of §2; logs under
+`kasumi:~/lanes/ws70/` (digests in §4). §3 above is as committed
+(`ba42a59`). The release tree's `src/` is final at `f0d11c5` (the
+stamp); every later commit is a workflow step or a document, so the
+binaries measured (rehearsal 1, run 39654225786 at `4ce9b5b`) are the
+release's: the later rehearsals' binaries are compared by digest in the
+pull request.
+
+- **P1 held.** The entry's sections in the predicted order; the
+  disclosure paragraph unchanged; no Security section. Added beyond
+  the prediction: the window (below) in the upgrade steps and in the
+  known list.
+- **P2 wrong on the sizes.** linux **3,992,984** B (`e4c19d0d…`), macOS
+  **3,879,275** B (`a00c3ea2…`), each "packed twice, identical" (run
+  39654225786); predicted 4.30–4.40 and 4.20–4.35 MB. The basis was
+  kasumi's build, and the runner's binary is another binary: 14,636,104
+  B against kasumi's 14,838,976 B, its sections in another order. ws61
+  wrote this down for 0.1.3 (the release tier links with the host's C
+  toolchain) and I did not use it. The rest held: rehearsal 2 (run
+  39655459695, `09cd04e`) packed linux 3,992,992 B (`16b52252…`) and
+  macOS 3,879,268 B (`d2571ae8…`), the archives differing by BUILD's
+  source line; 0.1.4's rehearsal binaries equal its tag's (§2).
+- **P3 held**, plus the release workflow (P4) and a ws70 lane entry in
+  the CHANGELOG.
+- **P4 held, with one bug of mine first.** No change for the pin. The
+  macOS root step's first run (39654225786, job "learner smoke
+  (aarch64-apple-darwin)") went red with no line printed: `pgrep -P`
+  exits 1 with no children and `pipefail` ended the step at the
+  assignment. Fixed (`09cd04e`). **Seen red on a plant**:
+  `ws70-plant-macwarn` (`9f82bfb`: `src/` not printing the single
+  process's root note, the release matrix cut to macOS), run
+  **39655455898**, job 119420104974: `as root: pid 1032 runs as root
+  with 0 child process(es)` then `the root start printed 0 copies of
+  the cannot-drop [warn], wanted 1`. Green at the release tree in run
+  39655459695 (job 119419003740): `lobo: [warn] running as root with no
+  "user" directive: nginx would run its workers as nobody (its
+  default), but this host cannot drop privileges …`, `as root: pid 1065
+  runs as root with 0 child process(es)`, `-s stop`. Four jobs ran
+  each time; dist 5–9 minutes (the rust cache), smoke under a minute.
+- **P5 held.**
+  - RSS of one process after 400,000 keepalive requests
+    (`ev/rss.log`, two rounds each, ab on cpus 6-7): 0.1.4 **4,588**
+    and **4,636** kB, 0.1.5 **4,740** and **4,664** kB; growth 0 B a
+    request and 0 B a connection on both (the integer of 200 kB over
+    400,000).
+  - Static, four workers, 32 clients over two ab processes on cpus 6
+    and 7, five rounds (`ev/tput-rel5.log`): keepalive 0.1.5 638,278,
+    0.1.4 631,482 (**1.011x**), nginx 497,352; a connection per request
+    125,781 / 127,672 (**0.985x**), nginx 126,742. On a runner VM (run
+    **39656019826**, VALID): nginx ÷ 0.1.5 close **1.032x** [1.010,
+    1.048], keepalive **0.933x** [0.928, 0.952], MET; 0.1.5 ÷ 0.1.4
+    **1.003x** and **1.002x**; at one worker 0.734x / 0.813x and
+    1.008x / 1.018x.
+  - Proxied, ws69's rig, five rounds: px 0.1.5 16,605 (spread
+    12,582–18,515), 0.1.4 21,649 — **0.767x**; ab1 15,758 / 16,457 —
+    **0.958x** (nginx 16,603); ab32 17,761 / 16,766 — **1.059x**
+    (nginx 17,844). 0.1.5's px spread is 36 %: its rounds 1 and 3 read
+    12,582 and 15,185, the others 16,605–18,515.
+- **P6 held** (`logs/gates-reh1.log`, the packed binary `0da8d84d…`,
+  SigBlk `0x10000`, SigIgn `0x4`, 0 SKIP lines): the archive smoke;
+  `corpus: 28/28 lane-runs green` over the fourteen `LOBO_BIN` tests
+  on native and checked; `lobo-membudget` 25/25 (`flat, proxied`: 140
+  KB over 2,000 proxied requests, bound 512); `lobo-user` 25/25 in
+  `ubuntu:24.04` (the oracle does not run there: the measured rule)
+  and 25/25 in `archlinux:base-devel`, where each default row read the
+  pinned nginx's worker beside lobo's hand (`Uid: 65534 ×4|Gid: 65534
+  ×4|Groups: 65534|`, `Groups: 1700 65534` with a group listing
+  `nobody`, root with `user root;`).
+- **P7, the upgrade** (`ev/upgrade-reh1.log`, `ev/upgrade-reh1-de.log`,
+  `ev/confload.log`):
+  - **Held**: as a user 45/45 configurations the same exit and text, 17
+    loading on both; as root one exit difference
+    (`corpus/crossplane-messy`: `user nobody;`, refused by 0.1.4, loads
+    on 0.1.5) and four text differences (`user nginx;`: 0.1.4's `cannot
+    drop privileges` became `getpwnam("nginx") failed`). None of the
+    shipped examples has a `user` line.
+  - **Held**: the 0.1.5 binary's `-s reload` to a running 0.1.4 answers
+    `reload complete (generation 2)` (`workers=2/2` with two); every
+    answer after it says `Server: lobo/0.1.4`, the processes'
+    `/proc/<pid>/exe` read `… (deleted)`; `control upgrade` exit 1.
+  - **Held**: the restart — 0 or 1 refused (A: 0 and 1 in two runs; B:
+    1; C as root: 0), the first 0.1.5 answer within 20 ms of the
+    start; the download in flight cut: **2,588,927 of 25,165,824 bytes,
+    then end-of-stream**, in both runs.
+  - **Half wrong — the window.** A hand put down while 0.1.5 is on
+    disk is replaced by 0.1.5, as predicted (B: 1.2 s later; D, as
+    root: about 4 s, the killed hand unreaped for 3 s). As a user it
+    serves beside its 0.1.4 sibling (7 and 42 of 60 GETs in two runs).
+    As root with no `user` line it drops itself to `Uid: 65534 ×4`
+    beside a root 0.1.4 sibling — but it does **not** fail and loop: it
+    **serves**, a root-only file answers **403** from it and **200**
+    from the sibling (GET rounds: 4 / 60 / 0 of 60 to the new hand),
+    and each of its access-log lines is dropped (`[warn] access log
+    "/w/D/logs/access.log": dropped 1 line(s) (buffer overflow or
+    unwritable path; 54 total) worker=1`): the logs are root's 0644,
+    never given away by the 0.1.4 master. `status` shows `restarts=1
+    pid=73` and nothing else amiss.
+  - **Held**: the new default — 0.1.4 as root: one process `Uid: 0 0 0
+    0`, the 0600 file 200, the logs `0:0`; 0.1.5 after the restart: a
+    master `Uid: 0 0 0 0` and one hand `Uid: 65534 65534 65534 65534`,
+    `Gid: 65534 …`, `Groups: 65534`, the file **403**, `access.log`
+    and `error.log` `65534:0`. The pinned nginx in the same container,
+    as root with no `user` line: worker `Uid: 65534 ×4`, the file 403.
+    `user root;`: hand `Uid: 0 0 0 0`, 200. A reload of the
+    configuration made 0600: `reload complete (generation 2)
+    workers=0/1` (lobo#101, on the release binary).
+  - **Held**: the warnings — `cert auto` as root (with a plaintext
+    listener for its challenge; my first config had none and `-t`
+    refused it by name): one root process and `[warn] running as root
+    with no "user" directive and `cert auto`: … (a named delta,
+    lobo#102)`; no account named `nobody`: one root process, the 0600
+    file 200, `[warn] … no account named "nobody" in /etc/passwd: nginx
+    would refuse to start here …`; macOS: P4.
+- **P8 held.** The tap branch `ws70`: `924032f` (formula), `c02c39d`
+  (`aur/lobo-bin` 0.1.5-1, zeros), `ef47d93` (`post_upgrade`). The
+  container proof, extended: it first builds the tap trunk's 0.1.4-1
+  from 0.1.4's published archive (staged by digest, no download) and
+  installs it, then builds 0.1.5-1 on the rehearsal's archive and
+  installs it **over** it with `pacman -U`: `upgrading lobo-bin...`,
+  the 0.1.5 note once under the real `vercmp`, `lobo-bin 0.1.5-1`,
+  `lobo -v` 0.1.5, `/usr/bin/lobo` equal to the archive's binary
+  (`0da8d84d…`), 16 documents, BUILD, no lane file, the page served as
+  a user, `REHEARSAL-OK` (`ev/aur-rehearsal.log`); with the zeros kept,
+  `==> ERROR: One or more files did not pass the validity check!`
+  (`ev/aur-rehearsal-red.log`). The tap PR's CI and the `+dev` PR are in
+  the pull request.
+
+### Found, reported, not fixed (for the orchestrator to file)
+
+- **A hand replaced during an upgrade is the new binary.** The master
+  exec's a replacement from the path `os_exe()` gave at its start, so
+  after a package manager renames the new binary over the old, any
+  hand the old master restarts (a crash, a kill) runs the new version
+  beside old hands, under a master that does not know. 0.1.4 → 0.1.5
+  as root with no `user` line makes it visible: the new hand drops to
+  `nobody` and answers root-only files 403 beside a root sibling's
+  200, and cannot write the logs the old master kept root's. nginx's
+  workers are forks of their master and never meet this. Written in
+  the upgrade notes ("restart right after the install") and the known
+  list; the AUR `post_upgrade` says it. A fix would be the master
+  holding its own image (exec'ing `/proc/self/exe`, or refusing to
+  start a hand whose `-v` is not its own).
+- lobo#101 confirmed on the release binary (above).
+- 0.1.4 writes no `error.log` until it has an error; 0.1.5's master
+  makes the file (to give it to the hands). Noted, harmless.
+
+### Slips, named
+
+- I wrote `commit.gpgsign false` into the shared lobo checkout's
+  config (worktrees share it) and removed it at once; the commits are
+  signed as trunk's are.
+- `upgrade.py`'s first full run read an error log that 0.1.4 had not
+  made, raised, and left its container running on a live client
+  thread; I stopped my own container by name (`podman stop`), made the
+  reads total and the threads daemons, gave the container a
+  `--timeout`, and re-ran; the log of record is the second run's (the
+  first, overwritten, had the same A and B lines).
+- `launch.sh` exec's `bash "$@"`: my first launch passed `bash -c …`
+  and died at once (`cannot execute binary file`); relaunched with the
+  script itself.
+- A worktree path given relative to `git -C lobo` landed inside the
+  clone; removed and re-made at the absolute path.
+- P2's basis (above).
+
+## 4. Evidence index
+
+kasumi `~/lanes/ws70/` (sha256 prefixes): `toolchains.txt`
+2c9b658e4600…, `dl/digest-check.txt` b8e300d66583…,
+`logs/build-trunk.log` 9b1d95a7813f…, `logs/gates-reh1.log`
+e3ef95441753…, `ev/upgrade-reh1.log` de35ff953250…,
+`ev/upgrade-reh1-de.log` 2b1c4cf81011…, `ev/rss.log` c5f5c1a13813…,
+`ev/tput-rel5.log` 7e1b2c4fd89a…, `ev/confload.log` 539065ede4dc…,
+`ev/aur-rehearsal.log` 46f29a36464a…, `ev/aur-rehearsal-red.log`
+16bb600bd195…; the gauntlet at the head `logs/g-head.log` (in the pull
+request). Scripts (`scripts/`): stage.sh a4968c8b8959…, build.sh
+3c518c4ea216…, g.sh 18040f938250…, launch.sh 3ba39ba2e1c0…, gates.sh
+886e9ac79e68…, archive-smoke.sh 22e9add29869… (ws65's), rss.sh
+1a6f2ad324a2…, upgrade.sh cb5c9f017a5e…, upgrade.py 757fc8a716fa…,
+confload.sh 6936f96fb6ab…, confload-run.sh 6489a0082202…, tput.sh
+6b6a7c4a5c6a… and tput-in.sh 309c631feedb… (ws69's `e208754b…` and
+`67df184f…` with this lane's paths and two static shapes), px69.py
+8efb62d375e7… and summ.py 941b8f8adfac… (ws69's, unchanged), chain1.sh
+5f5ec18c451b…; `door/aur-proof.sh` fde53fdfd604… (ws65's, with the
+upgrade).
+
+CI: rehearsal 1 **39654225786** (`4ce9b5b`: dist green both hosts, the
+macOS root step red on its own `pgrep`); the plant **39655455898**
+(`ws70-plant-macwarn` `9f82bfb`, job 119420104974, red at the `[warn]`
+count); rehearsal 2 **39655459695** (`09cd04e`, green, six jobs, two
+skipped by design); parity **39656019826** (`tier measure`, VALID); the
+final rehearsal, `tier pr`, `tier full` and the tap's runs at the final
+head are in the pull request.
+
+## Not verified
+
+The macOS archive on a Mac by hand (the release workflow's smoke and
+root step are its runs; no build or run on nomad-1); the Homebrew
+formula installed (`ruby -c` only; the tap's `doors` legs are red by
+construction until the fill); `-s quit` with a download in flight
+(only `-s stop` measured); the window on macOS; `cert auto` actually
+issuing under the default (the CA was absent; lobo#102 keeps root
+there); PAX (ws68 §6's note stands).
+
+## 5. Done-when
+
+Branch `ws70`, its PR open and unmerged with five sections by name,
+commit shas as bullets and a test checklist; `tier pr` green at the
+final head and the `full-matrix` label added there; `bash
+wolf/tools/lane-audit.sh lobo ws70 <PR>` from the org directory
+passing but for `tier full`'s green; the tap PR (draft) and the `+dev`
+PR (draft) open. Then the hand-back with the full run's id (RULES.md
+§6). The orchestrator merges, tags `v0.1.5` at the merge, watches the
+release run (four assets, the binaries equal to the final rehearsal's),
+runs `tools/lobo-fill-digests 0.1.5` in the tap, merges the tap PR,
+hands the AUR push to the maintainer, then doors-fresh and the `+dev`
+merge. `ws70-plant-macwarn` stays on origin as evidence.
