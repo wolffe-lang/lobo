@@ -1177,9 +1177,12 @@ release's text as published and is left as it was.
   (run 39654225786), fixed; seen red on a plant whose `src/` does not
   print the line (`ws70-plant-macwarn`, run 39655455898: "printed 0
   copies"), green at the release tree.
-- **The archives are the workflow's.** linux 3,992,984 bytes and macOS
-  3,879,275 (0.1.4: 3,850,272 and 3,776,230), each packed twice,
-  identical. The linux binary (14,636,104 bytes) differs from kasumi's
+- **The archives are the workflow's.** linux about 3.99 MB and macOS
+  about 3.88 MB (0.1.4: 3,850,272 and 3,776,230 bytes), each packed
+  twice, identical; the rehearsal at the release tree's head, its run
+  and its digests are in the pull request (the archive carries this
+  file, so no digest can be written in it). The linux binary
+  (14,636,104 bytes) differs from kasumi's
   build of the same tree (14,838,976), as ws61 found: the release tier
   links with the host's C toolchain.
 - **The gates on the packed linux binary** (kasumi, `taskset -c 0-3`,
