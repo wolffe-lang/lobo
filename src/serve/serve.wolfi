@@ -1,7 +1,7 @@
 module pkg :: serve
   wolfi v0 · toolchain 0.2.34 · edition v1
-  export_hash 8fff54c3b2f9fb9035bce30b217b12ba828ec96c333aad5109f26d8255b1310d
-  pkg_hash    8fff54c3b2f9fb9035bce30b217b12ba828ec96c333aad5109f26d8255b1310d
+  export_hash e458adbe5b690e559a76104dbae83c149abd9b70531804069837a7aa0bf3e5dc
+  pkg_hash    e458adbe5b690e559a76104dbae83c149abd9b70531804069837a7aa0bf3e5dc
   deps:
     budget  d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
     config  ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
@@ -9,7 +9,7 @@ module pkg :: serve
     http  7ee1eadde9554ff066159f14587f5fd0d45231a2050947b06eee3ef4b2d7572a
     metrics  d7876b1d15ed33fdcab7ea69533f1c19ce89efde7c2fb1ac340b777fed472ea1
     obs  f1404aeee2cc681b8063c87ce5083327b1c70d50a99255aeac7314f2d833d0aa
-    proxy  b44931f24f8dfb1dd033e740bf3b1303c4adca8605e902586ad19ab4de2336bb
+    proxy  c25ac573eecbcd620eb0d1de10c7ac6c8e5f6221767f3520dd82937de693bbe9
     resolver  937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
