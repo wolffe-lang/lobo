@@ -466,9 +466,10 @@ jobs:
           [ -s logs/headers ] || { cat logs/root.out; echo "::error::nothing answered as root within 10 s"; exit 1; }
           head -1 logs/headers | grep -q "^HTTP/1.1 200" || { echo "::error::as root, answered $(head -1 logs/headers)"; exit 1; }
           cmp logs/body html/index.html || { echo "::error::as root, the served bytes differ from html/index.html"; exit 1; }
-          pid=$(sudo cat logs/lobo.pid | tr -d ' \n')
+          pid=$(sudo cat logs/lobo.pid | tr -d ' \n') || { cat logs/root.out; echo "::error::no pid file at logs/lobo.pid"; exit 1; }
           user=$(ps -o user= -p "$pid" | tr -d ' ')
-          hands=$(pgrep -P "$pid" | wc -l | tr -d ' ')
+          # pgrep exits 1 when it finds none; under pipefail that would end the step unseen
+          hands=$({ pgrep -P "$pid" || true; } | wc -l | tr -d ' ')
           cat logs/root.out
           echo "as root: pid $pid runs as $user with $hands child process(es)"
           [ "$user" = root ] || { echo "::error::the root start's process runs as \"$user\""; exit 1; }
