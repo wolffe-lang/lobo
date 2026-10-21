@@ -1154,6 +1154,44 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws70 — 2026-10-21 — lobo 0.1.5: the release stamp, the entry completed and measured on the released binaries, the macOS root start in the release smoke
+
+- **The entry was written ahead** by ws68 and ws69; 117 commits lie
+  between `v0.1.4` and the release tree, exactly those of six pull
+  requests (#89, #93, #97, #98, #103, #107), and every user-visible
+  change among them has its line. This lane dated it, put the lead,
+  Install and `lobo -v` in, and measured the rest on the release
+  workflow's binaries. The pin does not move: wolf 0.2.33 (`85dab5d`),
+  lupin 0.1.54 (`0e536e8`), std `cceda63`, staged on kasumi from the
+  release archives by digest (`4f955e8d…`, `175df238…`, each read
+  twice).
+- **The release stamp**: `src/wolf.pkg`, `release_version`, the
+  channel `""`, the wire token, `shell.lu`'s doc example and the four
+  `version_text.lu` literals in one commit; the README's `-v` line
+  (stale at 0.2.29 since ws66) and upgrade note; GETTING-STARTED.
+- **The release workflow's one addition**: the macOS learner smoke
+  starts the archive as root with no `user` line (the hosted runner's
+  sudo) and asserts one root process, no workers and the one
+  cannot-drop `[warn]` — the only place a root start on macOS runs.
+  Its first run went red on the step's own `pgrep` under `pipefail`
+  (run 39654225786), fixed; seen red on a plant whose `src/` does not
+  print the line (`ws70-plant-macwarn`, run 39655455898: "printed 0
+  copies"), green at the release tree.
+- **The archives are the workflow's.** linux 3,992,984 bytes and macOS
+  3,879,275 (0.1.4: 3,850,272 and 3,776,230), each packed twice,
+  identical. The linux binary (14,636,104 bytes) differs from kasumi's
+  build of the same tree (14,838,976), as ws61 found: the release tier
+  links with the host's C toolchain.
+- **The gates on the packed linux binary** (kasumi, `taskset -c 0-3`,
+  0 SKIP lines): the archive smoke; the fourteen e2e tests that take
+  `LOBO_BIN`, native and checked, 28/28 lane-runs; `tools/lobo-membudget`
+  25/25; `tools/lobo-user` 25/25 in `ubuntu:24.04` and in
+  `archlinux:base-devel` with the pinned nginx's workers read beside
+  each row.
+- **The upgrade**, the restart, the window in which a replaced worker
+  is the new binary, the new default and the warnings: in `## 0.1.5`
+  above, and `notes/ws70-contract.md` §3.
+
 ## ws68 — 2026-10-20 — built with wolf 0.2.33; as root with no `user` line the hands drop to nginx's default (the `user` default, ruled at audit); a client that closes ends its exchange (lobo#99)
 
 Unreleased (trunk). Contract, inputs, the oracle's measurements and the
