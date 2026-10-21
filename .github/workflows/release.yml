@@ -439,3 +439,50 @@ jobs:
             echo ""
             echo "The page came back byte-identical to the archive's html/index.html; \`-s stop\` stopped the server. Windows x86-64 and linux aarch64: named refusals until s60c."
           } >> "$GITHUB_STEP_SUMMARY"
+
+      # ws70 (ruling #105): from 0.1.5, as root with no `user` line the
+      # workers run as nginx's default user, nobody — on linux. macOS has
+      # no privilege drop at this pin (std.process.set_ids is linux's), so
+      # there a root start keeps ONE root process and says so in ONE
+      # `[warn]`, which the release notes promise. This step is the only
+      # place a root start on macOS is run: the hosted runner's
+      # passwordless sudo, the archive's own binary and stock config, the
+      # step last so nothing after it meets root's files. ps, not kill -0:
+      # the runner's user may not signal root's process.
+      - name: "macOS, as root with no user line: one process keeps root, one [warn]"
+        if: runner.os == 'macOS'
+        shell: bash
+        working-directory: ${{ env.LOBO_DIR }}
+        run: |
+          set -euo pipefail
+          rm -f logs/headers logs/body
+          sudo ./lobo -c conf/lobo.conf serve > logs/root.out 2>&1 &
+          spid=$!
+          for i in $(seq 1 100); do
+            if curl -s -o logs/body -D logs/headers http://127.0.0.1:8080/; then break; fi
+            ps -p "$spid" > /dev/null || { cat logs/root.out; echo "::error::the root start exited before answering"; exit 1; }
+            sleep 0.1
+          done
+          [ -s logs/headers ] || { cat logs/root.out; echo "::error::nothing answered as root within 10 s"; exit 1; }
+          head -1 logs/headers | grep -q "^HTTP/1.1 200" || { echo "::error::as root, answered $(head -1 logs/headers)"; exit 1; }
+          cmp logs/body html/index.html || { echo "::error::as root, the served bytes differ from html/index.html"; exit 1; }
+          pid=$(sudo cat logs/lobo.pid | tr -d ' \n')
+          user=$(ps -o user= -p "$pid" | tr -d ' ')
+          hands=$(pgrep -P "$pid" | wc -l | tr -d ' ')
+          cat logs/root.out
+          echo "as root: pid $pid runs as $user with $hands child process(es)"
+          [ "$user" = root ] || { echo "::error::the root start's process runs as \"$user\""; exit 1; }
+          [ "$hands" = 0 ] || { echo "::error::as root on macOS lobo started $hands hand(s); it keeps one root process"; exit 1; }
+          n=$(grep -c '\[warn\] running as root with no "user" directive: nginx would run its workers as nobody (its default), but this host cannot drop privileges' logs/root.out || true)
+          [ "$n" = 1 ] || { echo "::error::the root start printed $n copies of the cannot-drop [warn], wanted 1"; exit 1; }
+          sudo ./lobo -s stop -c conf/lobo.conf
+          for i in $(seq 1 100); do ps -p "$spid" > /dev/null || break; sleep 0.1; done
+          if ps -p "$spid" > /dev/null; then echo "::error::the root start still runs 10 s after -s stop"; sudo kill -9 "$pid"; exit 1; fi
+          echo "as root with no user line: one root process, the one [warn], 200, byte-identical; -s stop took it down"
+          {
+            echo ""
+            echo '```'
+            echo "$ sudo ./lobo -c conf/lobo.conf serve   (macOS: no drop at this pin)"
+            cat logs/root.out
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
