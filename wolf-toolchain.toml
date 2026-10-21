@@ -1008,6 +1008,29 @@ rev = "e642f2630ad4c7f53740428d5cca705f2e0d295b"
 version_line = "lupin 0.1.55 (wolf-interp, reference interpreter at pin 294d626)"
 
 [std]
+# wolf-std at **e036bec** (ws71, 2026-10-21; sc66, sc67 and sc68: the
+# std wolf 0.2.34's archive bundles, `std/STD-REV` e036bec3…).
+# Re-derived against 0.2.34 before any source change (B151): trunk's
+# lobo source (06b079b) built at 0.2.34 against cceda63 and against
+# e036bec, both tiers, exits 0 with zero diagnostics at
+# --error-limit=0 (kasumi:~/lanes/ws71/logs/build-p34s33.log,
+# build-p34.log). The four files cceda63 -> e036bec touches under std/
+# (net/net.lu, os/users/users.lu, process/process.lu,
+# signal/signal.lu; 427 insertions, 53 deletions, no line of code
+# removed) are all four `use`d here — `std.net` by acme and proxy,
+# `std.os.users` by config's default user, `std.process` for the
+# privilege drop, `std.signal` for the meanings — and lobo calls
+# nothing they add (`net.Addr`, the core reads, `exit_signal`,
+# `ignore_one`, `reset_one`). The digests move on both tiers: dev
+# compiles the seven new functions and the runtime calls they reach
+# (+6,568 bytes), and release's whole-program pass drops them but
+# inlines 32 of lobo's functions differently (+1,632 bytes, .text
+# +864; ev/objdiff-p34s33-p34.log). The four import-free rig binaries
+# are byte-identical across the move; acmeca's code is too, and its
+# debug info carries std.net's moved line numbers (+8 bytes). Release 15,261,984 -> 15,263,616
+# bytes, dev 17,519,696 -> 17,526,264.
+#
+# (ws68:)
 # wolf-std at **cceda63** (ws68, 2026-10-20; sc64 and sc65: the std
 # wolf 0.2.33's archive bundles, `std/STD-REV` cceda631…, ruling #85's
 # wrappers for 0.2.31's calls). Re-derived against 0.2.33 before any
@@ -1248,4 +1271,4 @@ version_line = "lupin 0.1.55 (wolf-interp, reference interpreter at pin 294d626)
 # WOLF_MIDEND=0" was written at the twentieth measurement. #146 closed
 # 2026-09-15; ws52 took the flip-back at 0.2.24 — see [wolf].)
 repo = "wolffe-lang/wolf-std"
-rev = "cceda63151430eac07df895fdfffddfa4a0b92c1"
+rev = "e036bec318ad81ecd5a025612bc2c2adb17527f3"
