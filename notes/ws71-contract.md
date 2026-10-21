@@ -185,3 +185,275 @@ prediction, read after it).
 - lupin 0.1.55 answering a lobo `lupin` lane differently (its new
   refusals by name for the signal family; no lobo test that declares
   `lupin` is known to reach one).
+
+## 3. The prediction against the measurement
+
+Measured on kasumi (16 cpus; other lanes beside this one, load 1–18),
+the toolchains of §2; logs under `kasumi:~/lanes/ws71/` (digests in
+§4). §3 above is as committed (`9a8ce06`).
+
+### The pin
+
+**Held.**
+- Nothing is refused: at the bare pin (0.2.34, std `cceda63`) and at
+  the std move (`e036bec`) both tiers and the five rigs exit 0 with
+  zero diagnostics at `--error-limit=0` (`logs/build-p34s33.log`,
+  `build-p34.log`, `build-h34.log`); no W0304.
+- Commits in ws66's and ws68's shape: `[wolf]` and `[lupin]` with
+  `[std]` held (`7e38417`), the stamp constants (`0436187`), the
+  fourteen headers (`a6992b6`: `tools/lobo-interface --emit` at the
+  bare pin wrote exactly the fourteen `toolchain 0.2.34` lines),
+  `[std]` with `std_rev` (`2941c8e`), the surfaces (`fe99c55`). The CI
+  files do not change: both jobs acquire the revs the toolchain file
+  names (the parity run below built 0.2.34 and lupin 0.1.55 from them).
+- The audit (`ev/audit.log`): net +201, fs +128, exec +18, env +10 at
+  trunk on 0.2.33, at the bare pin and at the std move: no count moves,
+  no capability (I quoted ws68's +197 for net in the prediction; trunk
+  reads +201 since ws69).
+- **The gauntlet** (kasumi, `taskset -c 0-3`, strict env, SigBlk
+  `0x10000`, SigIgn `0x4`, 0 SKIP lines in each):
+  - trunk `06b079b` at 0.2.33 (`logs/g-trunk33.log`): GREEN, exit 0,
+    1,106 s;
+  - the bare pin `a6992b6` (`logs/g-bare34.log`): GREEN, exit 0, 1,021 s;
+  - the head `fe99c55` (`logs/g-head34.log`): GREEN, exit 0, 959 s
+  — each with trunk's rows: corpus 386/386 lane-runs, `differential`
+  33/33, `proxy-differential` 8/8, `control-differential` 20/20,
+  `logdiff` 4/4, `confcheck` 40 configs (27 / 13 / 0 red), `dryrun` 41
+  probes + 2 cross checks, `lobo-shell` 46 probes / 45 parity / 1 named
+  delta / 0 red, `lobo-signal` 22/22, `lobo-prefork` 38/38, `lobo-user`
+  25/25 (podman, `ubuntu:24.04`), `lobo-metrics`, `lobo-membudget`
+  25/25, `lobo-resolver` 9/9, `tls-interop` 8 cases, `tls-renewal` and
+  `acme` 0 red, the replay's hunt and fix, `lobo-dist` packed twice
+  identical and smoked (200, the stock page byte-compared, `-s stop`).
+  Row for row (`scripts/okdiff.sh`, numbers, digests and paths
+  normalized): 785 verdict lines each, and the only lines that differ
+  are the stamp's (`ev/ok-*.txt`). lupin 0.1.55 moves no declared lane.
+- **The memory gate** (`lobo-membudget`, the same 25 rows): the flat
+  rows read 0 KB over 4,000 requests, 2,000 connections, 10 idle seconds
+  and the file memo at both pins (resident 4,872–4,952 kB at 0.2.33,
+  4,912–4,992 kB at the head); the capped rows 52/24 KB and 76/36 KB
+  (bound 4,096); `flat, proxied` (lobo#106's row) 4 KB over 2,000 proxied
+  requests at both, under `taskset -c 0-3` (#106 is the 16-cpu case, not
+  re-taken: the contract leaves it as it is).
+- **The limit tests** (`control_exhausted_e2e`, `worker_connections_e2e`,
+  `start_at_limit_e2e`, `park_at_limit_e2e`) ok on native and checked in
+  every corpus step above, and the start ladder unchanged (`ev/ladder-t33.log`,
+  `ladder-h34.log`, ws66's `ladder.sh` by digest): at both pins `ulimit
+  -n` 4 exits 71 with the readiness set's one line, 5–8 exit 71 with the
+  signal hub's, 9–11 are lobo's own `[emerg]` (exit 1), from 12 it
+  serves; at 3 the measuring `setsid` cannot load libc (ws66's row).
+- At rest (`ev/rest-t33.log`, `rest-p34s33.log`, `rest-p34.log`): 20
+  descriptors and 9 threads at both pins, both tiers, the same targets
+  (the set at 3 and 4, the hub's pipes 5–8); RSS release 4,688–4,696 kB
+  (0.2.33), 4,676–4,732 kB (0.2.34).
+
+**Not predicted.** The release binary the gauntlet builds is
+byte-identical to this lane's build of the same tree from another path
+(`3e0b0e3e…` at 0.2.33); the debug binary is not (`a6607bb8…` against
+`53f7ef77…`): debug names its paths (ws53's note), release does not.
+
+**Wrong.**
+- The surfaces whose hashes move at the std move are `acme`, `dryrun`,
+  `proxy`, `serve`, `shell` and `root` (`fe99c55`), not `acme`,
+  `config`, `proxy`, `shell` and `root`. `config` keeps its hashes:
+  `std.os.users` changed by its documentation only, and a surface
+  hash is the signatures', so `ff8a852c…` holds. `dryrun` and `serve`
+  move although they import none of the four: each names `proxy`'s
+  hash (`proxy <hash>` in its surface), and `proxy`'s moved with
+  `std.net`'s. The hashes are transitive through lobo's own modules,
+  not only through the std's (my "what would make this wrong" named
+  only the std's).
+
+### The objects
+
+Every object the gauntlet's tools compile, at four points
+(`ev/objects-table.txt`; `scripts/objdiff.py` splits each binary's
+text symbols into lobo's code `_W…`, the Rust runtime and std `_R…`,
+and the rest; `scripts/wcode.py` compares lobo's functions instruction
+by instruction with addresses taken out). Bytes, `.text` and digest:
+
+| object | trunk at 0.2.33 | bare pin (0.2.34, `cceda63`) | std move (`e036bec`) | the head |
+|---|---|---|---|---|
+| `lobo` release | 14,838,976 / 1,616,323 / 3e0b0e3ec384 | 15,261,984 / 1,620,163 / 339e00bd3892 | 15,263,616 / 1,621,027 / 49881c0ebccc | 15,263,616 / 1,621,027 / 7f8980352a1e |
+| `lobo` dev | 17,090,376 / 3,319,731 / 53f7ef77674d | 17,519,696 / 3,329,150 / 0913feedc1c3 | 17,526,264 / 3,333,182 / 6b0f904fe71d | 17,526,264 / 3,333,182 / e3b2bf579c2b |
+| `nowms` | 13,040,360 / 238,467 / 2fbbc177ad34 | 13,456,968 / 238,467 / 66ac22e2d2c7 | the same bytes | the same bytes |
+| `climit` | 13,372,104 / 417,219 / 92ce924df139 | 13,793,272 / 418,931 / 7f5295562229 | the same bytes | the same bytes |
+| `pipewait` | 13,375,960 / 419,379 / 7942f92cd621 | 13,798,760 / 422,243 / 04de43bfcac7 | the same bytes | the same bytes |
+| `wedge` | 13,286,504 / 368,899 / 8862ba44275e | 13,710,424 / 371,587 / e3d210c27b75 | the same bytes | the same bytes |
+| `acmeca` | 15,184,544 / 1,752,515 / 0e9eeb4e2ee4 | 15,608,112 / 1,756,163 / e19bf7a84eae | 15,608,120 / 1,756,163 / 320a74a0e296 | the same bytes |
+| the dist archive | 4,361,263 B / 01cd338cf4e7 | 4,467,303 B / e1ee7793bba3 (`a6992b6`) | — | 4,468,479 B / ce64f0e9cc02 |
+
+**Held.**
+- Deterministic: built twice from one path, every object is the same
+  bytes (`t33`, `t33b`).
+- **The bare pin moves every digest by the runtime alone**
+  (`ev/objdiff-t33-p34s33.log`, `ev/wcode.log`). lobo's own code is
+  untouched: the release binary's 707 `_W` functions (208,369
+  instructions), dev's 1,522 (467,838), `acmeca`'s 881 and the rigs'
+  are identical instruction for instruction, with the same symbol
+  hashes. Release `.text` +3,840 bytes, all of it the runtime's: s247's
+  fork protocol on the threads lobo runs — the reactor's kernel wait
+  (`reactor_main` +396, a state change either side of each
+  `epoll_wait` so a fork can claim the thread there), the signal hub's
+  reader (`reader_main` +426, `try_hub` +202), the pool (a hold point
+  in each worker's loop, `fallback` +494, retired threads counted for
+  the fork's join) — and the C-ABI entries whose inlining moved
+  (`__wolf_rt_fs_read` +2,266 and `fs_read_chunk` +2,028 absorb the
+  four `scratch::with_read_buf` closures they called; the string
+  builtins about +240 each, the traps +213 and +237). The files grow
+  416–429 kB, nearly all the runtime's debug info (`.debug_info`
+  +167,834, `.debug_loc` +96,763, `.debug_str` +82,303, the same in
+  every object: the static library's). `nowms` (one 26-instruction
+  function) keeps its `.text` to the byte; only its debug info moves.
+- The four rigs that import nothing are byte-identical across the std
+  move, and the head differs from trunk built at the same pin by the
+  stamp's strings alone (release 48 bytes, dev 34: `0.2.34`,
+  `9da7bdc`, `e036bec`; `ev/objdiff-p34-h34.log`).
+
+**Wrong.**
+- The std move is not "under 4 kB on each of `lobo-rel`, `lobo-dev`
+  and `acmeca`" for the reason I gave. Dev grows 6,568 bytes: it
+  compiles the seven functions the four files add (`process.poll_core`
+  1,128 bytes of them) and the runtime entries they call
+  (`exit_signal`, `set_disp_one`, `wait_*_core`), and 19 of its 1,522
+  functions differ only in an immediate, the line number a trap
+  reports (`std.os.users` gained 35 lines of documentation above
+  them: `mov $0x5b,%ecx` → `mov $0x7e,%ecx`). Release grows 1,632
+  bytes (`.text` +864) with none of the seven in it: its whole-program
+  pass drops them, and 32 of lobo's functions come out inlined
+  differently (`serve_main` +46 instructions, `master_main` −83;
+  4 functions inlined away, 13 now out of line), 14 more by a trap's
+  line number or alignment padding; 657 of 707 are identical. The four
+  files remove no line of code (427 insertions, 53 deletions, every
+  deletion a comment), and the std's path is not the cause (0.2.34
+  built against the same `cceda63` tree by another path gives the bare
+  pin's bytes, `logs/build-ctl.log`). `acmeca`'s code is identical
+  across the move; 8 bytes of debug info carry `std.net`'s moved line
+  numbers (a `DW_AT_decl_line` 240 → 257 needs a second byte).
+
+**Not predicted.**
+- An object's debug build names its paths (the `acmeca` staging
+  directory moves its `.rodata` and digest); every `acmeca` compared
+  here is staged at one path (`scripts/acmeca.sh`, `logs/acmeca.log`).
+
+### The numbers
+
+Kasumi, ws70's rig with this lane's paths (§2; the server under
+`taskset -c 0-3`, the clients on cpus 6–7, the proxied rows' upstream
+on 4–5, in a rootless `archlinux:base-devel` container's own network
+namespace), five alternating rounds, load 1.1–4.9 (`ev/tput-rel5.log`,
+`scripts/summ.py`). Four servers each round: the published 0.1.5
+(`0da8d84d…`, built on the release runner), trunk `06b079b` built here
+at 0.2.33 (`t33`, the same source but the channel), the head built here
+at 0.2.34 (`h34`), and the pinned nginx. Requests a second, the median
+of five (the spread in brackets):
+
+| shape | nginx | 0.1.5 (ws70) | 0.1.5 | trunk at 0.2.33 | **the head** | head ÷ 0.1.5 | head ÷ trunk |
+|---|---|---|---|---|---|---|---|
+| static keepalive, 4 workers, 32 clients (`sk32`) | 663,080 | 638,278 | 698,673 (16 %) | 681,717 (14 %) | **680,922** (15 %) | 0.975x | 0.999x |
+| static, a connection per request (`sc32`) | 129,328 | 125,781 | 128,873 (7 %) | 128,524 (8 %) | **127,075** (7 %) | 0.986x | 0.989x |
+| proxied, one client in turn (`px`) | — | 16,605 | 16,695 (47 %) | 18,383 (16 %) | **19,875** (23 %) | 1.190x | 1.081x |
+| proxied, `ab -c 1` (`ab1`) | 16,693 | 15,758 | 15,835 (6 %) | 15,745 (6 %) | **15,716** (4 %) | 0.992x | 0.998x |
+| proxied, `ab -c 32` (`ab32`) | 18,096 | 17,761 | 18,063 (4 %) | 17,919 (3 %) | **17,984** (3 %) | 0.996x | 1.004x |
+
+ws69's head (the exchange as 0.1.5 ships it) read px 19,080, ab1 15,616
+and ab32 17,917 on its quiet box; this head reads 19,875, 15,716 and
+17,984.
+
+RSS of one process (`ev/rss.log`, `rss2.log`, ws70's `rss.sh`: a
+2,000-request warm-up, 400,000 keepalive requests, 100,000 connections
+of one request):
+
+| binary | after 400,000 keepalive requests | growth a request | a connection |
+|---|---|---|---|
+| 0.1.5 (published), twice | 4,808 and 4,772 kB | 0 B | 0 B |
+| the head, twice beside it | 5,008 and 4,916 kB | 0 B | 0 B |
+| trunk at 0.2.33 (built here), three rounds | 5,000, 4,940, 4,884 kB | 0 B | 0 B |
+| the head, three rounds beside it | 4,956, 4,920, 4,992 kB | 0 B | 0 B |
+
+`ev/rssprobe.log` (`scripts/rssprobe.sh`: `/proc/<pid>/smaps_rollup`
+at start, after the warm-up and after 400,000 requests, twice each):
+the anonymous memory is the same in all three binaries — 636–652 kB at
+start, 808–852 kB after 400,000 — and nine threads; the difference is
+file-backed pages, 3,888–3,912 kB for the runner-built 0.1.5 against
+4,028–4,096 kB for both binaries built here, at either pin.
+
+**Held.**
+- Static, the head ÷ 0.1.5 inside 0.95–1.05x (0.975x, 0.986x); ab1 and
+  ab32 inside 0.90–1.10x (0.992x, 0.996x). Against the same source
+  built here at 0.2.33 every row is 0.989–1.004x but px. **The pin
+  moves no number**: every difference is inside its row's spread.
+- RSS growth 0 B a request and 0 B a connection on both pins; against
+  trunk built here the head is the same resident size (medians 4,956
+  and 4,940 kB).
+- Runner-VM parity, run **39686889778** (`tier measure`, `ws71-parity`
+  at `fe99c55`, `ref_tree=v0.1.5`, 4 cpus, load 1.56, VALID SET):
+  nginx ÷ ws71 close **1.068x** [1.045, 1.095], keepalive **0.977x**
+  [0.973, 0.997], both MET (bar 1.10x); **ws71 ÷ 0.1.5 close 1.003x
+  [0.987, 1.006], keepalive 1.001x [0.992, 1.018]**; at one worker
+  0.997x and 1.049x (that cell refused: nginx's own keepalive spread,
+  1.226). nginx ÷ 0.1.5 on this VM 1.071x and 0.990x (ws70's VM:
+  1.032x, 0.933x).
+
+**Wrong.**
+- px, the head ÷ 0.1.5, is 1.190x, outside 0.90–1.10x. The row is
+  bimodal (ws69's note): 0.1.5's five read 10,844–18,743, trunk-here's
+  17,115–20,147, the head's 15,625–20,171; head ÷ trunk-here is 1.081x,
+  inside both spreads. Not the pin.
+- RSS against ws70's 0.1.5 range (4,664–4,740 kB) is +176 to +268 kB,
+  outside the ±200 kB I predicted, and +108 to +236 kB against 0.1.5
+  measured beside it. It is the build host, not the pin: the anonymous
+  memory is equal, trunk built here at 0.2.33 is as large as the head,
+  and the runner-built 0.1.5 maps fewer file-backed pages (ws70's note:
+  the runner's binary is not kasumi's).
+
+### Slips, named
+
+- The staging script's first run named trunk by a short sha that is
+  not its prefix (`06b079bc`); the checkout refused, nothing else ran
+  past it, and it was re-run with the full sha.
+- `build.sh` first staged `acmeca` in a directory named for each label;
+  a debug build names its paths, so those digests (in the `build-*.log`
+  rows) do not compare. Every `acmeca` in the table was rebuilt from one
+  path (`logs/acmeca.log`; 0.2.33's two builds there are the same bytes
+  as the first).
+- The head's gauntlet tree was first checked out one commit short
+  (`2941c8e`, before the surfaces); it was moved to `fe99c55` before the
+  gauntlet reached it (`logs/g-head34.STATUS` names the head it ran).
+- `wolf audit` was run once in trunk's gauntlet tree while that
+  gauntlet ran; it writes nothing (`git status --ignored` after it), and
+  the census step stayed green.
+
+## 4. Evidence index
+
+kasumi `~/lanes/ws71/` (sha256 prefixes): toolchains and digests: `toolchains.txt` 938a55040fbb…, `dl/digest-check.txt` a54b3119a193…; builds: `logs/build-t33.log` b1080e1f8507…, `logs/build-t33b.log` 0d098d330eb1…, `logs/build-p34s33.log` 058acb7ed843…, `logs/build-p34.log` 91cd14b9b590…, `logs/build-h34.log` 146c162fd195…, `logs/build-ctl.log` 8fbb4756a6e5…, `logs/acmeca.log` d8bf3a728017…; gauntlets: `logs/g-trunk33.log` 5c2a1b6d827a…, `logs/g-bare34.log` 2898dd308047…, `logs/g-head34.log` 1fe298832707…, `ev/ok-trunk33.txt` 4fd92921946a…, `ev/ok-bare34.txt` 201d02847a27…, `ev/ok-head34.txt` 2f21f8ccbbe0…; objects: `ev/objects-table.txt` ab4c1b966ba3…, `ev/objdiff-t33-p34s33.log` 3c96d9a7da65…, `ev/objdiff-p34s33-p34.log` 39cd59370c26…, `ev/objdiff-p34-h34.log` cbe1b86bfbf0…, `ev/objdiff-t33-p34.log` a0b6e88ccc91…, `ev/wcode.log` 9e92fb9f1c32…, `ev/wcode-std-rel.log` f7c31811beea…; the audit, at rest, the ladder: `ev/audit.log` cbacf0a11ef6…, `ev/rest-t33.log` 76701fc8ef87…, `ev/rest-p34s33.log` 46bac39ec3f9…, `ev/rest-p34.log` c30af1fe3657…, `ev/rest-h34.log` 53fd3f89e908…, `ev/ladder-t33.log` 4424c9db2b62…, `ev/ladder-h34.log` 57ddf7da45de…; the numbers: `ev/rss.log` 61b189dd7b68…, `ev/rss2.log` b2a9d4d99ef1…, `ev/rssprobe.log` e00dc6180789…, `ev/tput-rel5.log` 6c486afe3585…. Scripts (`scripts/`): acmeca.sh 9ed539e32009…, bt.sh 0f5df4bfff2e…, build.sh ae474bdcd8a5…, chain-g.sh b6e7e315cc49…, chain-n.sh 58a25de543da…, chain-r.sh 788b1ad3f95b…, digests.sh d78bdf23656b…, g.sh 5e39e59ccc60…, gsum.sh e6d0caeae544…, ladder.sh 9fed8639f76c…, launch.sh af28a25be9aa…, okdiff.sh 9a495ebd10aa…, rest.sh 84baede68eb4…, rssprobe.sh 4fce80be3228…, rss.sh 1defa5cb45e6…, stage.sh 3dea02097c71…, tput-in.sh 22ecb267f8cd…, tput.sh 5fbe88dec6ef…, objdiff.py f42c6d9c5988…, px69.py 8efb62d375e7…, summ.py 941b8f8adfac…, wcode1.py 087b26d2f54c…, wcode-all.py 4785f487f0ee…, wcode.py 894ce54cbf31…; `ladder.sh` is ws66's (`ebced9a9…`), `rss.sh`, `tput.sh`, `tput-in.sh`, `px69.py` and `summ.py` ws70's (§2's digests), each with this lane's paths.
+
+nomad-1 `~/lanes/ws71/ev/`: `api-wolf-{1,2}.txt`, `api-lupin-{1,2}.txt`,
+`api-lobo015-{1,2}.txt` (each pair identical), `parity-39686889778.log`
+(the parity job's log).
+
+CI: PR run 39686854924 (`tier pr` at `c443e22`, green); the parity
+dispatch **39686889778** (`tier measure` on `ws71-parity` at `fe99c55`,
+green, VALID SET; never merge evidence); the PR's `tier pr` and labelled
+`tier full` at the final head are in the pull request.
+
+## Not verified
+
+macOS beyond CI (no macOS host here: the `gauntlet-macos` job of `tier
+full` is the macOS row); the runner VM's static and proxied rows beyond
+the parity leg; aarch64 linux and windows; PAX; a lobo built on the
+release runner at 0.2.34 (the numbers' 0.1.5 column is runner-built, the
+two trunk columns kasumi-built); why the release tier's inliner moves 32
+of lobo's functions when an imported module gains functions nobody calls
+(measured, not explained; the code it emits is equally correct by every
+gate here).
+
+## 5. Done-when
+
+Branch `ws71`, PR #111 open and unmerged, five sections by name, commit
+shas as bullets, a test checklist and `Footprint: cross-cutting` (a pin,
+ruling #104); `tier pr` green at its head, the `full-matrix` label added
+at that head, `wolf/tools/lane-audit.sh lobo ws71 111` run from the org
+directory and passing but for `tier full`'s green; then the hand-back
+with the full run's id (RULES.md §6). `ws71-parity` stays on origin as
+the parity run's evidence. No issue is closed by this PR.
