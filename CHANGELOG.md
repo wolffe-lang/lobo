@@ -1,13 +1,15 @@
 # Changelog
 
-## 0.1.5 — unreleased — as root with no `user` line the workers run as nginx's default user; `user` drops privilege; a proxied request holds only itself and ends when its client closes; built with wolf 0.2.33
+## 0.1.5 — 2026-10-21 — as root with no `user` line the workers run as nginx's default user; `user` drops privilege; a proxied request holds only itself and ends when its client closes; built with wolf 0.2.33
 
-**Not released.** Trunk is `0.1.4+dev`; this entry is what 0.1.5
-carries as of ws69, written ahead of the release lane, which stamps the
-version, measures it on the release workflow's binary (the archives,
-the upgrade, the parity row), fills the date, and is cut on the
-maintainer's word (the checklist: `notes/ws68-contract.md` §6). The
-lane entries below (ws66 to ws69) have each change's numbers.
+The sixth release. **If you run lobo as root, read the first section
+before you upgrade**: with no `user` line its workers no longer run as
+root. A silent upstream no longer holds a serving process, a proxied
+exchange ends when its client goes away, pipelined requests are
+answered at once, `$request_time` is the request's own, and the binary
+is built with wolf 0.2.33. The command line and the configuration
+format are 0.1.4's; `user` is newly accepted as root. The lane entries
+below (ws66 to ws70) have each change's numbers.
 
 ### Upgrading from 0.1.4
 
@@ -63,6 +65,40 @@ Four smaller changes an operator may notice:
 Then the upgrade itself is 0.1.4's: install, `lobo -t -c
 conf/lobo.conf` with the new binary, then `lobo -s stop` and start the
 new one (`-s reload` keeps the running binary).
+
+### Install
+
+```sh
+brew install wolffe-lang/wolf/lobo     # macOS arm64
+yay -S lobo-bin                        # Arch x86-64
+```
+
+or download the archive for your host, unpack it, and run it in place:
+
+```sh
+tar -xzf lobo-0.1.5-x86_64-unknown-linux-gnu.tar.gz   # macOS: lobo-0.1.5-aarch64-apple-darwin
+cd lobo-0.1.5-x86_64-unknown-linux-gnu
+./lobo -v
+./lobo -t -c conf/lobo.conf
+./lobo -c conf/lobo.conf serve      # then: curl -i http://127.0.0.1:8080/
+```
+
+`GETTING-STARTED.md` in the archive is the learner path. The release
+workflow's last job downloads the published archive with no
+credentials on a clean runner, checks its digest, runs `lobo -v`,
+serves the stock page and compares the bytes; on macOS it then starts
+the archive as root and checks the one `[warn]` above.
+
+### `lobo -v`
+
+```
+lobo version: lobo/0.1.5 (built with wolf 0.2.33, pin 85dab5d)
+```
+
+`wolf-toolchain.toml` pins wolf 0.2.33 (`85dab5d`), lupin 0.1.54
+(`0e536e8`) and wolf-std `cceda63`; the release workflow builds that
+toolchain from source on each host, and the archive's `BUILD` file
+records it.
 
 ### What changed since 0.1.4
 
