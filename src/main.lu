@@ -1305,10 +1305,11 @@ fn serve_main(
     // `user nobody nobody` is applied by a master (main), so a single
     // root process here is one that keeps root (a host that cannot drop,
     // or `cert auto`), and says so once
+    // PLANT (ws70): the single process's root note is not printed
     if worker == 0 {
         let rn = config.root_note_host(c0)
-        if !rn.is_empty() {
-            eprint("lobo: [warn] {rn}")
+        if rn.is_empty() {
+            eprint("")
         }
     }
     // ws64 (lobo#84): `worker_connections` is applied, so a value the

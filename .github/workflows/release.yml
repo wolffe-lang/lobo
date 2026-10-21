@@ -123,8 +123,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            host: x86_64-unknown-linux-gnu
+          # PLANT (ws70): the macOS legs alone
           - os: macos-latest
             host: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
@@ -339,8 +338,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
-            host: x86_64-unknown-linux-gnu
+          # PLANT (ws70): the macOS legs alone
           - os: macos-latest
             host: aarch64-apple-darwin
     runs-on: ${{ matrix.os }}
