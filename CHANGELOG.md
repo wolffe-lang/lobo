@@ -48,10 +48,12 @@ Four smaller changes an operator may notice:
   `worker_connections` while its upstream exchange is out (nginx's
   count): at `worker_connections 16` with one `listen`, seven are held
   and the eighth is closed with nginx's `[alert]`.
-- Proxied requests a second **with one client at a time** are a little
-  below 0.1.4's — 0.82x and 0.96x on a quiet kasumi in two shapes,
-  0.62x and 0.88x under load (ws69; ws67's first shape was half) — and
-  at or above it with many clients at once (1.06x at 32): each exchange
+- Proxied requests a second **with one client at a time** are below
+  0.1.4's — 0.77x and 0.96x in two shapes on a quiet kasumi, the two
+  released binaries side by side (ws70; ws69 read 0.82x and 0.96x
+  against 0.1.4's tree, 0.62x and 0.88x under load; ws67's first shape
+  was half) — and above it with many clients at once (1.06x at 32,
+  nginx's own number): each exchange
   runs in a proc beside the serving loop, the price of a silent upstream
   no longer holding the process (lobo#100).
 - `$request_time` is the request's own time (ws69, lobo#105): through
@@ -62,9 +64,63 @@ Four smaller changes an operator may notice:
 - A `SIGSEGV` another process sends ends lobo at the first, as the
   host's default does (nginx's too); 0.1.4 lived through the first.
 
-Then the upgrade itself is 0.1.4's: install, `lobo -t -c
-conf/lobo.conf` with the new binary, then `lobo -s stop` and start the
-new one (`-s reload` keeps the running binary).
+Then the upgrade itself:
+
+1. Install 0.1.5 (below) or unpack the archive over a copy of your
+   prefix. `lobo -v` must print `lobo/0.1.5`.
+2. Test your configuration with the new binary: `lobo -t -c
+   conf/lobo.conf`. No directive was removed or renamed. Every
+   configuration 0.1.4 shipped or tested (45: the stock file, the
+   config corpus, the reel, the whole configurations in its documents)
+   loads the same on 0.1.5, with the same text, run as a user. Run as
+   root, a `user` line 0.1.4 refused (`cannot drop privileges`) loads
+   on 0.1.5 when its account exists, and names it nginx's way when it
+   does not (`getpwnam("nginx") failed`).
+3. **Stop the old server and start the new one, soon after the
+   install**: `lobo -s stop -c conf/lobo.conf`, then `lobo -c
+   conf/lobo.conf serve`. A reload is not enough: `-s reload` with the
+   new binary is answered by the running 0.1.4, which re-reads the
+   configuration and keeps its own binary; `lobo control upgrade` is
+   still not implemented (exit 1).
+
+Measured on linux x86-64 with 0.1.4's published binary and the release
+workflow's 0.1.5 binary, in a container (as root where root is named),
+the stock configuration, the new binary renamed over the old one as a
+package manager does, a client asking every 20 ms:
+
+- `-s reload` from the new binary answered `reload complete
+  (generation 2)` (with two workers, `workers=2/2`), and every answer
+  after it still said `Server: lobo/0.1.4`. The stop and the start,
+  issued one after the other: 0 or 1 of the client's requests refused,
+  and the first 0.1.5 answer within 20 ms of the start, with one
+  worker and with two.
+- **A download in flight at `-s stop` ends early**: a client reading a
+  24 MiB file slowly got 2.6 MB of it, then end-of-stream.
+- **Until the restart, a worker the 0.1.4 master replaces is the new
+  binary**: the master starts a worker from the file on disk. With
+  `worker_processes 2`, a worker put down by its pid came back 1 to
+  4 s later as 0.1.5 beside a 0.1.4 sibling, and served (7 and 42 of
+  60 requests made right after, in two runs). **As root with no `user`
+  line that replacement runs as `nobody` while its sibling stays
+  root**: a
+  file only root may read answered 200 or 403 by which worker took
+  the connection, and the replacement's access-log lines were dropped
+  (the 0.1.4 master never gave the log files to `nobody`). Restart
+  right after the install.
+- As root with no `user` line, 0.1.4 is one process (`Uid: 0 0 0 0`)
+  and a 0600 root file answers 200; after the restart 0.1.5 is a master
+  (`Uid: 0 0 0 0`) and one worker (`Uid: 65534 65534 65534 65534`,
+  `Gid: 65534 …`), the same file answers **403** — as the pinned nginx
+  1.30.4 answered it in the same container, as root with no `user`
+  line — and the log files are `nobody`'s. With `user root;` the
+  worker is root and the file 200. A reload whose configuration was
+  then made 0600 was answered `reload complete (generation 2)
+  workers=0/1` (lobo#101).
+- The `[warn]`s: as root with no `user` line, `cert auto` keeps one
+  root process and says why (lobo#102); with no account named
+  `nobody`, one root process and its line; on macOS the release
+  workflow started the archive as root: one root process, no workers,
+  the one `[warn]`.
 
 ### Install
 
@@ -167,11 +223,26 @@ records it.
 
 ### Against nginx
 
-Not re-taken for 0.1.5 yet; the release lane takes the release row.
-The last runner-VM set (ws66, at 0.2.32, four workers, run 39170446495):
-nginx ÷ lobo **1.031x** with a connection per request and **0.949x** on
-keepalive, inside the 1.10 bar. Proxied throughput is not in the bar;
-ws69 measured it on kasumi (above, and `notes/ws69-contract.md`).
+`docs/PARITY.md` defines the comparison: nginx ÷ lobo on one machine,
+32 concurrent clients, the median of five interleaved pairs; 1.10 or
+under is parity, and under 1.00 lobo answered more requests than
+nginx. The release row, at four workers on a GitHub hosted runner
+(4 vcpus), linux x86-64, nginx 1.30.4, the 0.1.5 tree built with wolf
+0.2.33 beside the `v0.1.4` tag built with its own wolf 0.2.29 (ws70,
+run 39656019826, VALID):
+
+| shape | nginx ÷ 0.1.5 | nginx ÷ 0.1.4 | 0.1.5 ÷ 0.1.4 |
+|---|---|---|---|
+| connection-per-request | **1.032x** [1.010, 1.048] | 1.039x | 1.003x [0.992, 1.017] |
+| keepalive | **0.933x** [0.928, 0.952] | 0.937x | 1.002x [0.991, 1.007] |
+
+Both shapes are inside the bar, and 0.1.5 serves static files as 0.1.4
+did. Proxied requests are not in the bar; on kasumi, the two released
+binaries and the pinned nginx in turn, five rounds (ws70): one client
+in turn 0.77x and 0.96x of 0.1.4's requests a second, 32 clients 1.06x;
+nginx as the proxy 1.01x of 0.1.4's with one client and 1.06x with 32. Resident memory of one
+process after 400,000 keepalive requests: 4,664–4,740 kB against
+0.1.4's 4,588–4,636 kB, neither growing.
 
 ### The hosts, and what is still known wrong or limited
 
@@ -180,6 +251,9 @@ The hosts are 0.1.4's: `x86_64-unknown-linux-gnu` and
 
 - **A reload of files only root may read** is refused by dropped
   workers, and the master's reply says `complete` (lobo#101).
+- **A worker replaced between an install and the restart** is the new
+  binary on disk beside the old binary's workers (above); there is no
+  binary-swap verb (`lobo control upgrade`).
 - **`cert auto` under `user`** is unverified (lobo#102); with no `user`
   line lobo keeps root for it.
 - **A client that closes behind an `https` upstream** is seen at every
