@@ -1154,6 +1154,57 @@ and `docs/directives.md` has always said so. The static resolution
 0.1.0 shipped is `root`/`alias` and `index`. The sentence above is the
 release's text as published and is left as it was.
 
+## ws71 — 2026-10-21 — built with wolf 0.2.34; nothing refused, lobo's own code compiles to the same instructions, the numbers unmoved
+
+Unreleased (trunk). Contract, inputs, the prediction and the measurement:
+`notes/ws71-contract.md`.
+
+- **The pin**: wolf 0.2.33 → **0.2.34** (`9da7bdc`), lupin 0.1.54 →
+  **0.1.55** (`e642f26`; wolf 0.2.34 declares it), from the release
+  archives by digest; wolf-std `cceda63` → **`e036bec`**, the std
+  0.2.34's archive bundles. Nothing is refused: both tiers and the five
+  rig binaries build with zero diagnostics against both std trees, and
+  none of the seven prelude names 0.2.34 adds is declared here. What
+  moves for lobo: nothing it calls — lobo does not fork, sets no
+  terminal mode, runs no `wolf test` and names neither
+  `os_signal_wait_fds` nor `os_term_restore_at_exit`; at rest it holds
+  20 descriptors and 9 threads at both pins, and a start at its
+  descriptor limit is refused as before (exit 71 with one line at
+  `ulimit -n` 4–8, lobo's `[emerg]` at 9–11, serving from 12).
+- **Every compiled object compared with 0.2.33's** (the two tiers of
+  `lobo`, and the five rig binaries the gauntlet's tools build; each
+  built twice from one path to the same bytes). At the bare pin every
+  digest moves by the runtime alone: lobo's own code is the same
+  707 functions in the release binary (1,522 in dev), instruction for
+  instruction once addresses are taken out; the release `.text` grows
+  3,840 bytes, all of it wolf_rt's (the pool, the signal hub's reader,
+  the reactor: s247's fork protocol), and the file 423,008 bytes, nearly
+  all the runtime's debug info. The std move adds seven functions to
+  the dev binary (+6,568 bytes) and none to release, whose
+  whole-program pass inlines 32 of lobo's functions differently (+1,632
+  bytes); the four rig binaries that import nothing are byte-identical
+  across it, and `acmeca`'s code too (its debug info names std.net's
+  moved lines). The head differs from trunk built at the same pin only
+  in the stamp's strings.
+- **The gauntlet** is green at 0.2.33 (trunk), at the bare pin and at
+  the head, under `taskset -c 0-3` with no SKIP line, row for row the
+  same 785 verdict lines but the stamp's: corpus 386/386 lane-runs,
+  `lobo-shell` 46 probes (45 parity, 1 named delta), the limit tests on
+  both tiers, membudget 25/25, the dist step's archive packed twice and
+  smoked. lupin 0.1.55 changes no test's lanes.
+- **The numbers do not move.** On a runner VM (parity run 39686889778,
+  `ref_tree=v0.1.5`): nginx ÷ this tree 1.068x close, 0.977x keepalive
+  (bar 1.10x, met), and this tree ÷ 0.1.5 1.003x and 1.001x. On kasumi
+  (ws70's rig, five rounds): static keepalive and close 0.975x and
+  0.986x of the published 0.1.5, proxied 1.19x (one client in turn, a
+  bimodal row), 0.992x and 0.996x (`ab -c 1`, `-c 32`); against the same
+  source built at 0.2.33 on the same box every row is 0.989–1.08x.
+  Resident size after 400,000 keepalive requests is 4,916–5,008 kB at
+  0.2.34 against 4,884–5,000 kB for trunk built here at 0.2.33, growth
+  0 B a request and a connection; the published 0.1.5 reads 4,772–4,808
+  kB beside them, the same anonymous memory and fewer file-backed pages
+  (it was built on the release runner).
+
 ## ws70 — 2026-10-21 — lobo 0.1.5: the release stamp, the entry completed and measured on the released binaries, the macOS root start in the release smoke
 
 - **The entry was written ahead** by ws68 and ws69; 117 commits lie
