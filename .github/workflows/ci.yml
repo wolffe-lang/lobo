@@ -294,13 +294,14 @@ jobs:
       # The rig's host tools beyond the toolchain (CLAUDE.md's list):
       # POSIX sh, awk, jq, diff and a real OpenSSL 3.x for the TLS
       # steps, plus nc for the acme/proxy/metrics drives. ubuntu-latest
-      # ships awk/jq/diff/openssl-3.x; netcat is the only add.
+      # ships awk/jq/diff/openssl-3.x. Declare ApacheBench and Python
+      # explicitly now that the relative proxy row runs in every gate.
       - name: host tools
         shell: bash
         run: |
           set -euo pipefail
           sudo apt-get update -qq
-          sudo apt-get install -y -qq netcat-openbsd
+          sudo apt-get install -y -qq netcat-openbsd apache2-utils python3
           openssl version
 
       - name: lobo-gauntlet
@@ -540,6 +541,8 @@ jobs:
         run: |
           set -euo pipefail
           command -v gtar > /dev/null || brew install gnu-tar
+          command -v ab > /dev/null
+          command -v python3 > /dev/null
           # the rig runs every lane under GNU `timeout -k` (tools/lobo-corpus,
           # ws25's process hygiene); macOS has none — the first run of this
           # job (37779996097) red at corpus on `timeout: command not found`
