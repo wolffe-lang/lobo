@@ -20,6 +20,24 @@ this is a named delta, not a binary-upgrade implementation. See
 `docs/WORKERS.md` and the `binary identity` row in `docs/PARITY.md`.
 
 
+### Proxied regression witnesses and CPU-counted memory census (ws73)
+
+Proxied serving keeps the existing persistent exchange pool. No new
+throughput recovery is claimed: the single-client gap remains lobo#100.
+A relative regression test now compares the head with pre-#81 source,
+built at the same toolchain on the same machine, using five alternating
+`ab -k -c 32` pairs; the head must retain at least 0.9× the reference rate.
+
+The memory witness reports schedulable CPUs and Linux RSS/thread/page-
+table snapshots. `lobo-membudget --proxy-census` runs its original proxy
+fixture alone; `LOBO_MEMBUDGET_PROXY_REQUESTS` permits the same drive
+through 60,000 requests. The 512 KiB RSS-growth bound is unchanged, and
+is witnessed at 4, 8 and 16 CPUs. A new end-to-end test carries 128 large
+POSTs and responses through the job pool on one keepalive connection.
+See `docs/PROFILE.md`, `docs/BUDGET.md` and the ws73 note for the measured
+ceiling, the older pre-pool memory regression and the rejected candidates.
+
+
 ## 0.1.5 — 2026-10-21 — as root with no `user` line the workers run as nginx's default user; `user` drops privilege; a proxied request holds only itself and ends when its client closes; built with wolf 0.2.33
 
 The sixth release. **If you run lobo as root, read the first section
