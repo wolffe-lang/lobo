@@ -1,7 +1,7 @@
 module pkg :: (root)
   wolfi v0 · toolchain 0.2.34 · edition v1
-  export_hash 45934f562b294f99e1e52640b0aa9bb6de0a1fc76c0ce6d4ce66be33750a07f2
-  pkg_hash    45934f562b294f99e1e52640b0aa9bb6de0a1fc76c0ce6d4ce66be33750a07f2
+  export_hash 7f6737c63b5aee3824a37da78afb8608a8518f068e8ba2a649a5af0caec1b5bb
+  pkg_hash    7f6737c63b5aee3824a37da78afb8608a8518f068e8ba2a649a5af0caec1b5bb
   deps:
     acme  2195f0a1eb2628caafdadd449e858e3fc9998c873992ab380346104a5330c1ea
     budget  d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
@@ -19,5 +19,6 @@ module pkg :: (root)
     std.process  0e3cb004e4f38cb8868d7decdd5740e70b93ec4315e782a67941c0f99f839a6f
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
     std.str  dc7ce11212aa0aefa04bfb36ce9514e82a7e3a81f51bfa61d26b0c931032be35
+    std.x.crypto.sha2  4bc46690a78f8e2a22615d01f2a1d18b3a1fc3dd05ceaf39b66dc77a32b4fe1f
     tls  c432c6c1e350bf748c610fd6ef794fa46130e2f1ce356ce2af5f4ef978c3f42f
   items: (none)
