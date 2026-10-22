@@ -4013,6 +4013,7 @@ fn serve_main(
                                         n_start = cs_eff
                                         pxs[pi].sock = fd
                                         pxs[pi].id = snext
+                                        pxs[pi].exchanges = pxs[pi].exchanges + 1
                                         pxs[pi].since = now
                                         pxs[pi].stop_at = 0
                                         net_write(
@@ -4560,6 +4561,7 @@ struct PxSlot {
     id: int,
     since: int,
     stop_at: int,
+    exchanges: int,
 }
 
 /// How long a pool proc may sit idle before it leaves and its job
@@ -4595,13 +4597,16 @@ fn px_of(pxs: List[PxSlot], sock: int, id: int) -> int {
     -1
 }
 
+/// Candidate ws73-c: batches of at most 32 exchanges, with one job
+/// in flight per proc (the bounded queue is one). Exhausted entries
+/// are not dispatched again; px_retire closes them at the pass end.
 /// An idle proc of the pool, the one idle the shortest time (its
 /// thread the likeliest warm), or -1. Pure and total.
 fn px_idle(pxs: List[PxSlot]) -> int {
     var at = -1
     var i = 0
     while i < pxs.len {
-        if pxs[i].jw >= 0 && pxs[i].sock < 0 && pxs[i].stop_at == 0 {
+        if pxs[i].jw >= 0 && pxs[i].sock < 0 && pxs[i].stop_at == 0 && pxs[i].exchanges < 32 {
             if at < 0 || pxs[i].since > pxs[at].since {
                 at = i
             }
@@ -4626,6 +4631,7 @@ fn px_new(mut pxs: List[PxSlot], jw: int, jr: int, out: int) -> int {
                 id: 0,
                 since: 0,
                 stop_at: 0,
+                exchanges: 0,
             }
             return i
         }
@@ -4639,6 +4645,7 @@ fn px_new(mut pxs: List[PxSlot], jw: int, jr: int, out: int) -> int {
         id: 0,
         since: 0,
         stop_at: 0,
+        exchanges: 0,
     })
     pxs.len - 1
 }
@@ -4696,7 +4703,7 @@ fn px_retire(mut pxs: List[PxSlot], now: int, ms: int) {
         if pxs[i].jw >= 0 &&
             pxs[i].sock < 0 &&
             pxs[i].stop_at == 0 &&
-            (ms < 0 || now - pxs[i].since >= ms) {
+            (ms < 0 || now - pxs[i].since >= ms || pxs[i].exchanges >= 32) {
             net_write(pxs[i].jw, "q") else |_| {}
             net_close(pxs[i].jw) else |_| {}
             pxs[i].jw = -1
