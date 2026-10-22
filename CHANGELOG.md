@@ -26,7 +26,11 @@ Proxied serving keeps the existing persistent exchange pool. No new
 throughput recovery is claimed: the single-client gap remains lobo#100.
 A relative regression test now compares the head with pre-#81 source,
 built at the same toolchain on the same machine, using five alternating
-`ab -k -c 32` pairs; the head must retain at least 0.9× the reference rate.
+`ab -k -c 32` pairs; Linux retains the 0.9× comparison bar pending its
+runner-spread calibration. The macOS CI leg records a bounded shorter
+sample without gating its ratio: the long sample exhausted local TCP
+address allocation. Raw failures and keep-alive counts are now retained;
+transport and application errors are not accepted as measurements.
 
 The memory witness reports schedulable CPUs and Linux RSS/thread/page-
 table snapshots. `lobo-membudget --proxy-census` runs its original proxy
