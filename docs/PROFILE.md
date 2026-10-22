@@ -2717,3 +2717,68 @@ column this page already calls noise.
   either working or parked; it is not cpu. The cores-used column in
   the parity table is the cpu.
 - `open(2)` at 9–12 µs is this filesystem (APFS) on this box.
+
+
+## ws73 — the pool's remaining single-client cost (wolf 0.2.34)
+
+The baseline is `f32a1b7`, which already contains ws69's persistent
+exchange pool. The recovery reference is pre-#81 `9a4723c`, rebuilt at
+the same compiler/runtime pin; comparing the pool with itself would hide
+lobo#100. nginx 1.30.4 remains a binary oracle, never a source reference.
+
+Perf was refused at the container security boundary and was dropped.
+The instruments here are `/proc/<pid>/stat` user/kernel tick deltas,
+main-thread schedstat, thread sampling, and a **separate** strace drive
+minus an equal-duration idle drive. Ptrace's syscall times are not normal
+request latencies.
+
+One untraced 20,000-request window, padded 4 KiB heads, four proxy CPUs,
+load 60–69, measured CPU microseconds per request:
+
+| part | pre-#81 | pool |
+|---|---:|---:|
+| whole proxy, user | 29.5 | 75.5 |
+| whole proxy, kernel | 49.0 | 124.5 |
+| serving main thread, user + kernel | 66.0 | 71.0 |
+| persistent exchange worker, including runtime calls | — | 102.0 |
+| remaining proxy helpers / transient threads (difference) | 12.5 | 27.0 |
+| main-thread run-queue wait | 171.2 | 222.2 |
+| exchange-worker run-queue wait | — | 702.7 |
+
+The pool's extra CPU was 46 µs user and 75.5 µs kernel. Its persistent
+exchange worker accumulated about 703 µs/request in the run queue on this
+loaded core set; that is scheduler wait, not socket-blocked time. This
+explains why extra wake crossings hurt much more under load. The worker
+row includes its runtime calls, and the residual includes helpers born
+and gone between snapshots. These are **not** an exact decomposition
+into copy, scheduling and spawn costs. Job sockets and wolf proc creation
+are zero per steady-state request in this pool.
+
+The separate idle-subtracted 20,000-request trace counted per request:
+
+| syscall | pre-#81 | pool |
+|---|---:|---:|
+| `clone3` | 0 | 0.703 |
+| `poll` | 1.989 | 4.995 |
+| `sendto` | 2.000 | 7.000 |
+| `recvfrom` | 3.833 | 6.000 |
+| `futex` | 3.035 | 3.644 |
+| upstream `socket` / `connect` | 1.000 each | 1.000 each |
+
+The clone rate varies with the workload and load: an earlier short-head
+trace read 1.77/request. It is compensation-thread churn (#836), not a
+wolf proc per request. Removing an exchange's job poll, finite batches,
+and a borrowed-body relay were measured as separate candidates; the lane
+note records their commits and numbers. Taking the whole exchange into
+the loop is still unavailable by name: `net_connect` blocks (#835), and
+TLS record reads remain blocking.
+
+`tools/lobo-proxy-throughput` is the CI ratchet: pre-#81 source and the
+head built at this checkout's pin, one prompt loopback nginx backend,
+`ab -k -c 32`, 2,000 warm-up and 20,000 measured requests, five alternating
+pairs. The head/reference median-rate ratio must be at least 0.9. No
+absolute req/s bar crosses between machines. This concurrent shape does
+not certify single-client recovery; the one-client and padded-client
+numbers remain separate in the lane note. The driver rejects failed,
+non-2xx or incomplete ApacheBench runs, and unit-tests the median/bar
+boundary and incomplete-pair handling.
