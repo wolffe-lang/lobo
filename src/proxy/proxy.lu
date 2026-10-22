@@ -2711,7 +2711,11 @@ pub fn job_loop(jr: int, out: int) -> int {
             var bad = !reading
             var at = 0
             while reading {
-                let piece = net_read_bytes(jr, 65536) else |_| {
+                // ws73-f: this is a read CHUNK, not a frame limit. The
+                // runtime keeps max bytes of read scratch per thread;
+                // the smaller chunk reduces this worker's retained scratch.
+                // Larger jobs continue through this loop unchanged.
+                let piece = net_read_bytes(jr, 8192) else |_| {
                     reading = false
                     bad = true
                     List[byte]()
