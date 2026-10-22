@@ -541,3 +541,61 @@ is no longer gated on anything upstream).
   the METER (503 `site=file`) and NO `site=region` event appears
   anywhere in the run, fifty keepalive requests after it,
   `budget-503s=1` and `mem-rt-hw` in `lobo status`.
+
+
+## Proxied requests: what the flat row measures (ws73)
+
+`flat, proxied` retains its **512 KiB RSS-growth bound**, after 400 warm-up
+requests. It drives one keepalive client in turn, 400 requests per
+connection, against the rig's fixed backend. It is not a 512 KiB total
+server-memory budget, a kernel-memory bound, or a bound for arbitrary
+concurrency. `os_cpus()` supplies the reported schedulable CPU count;
+counting installed CPUs would mislabel a pinned run.
+
+On Linux, the original rigback/memdrive fixture can be measured alone:
+
+```sh
+taskset -c 0-3 tools/lobo-membudget --proxy-census
+taskset -c 0-7 tools/lobo-membudget --proxy-census
+LOBO_MEMBUDGET_PROXY_REQUESTS=60000 tools/lobo-membudget --proxy-census
+```
+
+The last command is unpinned. The optional request count is a rig input,
+not a daemon setting: 2,000–60,000, in multiples of 400. It preserves the
+warm-up, connection shape and 512 KiB bound, and prints the short, 20k
+and 60k phases. A drive failure or CPU-query error is red, not a skip.
+
+At frozen pool baseline `f32a1b7`, rebuilt at wolf 0.2.34, the original
+fixture's RSS readings were (KiB; totals include warm-up):
+
+| CPUs | 0 | 400 | 2,400 | 20,400 | 60,400 | growth after warm-up |
+|---:|---:|---:|---:|---:|---:|---:|
+| 4 | 4,592 | 4,992 | 5,004 | 5,008 | 4,968 | −24 |
+| 8 | 4,692 | 5,096 | 5,112 | 5,112 | 5,112 | +16 |
+| 16 | 4,872 | 5,292 | 5,292 | 5,296 | 5,296 | +4 |
+
+Historical pre-pool source `251b6db`, built with the **same** 0.2.34
+compiler/runtime, instead grew 216 / 336 / **2,288 KiB** over that drive
+at 4 / 8 / 16 CPUs. Its 16-CPU short row grew 1,316 KiB. This reproduces
+#106 without blaming the pin. The persistent pool already bounds work to
+one job-reading worker for this sequential shape. A separate 2,400-
+request trace observed ten job-buffer-reading TIDs in the historical
+shape and one in the persistent pool. Runtime read scratch is per thread;
+worker and host-allocator warm-up must not be mistaken for a request's
+region retaining its body. The trace does not attribute every retained
+byte to scratch alone.
+
+RSS excludes kernel charges. A separate proxy-only cgroup probe, with
+backend and driver outside that cgroup, measured this resting CPU curve:
+
+| CPUs | anonymous RSS (KiB) | kernel stack charges (KiB) | page-table charges (KiB) |
+|---:|---:|---:|---:|
+| 4 | 616 | 128 | 124 |
+| 8 | 728 | 192 | 160 |
+| 16 | 948 | 320 | 216 |
+
+These are cgroup charges, not a sum to add to RSS; the initial thread may
+have been charged before cgroup attachment. Kernel slab charges also
+rose during the connection drive, while RSS stayed flat. The census's
+`VmPTE` and Threads lines separate page-table/thread growth from user
+resident memory; they are not a complete kernel-memory accounting.
