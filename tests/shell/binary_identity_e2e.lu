@@ -111,9 +111,12 @@ fn run_row(root: str, kind: str) -> bool ! {
     fs_write_text("{dir}/html/index.html", "ws72-survivor\n")?
     let bin = "{dir}/lobo"
     let original = env_get("LOBO_BIN") else "{root}/target/lobo-debug"
+    assert(command("cp \"$1\" \"$2\" && chmod 755 \"$2\"", original, bin), "copy test image")
+    let copied_size = fs_size(bin)?
+    let original_size = fs_size(original)?
     assert(
-        command("cp \"$1\" \"$2\" && chmod 755 \"$2\"", "{root}/target/lobo-debug", bin),
-        "copy test image",
+        copied_size == original_size,
+        "the requested executable, not the default tier, was copied",
     )
     let hp = free_port()?
     let cp = free_port()?
