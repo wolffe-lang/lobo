@@ -392,7 +392,7 @@ the same things. Four rows CARRY:
 | 4a. a bad config is refused | reload an unparseable config | both keep serving the previous config |
 | 4b. …and says so | the `-s reload` exit code | non-zero on both |
 
-Four rows are NAMED DELTAS, printed with their reason:
+Five rows are NAMED DELTAS, printed with their reason:
 
 | delta | nginx | lobo | why |
 |---|---|---|---|
@@ -400,6 +400,7 @@ Four rows are NAMED DELTAS, printed with their reason:
 | **D2 who parses** | the CLIENT parses the config and exits 1 with the `[emerg]`; the master is never signalled | the MASTER parses and answers the verdict on the wire, naming the generation that kept serving | lobo's trigger carries a reply socket; nginx's is a signal, which cannot answer |
 | **D3 narration** | the old workers drain in the dark (zero drain events in the error log) | six events per reload — `generation-draining`/`-loaded`/`-activated`/`-retired` — plus `lobo status` | docs/DRAIN.md's whole subject |
 | **D4 idle keepalive at reload** | the old worker closes its IDLE keepalive connections once it finishes shutting down | the draining generation HOLDS them until they close, or `worker_shutdown_timeout` aborts them | lobo is the more forgiving of the two: a client written against nginx keeps working, a client written against lobo may not survive nginx |
+| **D5 binary identity (ws72, 0.1.6)** | after the executable path is replaced, forks a dead worker's replacement from the master's old image | refuses the replacement once at `[emerg]`, retires the vacant slot and keeps survivors serving; restart to restore the count | lobo execs its path, not a fork of the master. Strict startup identity prevents mixed-version workers; `upgrade` remains unimplemented. `tests/differential/binary_identity.py` measures nginx's row (a byte-appended copy), `tests/shell/binary_identity_e2e.lu` holds lobo's refusal and unchanged-path control |
 
 Row 3 tolerates either behavior because D4 is real; it asserts the
 invariant a client depends on: an already-open connection is never

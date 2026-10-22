@@ -312,6 +312,35 @@ never parks on a hand serving a long connection. The rule:
   `restarts` bumped: `worker-started … restarts=1`. A hand that died
   inside a second of starting is replaced after a 250 ms pause, so a
   config that kills every hand at once cannot spin the master;
+- **since ws72 (0.1.6, lobo#110), a replacement first checks the
+  executable's startup identity.** The master takes one `fs_stat` of
+  `os_exe()` at start: device, inode, size and mtime (nanoseconds where
+  answered). Before every later spawn, including a retry of a failed
+  initial spawn, it follows the same path and compares. A different
+  identity, or an unreadable/missing/non-file path, refuses the spawn
+  with one `[emerg]` line: `replacement refused: binary identity
+  changed`, `startup=[…] current=[…]`, and `restart lobo, or control
+  upgrade when it exists`. That slot is retired for the master's
+  lifetime, not retried on every pass; every surviving hand keeps
+  serving. `status` retains the configured `workers: N`, with the
+  vacant row `unreachable`, `pid=-1` and no restart increment. Restarts
+  are not exported by `/metrics` at this pin, so the log is the refusal
+  count (one line per refused slot). The initial cohort is not guarded;
+  failure to capture its identity refuses startup before any hand.
+  An identical copy at a new inode is also different: strict identity,
+  not byte equivalence. Linux and macOS answer device/inode; where
+  they are unavailable (windows's `fs_stat` have bits), SHA-256 of
+  the file's contents substitutes for the pair, with size and mtime
+  still compared. A symlink is followed, as exec follows it. This is
+  a package-replacement guard, not protection against an untrusted
+  writer racing between stat and exec (there is no atomic check/exec
+  API here). **Named delta:** nginx forks its old master image and
+  restores the count after an install; lobo execs a path and refuses
+  when that path changed. Stop and restart lobo after installing to
+  restore its count. Reload does not reset the identity and `control
+  upgrade` remains unimplemented. Witnesses:
+  `tests/shell/binary_identity_e2e.lu` and
+  `tests/differential/binary_identity.py` (linux, inside a container);
 - under `quit`, a gone hand is reaped and NOT replaced; the master
   exits once every hand is gone;
 - a SIGKILLed master leaves its hands serving (nginx's workers

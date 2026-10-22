@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased — 0.1.6
+
+### Worker replacement after a binary install (ws72, lobo#110)
+
+The mixed-version worker window listed under 0.1.5's known issues is
+fixed in 0.1.6. A master records its executable's device, inode, size
+and modification time at startup. Before replacing a worker it checks
+that path again. If the identity changed (including an identical copy
+at a new inode), or the path cannot be read, it refuses that replacement
+with one `[emerg]` line naming the startup and current identities and
+asking for a restart. Surviving workers keep serving; the vacant slot
+is not retried. Stop the old master and start the installed binary to
+restore the configured worker count. `control upgrade` is still not
+implemented; a reload does not adopt the installed executable.
+
+nginx instead forks replacement workers from the master's old image;
+this is a named delta, not a binary-upgrade implementation. See
+`docs/WORKERS.md` and the `binary identity` row in `docs/PARITY.md`.
+
+
 ## 0.1.5 — 2026-10-21 — as root with no `user` line the workers run as nginx's default user; `user` drops privilege; a proxied request holds only itself and ends when its client closes; built with wolf 0.2.33
 
 The sixth release. **If you run lobo as root, read the first section

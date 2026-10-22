@@ -13,6 +13,12 @@ The tool that measures the bar as written is
 the box. Its table goes into the ledger at the foot of this page,
 dated, host-named, load-quoted.
 
+## Operational deltas
+
+| delta | nginx | lobo | witness |
+|---|---|---|---|
+| **binary identity** (ws72, 0.1.6; lobo#110) | replacing the on-disk executable does not change the master's image: a dead worker is replaced by a fork of the old image | before a replacement exec, compares startup device/inode, size and mtime with the path; a change (even identical bytes at a new inode) or unreadable path refuses that slot once at `[emerg]`; survivors keep serving until a restart restores the count | `tests/shell/binary_identity_e2e.lu`; linux black-box oracle row `tests/differential/binary_identity.py`; details in `docs/WORKERS.md` and `docs/CONTROL.md` D5. `control upgrade` is unimplemented |
+
 ## The bar
 
 ### The workload — the differential's own
