@@ -1111,6 +1111,15 @@ fn up_header(up: UpResponse, lname: str) -> str {
 /// hop-by-hop, minus the ones already emitted. `token`/`date` are the
 /// Server/Date values; `keep` the client keepalive decision. PURE.
 pub fn relay_response(up: UpResponse, body: str, token: str, date: str, keep: bool) -> str {
+    let head = relay_head(up, body.len, token, date, keep)
+    if up.body_mode == "chunked" {
+        return "{head}{chunk_frame(body)}"
+    }
+    "{head}{body}"
+}
+
+// ws73-d: the head independently of the already-buffered response body.
+fn relay_head(up: UpResponse, body_len: int, token: str, date: str, keep: bool) -> str {
     var head = "{up.status_line}\r\n"
     head = "{head}Server: {token}\r\n"
     head = "{head}Date: {date}\r\n"
@@ -1125,7 +1134,7 @@ pub fn relay_response(up: UpResponse, body: str, token: str, date: str, keep: bo
     if chunked {
         head = "{head}Transfer-Encoding: chunked\r\n"
     } else {
-        head = "{head}Content-Length: {body.len}\r\n"
+        head = "{head}Content-Length: {body_len}\r\n"
     }
     head = "{head}Connection: {keep_token(keep)}\r\n"
     // remaining upstream headers, in order, minus the special/hop-by-hop
@@ -1140,10 +1149,22 @@ pub fn relay_response(up: UpResponse, body: str, token: str, date: str, keep: bo
         }
         i = i + 1
     }
-    if chunked {
-        return "{head}\r\n{chunk_frame(body)}"
+    "{head}\r\n"
+}
+
+// Candidate ws73-d: `str` arguments borrow their immutable bytes for the
+// call. Two writes avoid materializing a head+body copy, at the price of
+// a second syscall. Chunked framing keeps the existing one-write path.
+fn relay_write(client: int, up: UpResponse, body: str, token: str, date: str, keep: bool) -> () ! {
+    closed,
+    io,
+} {
+    if up.body_mode == "chunked" {
+        net_write(client, relay_response(up, body, token, date, keep))?
+        return
     }
-    "{head}\r\n{body}"
+    net_write(client, relay_head(up, body.len, token, date, keep))?
+    net_write(client, body)?
 }
 
 /// Frame `body` as a single chunked chunk plus the terminating zero
@@ -1828,8 +1849,7 @@ fn attempt_tls(
     pacc.body_bytes = body.len
     // ws69 (lobo#104): what the client pipelined meanwhile goes back
     pacc.carry = w.carry
-    let out = relay_response(parsed, body, token, date, keep)
-    net_write(client, out)?
+    relay_write(client, parsed, body, token, date, keep)?
     0
 }
 
@@ -2072,8 +2092,7 @@ fn attempt(
     // waited goes back to the caller, which puts it in front of the
     // connection's next read: the connection is kept, as nginx's
     pacc.carry = w.carry
-    let out = relay_response(parsed, body, token, date, keep)
-    net_write(client, out)?
+    relay_write(client, parsed, body, token, date, keep)?
     0
 }
 
