@@ -2711,7 +2711,7 @@ pub fn job_loop(jr: int, out: int) -> int {
             var bad = !reading
             var at = 0
             while reading {
-                let piece = net_read_bytes(jr, 65536) else |_| {
+                let piece = net_read_bytes(jr, 4096) else |_| {
                     reading = false
                     bad = true
                     List[byte]()
@@ -2778,6 +2778,11 @@ pub fn job_loop(jr: int, out: int) -> int {
                             want = hdr + jl + tl
                         }
                     }
+                }
+                // PLANTED BREAK: mistake the read chunk for a whole frame.
+                if want >= 0 && buf.len < want {
+                    reading = false
+                    bad = true
                 }
                 if want >= 0 && buf.len >= want {
                     reading = false

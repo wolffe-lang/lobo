@@ -3980,6 +3980,8 @@ fn serve_main(
                                 }
                             }
                             if proxying_now {
+                                // PLANTED BREAK: serialize every proxy dispatch behind a sleep.
+                                time_sleep_ms(1)
                                 // ws67 (lobo#81): the EXCHANGE leaves the loop. A
                                 // generation already past its worker_shutdown_timeout
                                 // starts none (nothing was written: the row closes as

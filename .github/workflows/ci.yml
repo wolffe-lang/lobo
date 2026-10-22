@@ -310,6 +310,14 @@ jobs:
         working-directory: lobo
         run: tools/lobo-gauntlet
 
+      - name: ws73 planted throughput witness after the framing red
+        if: always() && inputs.parity != true && inputs.profile != true && inputs.syscalls != true
+        shell: bash
+        working-directory: lobo
+        run: |
+          echo "::warning::ws73 deliberate negative control; never merge this branch"
+          tools/lobo-proxy-throughput
+
       # ws22: the W8 bar on the one linux x86-64 the org has hands on.
       # docs/PARITY.md names this runner as a gating HOST and its noise
       # as the reason the statistic is a same-box ratio; a refused set
