@@ -367,6 +367,101 @@ red control, these are #106's closing evidence. The limit was not widened.
   measured tools (`logs/archive-verify.log`, exit 0). This verifies rather
   than merely trusting the tools copied from ws72.
 
+### Resume: runner method failures and R-ws73-3
+
+Both final-head runs at `b66f4082` failed the new throughput row. This
+supersedes the initial handoff's pending-CI state; the local 0.969× is
+not substituted for a runner result.
+
+Linux, actual reference/head req/s and paired ratios:
+
+| run | pair | reference | head | head/reference |
+|---|---:|---:|---:|---:|
+| 39827125144 | 0 | 6033.63 | 5302.16 | 0.878768 |
+| 39827125144 | 1 | 5920.67 | 5277.43 | 0.891357 |
+| 39827125144 | 2 | 5820.62 | 5284.49 | 0.907891 |
+| 39827125144 | 3 | 5894.15 | 5256.55 | 0.891825 |
+| 39827125144 | 4 | 5882.64 | 5260.71 | 0.894277 |
+| 39827128857 | 0 | 5926.22 | 5317.07 | 0.897211 |
+| 39827128857 | 1 | 5966.46 | 5355.87 | 0.897663 |
+| 39827128857 | 2 | 5947.36 | 5410.26 | 0.909691 |
+| 39827128857 | 3 | 5952.20 | 5337.55 | 0.896736 |
+| 39827128857 | 4 | 5964.36 | 5336.42 | 0.894718 |
+
+Ratios of medians were **0.895367** and **0.896736**, a run-to-run
+spread of 0.001368 (0.137 percentage points). Individual pairs span
+**0.878768–0.909691**. The two five-pair centres are below 0.900;
+more requests may narrow variation without raising that centre. These
+runs compare the historical inline reference with an unchanged server,
+not a new server-code regression introduced by this PR.
+
+The scratch experiment `ws73-method` at `ad6e53b`, run
+**39832837357**, completed on both runners. It is diagnostic data, never
+merge evidence. Additional Linux medians and paired ranges:
+
+| sample | requests / warm-up / pairs | reference median | head median | ratio | paired range |
+|---|---|---:|---:|---:|---|
+| identical-head control | 20k / 2k / 5 | 6270.33 | 6286.81 | 1.002628 | 0.997244–1.004743 |
+| historical-reference long | 100k / 2k / 5 | 7443.82 | 6279.09 | 0.843531 | 0.832294–0.858274 |
+| historical-reference repeat | 20k / 2k / 5 | 7408.69 | 6279.10 | 0.847532 | 0.826334–0.872518 |
+
+More measured requests did **not** bring the centre above 0.900. The
+identical-binary control is tight, while the historical-reference ratio
+changes between hosted VMs/conditions. This is an uncalibrated CI floor
+for the existing architecture, not evidence of a new server-code change.
+
+**R-ws73-3, recommendation UNIMPLEMENTED:** report the historical-reference
+measurement on CI, with the **0.900 merge gate retained on kasumi's
+calibrated four-CPU shape**. This changes gate posture and needs the
+maintainer's ruling; it is not being smuggled in as a method fix. Linux
+CI still enforces **0.900**. The provisional 0.85 suggestion was withdrawn:
+it would fail the additional 0.847532 set. A numerical alternative would
+need about 0.80, 0.026334 (2.633 percentage points) below the lowest
+observed historical-reference pair; that is not a confidence bound and
+is not recommended merely to obtain green. No bar was changed.
+
+macOS run 39827128857 completed **14,306 measured requests**, after a
+**2,000-request warm-up**, before ab exited 49 with
+`apr_socket_connect(): Can't assign requested address`. The scratch
+runner reproduced the failure after 14,287 measured requests and recorded:
+
+- ephemeral range **49152–65535**, width **16,384**;
+- TCP MSL **15,000 ms**, somaxconn **128**;
+- TIME_WAIT **0 before**, **16,349 at failure** (30 established sockets).
+
+This is source-address/ephemeral-port exhaustion, not a refused backlog:
+32 frontend clients are below somaxconn, and the host exhausts ports
+mid-drive. The proxy opens a fresh upstream connection for each exchange,
+even with persistent frontend connections. The HTTP parser honors
+HTTP/1.0 `Connection: Keep-Alive`, and every bounded probe row confirmed
+**1,000 Keep-Alive requests**, so ab's HTTP/1.0 persistence is not the
+failure being hidden.
+
+After a separate **32-second** control cooldown (two observed MSLs plus
+two seconds), the bounded 1k/100/five-pair sample completed: reference
+median **3565.42**, head **7830.42 req/s**, ratio **2.196213**, paired range
+**1.228983–2.679579**. That spread is why its shortened-window number is
+reported rather than gated. The cooldown separated a deliberate
+saturation experiment from a new experiment; it is not a retry or a
+request-timeout change in the product row.
+
+The method fix retains the Linux 20k/2k/five-pair shape and 0.900 bar.
+On **macOS CI only**, a 1,000-request sample with 100 warm-up requests
+and five pairs bounds the fixture to 11,000 upstream exchanges rather
+than 220,000. Its short-window number is explicitly **ADVISORY**, not
+a performance pass. Transport/application failures remain failures.
+No backlog/sysctl value or request timeout was raised. Raw ab output is
+preserved before checking its exit status, with role/round/phase and host
+state at a failure. The bounded-window method is verified on that macOS runner. Its
+short-window ratio is not interchangeable with the Linux ratio.
+
+The revised main-tree local gauntlet (`logs/r3-gate.log`) exited 0:
+392/392 corpus, eleven ratchet unit tests, shell 46 probes, memory 25/25,
+zero SKIPs, unchanged Linux numerical bar passed at **1.061×**. Its last
+line is `lobo-gauntlet: GREEN`. This does not override the hosted-runner
+reds or implement R-ws73-3. No server source or toolchain pin changed.
+
+
 ## 4. Evidence index
 
 Kasumi `/home/mfwolffe/lanes/ws73/`: `logs/build-base.log`,
