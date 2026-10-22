@@ -1,0 +1,239 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! ws72, lobo#110: a replacement must not exec a changed on-disk image.
+//! Each row starts its OWN copy, two workers, then atomically replaces
+//! the path, sends TERM to worker 1's recorded pid and waits for the
+//! supervisor's decision. No fixed startup sleep; readiness and decisions
+//! are polled with deadlines. The shell only copies/chmods binary bytes;
+//! the wolf test drives the real control channel, signal and HTTP path.
+//! The different-build row uses the release tier beside the debug tier
+//! (both built by the gauntlet). Strict identity includes identical bytes
+//! at a new inode. Missing paths fail closed too. Loopback only.
+
+use shell
+
+fn command(text: str, a: str, b: str) -> bool {
+    var args = List[str]()
+    (mut args).push("-c")
+    (mut args).push(text)
+    (mut args).push("sh")
+    (mut args).push(a)
+    (mut args).push(b)
+    let h = os_spawn_with("/bin/sh", args, List[int]()) else |_| { return false }
+    (os_wait(h) else -1) == 0
+}
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0")?
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn status(ep: str) -> str {
+    shell.control_fetch(ep, "status") else ""
+}
+
+fn row(st: str, n: int) -> str {
+    for line in st.lines() {
+        if line.starts_with("worker {n}: ") { return line }
+    }
+    ""
+}
+
+fn field(line: str, key: str) -> str {
+    let prefix = "{key}="
+    for word in line.words() {
+        if word.starts_with(prefix) { return word[prefix.len..word.len] }
+    }
+    ""
+}
+
+fn fetch(port: int) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| { return "" }
+    net_deadline(c, 1000) else |_| {}
+    net_write(c, "GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return ""
+    }
+    var reply = ""
+    loop {
+        let piece = net_read(c, 4096) else ""
+        if piece.is_empty() { break }
+        reply = "{reply}{piece}"
+    }
+    net_close(c) else |_| {}
+    reply
+}
+
+fn wait_ready(ep: str) -> bool {
+    let until = time_unix_ms() + 15000
+    while time_unix_ms() < until {
+        let st = status(ep)
+        if row(st, 1).contains(": serving ") && row(st, 2).contains(": serving ") {
+            return true
+        }
+        time_sleep_ms(20)
+    }
+    false
+}
+
+fn refusal_count(path: str) -> int {
+    let log = fs_read_text(path) else ""
+    var n: int = 0
+    for line in log.lines() {
+        if line.contains("[emerg]") &&
+            line.contains("binary identity") &&
+            line.contains("restart lobo, or control upgrade when it exists") {
+            n += 1
+        }
+    }
+    n
+}
+
+fn run_row(root: str, kind: str) -> bool ! {
+    io,
+    denied,
+    not_found,
+    exists,
+    invalid,
+    cross_device,
+    unsupported,
+} {
+    let dir = "{root}/ws72_e2e/{kind}"
+    fs_create_dir_all("{dir}/html")?
+    fs_write_text("{dir}/html/index.html", "ws72-survivor\n")?
+    let bin = "{dir}/lobo"
+    let original = env_get("LOBO_BIN") else "{root}/target/lobo-debug"
+    assert(
+        command("cp \"$1\" \"$2\" && chmod 755 \"$2\"", "{root}/target/lobo-debug", bin),
+        "copy test image",
+    )
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "{dir}/lobo.conf"
+    let log = "{dir}/error.log"
+    fs_write_text(
+        conf,
+        "worker_processes 2;\nuser root;\npid {dir}/lobo.pid;\ncontrol {ep};\nerror_log {log} notice;\nhttp {{ server {{ listen 127.0.0.1:{hp}; root {dir}/html; }} }}\n",
+    )?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(root)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    let child = os_spawn_with(bin, args, List[int]())?
+    defer {
+        let _ = shell.control_send(ep, "stop") else ""
+        let _ = os_wait(child) else -1
+    }
+    assert(wait_ready(ep), "two initial workers serve")
+    let before = status(ep)
+    let startup = fs_stat(bin)?
+    print(
+        "binary stat {kind}: words={startup.len} have={startup[3]} dev={startup[9]} ino={startup[10]} size={startup[1]} mtime={startup[14]}.{startup[15]}",
+    )
+    let victim = field(row(before, 1), "pid").to_int() else -1
+    let survivor = field(row(before, 2), "pid")
+    assert(victim > 0, "victim's pid is recorded")
+    if kind == "missing" {
+        fs_remove(bin)?
+    } else if kind == "mtime" {
+        assert(command("touch -m -t 202001010000 \"$1\"", bin, ""), "change mtime only")
+        let changed = fs_stat(bin)?
+        assert(
+            changed[9] == startup[9] &&
+                changed[10] == startup[10] &&
+                changed[1] == startup[1] &&
+                changed[14] != startup[14],
+            "mtime-only mutation",
+        )
+    } else if kind != "unchanged" {
+        let source = if kind == "different-build" {
+            env_get("LOBO_OTHER_BIN") else "{root}/target/lobo-release"
+        } else {
+            bin
+        }
+        assert(
+            command("cp -p \"$1\" \"$2.new\" && chmod 755 \"$2.new\"", source, bin),
+            "stage replacement",
+        )
+        if kind == "appended" {
+            assert(command("printf x >> \"$1.new\"", bin, ""), "append one byte")
+        }
+        fs_rename("{bin}.new", bin)?
+        if kind == "identical" {
+            let changed = fs_stat(bin)?
+            assert(changed[9] != startup[9] || changed[10] != startup[10], "new inode")
+            assert(
+                changed[1] == startup[1] &&
+                    changed[14] == startup[14] &&
+                    changed[15] == startup[15],
+                "same size and exact mtime: inode is decisive",
+            )
+        }
+    }
+    os_signal_send(victim, shell.sig_terminate()) else |_| { return io }
+    let until = time_unix_ms() + 8000
+    var decided = false
+    while time_unix_ms() < until && !decided {
+        let st = status(ep)
+        let first = row(st, 1)
+        if kind == "unchanged" {
+            decided = first.contains(": serving ") && field(first, "restarts") == "1"
+        } else {
+            decided = refusal_count(log) == 1 && field(first, "pid") == "-1"
+        }
+        if !decided { time_sleep_ms(20) }
+    }
+    let after = status(ep)
+    let first = row(after, 1)
+    var okay = decided &&
+        field(row(after, 2), "pid") == survivor &&
+        row(after, 2).contains(": serving ") &&
+        fetch(hp).contains("ws72-survivor")
+    if kind == "unchanged" {
+        okay = okay && refusal_count(log) == 0 && field(first, "pid") != "{victim}"
+    } else {
+        // Poll through another supervision interval with real status/HTTP
+        // work: no respawn and no repeated emergency line on a vacant slot.
+        let stable_until = time_unix_ms() + 700
+        while time_unix_ms() < stable_until {
+            let st = status(ep)
+            okay = okay &&
+                field(row(st, 1), "pid") == "-1" &&
+                !row(st, 1).contains(": serving ") &&
+                field(row(st, 1), "restarts") == "0" &&
+                refusal_count(log) == 1
+            time_sleep_ms(20)
+        }
+    }
+    print("binary identity {kind}: {if okay { "GREEN" } else { "RED" }}")
+    if !okay {
+        print("post-{kind}: {first}")
+    }
+    okay
+}
+
+fn main() -> !int {
+    let root = os_cwd()?
+    fs_remove_dir_all("{root}/ws72_e2e") else |_| {}
+    var okay = true
+    let only = env_get("WS72_CASE") else ""
+    for kind in ["unchanged", "appended", "identical", "different-build", "missing", "mtime"] {
+        if !only.is_empty() && only != kind { continue }
+        let got = run_row(root, kind)?
+        okay = okay && got
+    }
+    fs_remove_dir_all("{root}/ws72_e2e") else |_| {}
+    assert(okay, "binary identity rows (see RED lines)")
+    0
+}

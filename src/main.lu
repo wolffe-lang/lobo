@@ -94,6 +94,7 @@ use resolver
 use serve
 use shell
 use std.process
+use std.x.crypto.sha2
 use tls
 
 /// The no-argument banner: identity (the release stamp — shell's,
@@ -5673,11 +5674,43 @@ fn free_endpoint() -> str {
     "127.0.0.1:{p}"
 }
 
+/// The path's identity from ONE stat, following its final symlink as exec
+/// does. [os.fs.stat]: words 9/10 are device/inode (opaque signed bits),
+/// 1/2 are size/mtime-ms, 14/15 mtime seconds/nanoseconds, and word 3
+/// says which words the host answered. Linux and macOS answer the pair;
+/// windows does not, so only there use a SHA-256 content identity too.
+/// Metadata is still compared on the digest path. A missing/unreadable
+/// path, or one no longer naming a regular executable file, fails closed.
+/// This is a package-replacement guard, not an atomic stat-and-exec API:
+/// an untrusted writer racing between the check and exec is not excluded.
+fn binary_identity(path: str) -> str ! {not_found, denied, io} {
+    let st = fs_stat(path)?
+    if st.len != 20 || st[0] != 0 {
+        return io
+    }
+    let have = st[3]
+    let mt = if have & 49152 == 49152 {
+        "{st[14]}.{st[15]}"
+    } else {
+        "ms:{st[2]}"
+    }
+    if have & 1536 == 1536 {
+        return "dev={st[9]} ino={st[10]} size={st[1]} mtime={mt}"
+    }
+    // The pin's windows stat has no dev/ino. Do not interpret its zero
+    // placeholders as an identity; say what was actually compared.
+    let bytes = fs_read_bytes(path)?
+    let digest = sha2.to_hex(sha2.sum256(bytes))
+    "sha256={digest} size={st[1]} mtime={mt} (device/inode unavailable)"
+}
+
 /// Start worker `i` (1-based): pick its endpoint, spawn this
 /// executable as a hand WITH THE MASTER'S LISTENERS IN ITS INHERIT SET
 /// (ws17), log `worker-started`, and answer the child handle with the
 /// endpoint — or (-1, "") with the reason logged as an error (the loop
-/// retries on its next pass).
+/// retries on its next pass). A replacement whose identity changed returns
+/// (-2, ""): the slot is retired, not retried, so one refusal is one
+/// emergency line and no loop attempts to exec the replacement image.
 ///
 /// `lfds` is the master's listening handles in the config's own order
 /// (plaintext first, then TLS). `os_spawn_with` hands them to the
@@ -5699,6 +5732,7 @@ fn free_endpoint() -> str {
 /// The fallback is named out loud, once per spawn. Total.
 fn spawn_worker(
     exe: str,
+    identity: str,
     prefix: str,
     conf: str,
     i: int,
@@ -5710,6 +5744,20 @@ fn spawn_worker(
     lset: str,
     mut el: ELog,
 ) -> (int, str) {
+    // Empty only for the startup cohort, whose identity the master just
+    // captured. Every later attempt (including a retry of a failed startup
+    // spawn) checks the same saved identity, never a newly accepted image.
+    if !identity.is_empty() {
+        let current = binary_identity(exe) else |e| { "unavailable({e})" }
+        if current != identity {
+            ev_log(
+                mut el,
+                "emerg",
+                "worker {i}: replacement refused: binary identity changed at {exe}; startup=[{identity}] current=[{current}]; restart lobo, or control upgrade when it exists",
+            )
+            return (-2, "")
+        }
+    }
     let ep = worker_endpoint(mctrl, i)
     if ep.is_empty() {
         ev_log(mut el, "error", "worker {i}: no free endpoint for its control listener")
@@ -6015,6 +6063,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         )
         return 1
     }
+    let identity = binary_identity(exe) else |e| {
+        eprint("lobo: [emerg] cannot record binary identity at {exe}: {e}; no worker started")
+        return 1
+    }
     // ws49 (lobo#54): the master's endpoint under the prefix, as
     // serve_main's; each hand's `.wN` sibling then lives there too
     let ctrl = shell.control_endpoint(c0, prefix)
@@ -6273,7 +6325,20 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     }
     var i: int = 0
     while i < n {
-        let s = spawn_worker(exe, prefix, conf, i + 1, 0, lfds, ctrl_ep, 1, "", lset, mut elog_st)
+        let s = spawn_worker(
+            exe,
+            "",
+            prefix,
+            conf,
+            i + 1,
+            0,
+            lfds,
+            ctrl_ep,
+            1,
+            "",
+            lset,
+            mut elog_st,
+        )
         (mut wslot).push(s.0)
         (mut wport).push(ep_port(s.1))
         (mut wrest).push(0)
@@ -6531,6 +6596,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     if !quitting {
                         let s = spawn_worker(
                             exe,
+                            identity,
                             prefix,
                             conf,
                             j + 1,
@@ -6542,6 +6608,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                             lset,
                             mut elog,
                         )
+                        if s.0 == -2 {
+                            wgone[j] = true
+                            wslot[j] = -1
+                            wport[j] = -1
+                            j = j + 1
+                            continue
+                        }
                         wslot[j] = s.0
                         wport[j] = ep_port(s.1)
                         wup[j] = now
@@ -6599,6 +6672,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                 // generation, with its config id, not at 1
                 let s = spawn_worker(
                     exe,
+                    identity,
                     prefix,
                     conf,
                     j + 1,
@@ -6610,6 +6684,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     lset,
                     mut elog,
                 )
+                if s.0 == -2 {
+                    wgone[j] = true
+                    wslot[j] = -1
+                    wport[j] = -1
+                    j = j + 1
+                    continue
+                }
                 wslot[j] = s.0
                 wport[j] = ep_port(s.1)
                 wrest[j] = wrest[j] + 1
