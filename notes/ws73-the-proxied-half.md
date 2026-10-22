@@ -340,6 +340,12 @@ red control, these are #106's closing evidence. The limit was not widened.
   later four-CPU window, not the all-candidate dataset.
 - Eight Python ratchet unit tests pass; every candidate release binary
   passed the 128-large-body test under native and checked test drivers.
+- CI plant branch `ws73-plant` at `afdea02b34c3336b84e7895977f0f22efa8b1b3e`
+  was dispatched as the Linux-only `tier pr` run **39825697274**. Its first
+  available verdict was in progress; no CI red or green is claimed here.
+  The workflow also runs the throughput witness after the framing red,
+  so the corpus failure cannot hide the second new gate. The orchestrator
+  watches it; the branch is an intentional break, never merge evidence.
 - A local isolated plant added a 1 ms dispatch sleep and made a 4 KiB job
   read erroneously terminate an incomplete frame. The body test was RED
   (`trap(assert)`) on native and checked drivers. The real throughput
@@ -374,16 +380,30 @@ outputs are in `ev/trace-isolated/`; the curve is in `ev/proc-isolated/`.
 The failed perf-stat drive did **not** execute ab; its CPU deltas are not
 evidence. The lifecycle and curve instruments use no perf.
 
-## 5. Done-when
+## 5. Handoff
 
-Candidates measured at separate commits; silent-upstream, ws64 limits,
-proxy and memory rows green. A relative throughput CI row, its planted
-red, and a CPU-aware memory row justified by the curve. Final gauntlet,
-PR and audit. Decisive throughput retakes on cpus 12–15 below host load 8
-(the orchestrator's correction after the loaded first retake).
+Branch `ws73`, PR **113**, `Footprint: cross-cutting`. The selected server
+is A; the complete new tree is locally green, with the actual release
+binary byte-identical to the measured rebased pool. The PR's final head
+is labelled `full-matrix`; run IDs and the lane audit's last line are
+reported at handoff, without inventing a CI verdict. The orchestrator
+watches and merges; this lane does not wait on CI, merge, tag or release.
 
-The prediction-only commit changes no executable input; the rebased source's
-linux gauntlet is green in run **39794877850** (`tier pr`, head `3d1c191c`).
-The clean local baseline gauntlet exited 0 at `3d1c191c`; its last line
-is `lobo-gauntlet: GREEN`. The earlier contaminated run is not green
-evidence.
+- R-ws73-1 taken: `9a4723c` is the recovery reference; `f32a1b7` already
+  has the pool. The branch rebased onto `3d1c191c` before experiments.
+- R-ws73-2 taken: keep A; C is a **finite 32-exchange proc with a bounded
+  queue of one, a negative probe**, not a tested multi-job batch.
+- lobo#100 stays open. The kept head's ratios are 0.533× ab1, 1.062× ab32,
+  0.671× padded: **quiet-admitted at 7.10, end 11.18, max 13.56**. The
+  orchestrator supplies these numbers to the issue, not a recovery claim.
+- lobo#106's closing evidence is the same-pin pre-pool red control versus
+  A's complete 4/8/16 curve and seven preset unpinned short-row greens.
+  The 512 KiB bound is unchanged. The issue action is the orchestrator's.
+- No issue was filed or acted on by this lane. #835/#836 remain upstream
+  boundaries; the single unlocated native stale-socket red is preserved
+  for follow-up if it recurs, not asserted to be a new confirmed bug.
+
+The original prediction-only commit changed no executable input; the
+rebased source's Linux gauntlet was green in run 39794877850 at
+`3d1c191c`. The clean local baseline also exited 0 with last line
+`lobo-gauntlet: GREEN`; the earlier contaminated run is not evidence.
