@@ -2773,12 +2773,40 @@ note records their commits and numbers. Taking the whole exchange into
 the loop is still unavailable by name: `net_connect` blocks (#835), and
 TLS record reads remain blocking.
 
-`tools/lobo-proxy-throughput` is the CI ratchet: pre-#81 source and the
-head built at this checkout's pin, one prompt loopback nginx backend,
-`ab -k -c 32`, 2,000 warm-up and 20,000 measured requests, five alternating
-pairs. The head/reference median-rate ratio must be at least 0.9. No
+`tools/lobo-proxy-throughput` compares pre-#81 source and the head built
+at this checkout's pin, against one prompt loopback nginx backend.
+Linux and non-CI defaults use `ab -k -c 32`, 2,000 warm-up and 20,000
+measured requests, five alternating pairs, with a head/reference median-
+rate ratio of at least 0.9. The macOS CI exception is described below. No
 absolute req/s bar crosses between machines. This concurrent shape does
 not certify single-client recovery; the one-client and padded-client
 numbers remain separate in the lane note. The driver rejects failed,
 non-2xx or incomplete ApacheBench runs, and unit-tests the median/bar
 boundary and incomplete-pair handling.
+
+
+### Hosted-runner method boundary (ws73 follow-up)
+
+The first Linux CI sets read 0.895× and 0.897×, despite the local
+0.969×. The 0.900 Linux bar is unchanged pending the recorded
+R-ws73-3 calibration recommendation; the local number does not waive a
+runner red. A 100,000-request runner experiment still read 0.844× and a 20,000-
+request repeat 0.848×, while an identical-head control read 1.003×.
+More samples did not rescue that bar. R-ws73-3 recommends reporting CI
+measurements while keeping the calibrated kasumi merge gate, but that
+policy recommendation is unimplemented pending the ruling. The driver
+preserves actual counts, paired spread and raw output.
+
+The macOS CI long sample exhausted local address allocation after
+14,306 measured requests plus 2,000 warm-up requests (`EADDRNOTAVAIL`,
+ab exit 49). The runner recorded 16,349 TIME_WAIT sockets in its
+16,384-port range (49152–65535); MSL was 15,000 ms. A fresh upstream TCP
+connection per exchange consumes that budget even with persistent frontend requests. The macOS CI leg uses a
+short 1,000-request/100-warm-up/five-pair **reported measurement**, not a
+0.9 performance gate. Its output explains the transport-budget boundary
+and records the runner's port range/MSL/TCP counts. The runner's bounded
+probe completed at 2.196×, but paired ratios spanned 1.229–2.680; this is
+not precision sufficient for a hard 0.9 gate. Short-window ratios
+are not interchangeable with Linux's 20,000-request ratios. Failed,
+incomplete or non-keepalive responses still fail; no timeout or host
+setting is raised to make the row pass.
