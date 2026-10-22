@@ -47,5 +47,5 @@ if [ -z "$ref" ]; then
     fi
 fi
 [ -x "$ref" ] && [ -x "$head" ] || { echo 'lobo-proxy-throughput: FAILED — reference or head binary missing' >&2; exit 1; }
-echo "lobo-proxy-throughput: reference $ref_label; ab -k -c 32, 20,000 measured requests, five alternating pairs"
+echo "lobo-proxy-throughput: reference $ref_label; relative ab -k -c 32 (actual platform shape printed below)"
 python3 -I tests/rig/proxy_throughput/measure.py "$NG" "$ref" "$head" "$scratch"
