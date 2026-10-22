@@ -2687,9 +2687,9 @@ pub fn job_parse(s: str) -> Job ! {bad} {
 ///     a kill (wolf-lang#683, native) finds it at its next wait and
 ///     returns rather than waiting for a job forever.
 ///   * end of stream (the loop closed its end): as `q`.
-/// A wait here is `net_wait` (one poll, woken by the kernel) rather
-/// than a parked read: a poll cannot be reached by a kill, which is
-/// why every one of them has `jr` in its set. Total.
+/// The next job is read directly: bytes already queued take the read's
+/// fast path; an empty socket parks in the reactor. The upstream's
+/// separate waits still watch `jr` for stop/kill bytes. Total.
 pub fn job_loop(jr: int, out: int) -> int {
     var going = true
     var close_end = true
@@ -2699,7 +2699,9 @@ pub fn job_loop(jr: int, out: int) -> int {
         // reply, the account (ws67: without a block each exchange left
         // about 27 kB behind)
         region job {
-            let ready = net_wait([jr], -1) else |_| { List[int]() }
+            // ws73-e: the read already has a syscall-first fast path and
+            // parks in the reactor when empty. A preceding net_wait adds
+            // an unconditional blocking-compensation edge (#836).
             var buf = List[byte]()
             var hdr = 0
             var want = -1
@@ -2707,8 +2709,8 @@ pub fn job_loop(jr: int, out: int) -> int {
             var tl = 0
             var cfd = -1
             var xid = 0
-            var reading = ready.len > 0
-            var bad = !reading
+            var reading = true
+            var bad = false
             var at = 0
             while reading {
                 let piece = net_read_bytes(jr, 65536) else |_| {
