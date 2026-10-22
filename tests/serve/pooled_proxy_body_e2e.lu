@@ -1,0 +1,141 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! ws73: a job read chunk is not a frame/body limit. Send 128 POSTs
+//! over one keepalive connection, each with a body over 32 KiB. This
+//! test is the upstream too; it checks every rewritten request and
+//! byte, returns the same body, and checks every response. Each job
+//! crosses several 8 KiB reads and finite 32-exchange batches, if that
+//! candidate is used. All listeners are loopback and kernel-chosen.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| { return io }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn wait_up(port: int) -> bool {
+    var i = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_close(c) else |_| {}
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn framed(c: int, body_len: int) -> str ! {io} {
+    var buf = ""
+    var end = -1
+    while end < 0 || buf.len < end + body_len {
+        let part = net_read(c, 65536) else |_| { return io }
+        if part.is_empty() { return io }
+        buf = "{buf}{part}"
+        if end < 0 {
+            let h = buf.find("\r\n\r\n") else -1
+            if h >= 0 { end = h + 4 }
+        }
+    }
+    buf
+}
+
+fn one(c: int, backend: int, body: str, i: int) -> bool ! {io} {
+    let payload = "{i}:{body}"
+    net_write(
+        c,
+        "POST /up/{i} HTTP/1.1\r\nHost: t\r\nConnection: keep-alive\r\nContent-Length: {payload.len}\r\n\r\n{payload}",
+    ) else |_| { return io }
+    let up = net_accept(backend) else |_| { return io }
+    net_deadline(up, 3000) else |_| {}
+    let request = framed(up, payload.len) else |_| {
+        net_close(up) else |_| {}
+        return io
+    }
+    let mark = request.find("\r\n\r\n") else -1
+    let body_ok = mark >= 0 && request[mark + 4..request.len] == payload
+    let path_ok = request.starts_with("POST /{i} ")
+    net_write(
+        up,
+        "HTTP/1.1 200 OK\r\nContent-Length: {payload.len}\r\nConnection: close\r\n\r\n{payload}",
+    ) else |_| {
+        net_close(up) else |_| {}
+        return io
+    }
+    net_close(up) else |_| {}
+    let reply = framed(c, payload.len)?
+    let rh = reply.find("\r\n\r\n") else -1
+    body_ok &&
+        path_ok &&
+        rh >= 0 &&
+        reply.starts_with("HTTP/1.1 200 OK") &&
+        reply[rh + 4..reply.len] == payload
+}
+
+fn exchange_all(port: int, backend: int) -> bool ! {io} {
+    let c = net_connect("127.0.0.1:{port}") else |_| { return io }
+    net_deadline(c, 3000) else |_| {}
+    var body = "abcdefgh"
+    while body.len < 32768 { body = "{body}{body}" }
+    var good = true
+    var i = 0
+    while i < 128 && good {
+        region turn {
+            good = one(c, backend, body, i) else |_| { false }
+        }
+        i = i + 1
+    }
+    net_close(c) else |_| {}
+    print("large pooled exchanges: {i} attempted, complete={good}")
+    good && i == 128
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| { "." }
+    let d = "{root}/target/ws73_pooled_proxy_body"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all(d)?
+    let backend = net_listen("127.0.0.1:0")?
+    net_deadline(backend, 3000) else |_| {}
+    let bp = net_port(backend)?
+    let hp = free_port()?
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/lobo.pid;\nhttp {{ server {{ listen 127.0.0.1:{hp}; keepalive_requests 256; location /up/ {{ proxy_pass http://127.0.0.1:{bp}/; }} }} }}\n",
+    )?
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let out = fs_create("{d}/server.out")?
+    var args = List[str]()
+    (mut args).push("serve")
+    (mut args).push("-p")
+    (mut args).push(d)
+    (mut args).push("-c")
+    (mut args).push(conf)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    let child = os_spawn_fds(bin, args, map)?
+    let alive = wait_up(hp)
+    let good = if alive { exchange_all(hp, backend) else |_| { false } } else { false }
+    // Cleanup precedes every assertion, so a failed byte check leaves
+    // no server behind. The process belongs to this test alone.
+    os_kill(child) else |_| {}
+    let _ = os_wait(child) else |_| { 0 }
+    net_close(backend) else |_| {}
+    fs_close(out) else |_| {}
+    fs_remove_dir_all(d) else |_| {}
+    assert(alive, "the server listened")
+    assert(good, "all 128 large request and response bodies crossed the job pool intact")
+    0
+}
