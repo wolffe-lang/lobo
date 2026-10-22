@@ -4,9 +4,10 @@ nginx's `worker_processes N` is the directive that makes one server
 use N cores: a master binds the listening sockets, forks N workers,
 and the kernel hands each new connection to whichever worker accepts
 it first. This page is the CONTRACT for lobo's version of that
-directive under D73, prefork through `os.process`, with D7 kept:
-every process is still one spawn-free poll loop, and the task
-layer is never involved.
+directive under D73, prefork through `os.process`. Each hand keeps its
+poll-based serving loop. Large-body streams and proxied exchanges now run
+beside that loop in wolf procs; the task layer is involved there, not in
+the master's process-spawn protocol.
 
 ws16 built the machinery and MEASURED that the cores stayed idle:
 wolf had no `SO_REUSEPORT` and no descriptor inheritance, so N hands
@@ -836,3 +837,37 @@ the hands are not root, so a file only root may read is no longer
 served (403), the log files become the user's, and a reload whose
 configuration or key only root may read is refused by every hand
 (lobo#101, above), where it took before.
+
+
+## The exchange pool (ws69; remeasured at ws73)
+
+On the normal exchange path, a proxied request does not wait inside the
+serving loop. The loop prepares
+its exchange and sends its job to an idle proc of the pool; when none is
+idle it makes a proc and a loopback job connection. The proc reports the
+account before its completion line, then waits for another job on the
+same connection. There is no new job socket or wolf proc per steady-state
+request. This design landed in ws69, not ws73.
+
+- If the job listener or job pair cannot be made, the existing named
+  inline fallback remains. This is not a promise of nonblocking connect
+  under resource failure.
+- The job crosses as owned bytes. A view into the serving pass's region
+  cannot be lent to a proc that may outlive that pass.
+- Two job-socket descriptors stay with each idle proc for up to five
+  seconds after its last exchange. Idle entries leave earlier when an
+  accept is refused for lack of a descriptor.
+- A live proxied request still counts as two connections against
+  `worker_connections`; the pool does not bypass that limit.
+- A stop byte wakes an exchange's upstream wait. A client abort is watched
+  too; the known TLS-record boundary is still documented in the parity
+  ledger. The pool is not a nonblocking connect implementation:
+  wolf-lang#835 and #836 remain open.
+- Runtime threads are not wolf procs. A nearly constant Threads reading
+  can hide repeated compensation-thread creation. ws73 observed 1,981
+  distinct TIDs in a 20,000-request sample while Threads stayed 11–12;
+  the sample misses short-lived threads and is a lower bound.
+
+The memory witness is a fixed, sequential workload, not a claim about
+all concurrent exchanges. See `docs/BUDGET.md` for the CPU-counted census
+and `docs/PROFILE.md` for the request cost.
