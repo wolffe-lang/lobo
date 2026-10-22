@@ -410,15 +410,33 @@ identical-binary control is tight, while the historical-reference ratio
 changes between hosted VMs/conditions. This is an uncalibrated CI floor
 for the existing architecture, not evidence of a new server-code change.
 
-**R-ws73-3, recommendation UNIMPLEMENTED:** report the historical-reference
-measurement on CI, with the **0.900 merge gate retained on kasumi's
-calibrated four-CPU shape**. This changes gate posture and needs the
-maintainer's ruling; it is not being smuggled in as a method fix. Linux
-CI still enforces **0.900**. The provisional 0.85 suggestion was withdrawn:
-it would fail the additional 0.847532 set. A numerical alternative would
-need about 0.80, 0.026334 (2.633 percentage points) below the lowest
-observed historical-reference pair; that is not a confidence bound and
-is not recommended merely to obtain green. No bar was changed.
+**R-ws73-3, ruled by the maintainer and implemented:** CI reports the
+historical-reference throughput as a measurement on **both runners**.
+The **0.900 merge gate is enforced on kasumi's calibrated four-CPU shape
+only**, where this lane runs its own gauntlet. The observed hosted-runner
+paired range is **0.826–0.910**; the kasumi calibration reading is
+**1.061 at the byte-identical server head**. These are different host
+shapes, not interchangeable pass/fail numbers. No bar number changed.
+
+The ruled-policy local gauntlet (`logs/ruled-gate.log`) exited 0 with
+392/392 corpus, twelve Python tests, 46 shell probes, 25/25 memory checks,
+zero SKIPs and an enforced local ratio **1.017× >= 0.900×**. The earlier
+**1.061** is the calibration reading at the same byte-identical server
+head, not a number substituted for this confirmation. Last line:
+`lobo-gauntlet: GREEN`. A real CI-mode low-ratio sample (0.030×) was
+**REPORTED** with exit 0; an exited application remained **FAILED** with
+exit 1. Parser tests still reject transport/application, incomplete,
+non-2xx and non-keepalive outcomes before a reported ratio can exist.
+
+Transport, application, incomplete and non-keepalive failures remain fatal
+on CI: reporting applies only after a valid complete measurement. The
+CI output says plainly that the ratio is **reported, not gated**. Linux
+keeps its 20k/2k/five-pair sample; macOS keeps the bounded short sample.
+
+The provisional 0.85 suggestion was withdrawn after additional evidence.
+A numerical alternative would have needed about 0.80, 0.026334 below the
+lowest observed historical-reference pair; it was not adopted. No
+threshold was tuned to obtain green.
 
 macOS run 39827128857 completed **14,306 measured requests**, after a
 **2,000-request warm-up**, before ab exited 49 with
@@ -445,7 +463,8 @@ reported rather than gated. The cooldown separated a deliberate
 saturation experiment from a new experiment; it is not a retry or a
 request-timeout change in the product row.
 
-The method fix retains the Linux 20k/2k/five-pair shape and 0.900 bar.
+The method retains Linux's 20k/2k/five-pair shape; CI reports its ratio,
+while the 0.900 calibrated kasumi gate is unchanged.
 On **macOS CI only**, a 1,000-request sample with 100 warm-up requests
 and five pairs bounds the fixture to 11,000 upstream exchanges rather
 than 220,000. Its short-window number is explicitly **ADVISORY**, not
@@ -458,8 +477,10 @@ short-window ratio is not interchangeable with the Linux ratio.
 The revised main-tree local gauntlet (`logs/r3-gate.log`) exited 0:
 392/392 corpus, eleven ratchet unit tests, shell 46 probes, memory 25/25,
 zero SKIPs, unchanged Linux numerical bar passed at **1.061×**. Its last
-line is `lobo-gauntlet: GREEN`. This does not override the hosted-runner
-reds or implement R-ws73-3. No server source or toolchain pin changed.
+line is `lobo-gauntlet: GREEN`. This was the kasumi calibration reading for R-ws73-3, not a waiver of
+the old runner failures. The ruling above now separates reporting on CI
+from the calibrated local merge gate. No server source or toolchain pin
+changed.
 
 
 ## 4. Evidence index

@@ -46,7 +46,7 @@ def settings(system, requests=None, warmup=None, pairs=None, report_only=False, 
     out = dict(requests=requests if requests is not None else (1000 if mac else 20000),
                warmup=warmup if warmup is not None else (100 if mac else 2000),
                pairs=pairs if pairs is not None else 5,
-               report_only=report_only or mac)
+               report_only=report_only or ci)
     if not 32 <= out["requests"] <= 1000000 or not 32 <= out["warmup"] <= 100000:
         raise ValueError("request/warmup counts outside the bounded c=32 rig shape")
     if not 1 <= out["pairs"] <= 25:
@@ -146,9 +146,20 @@ class RatchetTests(unittest.TestCase):
         self.assertEqual(settings("Linux"), dict(requests=20000,warmup=2000,pairs=5,report_only=False))
         self.assertEqual(settings("Darwin",ci=True), dict(requests=1000,warmup=100,pairs=5,report_only=True))
         self.assertEqual(settings("Darwin"), settings("Linux"))
+        self.assertEqual(settings("Linux",ci=True), dict(requests=20000,warmup=2000,pairs=5,report_only=True))
         self.assertEqual(settings("Linux",requests=100000,pairs=7)["pairs"],7)
         for kwargs in [dict(requests=0),dict(warmup=31),dict(pairs=0),dict(pairs=26)]:
             with self.assertRaises(ValueError): settings("Linux",**kwargs)
+
+    def test_ci_reporting_does_not_accept_invalid_measurements(self):
+        for system in ["Linux", "Darwin"]:
+            self.assertTrue(settings(system,ci=True)["report_only"])
+            with self.assertRaises(ValueError):
+                ratio(self.rows(0))
+            with self.assertRaises(ValueError):
+                rate("Complete requests: 1000\nFailed requests: 1\nRequests per second: 1.0\n")
+            with self.assertRaises(ValueError):
+                keepalive("Keep-Alive requests: 0\n")
 
     def test_keepalive_confirmation_required(self):
         self.assertEqual(keepalive("Keep-Alive requests: 1000\n"),1000)
@@ -221,6 +232,8 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
     (scratch / "host-before.json").write_text(json.dumps(snapshot,indent=2))
     print("lobo-proxy-throughput: shape " + json.dumps(parameters),flush=True)
     print("lobo-proxy-throughput: host " + json.dumps(snapshot),flush=True)
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print("lobo-proxy-throughput: CI MEASUREMENT — ratio reported, not gated; the 0.900 merge gate is enforced by the lane on kasumi's calibrated four-CPU shape only; transport, application, incomplete and non-keepalive failures remain fatal",flush=True)
     if platform.system() == "Darwin" and report_only:
         print("lobo-proxy-throughput: macOS CI short-window ADVISORY — one upstream TCP connection per exchange can exhaust the default ephemeral-port budget before a 20000-request sample; this bounded short number is reported, not gated; transport/app errors remain failures",flush=True)
     children = []
@@ -265,7 +278,7 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
             print(f"lobo-proxy-throughput: {name}: median {statistics.median(speeds):.2f} "
                   f"req/s [{min(speeds):.2f}, {max(speeds):.2f}]", flush=True)
         value = ratio(rows,pairs)
-        verdict = "ADVISORY" if report_only else ("ok" if passes(rows,pairs) else "FAILED")
+        verdict = "REPORTED" if report_only else ("ok" if passes(rows,pairs) else "FAILED")
         comparison = "comparison bar 0.900x NOT APPLIED; reported measurement" if report_only else "bar 0.900x, this machine's own shape"
         print(f"lobo-proxy-throughput: {verdict} — head/reference {value:.3f}x ({comparison})", flush=True)
         pairs_by_round = [next(r["rate"] for r in rows if r["round"]==i and r["name"]=="head") /

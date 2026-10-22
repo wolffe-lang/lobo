@@ -2775,9 +2775,10 @@ TLS record reads remain blocking.
 
 `tools/lobo-proxy-throughput` compares pre-#81 source and the head built
 at this checkout's pin, against one prompt loopback nginx backend.
-Linux and non-CI defaults use `ab -k -c 32`, 2,000 warm-up and 20,000
-measured requests, five alternating pairs, with a head/reference median-
-rate ratio of at least 0.9. The macOS CI exception is described below. No
+Linux and local defaults use `ab -k -c 32`, 2,000 warm-up and 20,000
+measured requests, five alternating pairs. The lane enforces a head/
+reference median-rate ratio of at least 0.9 on kasumi's calibrated shape;
+CI reports that comparison instead. The macOS CI exception is described below. No
 absolute req/s bar crosses between machines. This concurrent shape does
 not certify single-client recovery; the one-client and padded-client
 numbers remain separate in the lane note. The driver rejects failed,
@@ -2787,15 +2788,17 @@ boundary and incomplete-pair handling.
 
 ### Hosted-runner method boundary (ws73 follow-up)
 
-The first Linux CI sets read 0.895× and 0.897×, despite the local
-0.969×. The 0.900 Linux bar is unchanged pending the recorded
-R-ws73-3 calibration recommendation; the local number does not waive a
-runner red. A 100,000-request runner experiment still read 0.844× and a 20,000-
-request repeat 0.848×, while an identical-head control read 1.003×.
-More samples did not rescue that bar. R-ws73-3 recommends reporting CI
-measurements while keeping the calibrated kasumi merge gate, but that
-policy recommendation is unimplemented pending the ruling. The driver
-preserves actual counts, paired spread and raw output.
+The first Linux CI sets read 0.895× and 0.897×, despite the kasumi
+1.061× calibration. Larger runner samples read 0.844× and 0.848×; the
+observed historical-reference paired range was **0.826–0.910**, while an
+identical-head control read 1.003×. More requests did not rescue the old
+CI floor. Under the maintainer's R-ws73-3 ruling, **both CI runners report
+the ratio as a measurement, not a gate**. The **0.900 merge gate is
+retained only on kasumi's calibrated four-CPU shape**, where the lane's
+own gauntlet runs it. No bar number changes. Failed, incomplete,
+non-2xx and non-keepalive measurements still fail on CI; only the ratio
+comparison is reported rather than gated. Actual counts, paired spread,
+host diagnostics and raw output remain recorded.
 
 The macOS CI long sample exhausted local address allocation after
 14,306 measured requests plus 2,000 warm-up requests (`EADDRNOTAVAIL`,
