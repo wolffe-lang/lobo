@@ -153,6 +153,12 @@ if ! tools/lobo-proxy-differential; then
     exit 1
 fi
 
+step "proxied throughput (ws73: head/reference >=0.9 on this machine, five alternating pairs)"
+if ! tools/lobo-proxy-throughput; then
+    echo "lobo-gauntlet: FAILED at proxy-throughput — the relative proxied row" >&2
+    exit 1
+fi
+
 step "control differential (ws15: nginx -s reload beside lobo -s reload — the reload semantics that carry, the transport/parse-locus/narration deltas measured)"
 if ! tools/lobo-control-differential; then
     echo "lobo-gauntlet: FAILED at control-differential — the reload semantics diverged (ws15)" >&2

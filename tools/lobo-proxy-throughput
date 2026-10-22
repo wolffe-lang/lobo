@@ -1,0 +1,51 @@
+#!/bin/sh
+# Relative proxied-throughput ratchet (ws73, lobo#100). The reference
+# is pre-#81 source, built at THIS toolchain alongside the head. Both
+# run on this machine in the same window; no absolute req/s bar.
+# Optional explicit reference/head binaries are measurement inputs,
+# never the gauntlet's default. nginx remains a binary oracle only.
+set -eu
+cd "$(dirname "$0")/.."
+. tools/lib-toolchain.sh
+. tools/lib-rigproc.sh
+rig_arm
+case "$(uname -s)" in
+Linux|Darwin) ;;
+*) echo "lobo-proxy-throughput: SKIPPED — the ApacheBench rig is Linux/macOS"; exit 0 ;;
+esac
+command -v ab >/dev/null 2>&1 || { echo 'lobo-proxy-throughput: FAILED — ApacheBench missing' >&2; exit 1; }
+command -v python3 >/dev/null 2>&1 || { echo 'lobo-proxy-throughput: FAILED — python3 missing (the rig uses its standard library)' >&2; exit 1; }
+NG="$(pwd)/tests/differential/bin/nginx"
+[ -x "$NG" ] || { echo 'lobo-proxy-throughput: FAILED — pinned nginx missing' >&2; exit 1; }
+want_ng=$(sed -n 's/^version = //p' tests/differential/NGINX-PIN)
+have_ng=$("$NG" -v 2>&1 | sed -n 's|^nginx version: nginx/||p')
+[ "$have_ng" = "$want_ng" ] || { echo "lobo-proxy-throughput: FAILED — nginx/$have_ng, pin nginx/$want_ng" >&2; exit 1; }
+python3 -I tests/rig/proxy_throughput/measure.py --self-test
+scratch="$(pwd)/target/lobo-proxy-throughput"
+rm -rf "$scratch"
+mkdir -p "$scratch"
+ref=${1:-}
+head=${2:-"$(pwd)/target/lobo-release"}
+rev=9a4723c0f83cf64fc25e81460ef7ed0020fa22ec
+ref_label="explicit binary $ref"
+if [ -z "$ref" ]; then
+    if ! git cat-file -e "$rev^{commit}" 2>/dev/null; then
+        if ! git fetch --no-tags origin "$rev"; then
+            echo "lobo-proxy-throughput: FAILED — cannot fetch frozen pre-#81 reference $rev" >&2
+            exit 1
+        fi
+    fi
+    mkdir -p "$scratch/reference"
+    git archive "$rev" src > "$scratch/reference.tar"
+    tar -xf "$scratch/reference.tar" -C "$scratch/reference"
+    ref="$scratch/reference/lobo"
+    ref_label="source $rev at this checkout's toolchain"
+    # A build's exit 2 is a compiler error, never a skip.
+    if ! env -u WOLF_MIDEND "$WOLF" build --release "$scratch/reference/src/main.lu" -o "$ref"; then
+        echo "lobo-proxy-throughput: FAILED — pre-#81 source does not build at this pin" >&2
+        exit 1
+    fi
+fi
+[ -x "$ref" ] && [ -x "$head" ] || { echo 'lobo-proxy-throughput: FAILED — reference or head binary missing' >&2; exit 1; }
+echo "lobo-proxy-throughput: reference $ref_label; ab -k -c 32, 20,000 measured requests, five alternating pairs"
+python3 -I tests/rig/proxy_throughput/measure.py "$NG" "$ref" "$head" "$scratch"
