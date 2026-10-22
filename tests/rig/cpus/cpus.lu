@@ -1,0 +1,13 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! The memory census must use the runtime's schedulable-cpu count,
+//! not the host's installed-cpu count. A failed query is an error.
+
+fn main() -> !int {
+    let n = os_cpus()?
+    assert(n >= 1, "os_cpus answers at least one schedulable cpu")
+    print("{n}")
+    0
+}

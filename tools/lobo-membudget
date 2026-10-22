@@ -105,6 +105,26 @@
 # and asserts the backstop theorem over the whole shape space the
 # meter can admit.
 set -u
+# --proxy-census keeps the original rigback/memdrive row and its 512 KB
+# bound, but runs it alone. The optional long drive uses the same 400-
+# request connections, and prints the 20k/60k phases rather than hiding
+# warm-up behind a wider bound.
+case "${1:-}" in
+""|--proxy-census) ;;
+*) echo "lobo-membudget: FAILED — usage: lobo-membudget [--proxy-census]" >&2; exit 2 ;;
+esac
+px_requests=${LOBO_MEMBUDGET_PROXY_REQUESTS:-2000}
+case "$px_requests" in
+""|0*|*[!0-9]*) echo "lobo-membudget: FAILED — proxy requests must be 2000..60000, a multiple of 400" >&2; exit 1 ;;
+esac
+if ! [ "$px_requests" -ge 2000 ] || ! [ "$px_requests" -le 60000 ]; then
+    echo "lobo-membudget: FAILED — proxy requests outside 2000..60000" >&2
+    exit 1
+fi
+if [ "$((px_requests % 400))" != 0 ]; then
+    echo "lobo-membudget: FAILED — proxy requests must be a multiple of 400" >&2
+    exit 1
+fi
 cd "$(dirname "$0")/.." || exit 2
 . tools/lib-toolchain.sh
 . tools/lib-rigproc.sh
@@ -160,20 +180,6 @@ check() { # check <desc> <ok(0/1)>
     fi
 }
 
-hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
-printf 'pid %s/lobo.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
-    "$scratch" "$hp" "$scratch" > "$scratch/lobo.conf"
-
-"$LOBO" serve -p . -c "$scratch/lobo.conf" 2> "$scratch/lobo.log" &
-pid=$!
-
-i=0
-while [ $i -lt 80 ]; do
-    if grep -q "generation-activated gen=1" "$scratch/lobo.log" 2>/dev/null; then break; fi
-    sleep 0.1
-    i=$((i + 1))
-done
-
 rss_kb() { ps -o rss= -p "$pid" | tr -d ' '; }
 drive() { # drive <count> <path> <desc>
     if out=$("$WOLF" run "$rig_root"/tests/rig/memdrive.lu "$hp" "$1" "$2" 2> "$scratch/drive.err"); then
@@ -207,6 +213,22 @@ flat() { # flat <label> <before_kb> <after_kb> <drove_ok(0/1)> <what> [bound_kb]
         check "$1: RSS grew ${g} KB over $5 (>= ${fb} KB; ${3} KB resident) — memory is NOT returned (lobo#66)" 1
     fi
 }
+
+if [ "${1:-}" != --proxy-census ]; then
+hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+printf 'pid %s/lobo.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
+    "$scratch" "$hp" "$scratch" > "$scratch/lobo.conf"
+
+"$LOBO" serve -p . -c "$scratch/lobo.conf" 2> "$scratch/lobo.log" &
+pid=$!
+
+i=0
+while [ $i -lt 80 ]; do
+    if grep -q "generation-activated gen=1" "$scratch/lobo.log" 2>/dev/null; then break; fi
+    sleep 0.1
+    i=$((i + 1))
+done
+
 flat_requests() { # flat_requests <label> [bound_kb]
     ok=0
     quiet_drive 400 /small.html || ok=1
@@ -420,11 +442,13 @@ fi
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 
+fi
+
 # ---------------------------------------------------------------
 # ws67 (lobo#81): THE EXCHANGE BESIDE THE LOOP. Since ws67 every
-# proxied request is one proc beside the loop, handed its job down a
-# loopback connection of its own and reporting down the stream pipe;
-# the loop keeps ints for the row and reuses the slot. The row: a
+# proxied request leaves the loop; since ws69 an idle proc of the pool
+# handles it on its existing job socket. The loop keeps ints for the
+# row and reuses the slot. The row: a
 # proxied location to the rig's backend (rigback, answering every
 # exchange from one reply file), 2,000 proxied keepalive requests on
 # five connections after a warm-up of 400 (keepalive_requests, 1000 by
@@ -433,14 +457,14 @@ wait "$pid" 2>/dev/null
 # ---------------------------------------------------------------
 pxrep="$scratch/px-reply.txt"
 printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\nPROXIED-BODY-16\n' > "$pxrep"
-# rigback serves exactly the 2,400 exchanges below and then exits on
+# rigback serves exactly warm-up + drive exchanges and then exits on
 # its own (`$!` is the `wolf run` driver: killing it would orphan the
 # server, lobo#1). Its record goes to /dev/null: rigback appends by
 # reading the whole record back and writing it out again, so 2,400
 # padded requests recorded to a file grew it past 24 GB resident
 # (measured on kasumi), and on the 16 GB CI runner the host stopped the
 # runner
-"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" 2400 > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
+"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
 bpid=$!
 bp=""
 i=0
@@ -462,15 +486,33 @@ while [ $i -lt 80 ]; do
     i=$((i + 1))
 done
 hp="$hp3"
+pcpus=$("$WOLF" run "$rig_root"/tests/rig/cpus/cpus.lu) || {
+    echo "lobo-membudget: FAILED — os_cpus query failed" >&2
+    exit 1
+}
+case "$pcpus" in ""|0|*[!0-9]*) echo "lobo-membudget: FAILED — invalid os_cpus answer: $pcpus" >&2; exit 1 ;; esac
+px_snapshot() { # phase totals include the warm-up
+    say "proxied phase=$1 cpus=$pcpus pid=$pid RSS=$(rss_kb) KB"
+    if [ -r "/proc/$pid/status" ]; then
+        awk '/^(RssAnon|RssFile|VmPTE|Threads):/ { printf "lobo-membudget:   %s\n", $0 }' "/proc/$pid/status"
+        awk '{ printf "lobo-membudget:   user_ticks=%s kernel_ticks=%s\n", $14, $15 }' "/proc/$pid/stat"
+        if [ -r "/proc/$pid/schedstat" ]; then
+            awk '{ printf "lobo-membudget:   run_ns=%s runqueue_wait_ns=%s timeslices=%s\n", $1, $2, $3 }' "/proc/$pid/schedstat"
+        fi
+    fi
+}
 pok=0
+px_snapshot 0
 quiet_drive 400 /up/x || pok=1
 pb=$(rss_kb)
+px_snapshot 400
 i=0
-while [ $i -lt 5 ]; do
+while [ $i -lt "$((px_requests / 400))" ]; do
     quiet_drive 400 /up/x || pok=1
     i=$((i + 1))
+    case "$((i * 400))" in 2000|20000|60000) px_snapshot "$((400 + i * 400))" ;; esac
 done
-flat "flat, proxied" "$pb" "$(rss_kb)" "$pok" "2,000 proxied keepalive requests on five connections, each exchanged by a proc beside the loop (ws67)"
+flat "flat, proxied" "$pb" "$(rss_kb)" "$pok" "$px_requests proxied keepalive requests on $((px_requests / 400)) connections, cpus=$pcpus, exchange pool (ws69)"
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 # the backend ends after its last exchange; a row that failed short of
@@ -485,6 +527,7 @@ if kill -0 "$bpid" 2>/dev/null; then
 fi
 wait "$bpid" 2>/dev/null
 
+if [ "${1:-}" != --proxy-census ]; then
 # ---------------------------------------------------------------
 # ws62 (px25's finding (c)): THE MASTER under supervision. Through
 # 0.1.3 the master rebuilt two lists per hand per pass and built every
@@ -518,8 +561,14 @@ flat "master, supervising four idle hands" "$mb" "$ma" "$mok" "60 s of supervisi
 "$LOBO" -s stop -p . -c "$mconf" > /dev/null 2>&1
 wait "$mpid" 2>/dev/null
 
+fi
+
 if [ "$red" != 0 ]; then
     echo "lobo-membudget: RED — $red of $total checks failed (logs under $scratch/)" >&2
     exit 1
 fi
+if [ "${1:-}" = --proxy-census ]; then
+    echo "lobo-membudget: $total/$total proxy checks green (original rigback/memdrive, cpus=$pcpus, warmup=400, drive=$px_requests, RSS growth <512 KB)"
+else
 echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; memory flat over requests, connections and idle time, lobo#66; flat over proxied requests, ws67; the master flat under supervision, ws62)"
+fi
