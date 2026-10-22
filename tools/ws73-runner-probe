@@ -1,0 +1,45 @@
+#!/bin/bash
+# Temporary runner method experiment. Not the gauntlet, never merge evidence.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+. tools/lib-toolchain.sh
+D=$PWD/target/ws73-runner-probe
+mkdir -p "$D/reference"
+rev=9a4723c0f83cf64fc25e81460ef7ed0020fa22ec
+git archive "$rev" src > "$D/reference.tar"
+tar -xf "$D/reference.tar" -C "$D/reference"
+echo '::warning::ws73 runner-method diagnostics only; not merge evidence'
+uname -a
+uptime
+ulimit -n
+ab -V
+python3 -I -c 'import os,platform; print(platform.platform(),os.cpu_count()); print(getattr(os,"sched_getaffinity",lambda _:"unavailable")(0))'
+env -u WOLF_MIDEND "$WOLF" build --release src/main.lu -o "$D/head"
+env -u WOLF_MIDEND "$WOLF" build --release "$D/reference/src/main.lu" -o "$D/ref"
+run() {
+ label=$1; ref=$2; head=$3; shift 3
+ rc=0
+ python3 -I tests/rig/proxy_throughput/measure.py "$PWD/tests/differential/bin/nginx" "$ref" "$head" "$D/$label" "$@" > "$D/$label.log" 2>&1 || rc=$?
+ cat "$D/$label.log"
+ echo "METHOD RESULT $label exit=$rc"
+ echo "$rc" > "$D/$label.status"
+ # A deliberately sampled transport failure is data, not an ignored gate.
+}
+if [ "$(uname -s)" = Darwin ]; then
+ run mac-original "$D/ref" "$D/head" --requests 20000 --warmup 2000 --pairs 1 --report-only
+ msl=$(sysctl -n net.inet.tcp.msl)
+ remaining=$(((2*msl+999)/1000+2))
+ echo "METHOD: separate experiments wait two observed MSLs ($remaining seconds) for the preceding TIME_WAIT population; no request timeout changed"
+ while [ "$remaining" -gt 0 ]; do
+  echo "METHOD cooldown remaining=$remaining $(date -u)"
+  uptime
+  step=10; [ "$remaining" -lt 10 ] && step=$remaining
+  sleep "$step"
+  remaining=$((remaining-step))
+ done
+ run mac-bounded "$D/ref" "$D/head" --requests 1000 --warmup 100 --pairs 5 --report-only
+else
+ run linux-self-control "$D/head" "$D/head" --requests 20000 --warmup 2000 --pairs 5 --report-only
+ run linux-long "$D/ref" "$D/head" --requests 100000 --warmup 2000 --pairs 5 --report-only
+ run linux-repeat "$D/ref" "$D/head" --requests 20000 --warmup 2000 --pairs 5 --report-only
+fi

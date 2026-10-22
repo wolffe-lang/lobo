@@ -308,7 +308,14 @@ jobs:
         if: inputs.parity != true && inputs.profile != true && inputs.syscalls != true
         shell: bash
         working-directory: lobo
-        run: tools/lobo-gauntlet
+        run: bash tools/ws73-runner-probe
+
+      - name: preserve ws73 method samples (not merge evidence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ws73-method-${{ runner.os }}
+          path: lobo/target/ws73-runner-probe
 
       # ws22: the W8 bar on the one linux x86-64 the org has hands on.
       # docs/PARITY.md names this runner as a gating HOST and its noise
@@ -555,7 +562,14 @@ jobs:
       - name: lobo-gauntlet
         shell: bash
         working-directory: lobo
-        run: tools/lobo-gauntlet
+        run: bash tools/ws73-runner-probe
+
+      - name: preserve ws73 method samples (not merge evidence)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ws73-method-${{ runner.os }}
+          path: lobo/target/ws73-runner-probe
 
   # The run's verdict, and its name: `tier full`, `tier pr` or `tier noop`.
   # It needs every job, runs unless the run was cancelled, and fails unless
