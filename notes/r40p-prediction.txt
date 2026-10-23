@@ -1,0 +1,4 @@
+At wolf 0.2.35 / lupin 0.1.56 with bundled std 2386522e, lobo's PR tier
+should fetch every pinned release archive by its published digest and retain
+its existing gauntlet verdicts. A digest or identity mismatch must fail before
+any build starts.
