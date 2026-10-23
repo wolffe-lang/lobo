@@ -99,18 +99,18 @@ pub fn release_channel() -> str {
 /// The wolf this binary was built with — wolf-toolchain.toml [wolf]'s
 /// version (bare at a release tag; `0.2.5+dev.32f66bf` at a trunk pin).
 pub fn toolchain_version() -> str {
-    "0.2.34"
+    "0.2.35"
 }
 
 /// …and its commit: the short sha `wolf --version` names as `pin`.
 pub fn toolchain_pin() -> str {
-    "9da7bdc"
+    "cf0c13d"
 }
 
 /// The wolf-std tree compiled in — wolf-toolchain.toml [std]'s rev,
 /// short. A tree has no --version; its sha is its identity.
 pub fn std_rev() -> str {
-    "e036bec"
+    "2386522e"
 }
 
 /// The pin file's [wolf] version_line, reassembled: what `wolf
@@ -508,7 +508,7 @@ pub fn version_token() -> str {
 /// criterion (D57: a binary that cannot name its own provenance is
 /// one nobody can debug). nginx's prefix (`nginx version:
 /// nginx/1.30.4`) with wolf's parenthetical: "lobo version: lobo/0.1.5
-/// (built with wolf 0.2.34, pin 9da7bdc)". Total.
+/// (built with wolf 0.2.35, pin cf0c13d)". Total.
 pub fn version_report() -> str {
     "lobo version: {version_token()}{release_channel()} (built with wolf {toolchain_version()}, pin {toolchain_pin()})"
 }
