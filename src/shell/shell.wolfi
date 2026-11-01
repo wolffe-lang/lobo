@@ -1,11 +1,11 @@
 module pkg :: shell
-  wolfi v0 · toolchain 0.2.35 · edition v1
-  export_hash 313228d0edad47daaba19d154e7c9a4da62ee5e7ec2004c4d1174f93d86645cf
-  pkg_hash    313228d0edad47daaba19d154e7c9a4da62ee5e7ec2004c4d1174f93d86645cf
+  wolfi v0 · toolchain 0.2.36 · edition v1
+  export_hash f1b47d95fda2fc3a3b9e72a325d3bbcd8d738ef1a05d832ad0f2bc9bac79a5d3
+  pkg_hash    f1b47d95fda2fc3a3b9e72a325d3bbcd8d738ef1a05d832ad0f2bc9bac79a5d3
   deps:
     config  ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
-    std.signal  132f77a19f3484ca637b6d71c13bed08c848062934a5b74250ad6d0e74a4d40c
+    std.signal  aca36f9c64678ba58f10e237fbe117b25831792999f2d02ebfbbafc27329a418
   items:
     [0] pub accept_failed_text — fn accept_failed_text(code: int, text: str) -> str
     [1] pub conf_hash — fn conf_hash(c: config.Conf) -> str · regions (ρ1) -> -
