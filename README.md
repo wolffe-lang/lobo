@@ -22,7 +22,7 @@ lobo -s stop -c conf/lobo.conf
 `lobo -v` prints the version and the compiler that built it:
 
 ```
-lobo version: lobo/0.1.5+dev (built with wolf 0.2.35, pin cf0c13d)
+lobo version: lobo/0.1.5+dev (built with wolf 0.2.36, pin 5adf3d9)
 ```
 
 > **Version 0.1.5.** Static serving, reverse proxy, TLS, ACME, prefork
