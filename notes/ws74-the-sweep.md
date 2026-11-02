@@ -95,6 +95,8 @@ Committed checkpoint:
 - `2cac119`: eleven-issue triage and initial host-tool finding.
 - `a074b5b`: approved R-ws74-1 A and image-build prediction.
 - `7b8c12e`: regression for #101, committed before any implementation.
+- `5cd6fe6`: queued baseline and deliberate-plant checkpoint.
+- `7c9493e`: correct the regression's native status command.
 
 The regression checks both workers ready at generation 1, a full reload
 (exit 0, 2/2), root-only config rejection (explicit incomplete 0/2, exit
@@ -116,10 +118,47 @@ are under `/home/mfwolffe/lanes/ws74/`:
 - Detached red job PID 4153050, log `logs/red.log`, terminal marker `logs/red.exit`; waits for setup before choosing the emptier block and builds only committed `7b8c12e`.
 - Detached plant job PID 47399, log `logs/plant.log`, terminal marker `logs/plant.exit`; requires the baseline's named red before queuing committed `0e6820b`.
 
-No source fix, completed build, image digest, observed red/green, final
-gauntlet or audit is claimed at this checkpoint. R-ws74-1 A is approved
-and awaiting its first red, not yet implemented. No issue is claimed fully
-fixed. README read, current against the committed test-only diff.
+Review caught a fixture error before execution: `-s` accepts nginx's four
+verbs only, so the readiness helper must use `lobo status`, not `-s status`.
+`7c9493e` corrects it; plant `c61c483` carries the same correction. The
+already queued earlier commits are not cancelled, rewritten or used as
+clean negative evidence. They may produce unrelated fixture failures.
+
+Detached corrected-control job PID 406612 waits for that earlier attempt,
+then runs baseline `7c9493e` and plant `c61c483`, choosing the emptier block
+each time. It accepts each negative only if the named root-only reload
+check is the **sole** failed check. Evidence: `logs/red2.log` +
+`logs/red2.exit`, `logs/plant2.log` + `logs/plant2.exit`; wrapper
+`logs/corrected.log` + `logs/corrected.exit`.
+
+The approved fix is queued conditionally, not claimed executed: detached
+PID 469924, `scripts/approved-fix-queue.sh`, `logs/fix.log` and
+`logs/fix.exit`. It first verifies the corrected baseline's unique actual
+red, then creates a separate `ws74-approved-fix` worktree, applies only
+the approved incomplete reply / nonzero CLI change, formats behind the
+block lock, commits only main.lu, and runs the root-container green rows
+from that commit. It never pushes. On execution, `logs/fix.sha` and
+`approved-fix.bundle` name and preserve its commit. Until those records
+exist, no implementation or green is claimed. Do not concurrently edit
+that reserved worktree; fetch/cherry-pick its commit into ws74 on resume.
+
+Setup waiter 3853900 was still queued at nineteen minutes forty seconds.
+Detached setup watcher PID 282639 records `logs/setup.exit` from its
+terminal success marker (or records failure if none); it does not change
+or kill the existing waiter. All recorded paths above are under
+`/home/mfwolffe/lanes/ws74/`.
+
+Draft PR #116 is the test-only checkpoint, not merge-ready. Deliberate
+plant draft PR #117 is at `c61c483`. Each immediate run-id lookup returned
+an empty list; no CI id or verdict is invented and no CI was awaited.
+The orchestrator owns the watches. Neither draft has been audited yet.
+
+No completed build, image digest, observed red/green, final gauntlet or
+audit is claimed at this checkpoint. R-ws74-1 A is approved and its guarded
+execution awaits the first real red. No issue is claimed fully fixed.
+README read, current against the committed test-only diff. After the fix,
+refresh its reload limitation, docs/CONTROL.md, docs/WORKERS.md and the
+Unreleased CHANGELOG, leaving historical release observations intact.
 
 Test targets:
 
