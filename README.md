@@ -314,6 +314,13 @@ serve linux aarch64.
   0.2.29 (about 1,550 with 0.2.28), where nginx makes 23: each
   process's wait for a signal reads its pipe every 5 ms
   (wolf-lang#710).
+- **Worker reloads.** Dropped workers must be able to read a reload's
+  configuration and keys. If the master accepts it but workers reject or
+  do not acknowledge it, the control reply says `reload incomplete …
+  workers=K/N` and the control CLI exits 1. This is not rollback: the
+  master has advanced and workers may still serve older configurations.
+  Inspect them with `lobo status`; master-to-worker configuration and key
+  transfer remains lobo#101.
 - **No binary swap.** `-s reload` re-reads the configuration and
   keeps the running binary; a new lobo is installed by stopping the
   old one and starting the new.
