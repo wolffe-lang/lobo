@@ -57,16 +57,22 @@ Groups: 0 assertion. One short probe printed Uid 0/0/0/0, Gid 0/0/0/0,
 Groups 0. Baseline and plant were then each uniquely red; the approved
 fix made all thirty root checks green. No assertion or timeout was weakened.
 
-R-ws74-2 diagnostic prediction: shorten only the test's copied image to
-one byte, after a successful copy and before the existing size predicate.
-At frozen old main 61de89e, native conformance should report trap(assert)
-and empty inline stdout. The new #118 diagnostic assertion should keep
-that same predicate false but name the original/copy paths and sizes in
-its retained failure message. Copy and readiness checks must likewise
-report their observations; readiness remains 15000 ms and reports elapsed
-wall time. Print failure messages only on failure because native records
-do not retain assert text. Keep plant #117 untouched. Then push one new
-main head and run one full short-path gauntlet, not retries to green.
+**R-ws74-2, ruled and implemented:** the orchestrator filed the intermittent
+native failure as lobo#118. Make the three pre-output assertions name their
+observations, not change their predicates or deadlines. Copy failures name
+both paths and sizes; size mismatches name the observed values; readiness
+failures name paths, sizes, endpoint, the unchanged 15000 ms deadline and
+elapsed time. The same failure message is printed only on failure before
+asserting it, because native conformance does not retain assert text
+(wolf-lang#150). Successful checks add no print.
+
+The prediction was committed before the change (`27602f3`, cherry-picked
+as `081e0d7`). A local one-byte copy plant first proved the old output was
+empty, then the diagnostic candidate named the same false size predicate.
+That deliberate shortening is absent from main and plant PR #117 is
+unchanged. Push one new head, run one full short-path gauntlet, and audit
+that head once only if it is green. #118 remains open; diagnostics do not
+claim to fix its intermittent cause.
 
 ## 4. Evidence index
 
@@ -105,11 +111,85 @@ END green-root exit=0
 END kasumi-sequence exit=0
 ```
 
-The two exit-1 rows are the intended, individually checked negatives, not
-application passes. The final-head full gauntlet is still pending when
-this note is committed; its actual head, END lines, SKIPs and verdict will
-be recorded in PR #116's five-section body after it runs. No earlier green
-will be substituted for that run.
+The two exit-1 rows above are intended, individually checked negatives,
+not application passes. At the earlier main head **61de89e**, the first
+full attempt was superseded after overly long worktree paths caused UNIX
+control binds to fail (376/392 green). The short-path attempt stopped at
+**391/392 green**: binary_identity_e2e [native] trap(assert), empty stdout;
+its checked leg passed in 23 s. Zero SKIP lines in the executed portion.
+Neither result was called green, and no downstream step was run after the
+corpus failed. Both attempts had the same terminal END sequence:
+
+```
+END stage-final exit=0
+END disk exit=0
+END toolchain-pin exit=0
+END manifest exit=0
+END stamp exit=0
+END signal-names exit=0
+END fmt-check exit=0
+END both-tiers-build exit=0
+END directive-docs exit=0
+END log-variable-docs exit=0
+END metrics-docs exit=0
+END interface-freshness exit=0
+END corpus exit=1
+END gauntlet exit=1
+END final-job exit=1
+```
+
+The orchestrator verified CI **41516482696 green at that same 61de89e
+head**, and filed #118. Before that ruling, exactly three unmodified
+native legs at each path and three off-line logged probes all returned
+exit(0), warnings=[] and diagnostics=[]. No reproduction or cause was
+claimed, and those nine greens did not replace the original red. The
+bare outputs contain all six GREEN cases; the probe protocol retains a
+4096-byte prefix plus full stdout hash, not a reconstructed transcript.
+Exact records are under /home/mfwolffe/lanes/ws74/logs/identity/ and
+/Users/mfwolffe/lanes/ws74/identity-diagnostics/; the complete driver log is
+/Users/mfwolffe/lanes/ws74/identity-nine.log, SHA-256
+a59e2bef49c8a59ce037dcaaec9882ffeb63158e35e06956a1f0fc880a831d6a.
+The debug seeds differed by 1480 bytes; every bare copy matched its own
+seed size. Release seeds were byte-identical. Inputs stayed unchanged.
+
+**#118 local forced-copy diagnostic proof:** old plant `72e3a9e` and new
+plant `0af0566` each shorten only the copied image to one byte. Both native
+records are trap(assert), but old stdout_inline is null and the new full
+failure output is:
+
+```
+binary identity unchanged size: source=[/home/mfwolffe/lanes/ws74/g61de89e/target/lobo-debug] source-size=18343064 copy=[/home/mfwolffe/lanes/ws74/g61de89e/ws72_e2e/unchanged/lobo] copy-size=1
+```
+
+The native message-quality observation changed from red to green, not the
+intentionally false size predicate. Records: /home/mfwolffe/lanes/ws74/logs/118/
+and /Users/mfwolffe/lanes/ws74/118-message-proof/. Every END:
+
+```
+END forced-old-native exit=1
+END old-message-quality exit=1
+END forced-old-observation exit=0
+END forced-old-job exit=0
+END forced-new-native exit=1
+END new-message-quality exit=0
+END forced-new-observation exit=0
+END forced-new-job exit=0
+```
+
+The main candidate is exactly the canonical new fixture with only that
+plant statement removed; token equality to the queued candidate and a
+read-only fmt check passed. wait_ready's predicate/deadline body and all
+post-first-print assertions are byte-identical to 61de89e. The diagnostic
+commit is `af5f623`, with lobo#118 in its message. No plant branch was
+pushed to the main PR.
+
+The new final-head full gauntlet is pending when this note is committed.
+Its actual head, every END, SKIPs and verdict will be added to PR #116's
+five-section body after its single run. No earlier green substitutes for
+that run. An earlier audit at 61de89e failed on malformed footprint
+punctuation and a missing done-when heading while CI was incomplete; this
+note fixes both fields. R-ws74-2 authorizes one fresh audit at this new
+head after a green gauntlet.
 
 **Superseded hasu attempts, not evidence:** the first fixture used invalid
 `-s status` (corrected in `7c9493e`), and rootless podman supplied an empty
@@ -141,11 +221,13 @@ END approved-fix-job exit=2
 `plant2` never ran: its predecessor's strict guard stopped first. The old
 hasu exit-2 rows are fixture/guard outcomes, not product skips or greens.
 
-## 5. Handoff
+## 5. Done-when and handoff
 
-PR #116 addresses **the diagnostic/CLI part of #101 only**. Do not close
-#101. The eleven-issue triage is complete; the broader implementation
-sweep is not claimed complete. Comment-ready lines for every issue left:
+PR #116 addresses **the diagnostic/CLI part of #101** and **test diagnostics
+for #118**, not their outstanding causes. Do not close #101 or #118. The
+eleven-issue triage is complete; the unimplemented #68, #82, #87, #95 and
+#102 work remains deferred as explicitly accepted by the orchestrator.
+Comment-ready lines for every original issue left:
 
 - #68: Still open; the old parsing/bookkeeping/head-route percentages need a new same-host profile before selecting a change or claiming recovery. ws73 measured proxy exchanges, not these levers. No new profile here.
 - #72: Runtime-owned per ws59's issue comment: 300 loaded four-CPU rounds with eight busy loops had no hang; every lobo wait was bounded to two seconds, unlike the captured forty-second futex sleep. A wolf-only witness needs a recurrence under memory/IO pressure. No new reproduction here.
@@ -166,7 +248,9 @@ Commit references:
 - `b9f33f0`, `a35e08b`: corrected-runner prediction and explicit root group / inside-container CPU pin.
 - `1f3bf09`: approved partial #101 fix, after uniquely observed negatives.
 - `09af7ff`: control/worker docs and Unreleased CHANGELOG.
-- `8720ac0`: README-only refresh. README read against the pass; counts, modules, install/build instructions and pins remain current.
+- `8720ac0`: README-only refresh. README read against the pass; counts, modules, install/build instructions and pins remain current. The #118 diagnostic-only change moves none of them.
+- `081e0d7`: #118 prediction, committed before changing the assertions.
+- `af5f623`: lobo#118 failure-only assertion observations, after the silent old-message seed.
 
 Test targets:
 
@@ -175,8 +259,10 @@ Test targets:
 - [x] Corrected baseline's single named root-container red.
 - [x] Deliberate plant's same single named red.
 - [x] Approved fix, thirty root-container checks green.
-- [ ] Full gauntlet at final committed head; count every SKIP.
-- [ ] Update PR evidence and read the current-head CI id once; orchestrator watches.
-- [ ] One final lane audit, exact last line reported.
+- [x] #118 forced-copy old silent failure and new value-bearing failure, with the size predicate still false.
+- [x] Ready predicate/deadline and all later assertions unchanged; no main shortening statement.
+- [ ] One full gauntlet at the new final committed head; count every SKIP.
+- [ ] Push once; identify the current-head CI id once, orchestrator watches.
+- [ ] If the new gauntlet is green, one audit at that new head; report its exact last line.
 
-Footprint: module.
+Footprint: module
