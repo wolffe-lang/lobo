@@ -37,8 +37,42 @@ will stop at the first failure and preserve every END line.
 
 ## 4. Evidence index
 
-Pending execution; no test result claimed by this prediction.
+No build or test has run. No green or red verdict is claimed.
+
+Comment-ready triage, one line per open issue:
+
+- #68: Still open: ws73's measurements concern proxy exchanges, not this parsing/bookkeeping/head-route profile; the old percentages need a new same-host profile before selecting a change or claiming recovery.
+- #72: Still open: the loaded-host control hang remains unlocated; reproduce the burst-of-closes shape at the current pin in an isolated container before assigning it to lobo or wolf. No kasumi evidence was revisited.
+- #78: Already fixed in 0.1.3 by b256d2e / #75; the open issue is an upgrade advisory, not an unfixed trunk defect. Closure is the orchestrator's decision.
+- #82: Still open: current tests explicitly preserve the later-server warnings and nonmatching regex name; per-server frozen effective configuration, ordered regex matching and master-owned listener changes remain separate implementation work, not a one-line warning fix.
+- #87: Still open: this is a bundle of independent limit follow-ups, not a single resolved defect; master descriptor reserve, admission distribution, metrics and the named TLS/ENFILE/no-/dev/null/reload-limit witnesses still need individual rows. Not yet implemented by this lane.
+- #90: Already fixed in 0.1.4 by ws64 / #86; this issue documents affected released binaries and the need to replace the process. No new trunk fix is owed; closure is the orchestrator's decision.
+- #91: Already fixed in 0.1.4 by ws63 / #83; the open issue is a release advisory. No new trunk fix is owed; closure is the orchestrator's decision.
+- #95: Still open: the old macOS negative-control discrepancy is not evidence of current runtime failure; park_at_limit_e2e still proves only that at least one download began, not that descriptor exhaustion preceded the first parked write. Needs a historical 0.2.29 macOS negative control and an instrumented stronger witness; no assertion was weakened.
+- #100: Still open: ws73 retained the existing persistent pool after measured alternatives regressed other shapes; its one-client recovery target remained unmet, with wolf-lang#835/#836 named as upstream boundaries. No bench or door changed here.
+- #101: Confirmed source defect: main.lu unconditionally says reload complete after fan_out even when zero workers accepted; control_exit treats every non-rejected reload reply as success. Truthful incomplete application and nonzero CLI status are a safe partial fix; parsed configuration/key transfer and generation consistency remain outstanding, so do not close the whole issue.
+- #102: Still open: config/userconf.lu deliberately exempts cert auto from the implicit root drop, but explicit user still drops; acme.store_write/account_key/install run in the owning hand and write the store. Verify cold issuance, root-owned existing keys, renewal and sibling pickup as root inside a container before choosing ownership/privileged-renewal policy. No chmod/chown workaround or credential-policy change was made.
+
+Host prerequisite checked on hasu: neither localhost/r41-toolchain:1 nor
+localhost/px75-ubuntu:2 nor localhost/px78-ubuntu:1 contains ApacheBench;
+command -v ab on the host is also empty. The complete gauntlet includes
+tools/lobo-proxy-throughput, so it cannot be honestly called green in
+these environments. No package was installed. wolf and lupin published
+Linux archive digest metadata was read twice, identical:
+
+- wolf: d383c74c8cd123b9d9dfaa268271d4f004294f85c2b230237d0ef07027d9500d
+- lupin: 34f52792bb59bc7565e0edc1235cd47d9a6ad13d5e6528993627f2e699b62193
+
+These are release API digests, not claims that bytes were downloaded or
+hashed locally. No build job or block waiter was submitted.
 
 ## 5. Handoff
 
-Pending. Footprint: module. No issue closure claimed yet.
+Early handback under the host-prerequisite rule: please provide a hasu
+container image with ApacheBench (and the existing gauntlet prerequisites),
+or install it as orchestrator. Resume this same lane afterwards; the safe
+first fix is #101's misleading partial-reload success. No implementation,
+red row, plant, PR, CI run or audit exists yet. No issue is claimed fixed
+by this lane. No ruling is requested; the blocker is a missing tool.
+
+README read, current against this notes-only checkpoint. Footprint: notes.
