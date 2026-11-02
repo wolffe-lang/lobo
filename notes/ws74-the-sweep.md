@@ -68,11 +68,22 @@ hashed locally. No build job or block waiter was submitted.
 
 ## 5. Handoff
 
-Early handback under the host-prerequisite rule: please provide a hasu
-container image with ApacheBench (and the existing gauntlet prerequisites),
-or install it as orchestrator. Resume this same lane afterwards; the safe
-first fix is #101's misleading partial-reload success. No implementation,
-red row, plant, PR, CI run or audit exists yet. No issue is claimed fixed
-by this lane. No ruling is requested; the blocker is a missing tool.
+The first checkpoint handed back for missing ApacheBench. On resume the
+orchestrator pointed out that the lane rules already permit constructing a
+lane-prefixed image: build localhost/ws74-ab:1 from localhost/px75-ubuntu:2
+with ApacheBench. The host is unchanged; image-local dependencies are not
+host package installations. Also stage jq and OpenSSL development headers,
+missing from the base and required by the documented gauntlet/oracle build.
 
-README read, current against this notes-only checkpoint. Footprint: notes.
+R-ws74-1 A was approved on resume: implement truthful incomplete-worker
+reporting and nonzero CLI exit, red first; leave full configuration/key
+transfer as a named follow-up. Test full success, all-worker rejection,
+continued old-worker serving and a subsequent readable-config recovery.
+Keep master generation semantics unchanged and describe the mixed state
+rather than falsely promise rollback. Count a reload acknowledgement only
+when it begins with the actual reload-complete reply, not arbitrary busy
+text. Predict the reverted diagnostic plant will fail the named row.
+
+No issue is claimed fully fixed yet. README read, current at checkpoint.
+Expected implementation footprint: cross-cutting (the existing test tool
+changes); final classification will be checked by the audit.
