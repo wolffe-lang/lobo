@@ -784,6 +784,15 @@ call fails.
   workers=0/2` and the hands keep serving the generation they had
   (measured, `kasumi:~/lanes/ws67/ev/reload96-h96.log`).
 
+That quoted reply is historical. In unreleased 0.1.6, fewer than N
+worker acknowledgements produce `reload incomplete (generation M)
+workers=K/N: …` and the control CLI exits 1, not 0. The master has already
+advanced; this is not rollback or generation reconciliation. Workers may
+still serve older configurations, including after their next successful
+reload has advanced their own generation counters. Master-to-worker
+configuration/key transfer remains lobo#101; `tools/lobo-user` holds the
+truthful reply and the surviving workers' behavior.
+
 ## ws68 — root with no `user` line drops to nginx's default
 
 The `user` default was a ruling asked at audit; the recommendation,

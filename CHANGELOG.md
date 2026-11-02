@@ -2,6 +2,22 @@
 
 ## Unreleased — 0.1.6
 
+### Incomplete worker reloads (lobo#101, partial)
+
+A master whose workers reject or do not acknowledge a reload now replies
+`reload incomplete (generation M) workers=K/N: …` instead of claiming
+`reload complete`. With a control endpoint, `lobo -s reload` and `lobo
+control reload` exit 1 for this reply. Full acknowledgement remains exit
+0. This does not roll back the master's accepted generation or transfer
+root-only configuration and keys to dropped workers; that part of #101
+remains open. Use `lobo status` to inspect individual worker generations.
+
+The root-container regression checks full success, a root-only config
+rejected by both dropped workers, continued old-generation serving and
+restored-readability acknowledgements. The fixture explicitly supplies
+root's supplementary group instead of depending on the container engine's
+default; no identity assertion is weakened.
+
 ### Worker replacement after a binary install (ws72, lobo#110)
 
 The mixed-version worker window listed under 0.1.5's known issues is

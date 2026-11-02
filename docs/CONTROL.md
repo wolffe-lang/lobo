@@ -152,7 +152,7 @@ close). Every verb is reachable three ways: over the wire, through
 
 | verb | what it does | signal twin | reply |
 |---|---|---|---|
-| `reload` | re-parse the config, freeze a new generation, drain the old one | `SIGHUP` (RELOAD) | `reload complete (generation N)` / `reload rejected: …; keeping generation N` |
+| `reload` | re-parse the config, freeze a new generation, drain the old one | `SIGHUP` (RELOAD) | `reload complete (generation N)` / `reload rejected: …; keeping generation N` / `reload incomplete (generation N) workers=K/M: …` |
 | `quit` | graceful: stop accepting, drain, exit | `SIGQUIT` (QUIT) | `quit: draining then exiting (generation N)` |
 | `stop` | fast shutdown | `SIGTERM` (TERMINATE) | `stop: shutting down (generation N)` |
 | `reopen` | cycle the log outputs | `SIGUSR1` (USER; ws63, a meaning since wolf 0.2.29) | `reopen: log outputs cycled (generation N)` |
@@ -164,9 +164,9 @@ close). Every verb is reachable three ways: over the wire, through
 `reopen`), and that parity is probed against the oracle in
 `tools/lobo-shell`, so `status`, `upgrade` and `ping` ride the
 lobo-native `lobo control <verb>` subcommand instead of a widened `-s`.
-A rejected reload, an unknown verb, an `unauthorized` answer and
-`upgrade`'s named refusal are all exit 1, so an operator's `lobo -s
-reload && deploy` never runs on a reload that did not happen.
+A rejected or incomplete reload, an unknown verb, an `unauthorized`
+answer and `upgrade`'s named refusal are all exit 1. This verdict applies
+to the control endpoint, not the signal-only path described below.
 
 **A master that does not answer is exit 1 too** (ws49, lobo#47). The
 client waits 2000 ms for the reply; an endpoint that takes the line
@@ -339,6 +339,18 @@ printed in its status row, it is authorized by the same `token
 argv), and a verb sent to ONE hand acts on that hand alone, which
 is how the witness stops a serving hand and watches a standby take
 the listener.
+
+If the master accepts the configuration but fewer than N workers accept
+the reload, it instead answers `reload incomplete (generation M)
+workers=K/N: …`; `lobo -s reload` over the endpoint and `lobo control
+reload` exit 1. For example, every dropped worker can reject a file only
+root may read even though the root master validated it. This is **not a
+rollback**: the master has advanced and workers may still serve older
+configurations. Inspect their individual generations with `lobo status`.
+Reading configuration and keys in the master and passing the parsed
+result to workers, including generation reconciliation, remains lobo#101.
+`tools/lobo-user` checks the root-only rejection, continued old-worker
+serving, full success and restored-readability acknowledgements.
 
 ## Authorization
 
