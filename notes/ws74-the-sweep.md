@@ -57,6 +57,17 @@ Groups: 0 assertion. One short probe printed Uid 0/0/0/0, Gid 0/0/0/0,
 Groups 0. Baseline and plant were then each uniquely red; the approved
 fix made all thirty root checks green. No assertion or timeout was weakened.
 
+R-ws74-2 diagnostic prediction: shorten only the test's copied image to
+one byte, after a successful copy and before the existing size predicate.
+At frozen old main 61de89e, native conformance should report trap(assert)
+and empty inline stdout. The new #118 diagnostic assertion should keep
+that same predicate false but name the original/copy paths and sizes in
+its retained failure message. Copy and readiness checks must likewise
+report their observations; readiness remains 15000 ms and reports elapsed
+wall time. Print failure messages only on failure because native records
+do not retain assert text. Keep plant #117 untouched. Then push one new
+main head and run one full short-path gauntlet, not retries to green.
+
 ## 4. Evidence index
 
 Authoritative execution is kasumi slot **4–7**, under
