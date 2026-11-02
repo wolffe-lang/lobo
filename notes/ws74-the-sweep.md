@@ -3,7 +3,7 @@
 ## 1. Forbidden
 
 Planning is read-only. No kasumi, maintainer data, host signal probes,
-process-group kills, package installation, attribution, labels, merge,
+process-group kills, host package installation, attribution, labels, merge,
 release, tag, issue filing or closing. nginx is a black-box oracle.
 Bench and doors stay unchanged. All execution is from committed copies.
 
@@ -42,7 +42,7 @@ No build or test has run. No green or red verdict is claimed.
 Comment-ready triage, one line per open issue:
 
 - #68: Still open: ws73's measurements concern proxy exchanges, not this parsing/bookkeeping/head-route profile; the old percentages need a new same-host profile before selecting a change or claiming recovery.
-- #72: Still open: the loaded-host control hang remains unlocated; reproduce the burst-of-closes shape at the current pin in an isolated container before assigning it to lobo or wolf. No kasumi evidence was revisited.
+- #72: Still open, runtime-owned per ws59's issue comment: 300 loaded four-CPU native rounds with eight busy loops had zero hangs, and every lobo blocking call was deadline-armed to at most two seconds. The captured forty-second futex sleep was not a lobo-loop wait; a wolf-only witness needs a recurrence under memory/IO pressure. No kasumi evidence was revisited.
 - #78: Already fixed in 0.1.3 by b256d2e / #75; the open issue is an upgrade advisory, not an unfixed trunk defect. Closure is the orchestrator's decision.
 - #82: Still open: current tests explicitly preserve the later-server warnings and nonmatching regex name; per-server frozen effective configuration, ordered regex matching and master-owned listener changes remain separate implementation work, not a one-line warning fix.
 - #87: Still open: this is a bundle of independent limit follow-ups, not a single resolved defect; master descriptor reserve, admission distribution, metrics and the named TLS/ENFILE/no-/dev/null/reload-limit witnesses still need individual rows. Not yet implemented by this lane.
@@ -80,10 +80,54 @@ reporting and nonzero CLI exit, red first; leave full configuration/key
 transfer as a named follow-up. Test full success, all-worker rejection,
 continued old-worker serving and a subsequent readable-config recovery.
 Keep master generation semantics unchanged and describe the mixed state
-rather than falsely promise rollback. Count a reload acknowledgement only
-when it begins with the actual reload-complete reply, not arbitrary busy
-text. Predict the reverted diagnostic plant will fail the named row.
+rather than falsely promise rollback. Keep this first fix to the approved
+incomplete-count reply and CLI status; stricter acknowledgement framing
+is a separate follow-up. Predict the deliberately false-acknowledgement
+plant will fail the named row.
 
-No issue is claimed fully fixed yet. README read, current at checkpoint.
-Expected implementation footprint: cross-cutting (the existing test tool
-changes); final classification will be checked by the audit.
+The existing test tool is lobo-local, not shared CI infrastructure:
+`ci/tiers.py classify` calls it gauntlet, and lane-audit's module path
+rules admit it. No CI, pin, runtime, loader or spec path changes.
+
+Committed checkpoint:
+
+- `542c970`: prediction before changes.
+- `2cac119`: eleven-issue triage and initial host-tool finding.
+- `a074b5b`: approved R-ws74-1 A and image-build prediction.
+- `7b8c12e`: regression for #101, committed before any implementation.
+
+The regression checks both workers ready at generation 1, a full reload
+(exit 0, 2/2), root-only config rejection (explicit incomplete 0/2, exit
+1), continued serving at the workers' old generation, and restored
+readability. It explicitly preserves the remaining master/worker generation
+number divergence rather than claiming the transfer problem fixed.
+
+An off-line plant branch `ws74-plant-reload` at `0e6820b` deliberately
+reports N/N even when the actual acknowledgement count is zero. Its
+named expected red is `reload_root_only: incomplete workers=0/2 is
+explicit and exits 1`; no red has been observed yet.
+
+Hasu execution is queued behind existing block holders, not stuck in a
+build. Setup chose A after counting both queues; the waiter stays there.
+At the latest observation it had waited eleven minutes. The recorded jobs
+are under `/home/mfwolffe/lanes/ws74/`:
+
+- Setup waiter PID 3853900, log `logs/setup.log`; success ends with `END setup exit=0`. The setup is still owned by the live background SSH call, not a detached setsid job; no durable exit marker exists for it.
+- Detached red job PID 4153050, log `logs/red.log`, terminal marker `logs/red.exit`; waits for setup before choosing the emptier block and builds only committed `7b8c12e`.
+- Detached plant job PID 47399, log `logs/plant.log`, terminal marker `logs/plant.exit`; requires the baseline's named red before queuing committed `0e6820b`.
+
+No source fix, completed build, image digest, observed red/green, final
+gauntlet or audit is claimed at this checkpoint. R-ws74-1 A is approved
+and awaiting its first red, not yet implemented. No issue is claimed fully
+fixed. README read, current against the committed test-only diff.
+
+Test targets:
+
+- [x] `bash -n tools/lobo-user`.
+- [ ] Red baseline's root-container `lobo-user` row.
+- [ ] Local deliberate plant's named red.
+- [ ] Implement #101 partial fix, then green root-container rows.
+- [ ] Complete gauntlet at final head, with END lines and counted SKIPs.
+- [ ] PR head CI handed to the orchestrator; one final lane audit.
+
+Footprint: module.
