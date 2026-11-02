@@ -402,9 +402,19 @@ else
     oarg=""
     echo "lobo-user: no oracle at $NG; rows 6–9 hold the measured rule"
 fi
-"$eng" run --rm --network none --user 0:0 \
+# Root's supplementary group is part of the fixture, not a property of
+# an engine's default. In particular rootless podman otherwise starts
+# root with an empty Groups line. Keep the existing Groups: 0 assertions.
+# A lane can constrain the container's CPU set without pinning the host
+# podman process (which does not constrain its container).
+if [ -n "${LOBO_USER_CPUS:-}" ]; then
+    set -- "$@" "$img" taskset -c "$LOBO_USER_CPUS"
+else
+    set -- "$@" "$img"
+fi
+"$eng" run --rm --network none --user 0:0 --group-add 0 --memory 12g \
     -v "$LOBO:/lobo:ro" -v "$(pwd)/tools/lobo-user:/lobo-user:ro" "$@" \
-    "$img" bash /lobo-user --inside /lobo $oarg
+    bash /lobo-user --inside /lobo $oarg
 rc=$?
 if [ "$rc" != 0 ]; then
     echo "lobo-user: FAILED — exit $rc from the container (a red check above, or the container did not run)" >&2
