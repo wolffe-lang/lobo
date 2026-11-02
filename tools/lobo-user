@@ -243,7 +243,13 @@ if [ "${1:-}" = "--inside" ]; then
         wait "$MP" 2> /dev/null
     fi
 
-    # 3. two hands
+    # 3. two hands; ws74 (#101): a root-readable configuration can
+    # validate in the master and fail in every dropped hand. The reply
+    # must not claim completion, and the control CLI must exit nonzero.
+    workers_at() { # workers_at <generation> <count>
+        "$LOBO" -p "$D" -c l.conf -s status > "$D/status.out" 2>&1 || return 1
+        [ "$(grep -c "^worker .* generation=$1 " "$D/status.out")" = "$2" ]
+    }
     fresh "user lw lwx; worker_processes 2;"
     start
     if up; then
@@ -253,6 +259,31 @@ if [ "${1:-}" = "--inside" ]; then
             [ "$(ids "$h")" = "Uid: 1500 1500 1500 1500|Gid: 1600 1600 1600 1600|Groups: 1600|" ] && good=$((good + 1))
         done
         check "worker_processes 2: both hands dropped ($good of $n)" "$([ "$n" = 2 ] && [ "$good" = 2 ] && echo 0 || echo 1)"
+        # Await startup only, not a retry of the reload under test.
+        i=0
+        while [ "$i" -lt 60 ] && ! workers_at 1 2; do sleep 0.1; i=$((i + 1)); done
+        check "reload: both workers ready at generation 1" "$(workers_at 1 2 && echo 0 || echo 1)"
+        "$LOBO" -p "$D" -c l.conf -s reload > "$D/reload.out" 2>&1
+        rc=$?
+        say "readable reload: exit=$rc $(cat "$D/reload.out")"
+        check "reload: full success stays exit 0 and workers=2/2" \
+            "$([ "$rc" = 0 ] && grep -q '^reload complete (generation 2) workers=2/2$' "$D/reload.out" && workers_at 2 2 && echo 0 || echo 1)"
+        chmod 600 "$D/l.conf"
+        "$LOBO" -p "$D" -c l.conf -s reload > "$D/reload.out" 2>&1
+        rc=$?
+        say "root-only reload: exit=$rc $(cat "$D/reload.out")"
+        check "reload_root_only: incomplete workers=0/2 is explicit and exits 1" \
+            "$([ "$rc" = 1 ] && grep -q '^reload incomplete (generation 3) workers=0/2:' "$D/reload.out" && echo 0 || echo 1)"
+        check "reload_root_only: rejected workers keep generation 2 and serve" \
+            "$(workers_at 2 2 && [ "$(status_of /index.html)" = 200 ] && echo 0 || echo 1)"
+        # This is diagnostic-only: the master has advanced, the workers
+        # have not. Restoring readability lets them reload, but does not
+        # repair their generation numbering (the remaining part of #101).
+        chmod 644 "$D/l.conf"
+        "$LOBO" -p "$D" -c l.conf -s reload > "$D/reload.out" 2>&1
+        rc=$?
+        check "reload: readable configuration recovers acknowledgements" \
+            "$([ "$rc" = 0 ] && grep -q '^reload complete (generation 4) workers=2/2$' "$D/reload.out" && workers_at 3 2 && echo 0 || echo 1)"
         stop
     else
         check "worker_processes 2: the server came up on :80" 1
