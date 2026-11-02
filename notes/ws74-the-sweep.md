@@ -63,8 +63,19 @@ Linux archive digest metadata was read twice, identical:
 - wolf: d383c74c8cd123b9d9dfaa268271d4f004294f85c2b230237d0ef07027d9500d
 - lupin: 34f52792bb59bc7565e0edc1235cd47d9a6ad13d5e6528993627f2e699b62193
 
-These are release API digests, not claims that bytes were downloaded or
-hashed locally. No build job or block waiter was submitted.
+The setup completed on 2026-11-02 at the 18:03Z observation. All three
+archives (wolf, lupin, pinned nginx) passed SHA-256 verification twice;
+nginx was compiled without inspecting its source. The toolchain source
+pins did not move. `logs/setup.log` ends `END setup exit=0`, and
+`logs/setup.exit` is 0.
+
+Image `localhost/ws74-ab:1`:
+
+- ID: `2102932cf0a90c7f709d8a0c429c673e4c756ef13dfcadc34f1de9b3e4315580`.
+- Digest: `sha256:2c73b11adf739bbc4151f380eae5e2ec13e04fb76f3fd3edabda65ebd51d55b9`.
+
+This supersedes the initial metadata-only checkpoint: archive bytes have
+now been downloaded and verified. It does not claim any lobo test result.
 
 ## 5. Handoff
 
@@ -153,9 +164,10 @@ plant draft PR #117 is at `c61c483`. Each immediate run-id lookup returned
 an empty list; no CI id or verdict is invented and no CI was awaited.
 The orchestrator owns the watches. Neither draft has been audited yet.
 
-No completed build, image digest, observed red/green, final gauntlet or
-audit is claimed at this checkpoint. R-ws74-1 A is approved and its guarded
-execution awaits the first real red. No issue is claimed fully fixed.
+No lobo red/green, final gauntlet or audit was claimed at the queued
+checkpoint. The completed image/oracle setup above supplies its own
+END line, not a product gauntlet result. R-ws74-1 A is approved and its
+guarded execution awaits the first real red. No issue is claimed fully fixed.
 README read, current against the committed test-only diff. After the fix,
 refresh its reload limitation, docs/CONTROL.md, docs/WORKERS.md and the
 Unreleased CHANGELOG, leaving historical release observations intact.
