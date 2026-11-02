@@ -247,7 +247,7 @@ if [ "${1:-}" = "--inside" ]; then
     # validate in the master and fail in every dropped hand. The reply
     # must not claim completion, and the control CLI must exit nonzero.
     workers_at() { # workers_at <generation> <count>
-        "$LOBO" -p "$D" -c l.conf -s status > "$D/status.out" 2>&1 || return 1
+        "$LOBO" -p "$D" -c l.conf status > "$D/status.out" 2>&1 || return 1
         [ "$(grep -c "^worker .* generation=$1 " "$D/status.out")" = "$2" ]
     }
     fresh "user lw lwx; worker_processes 2;"
