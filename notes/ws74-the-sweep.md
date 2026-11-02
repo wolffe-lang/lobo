@@ -35,6 +35,18 @@ A separate plant will restore the unconditional success reply and must
 make the named incomplete-reload regression red. Final gauntlet wrapper
 will stop at the first failure and preserve every END line.
 
+On the next resume, kasumi is explicitly authorized again. Read the new
+kasumi block in the lane rules; use only slot 4–7 or 8–11 with its one
+long flock, taskset inside, closed stdin and a terminal sentinel. Leave
+all hasu waiters untouched and classify their old fixture failures as
+superseded. Before another run, correct the committed root-container
+runner with `--group-add 0`; preserve every Groups: 0 assertion. Predict
+one short /proc/self/status probe will print root Uid/Gid/Groups 0, then
+the baseline and plant will each have only the named reload red, and the
+approved diagnostic/CLI fix will make all thirty root checks green.
+The host's devices, rpc-server and unplugged mount remain off limits.
+
+
 ## 4. Evidence index
 
 No build or test has run. No green or red verdict is claimed.
