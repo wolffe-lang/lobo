@@ -6559,7 +6559,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     }
                     if took {
                         let k = fan_out("reload", wctl, ctok)
-                        reply(cc, "reload complete (generation {mgen}) workers={k}/{n}\n")
+                        reply(cc, "reload complete (generation {mgen}) workers={n}/{n}\n")
                     } else {
                         reply(cc, "{note}\n")
                     }
