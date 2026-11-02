@@ -15,6 +15,13 @@
 
 use shell
 
+// Native conformance does not retain assertion messages (wolf-lang#150).
+// Preserve the same failure message in stdout, only when a predicate fails.
+fn named_assert(okay: bool, note: str) {
+    if !okay { print(note) }
+    assert(okay, note)
+}
+
 fn command(text: str, a: str, b: str) -> bool {
     var args = List[str]()
     (mut args).push("-c")
@@ -111,12 +118,20 @@ fn run_row(root: str, kind: str) -> bool ! {
     fs_write_text("{dir}/html/index.html", "ws72-survivor\n")?
     let bin = "{dir}/lobo"
     let original = env_get("LOBO_BIN") else "{root}/target/lobo-debug"
-    assert(command("cp \"$1\" \"$2\" && chmod 755 \"$2\"", original, bin), "copy test image")
+    let copied = command("cp \"$1\" \"$2\" && chmod 755 \"$2\"", original, bin)
+    let copy_note = if copied {
+        ""
+    } else {
+        let source_size = fs_size(original) else -1
+        let copy_size = fs_size(bin) else -1
+        "binary identity {kind} copy: source=[{original}] source-size={source_size} copy=[{bin}] copy-size={copy_size}"
+    }
+    named_assert(copied, copy_note)
     let copied_size = fs_size(bin)?
     let original_size = fs_size(original)?
-    assert(
+    named_assert(
         copied_size == original_size,
-        "the requested executable, not the default tier, was copied",
+        "binary identity {kind} size: source=[{original}] source-size={original_size} copy=[{bin}] copy-size={copied_size}",
     )
     let hp = free_port()?
     let cp = free_port()?
@@ -138,7 +153,13 @@ fn run_row(root: str, kind: str) -> bool ! {
         let _ = shell.control_send(ep, "stop") else ""
         let _ = os_wait(child) else -1
     }
-    assert(wait_ready(ep), "two initial workers serve")
+    let readiness_start = time_unix_ms()
+    let ready = wait_ready(ep)
+    let readiness_elapsed = time_unix_ms() - readiness_start
+    named_assert(
+        ready,
+        "binary identity {kind} readiness: source=[{original}] source-size={original_size} copy=[{bin}] copy-size={copied_size} endpoint=[{ep}] deadline-ms=15000 elapsed-ms={readiness_elapsed}",
+    )
     let before = status(ep)
     let startup = fs_stat(bin)?
     print(
