@@ -6559,7 +6559,14 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     }
                     if took {
                         let k = fan_out("reload", wctl, ctok)
-                        reply(cc, "reload complete (generation {mgen}) workers={k}/{n}\n")
+                        if k == n {
+                            reply(cc, "reload complete (generation {mgen}) workers={k}/{n}\n")
+                        } else {
+                            reply(
+                                cc,
+                                "reload incomplete (generation {mgen}) workers={k}/{n}: workers rejected or did not acknowledge the reload; some may still serve an older generation\n",
+                            )
+                        }
                     } else {
                         reply(cc, "{note}\n")
                     }
@@ -6842,7 +6849,7 @@ fn control_exit(reply: str) -> int {
     if reply == "unauthorized" {
         return 1
     }
-    if reply.starts_with("reload rejected") {
+    if reply.starts_with("reload rejected") || reply.starts_with("reload incomplete") {
         return 1
     }
     if reply.starts_with("unknown verb") {
