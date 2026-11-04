@@ -234,6 +234,14 @@ did not: with no control listener its loop never waited on the signal
 forwarder, so it used a whole core and answered no signal (measured at
 `af0fa41`, built with wolf 0.2.28 and 0.2.29 alike).
 `tests/shell/signal_send_e2e.lu` holds all of this against the binary.
+Since ws75 (lobo#91) `tools/lobo-signal` also measures such a master
+directly, with two hands and no `control` directive. Over a 3 s idle
+window its own cpu time must stay at or under a tenth of a cpu. It
+reads user plus system time from `/proc/<pid>/stat` on linux and from
+`ps` on macOS. A real `kill -HUP` must then make both hands activate
+generation 2, and a real `kill -TERM` must end the tree within 8 s.
+Every step has a bound, so a deaf master fails the row rather than
+hanging it.
 
 ## Out of descriptors: the reserve (ws64, lobo#84)
 
