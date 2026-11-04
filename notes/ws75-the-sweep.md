@@ -170,3 +170,62 @@ These are recommendations only; this lane does not implement them.
   - `lobo_accept_failures_total{reason="emfile|enfile|other"}`.
 
   This is for a follow-up lane.
+
+## 4. Evidence index
+
+Every count below ran on Linux, inside the lane container, pinned to one
+block's cpus. "cpu load" means two busy loops per cpu of that block;
+"build load" adds a release compile of lobo in a loop. The run logs stay
+with the lane.
+
+### lobo#119, trunk `64e7339`, the old row (counted before the change)
+
+- **25 full prefork steps under cpu load, six cpus, load1 9 to 21: 24
+  green, 1 red.**
+  - The 24 green runs split 25 to 37 connections per hand. None read a
+    hand at zero.
+  - The red run (run 4) is **not** the zero-hand shape. The master
+    answered its first `status`, then nothing for more than 10 s. Every
+    row that reads `status` failed together; the distribution row read
+    empty counts (`//`). Meanwhile every GET was served.
+  - Status returned once hand 1 had been killed (`kill -9`) and
+    replaced, and the rest of the run passed: 30 of 38 rows.
+  - That is a control-path stall under load, the family of lobo#72,
+    not of #119.
+- An earlier 6-run count is void. A runner bug overwrote its run count
+  with the cpu count.
+- The zero-hand shape itself was seen twice by ws74, on another shared
+  Linux host: 54/37/0 at trunk and 36/0/55 at a branch, each time with
+  the zero hand answering its own endpoint.
+- The change (`8af2674`) does not wait on that shape recurring. It
+  removes an assertion that `accept` does not support, and replaces it
+  with two that lobo controls (see `docs/WORKERS.md`).
+
+### lobo#118 and lobo#72, trunk `64e7339`, under build load (eight cpus, the package at 100 °C)
+
+- **`binary_identity_e2e` native: 25 of 25 green.** Runs took 30 to
+  35 s; no failure message was printed.
+- **`carry_e2e` native: 25 of 25 green.** Runs took 10 to 13 s.
+
+### lobo#87, the master's descriptors, trunk `64e7339`
+
+`worker_processes 2` with a control endpoint. The tree was started
+under `ulimit -n` at each limit below. At each, the probe asked
+`status` 20 times, sent a GET between asks, and then watched 6 idle
+seconds.
+
+| `ulimit -n` | what happened |
+|---|---|
+| 11 to 15 | the hands never came up: `no free endpoint for its control listener`, or, at 13 and 15, the master's own `spawn failed (io)`; the master stayed alive |
+| 16 | a hand came up at its own limit (`accept() failed (24: …)`), and the tree never reached two serving hands |
+| 18, 20 | serving; `status` 20/20; idle master 0 to 2 of 600 cs; no hand reaped; 186 `accept() failed (24: …)` lines from the hands, none from the master |
+| 24, 32, 64 | serving and clean; `status` 20/20; idle master at most 1 of 600 cs |
+
+The master rests at 14 descriptors at every limit, and a hand needs
+about 20. So wherever a hand can serve, the master has room for a
+control connection and for its probes. A failed probe never reaped a
+healthy hand.
+
+**R-ws75-3, recommended:** no master reserve. Document the master's
+14 at rest beside the hands' 20 in README's Limits, and close that item
+of #87.
