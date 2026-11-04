@@ -347,10 +347,10 @@ cpu_cs() { # cpu_cs <pid> — the process's user + system cpu, in hundredths of 
         ;;
     esac
 }
-lines_in() { # lines_in <file> <fixed text> — how many lines carry it
-    grep -cF -- "$2" "$1" 2>/dev/null || true
+lines_in() { # lines_in <file> <extended regex> — how many lines match it
+    grep -cE -- "$2" "$1" 2>/dev/null || true
 }
-wait_lines() { # wait_lines <file> <fixed text> <n> — up to ~10 s
+wait_lines() { # wait_lines <file> <extended regex> <n> — up to ~10 s
     _wl=0
     while [ "$_wl" -lt 100 ]; do
         [ "$(lines_in "$1" "$2")" -ge "$3" ] && return 0
@@ -365,7 +365,7 @@ printf 'worker_processes 2;\npid %s/nocontrol.pid;\nhttp {\n  types { text/html 
     "$scratch" "$hp8" "$scratch/A" > "$conf8"
 "$LOBO" serve -p . -c "$conf8" 2> "$scratch/nocontrol.log" &
 pid8=$!
-if wait_lines "$scratch/nocontrol.log" "generation-activated gen=1 worker=" 2; then
+if wait_lines "$scratch/nocontrol.log" "generation-activated gen=1 .*worker=[0-9]" 2; then
     # the hands are up; nothing touches the tree from here until the window closes
     sleep 1
     c0=$(cpu_cs "$pid8")
@@ -378,10 +378,10 @@ if wait_lines "$scratch/nocontrol.log" "generation-activated gen=1 worker=" 2; t
         check "[nocontrol-idle-cpu] the master's cpu time is readable (pid $pid8: [$c0] [$c1])" 1
     fi
     kill -HUP "$pid8"
-    if wait_lines "$scratch/nocontrol.log" "generation-activated gen=2 worker=" 2; then
+    if wait_lines "$scratch/nocontrol.log" "generation-activated gen=2 .*worker=[0-9]" 2; then
         check "[nocontrol-hup] a real kill -HUP at the master reached both hands (generation 2 activated by each)" 0
     else
-        check "[nocontrol-hup] a real kill -HUP at the master reached both hands (gen-2 activations: $(lines_in "$scratch/nocontrol.log" "generation-activated gen=2 worker="))" 1
+        check "[nocontrol-hup] a real kill -HUP at the master reached both hands (gen-2 activations: $(lines_in "$scratch/nocontrol.log" "generation-activated gen=2 .*worker=[0-9]"))" 1
     fi
     if [ "$(lines_in "$scratch/nocontrol.log" "signal-received sig=reload verb=reload source=signal")" -ge 1 ]; then
         check "[nocontrol-hup] the master logged the signal it heard (signal-received sig=reload … source=signal)" 0
@@ -389,7 +389,7 @@ if wait_lines "$scratch/nocontrol.log" "generation-activated gen=1 worker=" 2; t
         check "[nocontrol-hup] the master logged the signal it heard (signal-received sig=reload … source=signal)" 1
     fi
 else
-    check "[nocontrol-idle-cpu] the master and both hands came up with no control directive (gen-1 activations: $(lines_in "$scratch/nocontrol.log" "generation-activated gen=1 worker="))" 1
+    check "[nocontrol-idle-cpu] the master and both hands came up with no control directive (gen-1 activations: $(lines_in "$scratch/nocontrol.log" "generation-activated gen=1 .*worker=[0-9]"))" 1
 fi
 kill -TERM "$pid8" 2>/dev/null
 i=0
