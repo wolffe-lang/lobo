@@ -137,3 +137,36 @@ with one file and one hunk. The master's signal pipe joins its wait set
 only when there is a control listener, which is ws62's bug. Predicted
 red by name: the new #91 row. The master spins (well over 10 % of a
 cpu) and the HUP is not heard.
+
+## Recommendations for follow-up lanes (lobo#87)
+
+These are recommendations only; this lane does not implement them.
+
+- **R-ws75-1: a full hand takes a connection a sibling had room for.**
+  ws64 measured it with two hands at `worker_connections 16`: lobo
+  served 28 of the first 29 connections, and the oracle served the
+  first 28. The options:
+  - A: keep it, documented as a delta. The total refused is nginx's;
+    which connection is refused is not.
+  - B: a full hand with nothing idle to close leaves the shared
+    listener out of its wait for a short pause (about 20 ms) before it
+    takes and refuses a connection. A sibling with room then wins it.
+    When every hand is full, each refusal comes up to one pause later.
+    This is for hands on an inherited listener only: not a single
+    process, and not `reuseport`.
+  - C: the master decides admission, since it knows each hand's room.
+    That needs a channel from the master to its hands, which lobo does
+    not have.
+
+  **Recommended: B,** in its own lane, with a two-hand row at
+  `worker_connections 16` held to the oracle's measured first 28.
+- **R-ws75-2: `/metrics` counters for refused, evicted and
+  accept-failure connections.** Their names, types and labels must
+  pass `tools/lobo-metrics`' clause-by-clause exposition check.
+  **Recommended:** three per-process counters, each stamped with the
+  worker like the existing series:
+  - `lobo_connections_refused_total`;
+  - `lobo_connections_evicted_total`;
+  - `lobo_accept_failures_total{reason="emfile|enfile|other"}`.
+
+  This is for a follow-up lane.
