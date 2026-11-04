@@ -211,7 +211,11 @@ serve linux aarch64.
 - **Descriptors.** An idle connection holds one descriptor; a
   download parked on a slow client holds two (its socket and its
   file), two threads and about 150 KB resident. A process holds about
-  20 at rest, two of them in reserve. Set the limit where lobo is
+  20 at rest, two of them in reserve. A master over several workers
+  holds 14 and keeps none in reserve: it accepts no clients, so
+  wherever its workers can serve it has room for its control
+  connections and its checks on them (measured from `ulimit -n` 18 to
+  64; below 16 the workers cannot start). Set the limit where lobo is
   started (`ulimit -n`, systemd's `LimitNOFILE=`); lobo cannot set it
   (`worker_rlimit_nofile` is refused by name), and warns at start,
   `[warn] 512 worker_connections exceed open file resource limit:
