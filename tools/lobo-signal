@@ -21,7 +21,10 @@
 # blocks are byte-identical once the generation numbers and the seq
 # stamps are normalized away, and `source` is the whole of the
 # difference. That is what "a verb and a signal are indistinguishable
-# in the log" means, stated as a diff rather than a promise.
+# in the log" means, stated as a diff rather than a promise. Step 7 is
+# ws29's idle-loop forwarder witness, and step 8 (ws75, lobo#91) is a
+# master with two hands and NO control directive, measured: its idle
+# cpu, a real HUP fanned out to both hands, a real TERM ending the tree.
 #
 # Linux + macOS at this pin ([os.signal.platform]: s114 was
 # Linux-full; macOS joined at s59 via the task-layer port — the wsm03
@@ -319,6 +322,99 @@ else
 fi
 "$LOBO" -s stop -p . -c "$conf4" > /dev/null 2>&1 || kill -TERM "$pid4" 2>/dev/null || true
 wait "$pid4" 2>/dev/null || true
+
+# 8. ws75 (lobo#91): THE MASTER WITH NO CONTROL DIRECTIVE. Through ws62
+# a master with `worker_processes` above 1 and no `control` directive
+# built its wait set only for a control listener and waited only when
+# it had one: with none it never waited, so it span a whole cpu while
+# idle and never read its signal forwarder's pipe — `kill -HUP` did not
+# reload it and `kill -TERM` did not stop it (lobo 0.1.1 to 0.1.3; fixed
+# by ws63, #83). `signal_send_e2e.lu` step 3 drives the reload through
+# `lobo -s`; this row MEASURES the master itself: its own cpu over a 3 s
+# idle window (user + system, from /proc/<pid>/stat on linux and ps's
+# cpu time on macOS), then a real `kill -HUP` that both hands must act
+# on, then a real `kill -TERM` that must end the tree. A wait bound on
+# every step, so a deaf master is a red here, never a hang.
+cpu_cs() { # cpu_cs <pid> — the process's user + system cpu, in hundredths of a second ("" if unreadable)
+    case "$(uname -s)" in
+    Linux)
+        [ -r "/proc/$1/stat" ] || return 0
+        # the fields after the command's closing paren: utime and stime are the 12th and 13th
+        sed 's/^.*) //' "/proc/$1/stat" | awk -v hz="$(getconf CLK_TCK)" '{ printf "%d\n", ($12 + $13) * 100 / hz }'
+        ;;
+    *)
+        ps -o time= -p "$1" 2>/dev/null | awk -F: '{ s = $NF; m = (NF >= 2 ? $(NF - 1) : 0); h = (NF >= 3 ? $(NF - 2) : 0); printf "%d\n", ((h * 60 + m) * 60 + s) * 100 }'
+        ;;
+    esac
+}
+lines_in() { # lines_in <file> <fixed text> — how many lines carry it
+    grep -cF -- "$2" "$1" 2>/dev/null || true
+}
+wait_lines() { # wait_lines <file> <fixed text> <n> — up to ~10 s
+    _wl=0
+    while [ "$_wl" -lt 100 ]; do
+        [ "$(lines_in "$1" "$2")" -ge "$3" ] && return 0
+        sleep 0.1
+        _wl=$((_wl + 1))
+    done
+    return 1
+}
+hp8=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+conf8="$scratch/nocontrol.conf"
+printf 'worker_processes 2;\npid %s/nocontrol.pid;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s; }\n}\n' \
+    "$scratch" "$hp8" "$scratch/A" > "$conf8"
+"$LOBO" serve -p . -c "$conf8" 2> "$scratch/nocontrol.log" &
+pid8=$!
+if wait_lines "$scratch/nocontrol.log" "generation-activated gen=1 worker=" 2; then
+    # the hands are up; nothing touches the tree from here until the window closes
+    sleep 1
+    c0=$(cpu_cs "$pid8")
+    sleep 3
+    c1=$(cpu_cs "$pid8")
+    if [ -n "$c0" ] && [ -n "$c1" ]; then
+        used=$((c1 - c0))
+        check "[nocontrol-idle-cpu] an idle master with worker_processes 2 and no control directive used $used of 300 hundredths of a cpu-second in 3 s (bound 30, a tenth; ws63 measured 500 in 5 s before the fix)" $([ "$used" -le 30 ] && echo 0 || echo 1)
+    else
+        check "[nocontrol-idle-cpu] the master's cpu time is readable (pid $pid8: [$c0] [$c1])" 1
+    fi
+    kill -HUP "$pid8"
+    if wait_lines "$scratch/nocontrol.log" "generation-activated gen=2 worker=" 2; then
+        check "[nocontrol-hup] a real kill -HUP at the master reached both hands (generation 2 activated by each)" 0
+    else
+        check "[nocontrol-hup] a real kill -HUP at the master reached both hands (gen-2 activations: $(lines_in "$scratch/nocontrol.log" "generation-activated gen=2 worker="))" 1
+    fi
+    if [ "$(lines_in "$scratch/nocontrol.log" "signal-received sig=reload verb=reload source=signal")" -ge 1 ]; then
+        check "[nocontrol-hup] the master logged the signal it heard (signal-received sig=reload … source=signal)" 0
+    else
+        check "[nocontrol-hup] the master logged the signal it heard (signal-received sig=reload … source=signal)" 1
+    fi
+else
+    check "[nocontrol-idle-cpu] the master and both hands came up with no control directive (gen-1 activations: $(lines_in "$scratch/nocontrol.log" "generation-activated gen=1 worker="))" 1
+fi
+kill -TERM "$pid8" 2>/dev/null
+i=0
+while [ $i -lt 80 ] && kill -0 "$pid8" 2>/dev/null; do
+    sleep 0.1
+    i=$((i + 1))
+done
+if kill -0 "$pid8" 2>/dev/null; then
+    check "[nocontrol-term] a real kill -TERM at the master ended it within 8 s" 1
+    # a deaf master and its hands, put down by their own pids
+    for hpid in $(pgrep -f -- "-c $conf8 --worker" 2>/dev/null); do kill -KILL "$hpid" 2>/dev/null; done
+    kill -KILL "$pid8" 2>/dev/null
+    wait "$pid8" 2>/dev/null
+else
+    wait "$pid8"
+    check "[nocontrol-term] a real kill -TERM at the master ended the tree, exit 0" $?
+    i=0
+    left=$(pgrep -f -- "-c $conf8 --worker" 2>/dev/null | wc -l | tr -d ' ')
+    while [ "$left" != 0 ] && [ $i -lt 20 ]; do
+        sleep 0.1
+        i=$((i + 1))
+        left=$(pgrep -f -- "-c $conf8 --worker" 2>/dev/null | wc -l | tr -d ' ')
+    done
+    check "[nocontrol-term] …and no hand outlived it by 2 s (hands still running: $left)" $([ "$left" = 0 ] && echo 0 || echo 1)
+fi
 
 if [ "$red" != 0 ]; then
     echo "lobo-signal: RED — $red of $total checks failed (logs under $scratch/)" >&2
