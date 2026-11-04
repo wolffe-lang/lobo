@@ -6,10 +6,13 @@
 #      by position (wolf-lang#234/#235 landed), so all three accept on
 #      ONE socket; `lobo status` shows a row per hand with its own
 #      control endpoint and its own `accepted=` count;
-#   1b. THE DISTRIBUTION: a run of connection-per-request GETs moves
-#      `accepted=` on EVERY hand — the kernel is spreading the work
-#      across the processes, which is W6's first half and the thing
-#      ws16 could only file an issue about;
+#   1b. THE DISTRIBUTION: a run of connection-per-request GETs is
+#      accepted exactly once across the hands (the counters move by
+#      the number sent; the kernel's split is printed, not asserted:
+#      ws75, lobo#119), and EVERY hand accepts from the shared socket
+#      when it is the only accepter awake (its siblings stopped, one
+#      GET, its own `accepted=` moves by one) — W6's first half, and
+#      the thing ws16 could only file an issue about;
 #   1c. THE QUIET SERVER (ws18): one GET, then two seconds of silence,
 #      and every hand still answers its own control endpoint with no
 #      replacement. That is the check the accept turn used to buy — a
@@ -154,21 +157,79 @@ esac
 body=$(get /index.html)
 check "a GET is served (body: $body)" $([ "$body" = "HANDS-GEN-A" ] && echo 0 || echo 1)
 
-# 1b. THE DISTRIBUTION — the sprint's headline, asserted rather than
-# claimed: 90 connection-per-request GETs must move every hand's own
-# accept counter. The kernel picks; lobo only has to be there to be
-# picked, which is what the inherited listener buys.
+# 1b. THE DISTRIBUTION — the sprint's headline. Through ws74 it
+# asserted that 90 connection-per-request GETs move EVERY hand's
+# counter, and that is the kernel's to decide, not lobo's: with one
+# socket and three accepters, accept(2) promises no waiter a share,
+# and under load a hand that keeps losing the wake legitimately gets
+# none (lobo#119: 1 run in 5 on trunk, a zero-hand that answered its
+# own endpoint the whole time; ws75 counted it under load, see
+# notes/ws75-the-sweep.md). What lobo does guarantee is asserted
+# instead, two ways:
+#   - every connection is accepted exactly once, by some hand: the
+#     three counters move by exactly the number sent, and the split
+#     is printed, never asserted;
+#   - every hand accepts from the shared socket when it is the only
+#     accepter awake (1b'): its two siblings are stopped (SIGSTOP; a
+#     stopped process leaves its wait, so the kernel can only wake
+#     this one), one GET goes out, this hand serves it and its own
+#     counter moves by one, and the siblings continue (SIGCONT). That
+#     is a directed connection per hand, which no split can give.
+row_acc() { # row_acc <ordinal> — the hand's accepted=, or -1
+    _ra=$(row_field "$1" accepted)
+    case "$_ra" in '' | *[!0-9]*) echo -1 ;; *) echo "$_ra" ;; esac
+}
+a1=$(row_acc 1)
+a2=$(row_acc 2)
+a3=$(row_acc 3)
 i=0
 while [ $i -lt 90 ]; do
     get /index.html > /dev/null
     i=$((i + 1))
 done
-moved=0
+b1=$(row_acc 1)
+b2=$(row_acc 2)
+b3=$(row_acc 3)
+d1=$((b1 - a1))
+d2=$((b2 - a2))
+d3=$((b3 - a3))
+dsum=$((d1 + d2 + d3))
+readable=0
+for v in $a1 $a2 $a3 $b1 $b2 $b3; do [ "$v" -ge 0 ] && readable=$((readable + 1)); done
+check "[distribution-sum] 90 connections were each accepted once across the three hands (counters moved by $dsum; the kernel's split, printed and not asserted: $d1/$d2/$d3)" $([ "$readable" = 6 ] && [ "$dsum" = 90 ] && echo 0 || echo 1)
+get_within() { # get_within <path> — get with a 5 s bound, so a hand that never takes the connection is a red, not a hang
+    printf 'GET %s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$1" | nc -w 5 127.0.0.1 "$hp" 2>/dev/null |
+        awk 'BEGIN { RS = "\r\n\r\n" } NR == 2 { print $1 }'
+}
+directed=0
 for w in 1 2 3; do
-    a=$(row_field "$w" accepted)
-    [ -n "$a" ] && [ "$a" -gt 0 ] && moved=$((moved + 1))
+    others=""
+    sane=1
+    for o in 1 2 3; do
+        [ "$o" = "$w" ] && continue
+        op=$(row_field "$o" pid)
+        # a pid the master did not report is never signalled: `kill -STOP
+        # -1` or `kill -STOP 0` would reach far more than a sibling
+        case "$op" in '' | *[!0-9]* | 0 | 1) sane=0 ;; *) others="$others $op" ;; esac
+    done
+    aw=$(row_acc "$w")
+    if [ "$sane" != 1 ] || [ "$aw" -lt 0 ]; then
+        check "[distribution-directed] hand $w: its siblings' pids and its own counter are readable (pids:$others, accepted=$aw)" 1
+        continue
+    fi
+    # shellcheck disable=SC2086 # two pids, split on purpose
+    kill -STOP $others
+    dbody=$(get_within /index.html)
+    # shellcheck disable=SC2086
+    kill -CONT $others
+    aw2=$(row_acc "$w")
+    if [ "$dbody" = "HANDS-GEN-A" ] && [ "$aw2" = $((aw + 1)) ]; then
+        directed=$((directed + 1))
+    else
+        say "hand $w alone awake: body [$dbody], accepted $aw -> $aw2" >&2
+    fi
 done
-check "90 connections reached ALL THREE hands (rows with accepted>0: $moved; counts: $(row_field 1 accepted)/$(row_field 2 accepted)/$(row_field 3 accepted))" $([ "$moved" = 3 ] && echo 0 || echo 1)
+check "[distribution-directed] every hand, the only accepter awake, took a connection from the shared socket and served it ($directed/3)" $([ "$directed" = 3 ] && echo 0 || echo 1)
 
 # 1c. THE QUIET SERVER — ws18's check, and the one the accept turn
 # used to buy. Three hands now sit in `net_wait` on the SAME listener

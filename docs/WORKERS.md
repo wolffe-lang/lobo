@@ -206,7 +206,28 @@ Two hosts, two kernels: 36/29/26 on macOS and 26/34/31 on linux,
 free-for-all, and the quiet server holds on both. The runner's split is
 not a fixed shape and is not asserted as one (a second CI run over the
 same three hands read 34/25/32): the kernel picks, and what the step
-asserts is that every hand is picked. The DISTRIBUTION and
+asserts is that every hand is picked.
+
+Since ws75 (lobo#119) the step no longer asserts that every hand is
+picked. With one socket and three accepters, which process takes a
+connection is the kernel's choice. `accept` promises no waiter a share,
+and the old row read as a regression when one hand got none: twice in
+six full prefork steps on a shared Linux host, at trunk and at a branch
+alike, each time with that hand answering its own control endpoint. The
+step now asserts what lobo does control, two ways:
+
+- **`[distribution-sum]`:** the 90 connections are each accepted once.
+  The three counters move by exactly 90, and the split is printed, not
+  asserted.
+- **`[distribution-directed]`:** each hand accepts from the shared
+  socket when it is the only accepter awake. Its two siblings are
+  stopped (SIGSTOP), so the kernel can only wake this one. One GET goes
+  out. This hand must serve it, and its own `accepted=` must move by
+  one. Then the siblings continue (SIGCONT).
+
+That is a directed connection per hand, which no split can give. The
+counts behind the change, and the run that went red for another reason,
+are in `notes/ws75-the-sweep.md`. The DISTRIBUTION and
 the #242 observable are measured on both; the `req/s` table below is
 macOS only, because the bench is not a gauntlet step (a
 number depends on the box) and no CI job runs it. The linux numbers
