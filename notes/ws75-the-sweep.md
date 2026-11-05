@@ -201,6 +201,17 @@ with the lane.
   removes an assertion that `accept` does not support, and replaces it
   with two that lobo controls (see `docs/WORKERS.md`).
 
+### lobo#119, after the change (`8af2674`)
+
+- **The new rows: 25 of 25 runs green under cpu load** (load1 6 to 18),
+  and **25 of 25 green with no load.**
+  - `[distribution-sum]` moved by exactly 90 in all 50 runs.
+  - `[distribution-directed]` passed for all three hands in all 50.
+  - The printed splits ran from 16/35/39 to 34/23/33.
+- **Trunk's old row with no load: 25 of 25 green.**
+- On macOS the new rows pass too (39/39), and so does the #91 row
+  (27/27). Both ran at a local commit equal in source to these.
+
 ### lobo#118 and lobo#72, trunk `64e7339`, under build load (eight cpus, the package at 100 °C)
 
 - **`binary_identity_e2e` native: 25 of 25 green.** Runs took 30 to
@@ -229,3 +240,90 @@ healthy hand.
 **R-ws75-3, recommended:** no master reserve. Document the master's
 14 at rest beside the hands' 20 in README's Limits, and close that item
 of #87.
+
+### lobo#90 and lobo#78, their witnesses re-run at trunk `64e7339`
+
+`tools/lobo-corpus` over `tests/http/split_scalar.lu`,
+`tests/http/scalar_fuzz.lu`, `tests/serve/split_scalar_e2e.lu` (#78,
+fixed at `b256d2e`), `tests/serve/park_at_limit_e2e.lu`,
+`tests/shell/control_exhausted_e2e.lu` and
+`tests/shell/start_at_limit_e2e.lu` (#90, fixed at `f9fea550`): **13 of
+13 lane-runs green**, every declared lane of each.
+
+### lobo#91
+
+The new row (`60018dd`, its match corrected in `5be2e32`) is green on
+macOS. On linux it is green in the final gauntlet below. An idle master
+with two hands and no control directive used 0 of 300 hundredths of a
+cpu-second; a real HUP reached both hands; a real TERM ended the tree.
+The plant (one hunk: the signal pipe joins the master's wait set only
+with a control listener, which is ws62's bug) is red by name at
+`nocontrol-idle-cpu`, `nocontrol-hup` and `nocontrol-term`. Its record
+is in the PR.
+
+## 5. Done-when and handoff
+
+**Fixed here:** lobo#119. The distribution row now asserts the accept
+sum and a directed accept per hand, not the kernel's split.
+
+**Recommend closing:**
+- **#91:** fixed at `1d234718` (#83). It now has a row that measures the
+  master's idle cpu, its HUP and its TERM, and the plant shows that row
+  turns red if the bug comes back.
+- **#90:** fixed at `f9fea550` (#86); witnesses green at trunk.
+- **#78:** fixed at `b256d2e` (#75); witnesses green at trunk.
+
+**Still open, each with what it needs:**
+- **#118:** not reproduced. 25 of 25 green under build load, plus 9 of
+  9 isolated runs by ws74. The one red was a full-corpus run on a
+  shared host. ws74's diagnostics will name the failing assertion, with
+  its values, at the next red. No witness, so nothing is filed upstream
+  and no deadline is raised.
+- **#72:** `carry_e2e` was 25 of 25 green under build load. A new
+  sighting of the same family: one trunk prefork step under cpu load
+  (load1 21) where the master answered no `status` for more than 10 s
+  while GETs were served, and recovered once a hand was replaced. The
+  prefork loop now keeps that run's server log and takes a thread
+  snapshot at the stall. The next sighting can name the parked thread
+  and be filed on wolf-lang if it is the runtime's.
+- **#87:** the master's reserve is not needed (R-ws75-3, documented in
+  README). Two items are recommendations for follow-up lanes: R-ws75-1
+  (admission across hands) and R-ws75-2 (`/metrics` counters). Still
+  undriven: TLS listeners at the limits, ENFILE, a host with no
+  `/dev/null`, a reload at the limit, and macOS's dropped connection
+  after a failed accept (the host's behaviour, seen under nginx too).
+- **#102:** cert auto under a dropped user still needs a root-container
+  ACME witness, combining `tools/lobo-user` and `tools/lobo-acme`, and
+  a policy on who owns the ACME store and renewals. Not verified here.
+- **#100:** blocked upstream. wolf-lang#835 (a connect that does not
+  block the thread) and #836 are both open.
+- **#95:** a macOS-only CI observation on a 0.2.29 build. It needs an
+  instrumented macOS run. Not driven here.
+- **#82:** three named deltas: per-server limits, regex `server_name`,
+  listeners at reload. Implementation work, unblocked. Not taken here.
+- **#68:** the user-space levers need a fresh same-host profile before
+  any change is chosen.
+
+**Commits:**
+- `d141062`: the prediction, before any change.
+- `60018dd`, `df6f5b9`, `5be2e32`: the #91 row, its docs and its match
+  fix.
+- `8af2674`: the #119 rows and `docs/WORKERS.md`.
+- `5994b30`, `a753480`: the trunk evidence and the master's
+  descriptors in README.
+- `db3d095`: R-ws75-1 and R-ws75-2 as recommendations.
+
+**Test targets:**
+- [x] Trunk old prefork row: 25 runs under cpu load (24 green; the red
+  is a control stall, not #119's shape) and 25 with no load (25 green).
+- [x] New #119 rows: 25 under cpu load and 25 with no load, all green.
+- [x] `binary_identity_e2e` and `carry_e2e`: 25 each under build load,
+  all green.
+- [x] #87 master probe at `ulimit -n` 11 to 64.
+- [x] #90 and #78 witnesses: 13 of 13 lane-runs.
+- [x] #91 and #119 rows on macOS.
+- [ ] One gauntlet at the final head, with every END line (in the PR).
+- [ ] The plant, red by name at `nocontrol-*` (in the PR).
+- [ ] The audit, once.
+
+Footprint: module
