@@ -404,6 +404,8 @@ fi
 # oracle's own scheduling is a measurement, not a per-take precondition.
 python3 -I tests/rig/admission/drive.py admission "$LOBO" "$scratch/admission"
 check "[shared-listener-first28] the first 28 connections match the same-host oracle" $?
+python3 -I tests/rig/admission/drive.py review "$LOBO" "$scratch/admission-review"
+check "[admission-review] full queues, later listeners, backoff CPU and one-hand scope" $?
 
 if [ "$red" = 0 ]; then
     say "GREEN — $total/$total"
