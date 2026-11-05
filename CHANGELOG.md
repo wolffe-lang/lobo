@@ -8,8 +8,11 @@ A full worker with no idle connection to evict now leaves inherited
 shared client listeners out of its wait for 20 ms before taking and
 refusing a connection. This gives a sibling with room a chance to
 accept it. Control, signals and established connections remain
-serviceable. When all workers are full, each refusal gains one pause;
-single-process and `reuseport` admission are unchanged.
+serviceable. When all workers are full, queued refusals share one pause;
+the expired permit carries across bounded bursts and every ready listener
+until an immediate probe finds the eligible queues empty. Descriptor
+backoff takes precedence. Single serving workers, including one-hand
+masters, and `reuseport` admission are unchanged.
 
 `/metrics` adds per-process `lobo_connections_refused_total`,
 `lobo_connections_evicted_total` and

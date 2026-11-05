@@ -740,9 +740,15 @@ instead of on the round.
   shared listener leaves the client listeners out of its wait for
   20 ms before taking and refusing a connection. A sibling with room
   can take it instead. Control, signals and established connections
-  remain in the wait; when every hand is full, refusal gains one pause.
-  An expired pause buys one immediate queue probe, not a later arrival.
-  Single-process and `reuseport` listeners keep immediate refusal.
+  remain in the wait. When every hand is full, queued refusals share
+  one pause: its expired permit carries across bounded HTTP bursts and
+  every ready listener, including TLS and extra listeners. Only an
+  immediate probe finding every eligible queue empty re-arms it.
+  Descriptor-failure backoff always takes precedence. Single serving
+  workers (including one-hand masters) and `reuseport` listeners keep
+  immediate refusal. Sharing is the master's actual group and inherit
+  set, not a worker's re-read configuration; TLS pause eligibility uses
+  TLS's existing connection count, without changing its accounting.
   Each hand logs its own lines, with its `worker=N` field.
 - **Connection metrics are per hand:** `lobo_connections_refused_total`
   counts new clients closed for lack of a slot;

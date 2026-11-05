@@ -206,8 +206,12 @@ serve linux aarch64.
   worker_connections are not enough`, one line each. A full worker
   on an inherited shared listener first leaves that listener out of
   its wait for 20 ms, giving a sibling with room a chance to accept.
-  A single process and `reuseport` listeners still refuse immediately;
-  when every shared-listener worker is full, refusal gains one pause.
+  A single serving worker (including a one-hand master) and `reuseport`
+  listeners still refuse immediately. When all shared-listener workers
+  are full, queued refusals share one pause: the expired permit carries
+  across bounded bursts and every ready listener until an immediate
+  probe finds all eligible queues empty. Descriptor-failure backoff
+  takes precedence over this admission pause.
   `/metrics` exposes per-process refused and idle-evicted connection
   totals, plus failed accepts by `emfile`, `enfile` or `other` reason
   ([metrics reference](docs/metrics.md)). Upstream
