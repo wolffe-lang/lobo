@@ -1,8 +1,10 @@
 """Loopback admission and connection-counter witnesses; standard library only."""
 import argparse
+import os
 from pathlib import Path
 import re
 import resource
+import select
 import signal
 import socket
 import subprocess
@@ -73,11 +75,27 @@ class Server:
                                             preexec_fn=limit if nofile is not None else None)
         try:
             if oracle:
-                until(lambda: self.log.read_text().count("start worker process") >= workers,
-                      "oracle workers")
+                def worker_pids():
+                    return [int(pid) for pid in re.findall(r"start worker process ([0-9]+)", self.log.read_text())]
+                until(lambda: len(worker_pids()) == workers, "oracle workers")
+                # A fork notice is not readiness. Direct a warm-up to every
+                # worker, with only that worker running; all pids come from
+                # this server's own log. No scheduling-time assertion.
+                pids = worker_pids()
+                for active in pids:
+                    paused = [pid for pid in pids if pid != active]
+                    try:
+                        for pid in paused:
+                            os.kill(pid, signal.SIGSTOP)
+                        self.fetch("/index.html")
+                    finally:
+                        for pid in paused:
+                            os.kill(pid, signal.SIGCONT)
             else:
-                until(lambda: self.log.read_text().count("generation-activated gen=1") >= workers,
+                pattern = r"generation-activated gen=1 .*worker=[0-9]+" if workers > 1 else r"generation-activated gen=1"
+                until(lambda: len(re.findall(pattern, self.log.read_text())) >= workers,
                       "lobo workers")
+                until(lambda: "generation 1: current live=0" in self.status(), "lobo control ready")
         except BaseException:
             self.close()
             raise
@@ -172,7 +190,8 @@ def eviction(binary, directory):
     try:
         for _ in range(24):
             server.connect()
-        until(lambda: "accepted: 24\n" in server.status(), "24 idle accepts")
+        until(lambda: len(select.select(server.sockets, [], [], 0)[0]) == 11,
+              "eleven idle evictions after 24 accepts")
         # At 16 slots, the fourteenth idle accept and each following one
         # evicts one old idle connection: 24 - 13 = 11, the existing limit row.
         server.release()
@@ -188,7 +207,8 @@ def accept_failure(binary, directory):
     try:
         for _ in range(100):
             server.connect()
-        until(lambda: "accept4() failed (24:" in server.log.read_text(), "EMFILE accept failure")
+        until(lambda: re.search(r"accept(?:4)?\(\) failed \(24:", server.log.read_text()),
+              "EMFILE accept failure")
         server.release()
         body = server.fetch("/metrics")
         assert sample(body, 'lobo_accept_failures_total{reason="emfile"}') >= 1
