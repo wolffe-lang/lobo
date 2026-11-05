@@ -253,6 +253,31 @@ The causal take is `backend-diagnosis.log`, SHA-256
 The original instrument controls are `order-controls.log`, SHA-256
 `ef8b52e588b41d3a820881f4abac4843b5dc4189bb6b0da6869806d9543e495b`.
 
+### Extended instrument validation — namespace carryover
+
+The five fresh-port reference-self ratios were 1.001142, 0.992843,
+1.000234, 0.980495 and 1.026692. That was not a complete green: the
+shared namespace subsequently reached 262,144 TIME_WAIT entries. An
+identical-head comparison then read 1.598, and the actual comparison
+read 0.829. Raw rates jumped from about 17,000 to 28,000–33,000 req/s
+when the table reached that ceiling. The preflight had run below the
+ceiling and later drives crossed it, so their starting resource states
+were no longer comparable. This failed take is retained as
+`instrument-validation.log`, SHA-256
+`d99bc9e73387f95cfea23b280353b687ef1f8f27e6859e33c671fa341feb5e86`.
+
+Before the next change, the prediction is that condition-based settling
+of loopback TIME_WAIT before and after each complete pairing will remove
+namespace accumulation as well as destination carryover. It will happen
+outside timed drives, after every owned child has stopped. A 120-second
+hang bound will refuse the instrument rather than waive the condition;
+no sockets are forcibly flushed and no network setting is changed.
+Reaching the kernel-reported TIME_WAIT capacity will also invalidate a
+sample by name. An explicitly identical candidate/reference comparison
+must meet the control budget in both directions, so a 1.598 reading
+cannot masquerade as improvement. The five pairs, request counts and
+0.900 candidate bar stay unchanged. All three validations remain required.
+
 The final-head green and off-line plant records, their SHA-256s and
 every END line accompany the PR. Parser-shape smoke records were
 verified separately before the locked take; they are not merge evidence.
