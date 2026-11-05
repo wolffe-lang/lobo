@@ -16,7 +16,7 @@ bounded containers on assigned CPUs.
 - The ignored reference directory was copied into this fresh clone.
   Its API conventions differed from the canonical standard-library
   trunk; the canonical copy replaced it before implementation.
-- The required entry gauntlet is queued against the unmodified base.
+- The required entry gauntlet passed at the unmodified base.
 
 ## 3. Prediction (committed before any source change)
 
@@ -52,7 +52,30 @@ plant required to fail the admission row by name.
 
 ## 4. Evidence index
 
-Pending the red-first drives and final-head gate.
+### First drive and row correction
+
+The first paired drive at base was 2 green / 18 red unloaded and
+0 green / 20 red under CPU load. Of its 38 reds, 30 were the oracle's
+own failure to serve the first 28, five showed a full lobo worker
+taking a sibling's connection while the oracle served 28, and three
+were socket timeouts. The oracle's measured capacity is 28; its
+per-connection distribution is not stable on this host. A fresh
+oracle scheduling result is therefore no longer a row precondition.
+The row holds lobo to those measured first 28 directly, unchanged
+from the requested capacity, and reports its 29-connection map.
+The separate `oracle` drive preserves the black-box measurement.
+
+The three timeouts are **unknown cause**, not claimed as admission
+defects: `base-cpu-3.log`, `base-cpu-13.log`, `base-cpu-20.log` in the
+lane's private evidence directory. Their driver did not identify
+which server or connection timed out. The revised driver names the
+connection, prefix map and server log, and reads a complete response
+head rather than assuming one recv contains it. Its five-second
+socket deadline bounds a hang; it is not a latency comparison gate.
+
+Each connection-counter drive was red for its missing named series
+before any production source change: refusal, idle eviction and
+EMFILE. Final-head and redesigned admission counts are pending.
 
 ## 5. Limits and follow-ups
 

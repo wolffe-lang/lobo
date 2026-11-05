@@ -138,10 +138,17 @@ class Server:
             sock = self.connect()
             sock.sendall(b"GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             try:
-                data = sock.recv(2048)
-                result += "2" if data.startswith(b"HTTP/1.1 200") else "1"
+                data = b""
+                while b"\r\n\r\n" not in data:
+                    piece = sock.recv(2048)
+                    if not piece:
+                        break
+                    data += piece
+                result += "2" if data.startswith(b"HTTP/1.1 200 ") else "1"
             except (ConnectionResetError, BrokenPipeError):
                 result += "1"
+            except TimeoutError as error:
+                raise AssertionError(f"download {len(result) + 1} timed out; prefix={result}; log={self.log}") from error
         return result
 
     def close(self):
@@ -157,17 +164,24 @@ def sample(body, name):
     return int(match[1])
 
 
-def admission(binary, oracle, directory):
-    results = {}
-    for name, executable, is_oracle in [("oracle", oracle, True), ("lobo", binary, False)]:
-        server = Server(executable, directory / name, oracle=is_oracle, workers=2)
-        try:
-            results[name] = server.downloads(29)
-        finally:
-            server.close()
-    print("admission maps: oracle=" + results["oracle"] + " lobo=" + results["lobo"], flush=True)
-    assert results["oracle"] == "2" * 28 + "1", "same-host oracle capacity changed"
-    assert results["lobo"] == results["oracle"], "a full hand took a sibling's connection"
+def admission(binary, directory):
+    # 28 is the same-host oracle's measured capacity, not a claim that
+    # its own shared-listener scheduling is deterministic on every take.
+    server = Server(binary, directory / "lobo", workers=2)
+    try:
+        mapping = server.downloads(29)
+        print("admission map: lobo=" + mapping + " oracle-capacity=28", flush=True)
+        assert mapping == "2" * 28 + "1", "a full hand took a sibling's connection"
+    finally:
+        server.close()
+
+
+def measure_oracle(binary, directory):
+    server = Server(binary, directory / "oracle", oracle=True, workers=2)
+    try:
+        print("oracle measurement: map=" + server.downloads(29), flush=True)
+    finally:
+        server.close()
 
 
 def refusal(binary, directory):
@@ -223,13 +237,14 @@ def accept_failure(binary, directory):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("admission", "counters"))
+    parser.add_argument("mode", choices=("admission", "counters", "oracle"))
     parser.add_argument("binary")
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--oracle")
     args = parser.parse_args()
     if args.mode == "admission":
-        rows = [("shared-listener-first28", lambda: admission(args.binary, args.oracle, args.directory))]
+        rows = [("shared-listener-first28", lambda: admission(args.binary, args.directory))]
+    elif args.mode == "oracle":
+        rows = [("oracle-measurement", lambda: measure_oracle(args.binary, args.directory))]
     else:
         rows = [("connections-refused", lambda: refusal(args.binary, args.directory / "refused")),
                 ("connections-evicted", lambda: eviction(args.binary, args.directory / "evicted")),
