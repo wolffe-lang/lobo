@@ -2413,7 +2413,11 @@ fn serve_main(
                     // the loop would spin on it: 293 cpu ticks in 4.5 s at
                     // ws63)
                     let full = crows - cdead + pxlive >= croom
-                    let idle = if full { has_idle(cfds, cwait, cstream, cclen, crows) } else { false }
+                    let idle = if full {
+                        has_idle(cfds, cwait, cstream, cclen, crows)
+                    } else {
+                        false
+                    }
                     let admission_pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
                     if admission_pause == 0 {
                         adm_off = 0
@@ -2520,8 +2524,8 @@ fn serve_main(
                     // served in it ends there
                     let tw = time_unix_ms()
                     if acc_on && adm_off > 0 && now >= adm_off {
-                        var admission_ready = (have_http && ready_has(ready, hl)) ||
-                            (have_tls && ready_has(ready, tls_l))
+                        var admission_ready = have_http && ready_has(ready, hl) ||
+                            have_tls && ready_has(ready, tls_l)
                         for xl in xls {
                             if xl >= 0 && ready_has(ready, xl) {
                                 admission_ready = true
@@ -3034,8 +3038,17 @@ fn serve_main(
                                 // ws76: a burst can fill this hand after the wait
                                 // was built. Yield here too, before the next take.
                                 let full = crows - cdead + pxlive >= croom
-                                let idle = if full { has_idle(cfds, cwait, cstream, cclen, crows) } else { false }
-                                let pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
+                                let idle = if full {
+                                    has_idle(cfds, cwait, cstream, cclen, crows)
+                                } else {
+                                    false
+                                }
+                                let pause = shell.admission_pause_ms(
+                                    adopting,
+                                    reuseport,
+                                    full,
+                                    idle,
+                                )
                                 if pause > 0 {
                                     let at = time_unix_ms()
                                     if adm_off == 0 {
@@ -3222,7 +3235,11 @@ fn serve_main(
                         let ton = if tsel == 0 { have_tls } else { th >= 0 }
                         if ton && running && !quitting && ready_has(ready, th) {
                             let full = crows - cdead + pxlive >= croom
-                            let idle = if full { has_idle(cfds, cwait, cstream, cclen, crows) } else { false }
+                            let idle = if full {
+                                has_idle(cfds, cwait, cstream, cclen, crows)
+                            } else {
+                                false
+                            }
                             let pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
                             if pause > 0 {
                                 let at = time_unix_ms()
@@ -5504,7 +5521,13 @@ fn descriptor_reason() -> (int, str) {
 /// Whether any live plaintext row is idle and can be evicted. The
 /// admission pause asks this without allocating or sorting a batch.
 /// Pure and total; the predicate is the same as `idle_pick` below.
-fn has_idle(cfds: List[int], cwait: List[int], cstream: List[int], cclen: List[int], rows: int) -> bool {
+fn has_idle(
+    cfds: List[int],
+    cwait: List[int],
+    cstream: List[int],
+    cclen: List[int],
+    rows: int,
+) -> bool {
     var i: int = 0
     while i < rows {
         if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 {

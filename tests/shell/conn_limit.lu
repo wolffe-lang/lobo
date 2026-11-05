@@ -121,7 +121,10 @@ fn main() -> !int {
             for full in [false, true] {
                 for idle in [false, true] {
                     let want = if inherited && !reuseport && full && !idle { 20 } else { 0 }
-                    assert(shell.admission_pause_ms(inherited, reuseport, full, idle) == want, "admission pause scope")
+                    assert(
+                        shell.admission_pause_ms(inherited, reuseport, full, idle) == want,
+                        "admission pause scope",
+                    )
                 }
             }
         }

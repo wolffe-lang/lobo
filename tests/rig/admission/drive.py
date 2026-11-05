@@ -135,6 +135,7 @@ class Server:
     def downloads(self, count):
         result = ""
         for _ in range(count):
+            began = time.perf_counter()
             sock = self.connect()
             sock.sendall(b"GET /big.bin HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             try:
@@ -149,6 +150,7 @@ class Server:
                 result += "1"
             except TimeoutError as error:
                 raise AssertionError(f"download {len(result) + 1} timed out; prefix={result}; log={self.log}") from error
+            self.last_download_ms = (time.perf_counter() - began) * 1000
         return result
 
     def close(self):
@@ -167,13 +169,19 @@ def sample(body, name):
 def admission(binary, directory):
     # 28 is the same-host oracle's measured capacity, not a claim that
     # its own shared-listener scheduling is deterministic on every take.
+    usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+    cpu_before = usage.ru_utime + usage.ru_stime
     server = Server(binary, directory / "lobo", workers=2)
     try:
         mapping = server.downloads(29)
         print("admission map: lobo=" + mapping + " oracle-capacity=28", flush=True)
+        # Observations only: no wall-time threshold decides the row.
+        print(f"last-download-ms={server.last_download_ms:.3f} (observed, not gated)", flush=True)
         assert mapping == "2" * 28 + "1", "a full hand took a sibling's connection"
     finally:
         server.close()
+        usage = resource.getrusage(resource.RUSAGE_CHILDREN)
+        print(f"server-tree-cpu-ms={(usage.ru_utime + usage.ru_stime - cpu_before) * 1000:.3f}", flush=True)
 
 
 def measure_oracle(binary, directory):
