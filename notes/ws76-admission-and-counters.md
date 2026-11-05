@@ -95,9 +95,10 @@ not a latency comparison gate.
 | tree | unloaded | CPU-loaded | named failure |
 |---|---|---|---|
 | base `6b8b9ee`, redesigned row `f99befc` | 4 green / 16 red of 20 | 1 green / 19 red of 20 | all 35 reds: a full hand took a sibling's connection |
-| fixed `ab1d0c4` | 20 green / 0 red | 20 green / 0 red | none |
+| first candidate `ab1d0c4` | 20 green / 0 red | 20 green / 0 red | none in this row; queue defects found below |
+| queue-wave repair `a87c58f` | 20 green / 0 red | 20 green / 0 red | none |
 
-No oracle-precondition failures or timeouts occurred in these 80
+No oracle-precondition failures or timeouts occurred in these 120
 redesigned-row takes. Each green served the first 28 downloads and
 refused the 29th, rather than merely counting 28 served somewhere.
 
@@ -119,13 +120,46 @@ No throughput or relative latency improvement is claimed. This
 measurement supports retaining the specified starting value; it
 claims neither that 20 ms is an optimum nor a latency guarantee.
 
-An expired pause buys one immediate queue probe. If the sibling took
-the queue, the full hand clears that permit; a later arrival must
-get a new pause. HTTP bursts check fullness again before every take,
-so a hand becoming full inside a burst cannot skip the yield. TLS
-listeners share the yield, but TLS accounting retains its documented
-one-at-a-time limitation. The 16-combination pure scope row keeps
+After one pause for a nonempty eligible queue, the expired permit
+carries across the existing bounded HTTP bursts and every other ready
+listener. It re-arms only after an immediate probe finds every eligible
+queue empty, not after every take. Resource-failure backoff clears the
+permit, excludes further client accepts in that pass, and takes
+precedence over admission wakeups. Full/no-idle eligibility is checked
+inside HTTP bursts too; fresh accepts remain idle until step 3 reads
+them, preserving the old eviction policy rather than promising to yield
+while an idle candidate exists.
+
+The master supplies a private sharing bit from its group size and the
+actual inherit set. A one-hand master, fallback binder or reuseport
+worker therefore cannot yield to a nonexistent sibling, and a child's
+re-read configuration cannot override the scope. TLS's eligibility
+matches its existing admission calculation, without adding proxied
+exchanges to that calculation. The 16-combination pure scope row keeps
 single-process, reuseport, non-full and idle-evictable cases at zero.
+
+### Queue, backoff and one-hand regressions
+
+The following rows were each run red, in order, before the repair:
+
+| row | first candidate | repaired candidate |
+|---|---|---|
+| later-listener-progress | both extra plaintext and TLS still pending after 192 primary refusals | both completed after 71 primary refusals |
+| all-full-burst-progress | 2 of 32 queued clients refused after two control barriers per worker | 32 of 32 |
+| multi-listener-emfile-cpu | minimum idle CPU fraction 0.9549; repeated take 0.9499 | 0.0000 (samples 0, 0, 0.0050) |
+| one-hand-master-scope | pending refusal still waiting after two control barriers | completed; root-container row green |
+
+The later-listener and burst assertions use counts and control-message
+barriers, not wall-time speed limits. The workers' own stopped states
+are acknowledged before queues are populated. The CPU row lowers only
+its stopped workers' soft descriptor limits, queues plaintext and TLS,
+and restores each limit before cleanup. It sums their process CPU over
+three one-second windows, divides by two workers' elapsed capacity,
+and takes the minimum with a 0.10 bound. The block's light lock is held
+too; the margin separates a near-full-core spin from the corrected
+idle loop and keeps windows above timer grain. A one-hand master needs
+a root Linux container: the ordinary non-root suite names that skip,
+and the separate root take executes the row at the same binary.
 
 ### Counters and gates
 
@@ -137,9 +171,11 @@ at a 48-descriptor limit. The refusal/eviction drives leave the other
 counter at zero. A directed two-worker scrape reads one refusal on
 the driven worker and zero on its sibling, with each scrape's
 `lobo_worker_id` checked. All four live rows passed twice at the fixed
-head (directly, then inside `tools/lobo-metrics`). Both pure files
-passed native, checked and interpreter lanes: 6/6, no warnings.
-The exposition checker passed every clause, and prefork passed 40/40.
+head (directly, then inside `tools/lobo-metrics`), including after the
+queue-wave repair. Three pure files, including the sharing-bit transport
+surface, passed native, checked and interpreter lanes: 9/9, no warnings.
+The exposition checker passed every clause, and the expanded prefork
+suite passed 41/41. The first candidate's narrower suite had passed 40/40.
 
 Evidence retained outside the source tree:
 - `red-ready.log`: three named missing-counter reds;
@@ -148,6 +184,13 @@ Evidence retained outside the source tree:
   SHA-256 `8f4a683d3b9504127016e27a09df4d713d0db35b75e77398202f0811d3ea2662`.
 - `fixed-counts.log`: builds, pure/live suites and fixed 20+20;
   SHA-256 `2f1fe4a473f29734db02d329a8f6d2a3a63e0c9c69955991120149719f05ed76`.
+- `review-red.log`: the four ordered queue/backoff/scope reds;
+  SHA-256 `98a763aae13ca1b1a0d62af170f4f12e40bef0f1ac1a3b12005b2000da20db77`.
+- `review-red2.log`: repeated reds with stopped-state acknowledgements;
+  SHA-256 `9db4d048023ab678384e60929069d433c6a0d9b0d854043c679c7983aedd8d32`.
+- `repaired-counts.log`: builds, nine pure lane-runs, live rows,
+  root scope and the repaired 20+20;
+  SHA-256 `dd31d3871215045f10f418d69b2369f7df7ffb553e47e530d784244032d83e28`.
 - `entry.log`: unmodified-base entry gauntlet;
   SHA-256 `0a85989d7c98be72257ab0c0528dd217c5c687e5883a1380c6e101e2505a5354`.
 
@@ -162,20 +205,16 @@ No new policy is chosen here: the shared-listener pause and the
 three counter families implement the specified follow-up scope.
 Host-wide ENFILE is not safe to induce on a shared host; its reason
 mapping is covered by a pure row in addition to the live EMFILE witness.
-A live ENFILE or non-descriptor accept failure, and TLS at the limit,
-have not been driven.
+A live ENFILE or non-descriptor accept failure, and TLS idle eviction,
+have not been driven. TLS refusal at the limit is now exercised by the
+later-listener row; the CPU row covers backoff with a TLS client queued.
 
-Independent review of the first candidate found completion-blocking
-holes not covered by the successful first-28 rows: re-arming after
-each refusal serializes queued refusals and can starve later listeners;
-a TLS re-arm after a plaintext accept failure can defeat the resource
-backoff and spin. An inherited listener with only one worker also
-pauses, and TLS pause eligibility includes proxied exchanges that its
-existing admission calculation excludes. These are verified control-flow
-findings, not reproduced rows yet. The generated-doc drift at that
-candidate was fixed by regeneration. No final gate or merge-readiness
-claim is made until the remaining defects have red-first witnesses and
-repairs. Fresh accepts remain idle until their request is read, retaining
-the existing eviction semantics; the burst comment needs to say so.
+Independent review found queue starvation, serial delays, a resource
+backoff spin, one-hand scope and a TLS eligibility mismatch in the first
+candidate. The four ordered red-first rows above reproduce the observable
+failures, and the queue-wave repair passes them. Generated-doc drift
+was fixed by regeneration; fresh-idle eviction semantics were retained
+and the comment qualified. The final-head recorded gate and real pause
+plant remain the merge evidence, not the earlier targeted takes.
 
 Footprint: module
