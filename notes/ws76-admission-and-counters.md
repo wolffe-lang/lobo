@@ -194,6 +194,27 @@ Evidence retained outside the source tree:
 - `entry.log`: unmodified-base entry gauntlet;
   SHA-256 `0a85989d7c98be72257ab0c0528dd217c5c687e5883a1380c6e101e2505a5354`.
 
+### Throughput instrument — prediction before method changes
+
+The first full take at `5c62a88` stopped at the existing 0.900 proxied
+throughput bar, reading 0.833. Unchanged-binary controls then read
+head-self 0.956, head/reference 1.053 and reference-self 0.748; the last
+alternated 0.72/1.37/0.74/1.36/0.75. Identical reference bytes were
+compared, so the instrument can reject equality on this host. That is
+not evidence that the admission implementation regressed throughput.
+
+Before changing the method, the next take will measure destination-port
+TCP state around every drive, comparing the persistent backend with a
+restarted backend on the same port and a fresh backend/port per drive.
+The hypothesis is per-destination connection-state carryover: restarting
+the process alone should not clear it, while a fresh port should. The
+method will be selected from those results, not from a threshold waiver.
+Five alternating pairs, 2,000 warm-up and 20,000 measured requests, and
+the 0.900 head/reference bar remain unchanged. Reference-self must pass
+before candidate judgment; the same 0.900 budget applies with control
+labels in either direction, and CI reporting cannot waive calibration.
+Five reference-self repetitions, head-self and head/reference must pass.
+
 The final-head green and off-line plant records, their SHA-256s and
 every END line accompany the PR. Parser-shape smoke records were
 verified separately before the locked take; they are not merge evidence.
