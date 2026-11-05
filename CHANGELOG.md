@@ -76,9 +76,11 @@ throughput recovery is claimed: the single-client gap remains lobo#100.
 A relative regression test now compares the head with pre-#81 source,
 built at the same toolchain on the same machine, using five alternating
 `ab -k -c 32` pairs; CI reports the ratio on both runners rather than gating it, following
-its observed 0.826–0.910 runner spread. The unchanged 0.9× merge gate is
-enforced on kasumi's calibrated shape (1.061× at this server head). The macOS CI leg records a bounded shorter
-sample without gating its ratio: the long sample exhausted local TCP
+its observed 0.826–0.910 runner spread. The original four-CPU calibration
+read 1.061×; the 0.9× local bar is unchanged. The mandatory instrument
+calibration described above now precedes candidate judgment. The macOS
+CI leg retains its bounded shorter sample without gating the candidate
+ratio: the long sample exhausted local TCP
 address allocation. Raw failures and keep-alive counts are now retained;
 transport and application errors are not accepted as measurements.
 

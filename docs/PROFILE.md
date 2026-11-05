@@ -2797,7 +2797,11 @@ remain fatal; unit tests cover calibration refusal, the unchanged bar,
 backend isolation and incomplete-pair handling.
 
 
-### Hosted-runner method boundary (ws73 follow-up)
+### Hosted-runner method boundary (ws73 history)
+
+The following records the older candidate-ratio reporting policy, which
+is unchanged. The current mandatory reference-self calibration above is
+additional and is never advisory, including on CI.
 
 The first Linux CI sets read 0.895× and 0.897×, despite the kasumi
 1.061× calibration. Larger runner samples read 0.844× and 0.848×; the
