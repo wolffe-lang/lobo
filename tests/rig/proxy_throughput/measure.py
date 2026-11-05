@@ -184,6 +184,7 @@ class RatchetTests(unittest.TestCase):
     def test_unsound_reference_self_prevents_candidate_judgement(self):
         for advisory in (False, True):
             with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(80)) as sample, \
+                 mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
                  mock.patch("builtins.print"):
                 self.assertEqual(measure("ng", "ref", "head", "unused", report_only=advisory), 1)
                 self.assertEqual(sample.call_count, 1)
@@ -191,6 +192,7 @@ class RatchetTests(unittest.TestCase):
 
     def test_control_collection_failure_is_named_and_stops_judgement(self):
         with mock.patch(__name__ + "._sample_pairing", side_effect=RuntimeError("transport failed")) as sample, \
+             mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
              mock.patch("builtins.print") as output:
             self.assertEqual(measure("ng", "ref", "head", "unused"), 1)
             self.assertEqual(sample.call_count, 1)
@@ -199,10 +201,12 @@ class RatchetTests(unittest.TestCase):
     def test_control_precedes_unchanged_candidate_bar(self):
         for speed, expected in ((90, 0), (89.999, 1)):
             with mock.patch(__name__ + "._sample_pairing", side_effect=[self.rows(100), self.rows(speed)]) as sample, \
+                 mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
                  mock.patch("builtins.print"):
                 self.assertEqual(measure("ng", "ref", "head", "unused"), expected)
                 self.assertEqual([c.args[1:3] for c in sample.call_args_list], [("ref", "ref"), ("ref", "head")])
         with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(100)) as sample, \
+             mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
              mock.patch("builtins.print"):
             self.assertEqual(measure("ng", "ref", "head", "unused", control_only=True), 0)
             self.assertEqual(sample.call_count, 1)
@@ -215,6 +219,7 @@ class RatchetTests(unittest.TestCase):
                  mock.patch(__name__ + ".wait_up"), mock.patch(__name__ + ".stop") as stop_child, \
                  mock.patch(__name__ + ".host_snapshot", return_value={}), \
                  mock.patch(__name__ + ".tcp_snapshot", return_value={}), \
+                 mock.patch(__name__ + ".wait_tcp_quiet") as quiet, \
                  mock.patch(__name__ + ".drive", return_value=(100, "Keep-Alive requests: 32\n")), \
                  mock.patch.object(subprocess, "check_output", return_value="up"), \
                  mock.patch.object(subprocess, "Popen") as launch, mock.patch("builtins.print"):
@@ -223,6 +228,7 @@ class RatchetTests(unittest.TestCase):
                 self.assertEqual(sum(c.args[0][0] == "ng" for c in launch.call_args_list), 2)
                 self.assertEqual(sum(c.args[0][0] in ("ref", "head") for c in launch.call_args_list), 2)
                 self.assertGreaterEqual(stop_child.call_count, 4)
+                self.assertEqual(quiet.call_count, 2)
 
     def test_tcp_diagnostics_distinguish_backend_ports(self):
         data = ("sl local remote st\n"
@@ -239,6 +245,43 @@ class RatchetTests(unittest.TestCase):
         with mock.patch.object(Path, "exists", return_value=False):
             self.assertEqual(tcp_snapshot(), {"available": False})
             self.assertEqual(backend_tcp_states({31001}), {"available": False})
+
+    def test_settling_is_bounded_and_observes_namespace_counts(self):
+        with mock.patch(__name__ + ".time_wait_count", side_effect=[2, 1, 0]), \
+             mock.patch(__name__ + ".tcp_capacity_limit", return_value=262144), \
+             mock.patch.object(time, "sleep") as sleep, mock.patch("builtins.print"):
+            result = wait_tcp_quiet("unit", timeout=120)
+            self.assertEqual((result["before"], result["after"]), (2, 0))
+            self.assertGreaterEqual(result["elapsed_seconds"], 0)
+            self.assertEqual(sleep.call_count, 2)
+        with mock.patch(__name__ + ".time_wait_count", return_value=1), \
+             mock.patch(__name__ + ".tcp_capacity_limit", return_value=262144), \
+             mock.patch.object(time, "monotonic", side_effect=[0, 121]), \
+             mock.patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, "tcp-settle"):
+                wait_tcp_quiet("unit", timeout=120)
+
+    def test_tcp_saturation_is_refused(self):
+        check_tcp_capacity(262143, 262144)
+        with self.assertRaisesRegex(RuntimeError, "tcp-state"):
+            check_tcp_capacity(262144, 262144)
+
+    def test_digest_not_name_controls_symmetric_judgement(self):
+        parent = Path(os.environ.get("TMPDIR", "target"))
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=parent) as directory:
+            root = Path(directory)
+            (root / "a").mkdir(); (root / "b").mkdir()
+            left, right = root / "a/bin", root / "b/bin"
+            left.write_bytes(b"same bytes"); right.write_bytes(b"same bytes")
+            self.assertEqual(binary_digest(left), binary_digest(right))
+            with mock.patch(__name__ + "._sample_pairing", side_effect=[self.rows(100), self.rows(160)]), mock.patch("builtins.print"):
+                self.assertEqual(measure("ng", left, right, "unused"), 1)
+            right.write_bytes(b"different bytes")
+            self.assertNotEqual(binary_digest(left), binary_digest(right))
+            for speed, expected in ((160, 0), (90, 0), (89.999, 1)):
+                with mock.patch(__name__ + "._sample_pairing", side_effect=[self.rows(100), self.rows(speed)]), mock.patch("builtins.print"):
+                    self.assertEqual(measure("ng", left, right, "unused"), expected)
 
     def test_pair_count_is_not_hardcoded(self):
         rows = [dict(name=name,rate=value) for _ in range(7)
