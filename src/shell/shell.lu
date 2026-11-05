@@ -163,6 +163,7 @@ pub struct Cli {
     worker: int,
     worker_control: str,
     inherit: int,
+    shared_admission: bool,
     generation: int,
     generation_id: str,
     listeners: str,
@@ -216,6 +217,7 @@ pub fn parse_cli(args: List[str]) -> Cli {
     var worker: int = 0
     var worker_control = ""
     var inherit: int = 0
+    var shared_admission = false
     var generation: int = 0
     var generation_id = ""
     var listeners = ""
@@ -367,6 +369,8 @@ pub fn parse_cli(args: List[str]) -> Cli {
         } else if a == "--inherit" {
             want = "inherit"
             want_kind = "parameter"
+        } else if a == "--shared-admission" {
+            shared_admission = true
         } else if a == "--generation" {
             want = "generation"
             want_kind = "parameter"
@@ -440,6 +444,10 @@ pub fn parse_cli(args: List[str]) -> Cli {
     // rode here too until ws18 deleted the accept turn that read it —
     // it is not a retired flag with a kind refusal, it is GONE, and an
     // argv carrying it takes the ordinary `invalid option` road.
+    if !errored && shared_admission && (inherit == 0 || worker == 0 || mode != "serve") {
+        errored = true
+        err_msg = "option \"--shared-admission\" requires an inherited worker listener (internal)"
+    }
     if !errored && inherit > 0 && (worker == 0 || mode != "serve") {
         errored = true
         err_msg = "option \"--inherit\" rides the master's worker flags (internal)"
@@ -483,6 +491,7 @@ pub fn parse_cli(args: List[str]) -> Cli {
         worker: worker,
         worker_control: worker_control,
         inherit: inherit,
+        shared_admission: shared_admission,
         generation: generation,
         generation_id: generation_id,
         listeners: listeners,

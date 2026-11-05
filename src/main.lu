@@ -1312,6 +1312,7 @@ fn serve_main(
     worker: int,
     wctrl: str,
     inherit: int,
+    sharing: bool,
     gen0: int,
     gid0: str,
     lset: str,
@@ -1446,6 +1447,9 @@ fn serve_main(
     // `next_fd` walks the positions the master actually handed.
     var next_fd = 3
     let adopting = inherit > 0
+    // The master supplied this bit from its actual group size. Neither
+    // reuseport nor a one-hand master shares an inherited listener.
+    let shared_admission = adopting && sharing
     if want_http {
         var bound = true
         var cand: int = 0
@@ -2110,7 +2114,7 @@ fn serve_main(
     // this loop from spinning on a listener that stays ready
     var acc_off: int = 0
     // ws76: distinct from accept-failure backoff. An expired admission
-    // pause permits one take; it is not renewed until that take ends.
+    // pause permits queue draining; only an empty eligible set renews it.
     var adm_off: int = 0
     var ctl_off: int = 0
     // ws64: THE RESERVE. Two descriptors lobo holds and does not use,
@@ -2412,17 +2416,21 @@ fn serve_main(
                     // sits out its half second (it would stay ready, and
                     // the loop would spin on it: 293 cpu ticks in 4.5 s at
                     // ws63)
-                    let full = crows - cdead + pxlive >= croom
-                    let idle = if full {
+                    let full_http = crows - cdead + pxlive >= croom
+                    let full_tls = crows - cdead >= croom
+                    let idle = if full_http {
                         has_idle(cfds, cwait, cstream, cclen, crows)
                     } else {
                         false
                     }
-                    let admission_pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
-                    if admission_pause == 0 {
+                    let pause_http = shell.admission_pause_ms(shared_admission, false, full_http, idle) > 0
+                    let pause_tls = shell.admission_pause_ms(shared_admission, false, full_tls, idle) > 0
+                    var acc_on = now >= acc_off
+                    if !acc_on || !pause_http && !pause_tls {
                         adm_off = 0
                     }
-                    let acc_on = now >= acc_off && (adm_off == 0 || now >= adm_off)
+                    let http_on = acc_on && (!pause_http || adm_off == 0 || now >= adm_off)
+                    let tls_on = acc_on && (!pause_tls || adm_off == 0 || now >= adm_off)
                     if have_ctrl && now >= ctl_off {
                         (mut wfds).push(cl)
                     }
@@ -2440,19 +2448,21 @@ fn serve_main(
                     // race answers NOTHING, inside the budget `arm_accept` armed —
                     // so there is nothing left for a turn to buy, and the twenty
                     // lines that bought it are gone.
-                    if have_http && running && !quitting && acc_on {
+                    if have_http && running && !quitting && http_on {
                         (mut wfds).push(hl)
                     }
-                    if have_tls && running && !quitting && acc_on {
+                    if have_tls && running && !quitting && tls_on {
                         (mut wfds).push(tls_l)
                     }
                     // ws62 (px25 (a)): every extra listener too
-                    if running && !quitting && acc_on {
+                    if running && !quitting && http_on {
                         for xl in xls {
                             if xl >= 0 {
                                 (mut wfds).push(xl)
                             }
                         }
+                    }
+                    if running && !quitting && tls_on {
                         for xl in xtls {
                             if xl >= 0 {
                                 (mut wfds).push(xl)
@@ -2490,10 +2500,10 @@ fn serve_main(
                     if now < acc_off && acc_off - now < wms {
                         wms = acc_off - now
                     }
-                    if adm_off > 0 {
+                    if acc_on && adm_off > 0 {
                         if now >= adm_off {
-                            // The pause buys one immediate queue probe, never a
-                            // future connection arriving after this pause ended.
+                            // Drain the eligible queues after one pause, without
+                            // a fresh delay for every queued connection.
                             wms = 0
                         } else if adm_off - now < wms {
                             wms = adm_off - now
@@ -2524,15 +2534,15 @@ fn serve_main(
                     // served in it ends there
                     let tw = time_unix_ms()
                     if acc_on && adm_off > 0 && now >= adm_off {
-                        var admission_ready = have_http && ready_has(ready, hl) ||
-                            have_tls && ready_has(ready, tls_l)
+                        var admission_ready = pause_http && have_http && ready_has(ready, hl) ||
+                            pause_tls && have_tls && ready_has(ready, tls_l)
                         for xl in xls {
-                            if xl >= 0 && ready_has(ready, xl) {
+                            if pause_http && xl >= 0 && ready_has(ready, xl) {
                                 admission_ready = true
                             }
                         }
                         for xl in xtls {
-                            if xl >= 0 && ready_has(ready, xl) {
+                            if pause_tls && xl >= 0 && ready_has(ready, xl) {
                                 admission_ready = true
                             }
                         }
@@ -3007,7 +3017,7 @@ fn serve_main(
                     while lsel <= xls.len {
                         let lh = if lsel == 0 { hl } else { xls[lsel - 1] }
                         let lon = if lsel == 0 { have_http } else { lh >= 0 }
-                        if lon && running && !quitting && ready_has(ready, lh) {
+                        if lon && running && !quitting && acc_on && ready_has(ready, lh) {
                             // DRAIN the accept queue, bounded. One accept per pass
                             // was ws16's shape and it is what held a
                             // connection-per-request load to one accept per poll, so
@@ -3035,8 +3045,9 @@ fn serve_main(
                                         continue
                                     }
                                 }
-                                // ws76: a burst can fill this hand after the wait
-                                // was built. Yield here too, before the next take.
+                                // ws76: recheck full/no-idle admission inside a
+                                // burst. Fresh rows remain idle until step 3 reads
+                                // them, retaining ws64's eviction policy.
                                 let full = crows - cdead + pxlive >= croom
                                 let idle = if full {
                                     has_idle(cfds, cwait, cstream, cclen, crows)
@@ -3044,8 +3055,8 @@ fn serve_main(
                                     false
                                 }
                                 let pause = shell.admission_pause_ms(
-                                    adopting,
-                                    reuseport,
+                                    shared_admission,
+                                    false,
                                     full,
                                     idle,
                                 )
@@ -3084,6 +3095,8 @@ fn serve_main(
                                 // nothing and span on the ready listener).
                                 if acc_io {
                                     acc_off = now + accept_pause_ms()
+                                    acc_on = false
+                                    adm_off = 0
                                     let why = descriptor_reason()
                                     note_accept_failure(mut counters, why.0)
                                     ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
@@ -3093,7 +3106,6 @@ fn serve_main(
                                         px_retire(mut pxs, now, -1)
                                     }
                                 }
-                                adm_off = 0
                                 if !got_conn {
                                     draining = false
                                     continue
@@ -3233,14 +3245,14 @@ fn serve_main(
                     while tsel <= xtls.len {
                         let th = if tsel == 0 { tls_l } else { xtls[tsel - 1] }
                         let ton = if tsel == 0 { have_tls } else { th >= 0 }
-                        if ton && running && !quitting && ready_has(ready, th) {
-                            let full = crows - cdead + pxlive >= croom
+                        if ton && running && !quitting && acc_on && ready_has(ready, th) {
+                            let full = crows - cdead >= croom
                             let idle = if full {
                                 has_idle(cfds, cwait, cstream, cclen, crows)
                             } else {
                                 false
                             }
-                            let pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
+                            let pause = shell.admission_pause_ms(shared_admission, false, full, idle)
                             if pause > 0 {
                                 let at = time_unix_ms()
                                 if adm_off == 0 {
@@ -3264,11 +3276,12 @@ fn serve_main(
                                     0
                                 },
                             }
-                            adm_off = 0
                             // ws64: as the plaintext listeners' — the failed
                             // accept, and a connection past worker_connections
                             if tls_io {
                                 acc_off = now + accept_pause_ms()
+                                acc_on = false
+                                adm_off = 0
                                 let why = descriptor_reason()
                                 note_accept_failure(mut counters, why.0)
                                 ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
@@ -5866,10 +5879,10 @@ fn binary_identity(path: str) -> str ! {not_found, denied, io} {
 /// child as descriptors 3, 4, … in that order — the numbering IS the
 /// contract ([os.proc.inherit]), so the hand is told only HOW MANY
 /// rode down, never a descriptor number, and it adopts them by
-/// position. That count is now the ONLY thing the master tells a hand
-/// about the shape of the group: `--hands N` retired with the accept
-/// turn at ws18, because a free-for-all hand has no reason to know how
-/// many siblings it has. Both processes then hold their own descriptor for the
+/// position. `--hands N` retired with the accept turn at ws18. ws76
+/// adds only a private `--shared-admission` bit when more than one hand
+/// really inherits the set, so a one-hand master never yields to a
+/// nonexistent sibling. Both processes hold their own descriptor for the
 /// same socket: the master closing its copy would not disturb a hand,
 /// and a REPLACEMENT hand inherits the same listener, which is why
 /// the master keeps them open for its whole life.
@@ -5885,6 +5898,7 @@ fn spawn_worker(
     prefix: str,
     conf: str,
     i: int,
+    sharing: bool,
     restarts: int,
     lfds: List[int],
     mctrl: str,
@@ -5915,12 +5929,12 @@ fn spawn_worker(
     var handed = lfds.len
     var h: int = -1
     if handed > 0 {
+        var args = shell.worker_args(prefix, conf, i, ep, handed, gen, gid, lset)
+        if sharing {
+            (mut args).push("--shared-admission")
+        }
         var ok = true
-        let hh = os_spawn_with(
-            exe,
-            shell.worker_args(prefix, conf, i, ep, handed, gen, gid, lset),
-            lfds,
-        ) else |e| match e {
+        let hh = os_spawn_with(exe, args, lfds) else |e| match e {
             unsupported => {
                 ok = false
                 ev_log(
@@ -6480,6 +6494,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             prefix,
             conf,
             i + 1,
+            n > 1,
             0,
             lfds,
             ctrl_ep,
@@ -6756,6 +6771,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                             prefix,
                             conf,
                             j + 1,
+                            n > 1,
                             wrest[j],
                             lfds,
                             ctrl_ep,
@@ -6832,6 +6848,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     prefix,
                     conf,
                     j + 1,
+                    n > 1,
                     wrest[j] + 1,
                     lfds,
                     ctrl_ep,
@@ -7416,6 +7433,7 @@ fn main() -> int {
                 cli.worker,
                 cli.worker_control,
                 cli.inherit,
+                cli.shared_admission,
                 cli.generation,
                 cli.generation_id,
                 cli.listeners,
@@ -7464,7 +7482,7 @@ fn main() -> int {
         if n > 1 || config.ok(c) && config.hands_drop(c, config.self_euid()) {
             return master_main(cli.prefix, cli.conf, n)
         }
-        return serve_main(cli.prefix, cli.conf, 0, "", 0, 0, "", "")
+        return serve_main(cli.prefix, cli.conf, 0, "", 0, false, 0, "", "")
     }
     banner()
     0
