@@ -2186,6 +2186,29 @@ pub fn out_of_descriptors(code: int) -> bool {
     code == 24 || code == 23
 }
 
+/// The bounded metric reason for a failed accept: the same host error
+/// numbers as `out_of_descriptors`, or "other" when no descriptor
+/// exhaustion could be attributed. Pure and total.
+pub fn accept_failure_reason(code: int) -> str {
+    if code == 24 {
+        return "emfile"
+    }
+    if code == 23 {
+        return "enfile"
+    }
+    "other"
+}
+
+/// A full hand on an inherited listener, with nothing idle to evict,
+/// yields the listener for 20 ms before taking and refusing. Single
+/// processes and reuseport listeners never pause. Pure and total.
+pub fn admission_pause_ms(inherited: bool, reuseport: bool, full: bool, idle: bool) -> int {
+    if inherited && !reuseport && full && !idle {
+        return 20
+    }
+    0
+}
+
 /// The body of the `[crit]` line for an accept the host refused:
 /// nginx's `accept4() failed (24: Too many open files)` with the call
 /// named `accept()` (which call the runtime makes is the runtime's;

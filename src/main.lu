@@ -439,6 +439,11 @@ fn start_reload(
 /// shape stays a set of scalar writes.
 struct Counters {
     accepted: int,
+    refused: int,
+    evicted: int,
+    accept_emfile: int,
+    accept_enfile: int,
+    accept_other: int,
     req_2xx: int,
     req_3xx: int,
     req_4xx: int,
@@ -469,6 +474,11 @@ struct Counters {
 fn counters_new() -> Counters {
     Counters {
         accepted: 0,
+        refused: 0,
+        evicted: 0,
+        accept_emfile: 0,
+        accept_enfile: 0,
+        accept_other: 0,
         req_2xx: 0,
         req_3xx: 0,
         req_4xx: 0,
@@ -492,6 +502,19 @@ fn counters_new() -> Counters {
         gens_retired: 0,
         rdur: metrics.hist_new(),
         udur: metrics.hist_new(),
+    }
+}
+
+/// One actual failed accept, attributed before any reserve is released.
+/// Timeouts from a lost accept race never reach this helper. Total.
+fn note_accept_failure(mut ct: Counters, code: int) {
+    let reason = shell.accept_failure_reason(code)
+    if reason == "emfile" {
+        ct.accept_emfile = ct.accept_emfile + 1
+    } else if reason == "enfile" {
+        ct.accept_enfile = ct.accept_enfile + 1
+    } else {
+        ct.accept_other = ct.accept_other + 1
     }
 }
 
@@ -617,6 +640,14 @@ fn render_metrics(ct: Counters, gens: List[GenRow], events: int, worker: int) ->
 
     out = "{out}{metrics.header("lobo_connections_accepted_total")}"
     out = "{out}{metrics.sample0("lobo_connections_accepted_total", ct.accepted)}"
+    out = "{out}{metrics.header("lobo_connections_refused_total")}"
+    out = "{out}{metrics.sample0("lobo_connections_refused_total", ct.refused)}"
+    out = "{out}{metrics.header("lobo_connections_evicted_total")}"
+    out = "{out}{metrics.sample0("lobo_connections_evicted_total", ct.evicted)}"
+    out = "{out}{metrics.header("lobo_accept_failures_total")}"
+    out = "{out}{metrics.sample1("lobo_accept_failures_total", "reason", "emfile", ct.accept_emfile)}"
+    out = "{out}{metrics.sample1("lobo_accept_failures_total", "reason", "enfile", ct.accept_enfile)}"
+    out = "{out}{metrics.sample1("lobo_accept_failures_total", "reason", "other", ct.accept_other)}"
     out = "{out}{metrics.header("lobo_connections_active")}"
     for g in gens {
         out = "{out}{metrics.sample1("lobo_connections_active", "gen", "{g.gen}", g.live)}"
@@ -2078,6 +2109,9 @@ fn serve_main(
     // the host refused — nginx's half second, which is also what keeps
     // this loop from spinning on a listener that stays ready
     var acc_off: int = 0
+    // ws76: distinct from accept-failure backoff. An expired admission
+    // pause permits one take; it is not renewed until that take ends.
+    var adm_off: int = 0
     var ctl_off: int = 0
     // ws64: THE RESERVE. Two descriptors lobo holds and does not use,
     // so that out of descriptors it can still take an order: `rsv_a`
@@ -2378,7 +2412,13 @@ fn serve_main(
                     // sits out its half second (it would stay ready, and
                     // the loop would spin on it: 293 cpu ticks in 4.5 s at
                     // ws63)
-                    let acc_on = now >= acc_off
+                    let full = crows - cdead + pxlive >= croom
+                    let idle = if full { has_idle(cfds, cwait, cstream, cclen, crows) } else { false }
+                    let admission_pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
+                    if admission_pause == 0 {
+                        adm_off = 0
+                    }
+                    let acc_on = now >= acc_off && (adm_off == 0 || now >= adm_off)
                     if have_ctrl && now >= ctl_off {
                         (mut wfds).push(cl)
                     }
@@ -2443,8 +2483,17 @@ fn serve_main(
                         wms = 0
                     }
                     // ws64: the wait ends when a sat-out endpoint is due back
-                    if !acc_on && acc_off - now < wms {
+                    if now < acc_off && acc_off - now < wms {
                         wms = acc_off - now
+                    }
+                    if adm_off > 0 {
+                        if now >= adm_off {
+                            // The pause buys one immediate queue probe, never a
+                            // future connection arriving after this pause ended.
+                            wms = 0
+                        } else if adm_off - now < wms {
+                            wms = adm_off - now
+                        }
                     }
                     if have_ctrl && now < ctl_off && ctl_off - now < wms {
                         wms = ctl_off - now
@@ -2470,6 +2519,23 @@ fn serve_main(
                     // first bytes read in this pass start at `tw`, and a request
                     // served in it ends there
                     let tw = time_unix_ms()
+                    if acc_on && adm_off > 0 && now >= adm_off {
+                        var admission_ready = (have_http && ready_has(ready, hl)) ||
+                            (have_tls && ready_has(ready, tls_l))
+                        for xl in xls {
+                            if xl >= 0 && ready_has(ready, xl) {
+                                admission_ready = true
+                            }
+                        }
+                        for xl in xtls {
+                            if xl >= 0 && ready_has(ready, xl) {
+                                admission_ready = true
+                            }
+                        }
+                        if !admission_ready {
+                            adm_off = 0
+                        }
+                    }
 
                     // 0. ws13: one resolver pass — every pending query socket
                     // gets a 1 ms read under its deadline; settled names become
@@ -2591,6 +2657,8 @@ fn serve_main(
                             io => {
                                 got_ctrl = false
                                 ctl_io = true
+                                let why = descriptor_reason()
+                                note_accept_failure(mut counters, why.0)
                                 0
                             },
                         }
@@ -2609,9 +2677,17 @@ fn serve_main(
                             }
                             if still.len > 0 {
                                 got_ctrl = true
-                                cand = net_accept(cl) else |_| {
-                                    got_ctrl = false
-                                    0
+                                cand = net_accept(cl) else |e| match e {
+                                    timeout => {
+                                        got_ctrl = false
+                                        0
+                                    },
+                                    io => {
+                                        got_ctrl = false
+                                        let why = descriptor_reason()
+                                        note_accept_failure(mut counters, why.0)
+                                        0
+                                    },
                                 }
                             }
                         }
@@ -2955,6 +3031,21 @@ fn serve_main(
                                         continue
                                     }
                                 }
+                                // ws76: a burst can fill this hand after the wait
+                                // was built. Yield here too, before the next take.
+                                let full = crows - cdead + pxlive >= croom
+                                let idle = if full { has_idle(cfds, cwait, cstream, cclen, crows) } else { false }
+                                let pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
+                                if pause > 0 {
+                                    let at = time_unix_ms()
+                                    if adm_off == 0 {
+                                        adm_off = at + pause
+                                    }
+                                    if at < adm_off {
+                                        draining = false
+                                        continue
+                                    }
+                                }
                                 var got_conn = true
                                 var acc_io = false
                                 let conn = net_accept(lh) else |e| match e {
@@ -2981,6 +3072,7 @@ fn serve_main(
                                 if acc_io {
                                     acc_off = now + accept_pause_ms()
                                     let why = descriptor_reason()
+                                    note_accept_failure(mut counters, why.0)
                                     ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
                                     // ws69: the exchange pool's idle procs
                                     // give their job sockets back first
@@ -2988,6 +3080,7 @@ fn serve_main(
                                         px_retire(mut pxs, now, -1)
                                     }
                                 }
+                                adm_off = 0
                                 if !got_conn {
                                     draining = false
                                     continue
@@ -3042,6 +3135,7 @@ fn serve_main(
                                             }
                                         }
                                         cdead = cdead + picks.len
+                                        counters.evicted = counters.evicted + picks.len
                                         if picks.len > 0 && now / 1000 != warn_s {
                                             warn_s = now / 1000
                                             ev_log(
@@ -3100,6 +3194,7 @@ fn serve_main(
                                     }
                                 }
                                 if !admitted {
+                                    counters.refused = counters.refused + 1
                                     net_close(conn) else |_| {}
                                     ev_log(mut elog, "alert", shell.conns_short_text(wconn, false))
                                 }
@@ -3126,6 +3221,19 @@ fn serve_main(
                         let th = if tsel == 0 { tls_l } else { xtls[tsel - 1] }
                         let ton = if tsel == 0 { have_tls } else { th >= 0 }
                         if ton && running && !quitting && ready_has(ready, th) {
+                            let full = crows - cdead + pxlive >= croom
+                            let idle = if full { has_idle(cfds, cwait, cstream, cclen, crows) } else { false }
+                            let pause = shell.admission_pause_ms(adopting, reuseport, full, idle)
+                            if pause > 0 {
+                                let at = time_unix_ms()
+                                if adm_off == 0 {
+                                    adm_off = at + pause
+                                }
+                                if at < adm_off {
+                                    tsel = tsel + 1
+                                    continue
+                                }
+                            }
                             var got_tls = true
                             var tls_io = false
                             let tconn = net_accept(th) else |e| match e {
@@ -3139,11 +3247,13 @@ fn serve_main(
                                     0
                                 },
                             }
+                            adm_off = 0
                             // ws64: as the plaintext listeners' — the failed
                             // accept, and a connection past worker_connections
                             if tls_io {
                                 acc_off = now + accept_pause_ms()
                                 let why = descriptor_reason()
+                                note_accept_failure(mut counters, why.0)
                                 ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
                                 in life {
                                     px_retire(mut pxs, now, -1)
@@ -3168,12 +3278,14 @@ fn serve_main(
                                     }
                                 }
                                 cdead = cdead + picks.len
+                                counters.evicted = counters.evicted + picks.len
                                 if picks.len > 0 && now / 1000 != warn_s {
                                     warn_s = now / 1000
                                     ev_log(mut elog, "warn", shell.conns_short_text(wconn, true))
                                 }
                                 if crows - cdead >= croom {
                                     counters.accepted = counters.accepted + 1
+                                    counters.refused = counters.refused + 1
                                     net_close(tconn) else |_| {}
                                     ev_log(mut elog, "alert", shell.conns_short_text(wconn, false))
                                     got_tls = false
@@ -5387,6 +5499,20 @@ fn descriptor_reason() -> (int, str) {
         return (code, os_error_text(code))
     }
     (0, "")
+}
+
+/// Whether any live plaintext row is idle and can be evicted. The
+/// admission pause asks this without allocating or sorting a batch.
+/// Pure and total; the predicate is the same as `idle_pick` below.
+fn has_idle(cfds: List[int], cwait: List[int], cstream: List[int], cclen: List[int], rows: int) -> bool {
+    var i: int = 0
+    while i < rows {
+        if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 {
+            return true
+        }
+        i = i + 1
+    }
+    false
 }
 
 /// ws64 (lobo#84): the rows one round of making room closes — the

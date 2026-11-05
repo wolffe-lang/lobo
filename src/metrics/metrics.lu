@@ -106,6 +106,24 @@ pub fn registry() -> List[Spec] {
         help: "Connections accepted since start.",
     })
     (mut r).push(Spec {
+        name: "lobo_connections_refused_total",
+        kind: "counter",
+        labels: "",
+        help: "Accepted client connections refused because worker_connections had no free slot and no idle connection could be evicted, since process start.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_connections_evicted_total",
+        kind: "counter",
+        labels: "",
+        help: "Idle client connections evicted to make room at worker_connections, since process start.",
+    })
+    (mut r).push(Spec {
+        name: "lobo_accept_failures_total",
+        kind: "counter",
+        labels: "reason",
+        help: "Failed client or control accepts since process start, including failed recovery accepts; reason emfile or enfile when descriptor exhaustion is attributable, otherwise other. An accept timeout after a lost race is not a failure.",
+    })
+    (mut r).push(Spec {
         name: "lobo_connections_active",
         kind: "gauge",
         labels: "gen",
