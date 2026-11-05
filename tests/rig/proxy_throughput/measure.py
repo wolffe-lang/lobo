@@ -79,7 +79,7 @@ def host_snapshot():
 
 class RatchetTests(unittest.TestCase):
     def rows(self, head):
-        return [dict(name=name, rate=speed) for _ in range(5)
+        return [dict(round=i, name=name, rate=speed) for i in range(5)
                 for name, speed in [("reference", 100), ("head", head)]]
 
     def test_boundary(self):
@@ -257,29 +257,57 @@ def drive(port, count, raw_path=None):
         raise ValueError(f"ApacheBench completed {got}, expected {count}")
     return speed, result.stdout
 
-def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5, report_only=False):
+def tcp_snapshot():
+    """Fast Linux socket counters; diagnostic data, never an acceptance gate."""
+    path = Path("/proc/net/sockstat")
+    if not path.exists():
+        return {"available": False}
+    for line in path.read_text().splitlines():
+        if line.startswith("TCP:"):
+            fields = line.split()[1:]
+            return dict(available=True, **{fields[i]: int(fields[i + 1]) for i in range(0, len(fields), 2)})
+    return {"available": False}
+
+
+def backend_tcp_states(ports):
+    """Count procfs TCP entries by the observed backend port after sampling.
+
+    This potentially larger read is outside all timed drives. Local and
+    remote matches are counted as entries, not claimed as distinct flows.
+    """
+    path = Path("/proc/net/tcp")
+    if not path.exists():
+        return {"available": False}
+    counts = {str(port): {} for port in ports}
+    for line in path.read_text().splitlines()[1:]:
+        fields = line.split()
+        local = int(fields[1].rsplit(":", 1)[1], 16)
+        remote = int(fields[2].rsplit(":", 1)[1], 16)
+        for port in {local, remote} & set(ports):
+            state = fields[3]
+            row = counts[str(port)]
+            row[state] = row.get(state, 0) + 1
+    return dict(available=True, states=counts)
+
+
+def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5,
+                    backend_lifetime="persistent"):
+    # The two non-default lifetimes are diagnostic interventions, not CLI
+    # waiver switches. The selected gate method is set by measure below.
+    if backend_lifetime not in ("persistent", "restart-same-port", "fresh"):
+        raise ValueError("unknown backend lifetime")
     scratch = Path(scratch)
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "logs").mkdir(exist_ok=True)
     (scratch / "body").write_bytes(b"PROXIED-BODY-16\n")
-    backend_port = free_port()
-    conf = scratch / "backend.conf"
-    conf.write_text(f"daemon off; master_process off; pid {scratch}/backend.pid; "
-                    f"error_log {scratch}/backend.log; events {{worker_connections 2048;}} "
-                    f"http {{access_log off; server {{listen 127.0.0.1:{backend_port}; root {scratch};}}}}")
-    parameters = dict(requests=requests,warmup=warmup,pairs=pairs,report_only=report_only)
-    (scratch / "parameters.json").write_text(json.dumps(parameters,indent=2))
-    snapshot = host_snapshot()
-    (scratch / "host-before.json").write_text(json.dumps(snapshot,indent=2))
-    print("lobo-proxy-throughput: shape " + json.dumps(parameters),flush=True)
-    print("lobo-proxy-throughput: host " + json.dumps(snapshot),flush=True)
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print("lobo-proxy-throughput: CI MEASUREMENT — ratio reported, not gated; the 0.900 merge gate is enforced by the lane on kasumi's calibrated four-CPU shape only; transport, application, incomplete and non-keepalive failures remain fatal",flush=True)
-    if platform.system() == "Darwin" and report_only:
-        print("lobo-proxy-throughput: macOS CI short-window ADVISORY — one upstream TCP connection per exchange can exhaust the default ephemeral-port budget before a 20000-request sample; this bounded short number is reported, not gated; transport/app errors remain failures",flush=True)
-    children = []
-    rows = []
-    files = []
+    parameters = dict(requests=requests, warmup=warmup, pairs=pairs, backend_lifetime=backend_lifetime)
+    (scratch / "parameters.json").write_text(json.dumps(parameters, indent=2))
+    (scratch / "host-before.json").write_text(json.dumps(host_snapshot(), indent=2))
+    print("lobo-proxy-throughput: shape " + json.dumps(parameters), flush=True)
+    children, rows, files = [], [], []
+    used_ports = set()
+    backend = None
+    backend_port = None if backend_lifetime == "fresh" else free_port()
 
     def launch(args, label):
         logfile = open(scratch / (label + ".stderr"), "w")
@@ -288,55 +316,81 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
         children.append(process)
         return process
 
-
     try:
-        backend = launch([nginx, "-p", str(scratch), "-c", str(conf)], "backend")
-        wait_up(backend_port, backend)
         for round_ in range(pairs):
             order = [("reference", reference), ("head", head)]
             if round_ % 2:
                 order.reverse()
             for name, binary in order:
+                label = f"{name}-{round_}"
+                if backend is None:
+                    if backend_lifetime == "fresh":
+                        for _ in range(100):
+                            candidate = free_port()
+                            if candidate not in used_ports:
+                                backend_port = candidate
+                                break
+                        else:
+                            raise RuntimeError("no distinct backend port available")
+                    used_ports.add(backend_port)
+                    conf = scratch / ("backend-" + label + ".conf")
+                    conf.write_text(f"daemon off; master_process off; pid {scratch}/backend.pid; "
+                                    f"error_log {scratch}/backend.log; events {{worker_connections 2048;}} "
+                                    f"http {{access_log off; server {{listen 127.0.0.1:{backend_port}; root {scratch};}}}}")
+                    backend = launch([nginx, "-p", str(scratch), "-c", str(conf)], "backend-" + label)
+                    wait_up(backend_port, backend)
+                before = tcp_snapshot()
                 port = free_port()
-                conf = scratch / (name + ".conf")
+                conf = scratch / (label + ".conf")
                 conf.write_text(f"pid {scratch}/{name}.pid; http {{access_log off; "
                                 f"server {{listen 127.0.0.1:{port}; location / {{"
                                 f"proxy_pass http://127.0.0.1:{backend_port};}}}}}}")
-                process = launch([binary, "serve", "-p", str(scratch), "-c", str(conf)], name)
+                process = launch([binary, "serve", "-p", str(scratch), "-c", str(conf)], label)
                 wait_up(port, process)
-                print(f"lobo-proxy-throughput: drive {name} round={round_} warmup={warmup} measured={requests}",flush=True)
-                drive(port, warmup, scratch / f"{name}-{round_}-warmup.ab")
-                speed, raw = drive(port, requests, scratch / f"{name}-{round_}.ab")
-                ka = keepalive(raw)
-                row = dict(round=round_, name=name, rate=speed,keepalive_requests=ka)
+                print(f"lobo-proxy-throughput: drive {name} round={round_} backend={backend_port} warmup={warmup} measured={requests}", flush=True)
+                drive(port, warmup, scratch / (label + "-warmup.ab"))
+                speed, raw = drive(port, requests, scratch / (label + ".ab"))
+                row = dict(round=round_, name=name, rate=speed, keepalive_requests=keepalive(raw),
+                           backend_port=backend_port, tcp_before=before, tcp_after=tcp_snapshot())
                 rows.append(row)
                 print("lobo-proxy-throughput: " + json.dumps(row), flush=True)
                 stop(process)
+                if backend_lifetime != "persistent":
+                    stop(backend)
+                    backend = None
         (scratch / "measurements.json").write_text(json.dumps(rows, indent=2))
+        states = backend_tcp_states(used_ports)
+        (scratch / "backend-tcp-states.json").write_text(json.dumps(states, indent=2))
+        print("lobo-proxy-throughput: backend TCP entries " + json.dumps(states), flush=True)
         print(subprocess.check_output(["uptime"], text=True).strip(), flush=True)
-        for name in ["reference", "head"]:
-            speeds = [r["rate"] for r in rows if r["name"] == name]
-            print(f"lobo-proxy-throughput: {name}: median {statistics.median(speeds):.2f} "
-                  f"req/s [{min(speeds):.2f}, {max(speeds):.2f}]", flush=True)
-        value = ratio(rows,pairs)
-        verdict = "REPORTED" if report_only else ("ok" if passes(rows,pairs) else "FAILED")
-        comparison = "comparison bar 0.900x NOT APPLIED; reported measurement" if report_only else "bar 0.900x, this machine's own shape"
-        print(f"lobo-proxy-throughput: {verdict} — head/reference {value:.3f}x ({comparison})", flush=True)
-        pairs_by_round = [next(r["rate"] for r in rows if r["round"]==i and r["name"]=="head") /
-                          next(r["rate"] for r in rows if r["round"]==i and r["name"]=="reference") for i in range(pairs)]
-        print("lobo-proxy-throughput: paired ratios " + json.dumps(pairs_by_round),flush=True)
-        (scratch / "host-after.json").write_text(json.dumps(host_snapshot(),indent=2))
-        return 0 if report_only or passes(rows,pairs) else 1
+        (scratch / "host-after.json").write_text(json.dumps(host_snapshot(), indent=2))
+        return rows
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
-        snapshot=host_snapshot()
-        (scratch / "host-failure.json").write_text(json.dumps(snapshot,indent=2))
-        print("lobo-proxy-throughput: host at failure " + json.dumps(snapshot),flush=True)
+        (scratch / "host-failure.json").write_text(json.dumps(host_snapshot(), indent=2))
         raise
     finally:
         for process in reversed(children):
             stop(process)
         for file in files:
             file.close()
+
+
+def _report_pairing(rows, pairs, label, report_only=False):
+    for name in ("reference", "head"):
+        speeds = [r["rate"] for r in rows if r["name"] == name]
+        print(f"lobo-proxy-throughput: {label} {name}: median {statistics.median(speeds):.2f} req/s [{min(speeds):.2f}, {max(speeds):.2f}]", flush=True)
+    value = ratio(rows, pairs)
+    verdict = "REPORTED" if report_only else ("ok" if passes(rows, pairs) else "FAILED")
+    print(f"lobo-proxy-throughput: {verdict} — {label} head/reference {value:.3f}x (bar 0.900x{' advisory' if report_only else ''})", flush=True)
+    paired = [next(r["rate"] for r in rows if r["round"] == i and r["name"] == "head") /
+              next(r["rate"] for r in rows if r["round"] == i and r["name"] == "reference") for i in range(pairs)]
+    print("lobo-proxy-throughput: paired ratios " + json.dumps(paired), flush=True)
+    return 0 if report_only or passes(rows, pairs) else 1
+
+
+def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5, report_only=False):
+    rows = _sample_pairing(nginx, reference, head, scratch, requests, warmup, pairs)
+    return _report_pairing(rows, pairs, "comparison", report_only)
 
 
 def main():
