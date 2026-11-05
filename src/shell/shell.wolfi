@@ -1,7 +1,7 @@
 module pkg :: shell
   wolfi v0 · toolchain 0.2.36 · edition v1
-  export_hash 36930982217d75af8d54deab798a25c87fe84b8c4d471288bae65f55fd75f974
-  pkg_hash    36930982217d75af8d54deab798a25c87fe84b8c4d471288bae65f55fd75f974
+  export_hash 84612ced9d000406486e968925d0b9979d5930f9c535bbb3525a9c5b6ef52a0f
+  pkg_hash    84612ced9d000406486e968925d0b9979d5930f9c535bbb3525a9c5b6ef52a0f
   deps:
     config  ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
@@ -109,6 +109,6 @@ module pkg :: shell
     [99] pub worker_args — fn worker_args(prefix: str, conf: str, worker: int, ctrl: str, inherit: int, gen: int, gid: str, lset: str) -> prelude.List[str] · regions (-, -, -, -, -, -, -, -) -> ρ_caller
     [100] pub worker_argv — fn worker_argv(exe: str, prefix: str, conf: str, worker: int, ctrl: str, inherit: int, gen: int, gid: str, lset: str) -> prelude.List[str] · regions (-, -, -, -, -, -, -, -, -) -> ρ_caller
     [101] pub worker_processes — fn worker_processes(c: config.Conf) -> int · regions (ρ1) -> -
-    [102] pub Cli — struct Cli { mode: str, signal: str, prefix: str, conf: str, errlog: str, globals: str, quiet: bool, err_msg: str, exit_code: int, format: str, requests: prelude.List[str], sni: str, client: str, stat: bool, worker: int, worker_control: str, inherit: int, generation: int, generation_id: str, listeners: str }
+    [102] pub Cli — struct Cli { mode: str, signal: str, prefix: str, conf: str, errlog: str, globals: str, quiet: bool, err_msg: str, exit_code: int, format: str, requests: prelude.List[str], sni: str, client: str, stat: bool, worker: int, worker_control: str, inherit: int, shared_admission: bool, generation: int, generation_id: str, listeners: str }
     [103] pub Gen — struct Gen { conf: config.Conf, gen: int, ok: bool, note: str }
 
