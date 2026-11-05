@@ -2423,8 +2423,20 @@ fn serve_main(
                     } else {
                         false
                     }
-                    let pause_http = shell.admission_pause_ms(shared_admission, false, full_http, idle) > 0
-                    let pause_tls = shell.admission_pause_ms(shared_admission, false, full_tls, idle) > 0
+                    let pause_http = shell.admission_pause_ms(
+                        shared_admission,
+                        false,
+                        full_http,
+                        idle,
+                    ) >
+                        0
+                    let pause_tls = shell.admission_pause_ms(
+                        shared_admission,
+                        false,
+                        full_tls,
+                        idle,
+                    ) >
+                        0
                     var acc_on = now >= acc_off
                     if !acc_on || !pause_http && !pause_tls {
                         adm_off = 0
@@ -3252,7 +3264,12 @@ fn serve_main(
                             } else {
                                 false
                             }
-                            let pause = shell.admission_pause_ms(shared_admission, false, full, idle)
+                            let pause = shell.admission_pause_ms(
+                                shared_admission,
+                                false,
+                                full,
+                                idle,
+                            )
                             if pause > 0 {
                                 let at = time_unix_ms()
                                 if adm_off == 0 {

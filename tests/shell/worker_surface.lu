@@ -311,14 +311,20 @@ fn main() -> !int {
     var sharing = copy gargs
     (mut sharing).push("--shared-admission")
     let cs = shell.parse_cli(sharing)
-    assert(cs.mode == "serve" && cs.shared_admission, "master-supplied sharing bit rides an inherited hand")
+    assert(
+        cs.mode == "serve" && cs.shared_admission,
+        "master-supplied sharing bit rides an inherited hand",
+    )
     var sharing_lone = List[str]()
     (mut sharing_lone).push("serve")
     (mut sharing_lone).push("--shared-admission")
     assert(shell.parse_cli(sharing_lone).mode == "error", "sharing bit cannot stand alone")
     var sharing_unbound = copy argv
     (mut sharing_unbound).push("--shared-admission")
-    assert(shell.parse_cli(sharing_unbound).mode == "error", "sharing bit requires actual inheritance")
+    assert(
+        shell.parse_cli(sharing_unbound).mode == "error",
+        "sharing bit requires actual inheritance",
+    )
 
     // ---- the config-side reader is the single-process default
     let c = config.parse_str("http {{ server {{ listen 8080; }} }}\n", "t")
