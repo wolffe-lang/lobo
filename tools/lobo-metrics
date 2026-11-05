@@ -339,6 +339,11 @@ if [ "$code" != "0" ]; then
     bad "lobo exited $code"
 fi
 
+# ws76: actual refusal, idle eviction and EMFILE drives, with exact series.
+if ! python3 -I tests/rig/admission/drive.py counters "$BIN" "$D/admission"; then
+    bad "connection-counter drives (named rows above)"
+fi
+
 if [ "$red" != "0" ]; then
     echo "lobo-metrics: $red red" >&2
     exit 1

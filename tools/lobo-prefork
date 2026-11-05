@@ -400,6 +400,11 @@ else
     check "pid file removed on stop" 0
 fi
 
+# ws76: admission at the shared-listener limit, against the pinned oracle.
+python3 -I tests/rig/admission/drive.py admission "$LOBO" "$scratch/admission" \
+    --oracle tests/differential/bin/nginx
+check "[shared-listener-first28] the first 28 connections match the same-host oracle" $?
+
 if [ "$red" = 0 ]; then
     say "GREEN — $total/$total"
     exit 0
