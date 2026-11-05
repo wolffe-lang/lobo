@@ -2,6 +2,9 @@
 # Relative proxied-throughput ratchet (ws73, lobo#100). The reference
 # is pre-#81 source, built at THIS toolchain alongside the head. Both
 # run on this machine in the same window; no absolute req/s bar.
+# Every drive gets a fresh backend process and destination port. A
+# mandatory same-binary reference-self check precedes candidate judgment;
+# the five alternating pairs and 0.900 candidate bar are unchanged.
 # Optional explicit reference/head binaries are measurement inputs,
 # never the gauntlet's default. nginx remains a binary oracle only.
 set -eu
@@ -47,5 +50,5 @@ if [ -z "$ref" ]; then
     fi
 fi
 [ -x "$ref" ] && [ -x "$head" ] || { echo 'lobo-proxy-throughput: FAILED — reference or head binary missing' >&2; exit 1; }
-echo "lobo-proxy-throughput: reference $ref_label; relative ab -k -c 32 (actual platform shape printed below)"
+echo "lobo-proxy-throughput: reference $ref_label; mandatory reference-self then relative ab -k -c 32; fresh backend per drive (actual platform shape printed below)"
 python3 -I tests/rig/proxy_throughput/measure.py "$NG" "$ref" "$head" "$scratch"

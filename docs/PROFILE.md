@@ -2774,16 +2774,27 @@ the loop is still unavailable by name: `net_connect` blocks (#835), and
 TLS record reads remain blocking.
 
 `tools/lobo-proxy-throughput` compares pre-#81 source and the head built
-at this checkout's pin, against one prompt loopback nginx backend.
-Linux and local defaults use `ab -k -c 32`, 2,000 warm-up and 20,000
-measured requests, five alternating pairs. The lane enforces a head/
-reference median-rate ratio of at least 0.9 on kasumi's calibrated shape;
-CI reports that comparison instead. The macOS CI exception is described below. No
-absolute req/s bar crosses between machines. This concurrent shape does
-not certify single-client recovery; the one-client and padded-client
-numbers remain separate in the lane note. The driver rejects failed,
-non-2xx or incomplete ApacheBench runs, and unit-tests the median/bar
-boundary and incomplete-pair handling.
+at this checkout's pin. Each drive gets a fresh prompt loopback nginx
+backend process and destination port. Linux and local defaults still use
+`ab -k -c 32`, 2,000 warm-up and 20,000 measured requests, five alternating
+pairs, and a head/reference median-rate bar of 0.900. A same-binary
+reference-self check must first satisfy that budget in both label
+directions; otherwise the instrument refuses candidate judgment by name.
+Calibration is mandatory even where CI reports the candidate ratio.
+The existing macOS CI short window is unchanged. Raw results live under
+`reference-self/` and `comparison/`, with Linux TCP-state diagnostics.
+
+The backend reset fixes a measurement artifact, not server performance:
+a persistent backend gave reference-self 0.723, and restarting it on the
+same port still gave 0.739 with the same alternation. Fresh ports gave
+1.003 without alternation while total TIME_WAIT entries increased, so
+the carryover follows the destination, not the process or total socket
+count. Per-backend TIME_WAIT entries are retained in the evidence; the
+exact kernel reuse algorithm is not inferred. No absolute req/s bar
+crosses between machines. This concurrent shape does not certify
+single-client recovery. Failed, non-2xx, incomplete or non-keepalive runs
+remain fatal; unit tests cover calibration refusal, the unchanged bar,
+backend isolation and incomplete-pair handling.
 
 
 ### Hosted-runner method boundary (ws73 follow-up)

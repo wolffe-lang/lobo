@@ -2,6 +2,18 @@
 
 ## Unreleased — 0.1.6
 
+### Proxied-throughput instrument calibration
+
+Every timed drive now gets a fresh loopback backend process and port.
+The previous shared destination could make an unchanged reference fail
+against itself: restarting the backend on the same port retained the
+alternation, while a fresh port removed it. The gate now requires a
+same-binary reference-self control before judging the candidate, refusing
+an unsound instrument by name. Five alternating pairs and the 0.900 bar
+are unchanged; calibration is never advisory, including on CI. The
+existing CI candidate-ratio reporting policy and macOS short sample stay
+unchanged. This repairs the instrument, not the server's throughput.
+
 ### Shared-listener admission and connection metrics
 
 A full worker with no idle connection to evict now leaves inherited

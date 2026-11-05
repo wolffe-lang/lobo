@@ -183,7 +183,8 @@ class RatchetTests(unittest.TestCase):
 
     def test_unsound_reference_self_prevents_candidate_judgement(self):
         for advisory in (False, True):
-            with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(80)) as sample:
+            with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(80)) as sample, \
+                 mock.patch("builtins.print"):
                 self.assertEqual(measure("ng", "ref", "head", "unused", report_only=advisory), 1)
                 self.assertEqual(sample.call_count, 1)
                 self.assertEqual(sample.call_args.args[1:3], ("ref", "ref"))
@@ -197,10 +198,12 @@ class RatchetTests(unittest.TestCase):
 
     def test_control_precedes_unchanged_candidate_bar(self):
         for speed, expected in ((90, 0), (89.999, 1)):
-            with mock.patch(__name__ + "._sample_pairing", side_effect=[self.rows(100), self.rows(speed)]) as sample:
+            with mock.patch(__name__ + "._sample_pairing", side_effect=[self.rows(100), self.rows(speed)]) as sample, \
+                 mock.patch("builtins.print"):
                 self.assertEqual(measure("ng", "ref", "head", "unused"), expected)
                 self.assertEqual([c.args[1:3] for c in sample.call_args_list], [("ref", "ref"), ("ref", "head")])
-        with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(100)) as sample:
+        with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(100)) as sample, \
+             mock.patch("builtins.print"):
             self.assertEqual(measure("ng", "ref", "head", "unused", control_only=True), 0)
             self.assertEqual(sample.call_count, 1)
 
@@ -214,7 +217,7 @@ class RatchetTests(unittest.TestCase):
                  mock.patch(__name__ + ".tcp_snapshot", return_value={}), \
                  mock.patch(__name__ + ".drive", return_value=(100, "Keep-Alive requests: 32\n")), \
                  mock.patch.object(subprocess, "check_output", return_value="up"), \
-                 mock.patch.object(subprocess, "Popen") as launch:
+                 mock.patch.object(subprocess, "Popen") as launch, mock.patch("builtins.print"):
                 rows = _sample_pairing("ng", "ref", "head", directory, requests=32, warmup=32, pairs=1)
                 self.assertEqual([r["backend_port"] for r in rows], [31001, 31003])
                 self.assertEqual(sum(c.args[0][0] == "ng" for c in launch.call_args_list), 2)
@@ -322,9 +325,9 @@ def backend_tcp_states(ports):
 
 
 def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5,
-                    backend_lifetime="persistent", report_only=False):
-    # The two non-default lifetimes are diagnostic interventions, not CLI
-    # waiver switches. The selected gate method is set by measure below.
+                    backend_lifetime="fresh", report_only=False):
+    # The gate isolates every drive with a fresh backend and destination
+    # port. Other lifetimes are causal diagnostics, not CLI waiver switches.
     if backend_lifetime not in ("persistent", "restart-same-port", "fresh"):
         raise ValueError("unknown backend lifetime")
     scratch = Path(scratch)
@@ -440,7 +443,7 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
     if control_only:
         return 0
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        print("lobo-proxy-throughput: CI MEASUREMENT — reference-self calibration is mandatory; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
+        print("lobo-proxy-throughput: CI MEASUREMENT — every drive has a fresh backend and port; reference-self calibration is mandatory and fatal; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
     if platform.system() == "Darwin" and report_only:
         print("lobo-proxy-throughput: macOS CI uses its bounded short request window; calibration remains mandatory", flush=True)
     rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs,
