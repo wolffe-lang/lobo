@@ -2213,7 +2213,7 @@ pub fn accept_failure_reason(code: int) -> str {
 /// processes and reuseport listeners never pause. Pure and total.
 pub fn admission_pause_ms(inherited: bool, reuseport: bool, full: bool, idle: bool) -> int {
     if inherited && !reuseport && full && !idle {
-        return 20
+        return 0
     }
     0
 }
