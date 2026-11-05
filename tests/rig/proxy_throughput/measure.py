@@ -11,6 +11,7 @@ import statistics
 import subprocess
 import sys
 import time
+import tempfile
 import unittest
 from unittest import mock
 
@@ -165,6 +166,46 @@ class RatchetTests(unittest.TestCase):
         self.assertEqual(keepalive("Keep-Alive requests: 1000\n"),1000)
         for raw in ["", "Keep-Alive requests: 0\n"]:
             with self.assertRaises(ValueError): keepalive(raw)
+
+    def test_same_binary_control_uses_the_bar_in_both_directions(self):
+        self.assertTrue(control_passes(self.rows(100)))
+        self.assertTrue(control_passes(self.rows(90)))
+        self.assertTrue(control_passes(self.rows(110)))
+        self.assertFalse(control_passes(self.rows(89.999)))
+        self.assertFalse(control_passes(self.rows(112)))
+
+    def test_unsound_reference_self_prevents_candidate_judgement(self):
+        for advisory in (False, True):
+            with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(80)) as sample:
+                self.assertEqual(measure("ng", "ref", "head", "unused", report_only=advisory), 1)
+                self.assertEqual(sample.call_count, 1)
+                self.assertEqual(sample.call_args.args[1:3], ("ref", "ref"))
+
+    def test_control_precedes_unchanged_candidate_bar(self):
+        for speed, expected in ((90, 0), (89.999, 1)):
+            with mock.patch(__name__ + "._sample_pairing", side_effect=[self.rows(100), self.rows(speed)]) as sample:
+                self.assertEqual(measure("ng", "ref", "head", "unused"), expected)
+                self.assertEqual([c.args[1:3] for c in sample.call_args_list], [("ref", "ref"), ("ref", "head")])
+        with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(100)) as sample:
+            self.assertEqual(measure("ng", "ref", "head", "unused", control_only=True), 0)
+            self.assertEqual(sample.call_count, 1)
+
+    def test_every_drive_has_a_distinct_backend_process_and_port(self):
+        parent = Path(os.environ.get("TMPDIR", "target"))
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=parent) as directory:
+            with mock.patch(__name__ + ".free_port", side_effect=[31001, 31002, 31003, 31004]), \
+                 mock.patch(__name__ + ".wait_up"), mock.patch(__name__ + ".stop") as stop_child, \
+                 mock.patch(__name__ + ".host_snapshot", return_value={}), \
+                 mock.patch(__name__ + ".tcp_snapshot", return_value={}), \
+                 mock.patch(__name__ + ".drive", return_value=(100, "Keep-Alive requests: 32\n")), \
+                 mock.patch.object(subprocess, "check_output", return_value="up"), \
+                 mock.patch.object(subprocess, "Popen") as launch:
+                rows = _sample_pairing("ng", "ref", "head", directory, requests=32, warmup=32, pairs=1)
+                self.assertEqual([r["backend_port"] for r in rows], [31001, 31003])
+                self.assertEqual(sum(c.args[0][0] == "ng" for c in launch.call_args_list), 2)
+                self.assertEqual(sum(c.args[0][0] in ("ref", "head") for c in launch.call_args_list), 2)
+                self.assertGreaterEqual(stop_child.call_count, 4)
 
     def test_pair_count_is_not_hardcoded(self):
         rows = [dict(name=name,rate=value) for _ in range(7)
