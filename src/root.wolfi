@@ -1,7 +1,7 @@
 module pkg :: (root)
   wolfi v0 · toolchain 0.2.36 · edition v1
-  export_hash 86e321e474f6f544a05da5f51f28338a1310ee20338fe707a7a8c3a67e94094c
-  pkg_hash    86e321e474f6f544a05da5f51f28338a1310ee20338fe707a7a8c3a67e94094c
+  export_hash e01fca21a7ec35c76904b9bb0dde4a7a3ce635a8d915807ba192d041aaacd4b6
+  pkg_hash    e01fca21a7ec35c76904b9bb0dde4a7a3ce635a8d915807ba192d041aaacd4b6
   deps:
     acme  2195f0a1eb2628caafdadd449e858e3fc9998c873992ab380346104a5330c1ea
     budget  d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
@@ -14,7 +14,7 @@ module pkg :: (root)
     proxy  c25ac573eecbcd620eb0d1de10c7ac6c8e5f6221767f3520dd82937de693bbe9
     resolver  937db334a0a067c530978f91eb9ea57774c5844f1aa378001faf2d7f2751e5e4
     serve  e458adbe5b690e559a76104dbae83c149abd9b70531804069837a7aa0bf3e5dc
-    shell  f1b47d95fda2fc3a3b9e72a325d3bbcd8d738ef1a05d832ad0f2bc9bac79a5d3
+    shell  36930982217d75af8d54deab798a25c87fe84b8c4d471288bae65f55fd75f974
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
     std.process  6fdb2a0609ef8ba95dadc13eb6f1003ff4d5b78858e868a6f437bdd12805ee7c
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
