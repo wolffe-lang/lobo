@@ -278,6 +278,35 @@ must meet the control budget in both directions, so a 1.598 reading
 cannot masquerade as improvement. The five pairs, request counts and
 0.900 candidate bar stay unchanged. All three validations remain required.
 
+### Bounded-settle and identity repair evidence
+
+A deliberate stress fixture, guarded to use a network namespace other
+than the host's, reached the actual 262,144 ceiling. The old instrument
+reported reference-self 0.983 and failed the new `saturation-refusal`
+row. The repaired instrument then refused `[tcp-state]` before any
+ratio, recording before=262144, after=262144 and elapsed=0.000079 s
+with ceiling=120 s. Both printed reference digests were
+`450bae474a21d8999c46292656153eabc06875902934a036c2998588f75ce192`.
+No namespace or host TCP settings were changed or forcibly flushed.
+
+The new pure rows went red (21 tests, seven missing-helper errors),
+then 21/21 green. They cover bounded count-based settling and timeout,
+saturation refusal, equal digests at different paths, and different
+contents with the same basename retaining the one-sided rule: 1.60 and
+0.90 pass, 0.89999 fails. The light takes averaged 0.949 busy CPU red
+and 0.976 green, with a 6 GiB cap and one Python worker.
+
+Completed evidence: `saturation-red.log` SHA-256
+`342739e3f0d79e3e1e449ac336e0c96164f710f0da1b8bf11bba2c8c1104ff49`;
+`saturation-green.log`
+`87d3c92a286cd615e543ecd01a1a69c0cb2138b0f431777d1f64ab33824765c2`;
+`instrument-unit-settle-red.log`
+`951645accd83663f414f91eed16176c423c0a04ab678886589c1c7ac97acdacb`;
+`instrument-unit-settle-green.log`
+`039a1ee26e2b746463351ceec7af89637a48e1467ac98c2f26e0bdfc6358538a`.
+A new private-namespace validation starts from scratch; none of the
+pre-settling ratios is counted toward its five required repetitions.
+
 The final-head green and off-line plant records, their SHA-256s and
 every END line accompany the PR. Parser-shape smoke records were
 verified separately before the locked take; they are not merge evidence.

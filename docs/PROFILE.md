@@ -2795,8 +2795,8 @@ exact kernel reuse algorithm is not inferred.
 Longer validation exposed a second boundary: namespace TIME_WAIT reached
 262,144, an identical-head comparison read 1.598, and candidate/reference
 read 0.829 after its preflight had run below that ceiling. Each complete
-pairing now observes actual namespace quietness before and after all
-owned children stop, outside timed AB drives, with a 120-second ceiling.
+pairing now observes actual namespace quietness before timed drives
+and again after all owned children stop, with a 120-second ceiling.
 The record and settle JSON retain the before/after counts and duration.
 Failure to settle, or reaching the kernel-reported capacity, refuses the
 instrument by name without judging a ratio. No network setting is
