@@ -95,7 +95,8 @@ class Server:
                 pattern = r"generation-activated gen=1 .*worker=[0-9]+" if workers > 1 else r"generation-activated gen=1"
                 until(lambda: len(re.findall(pattern, self.log.read_text())) >= workers,
                       "lobo workers")
-                until(lambda: "generation 1: current live=0" in self.status(), "lobo control ready")
+                until(lambda: (f"worker {workers}: serving " in self.status()) if workers > 1
+                      else ("generation 1: current live=0" in self.status()), "lobo control ready")
         except BaseException:
             self.close()
             raise
