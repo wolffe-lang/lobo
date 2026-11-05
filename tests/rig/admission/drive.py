@@ -263,6 +263,7 @@ def worker_counters(binary, directory):
         for line in server.status().splitlines():
             match = re.match(r"worker ([0-9]+): serving control=([^ ]+) .*pid=([0-9]+)", line)
             if match:
+                assert int(match[3]) > 1, "owned worker pid is positive"
                 rows[int(match[1])] = (match[2], int(match[3]))
         assert set(rows) == {1, 2}, "both workers' own control endpoints and pids"
 
@@ -309,6 +310,7 @@ def worker_rows(server):
     for line in server.status().splitlines():
         match = re.match(r"worker ([0-9]+): serving control=([^ ]+) .*pid=([0-9]+)", line)
         if match:
+            assert int(match[3]) > 1, "owned worker pid is positive"
             rows[int(match[1])] = (match[2], int(match[3]))
     return rows
 
