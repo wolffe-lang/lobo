@@ -188,6 +188,13 @@ class RatchetTests(unittest.TestCase):
                 self.assertEqual(sample.call_count, 1)
                 self.assertEqual(sample.call_args.args[1:3], ("ref", "ref"))
 
+    def test_control_collection_failure_is_named_and_stops_judgement(self):
+        with mock.patch(__name__ + "._sample_pairing", side_effect=RuntimeError("transport failed")) as sample, \
+             mock.patch("builtins.print") as output:
+            self.assertEqual(measure("ng", "ref", "head", "unused"), 1)
+            self.assertEqual(sample.call_count, 1)
+            self.assertTrue(any("[reference-self]" in str(c.args[0]) for c in output.call_args_list))
+
     def test_control_precedes_unchanged_candidate_bar(self):
         for speed, expected in ((90, 0), (89.999, 1)):
             with mock.patch(__name__ + "._sample_pairing", side_effect=[self.rows(100), self.rows(speed)]) as sample:
@@ -213,6 +220,22 @@ class RatchetTests(unittest.TestCase):
                 self.assertEqual(sum(c.args[0][0] == "ng" for c in launch.call_args_list), 2)
                 self.assertEqual(sum(c.args[0][0] in ("ref", "head") for c in launch.call_args_list), 2)
                 self.assertGreaterEqual(stop_child.call_count, 4)
+
+    def test_tcp_diagnostics_distinguish_backend_ports(self):
+        data = ("sl local remote st\n"
+                "0: 0100007F:7919 0100007F:8000 06 rest\n"
+                "1: 0100007F:8001 0100007F:791B 01 rest\n"
+                "2: 0100007F:8002 0100007F:8003 06 rest\n")
+        with mock.patch.object(Path, "exists", return_value=True), \
+             mock.patch.object(Path, "read_text", return_value=data):
+            self.assertEqual(backend_tcp_states({31001, 31003}),
+                             dict(available=True, states={"31001": {"06": 1}, "31003": {"01": 1}}))
+        with mock.patch.object(Path, "exists", return_value=True), \
+             mock.patch.object(Path, "read_text", return_value="TCP: inuse 4 orphan 0 tw 22000 alloc 8 mem 0\n"):
+            self.assertEqual(tcp_snapshot()["tw"], 22000)
+        with mock.patch.object(Path, "exists", return_value=False):
+            self.assertEqual(tcp_snapshot(), {"available": False})
+            self.assertEqual(backend_tcp_states({31001}), {"available": False})
 
     def test_pair_count_is_not_hardcoded(self):
         rows = [dict(name=name,rate=value) for _ in range(7)
@@ -285,12 +308,13 @@ def backend_tcp_states(ports):
     path = Path("/proc/net/tcp")
     if not path.exists():
         return {"available": False}
+    ports = set(ports)
     counts = {str(port): {} for port in ports}
     for line in path.read_text().splitlines()[1:]:
         fields = line.split()
         local = int(fields[1].rsplit(":", 1)[1], 16)
         remote = int(fields[2].rsplit(":", 1)[1], 16)
-        for port in {local, remote} & set(ports):
+        for port in {local, remote} & ports:
             state = fields[3]
             row = counts[str(port)]
             row[state] = row.get(state, 0) + 1
@@ -298,7 +322,7 @@ def backend_tcp_states(ports):
 
 
 def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5,
-                    backend_lifetime="persistent"):
+                    backend_lifetime="persistent", report_only=False):
     # The two non-default lifetimes are diagnostic interventions, not CLI
     # waiver switches. The selected gate method is set by measure below.
     if backend_lifetime not in ("persistent", "restart-same-port", "fresh"):
@@ -307,7 +331,8 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "logs").mkdir(exist_ok=True)
     (scratch / "body").write_bytes(b"PROXIED-BODY-16\n")
-    parameters = dict(requests=requests, warmup=warmup, pairs=pairs, backend_lifetime=backend_lifetime)
+    parameters = dict(requests=requests, warmup=warmup, pairs=pairs, backend_lifetime=backend_lifetime,
+                      report_only=report_only)
     (scratch / "parameters.json").write_text(json.dumps(parameters, indent=2))
     (scratch / "host-before.json").write_text(json.dumps(host_snapshot(), indent=2))
     print("lobo-proxy-throughput: shape " + json.dumps(parameters), flush=True)
@@ -402,9 +427,14 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
     # Calibration is never advisory, including when CI only reports
     # the candidate ratio. Do not judge a candidate with an unsound rig.
     root = Path(scratch)
-    control_rows = _sample_pairing(nginx, reference, reference, root / "reference-self",
-                                   requests, warmup, pairs)
-    if _report_pairing(control_rows, pairs, "[reference-self]", control=True) != 0:
+    try:
+        control_rows = _sample_pairing(nginx, reference, reference, root / "reference-self",
+                                       requests, warmup, pairs)
+        calibrated = _report_pairing(control_rows, pairs, "[reference-self]", control=True) == 0
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
+        print(f"lobo-proxy-throughput: FAILED — [reference-self] collection failed: {error}; candidate not judged", flush=True)
+        return 1
+    if not calibrated:
         print("lobo-proxy-throughput: REFUSED — reference-self instrument check failed; candidate not judged", flush=True)
         return 1
     if control_only:
@@ -413,7 +443,8 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
         print("lobo-proxy-throughput: CI MEASUREMENT — reference-self calibration is mandatory; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
     if platform.system() == "Darwin" and report_only:
         print("lobo-proxy-throughput: macOS CI uses its bounded short request window; calibration remains mandatory", flush=True)
-    rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs)
+    rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs,
+                           report_only=report_only)
     return _report_pairing(rows, pairs, "comparison", report_only)
 
 
