@@ -350,6 +350,19 @@ def full_workers(server, count=2):
     return rows
 
 
+def pause(rows):
+    for _, pid in rows.values():
+        os.kill(pid, signal.SIGSTOP)
+    def stopped(pid):
+        status = Path(f"/proc/{pid}/status")
+        if status.exists():
+            return re.search(r"^State:\s+T", status.read_text(), re.M) is not None
+        state = subprocess.run(["ps", "-o", "state=", "-p", str(pid)],
+                               capture_output=True, text=True, timeout=5)
+        return state.stdout.strip().startswith("T")
+    until(lambda: all(stopped(pid) for _, pid in rows.values()), "owned workers stopped")
+
+
 def resume(rows):
     for _, pid in rows.values():
         try:
@@ -363,8 +376,7 @@ def later_listener_progress(binary, directory):
     rows = {}
     try:
         rows = full_workers(server)
-        for _, pid in rows.values():
-            os.kill(pid, signal.SIGSTOP)
+        pause(rows)
         primary = [queued(server) for _ in range(64)]
         later = {queued(server, server.extra_port): "extra-plaintext",
                  queued(server, server.tls_port): "tls"}
@@ -396,8 +408,7 @@ def full_burst_progress(binary, directory):
     rows = {}
     try:
         rows = full_workers(server)
-        for _, pid in rows.values():
-            os.kill(pid, signal.SIGSTOP)
+        pause(rows)
         pending = [queued(server) for _ in range(32)]
         resume(rows)
         until(lambda: any(closed(sock) for sock in pending), "first all-full refusal")
@@ -427,8 +438,8 @@ def backoff_idle_cpu(binary, directory):
     limits = {}
     try:
         rows = full_workers(server)
+        pause(rows)
         for _, pid in rows.values():
-            os.kill(pid, signal.SIGSTOP)
             limits[pid] = resource.prlimit(pid, resource.RLIMIT_NOFILE)
             fds = {int(p.name) for p in Path(f"/proc/{pid}/fd").iterdir()}
             first_hole = 0
@@ -469,7 +480,7 @@ def one_hand_scope(binary, directory):
     rows = {}
     try:
         rows = full_workers(server, count=1)
-        os.kill(rows[1][1], signal.SIGSTOP)
+        pause(rows)
         pending = queued(server)
         resume(rows)
         for _ in range(2):

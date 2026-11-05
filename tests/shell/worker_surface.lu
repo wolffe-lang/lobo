@@ -305,6 +305,21 @@ fn main() -> !int {
     assert(shell.stanza_field_sum(st, "budget-503s") == 3, "budget-503s= sums (1+2)")
     assert(shell.stanza_field_sum(st, "nothing") == 0, "an absent field sums to 0")
 
+    // ws76: only the master knows whether the inherited listener is
+    // shared by multiple hands. The optional private bit is not c0.
+    assert(!cg.shared_admission && !cp.shared_admission, "no private bit: no shared admission")
+    var sharing = copy gargs
+    (mut sharing).push("--shared-admission")
+    let cs = shell.parse_cli(sharing)
+    assert(cs.mode == "serve" && cs.shared_admission, "master-supplied sharing bit rides an inherited hand")
+    var sharing_lone = List[str]()
+    (mut sharing_lone).push("serve")
+    (mut sharing_lone).push("--shared-admission")
+    assert(shell.parse_cli(sharing_lone).mode == "error", "sharing bit cannot stand alone")
+    var sharing_unbound = copy argv
+    (mut sharing_unbound).push("--shared-admission")
+    assert(shell.parse_cli(sharing_unbound).mode == "error", "sharing bit requires actual inheritance")
+
     // ---- the config-side reader is the single-process default
     let c = config.parse_str("http {{ server {{ listen 8080; }} }}\n", "t")
     assert(shell.worker_processes(c) == 1, "no directive: one process (ws15's lobo, untouched)")
