@@ -378,7 +378,9 @@ tools/lobo-dist         # a release archive, packed reproducibly and smoke-teste
 
 The proxied-throughput step first validates its reference against itself
 before judging the candidate; each drive uses a fresh loopback backend
-and port. The [measurement method](docs/PROFILE.md) explains the controls.
+and port. Pairings require bounded, recorded TCP settling and refuse
+saturated namespaces rather than judging a ratio. The
+[measurement method](docs/PROFILE.md) explains the controls.
 
 Each release archive includes a `BUILD` file with the toolchain, source
 commit and pins it was built from.

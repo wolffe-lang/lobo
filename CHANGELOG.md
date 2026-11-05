@@ -12,7 +12,12 @@ same-binary reference-self control before judging the candidate, refusing
 an unsound instrument by name. Five alternating pairs and the 0.900 bar
 are unchanged; calibration is never advisory, including on CI. The
 existing CI candidate-ratio reporting policy and macOS short sample stay
-unchanged. This repairs the instrument, not the server's throughput.
+unchanged. Pairings also wait for observed namespace TIME_WAIT to drain,
+recording both counts and elapsed time with a 120-second bound; timeout
+or saturation refuses the pairing by name, never as a candidate ratio.
+Both binary SHA-256s are printed. Only identical digests receive symmetric
+judgment; different digests retain the one-sided 0.900 rule. No network
+setting changes. This repairs the instrument, not the server's throughput.
 
 ### Shared-listener admission and connection metrics
 

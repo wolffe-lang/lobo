@@ -465,7 +465,7 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
     limit = tcp_capacity_limit()
     parameters = dict(requests=requests, warmup=warmup, pairs=pairs, backend_lifetime=backend_lifetime,
                       report_only=report_only, binary_sha256=identities, tcp_max_tw_buckets=limit,
-                      settle_ceiling_seconds=120)
+                      settle_ceiling_seconds=120, tcp_settle_scope="namespace before and after pairing")
     print("lobo-proxy-throughput: binary SHA256 " + json.dumps(identities), flush=True)
     (scratch / "parameters.json").write_text(json.dumps(parameters, indent=2))
     (scratch / "host-before.json").write_text(json.dumps(host_snapshot(), indent=2))
@@ -586,7 +586,7 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
     if control_only:
         return 0
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        print("lobo-proxy-throughput: CI MEASUREMENT — every drive has a fresh backend and port; reference-self calibration is mandatory and fatal; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
+        print("lobo-proxy-throughput: CI MEASUREMENT — fresh backend/port per drive and bounded recorded TCP settling per pairing; SHA256 identity governs symmetric controls; reference-self calibration and saturation refusal are mandatory and fatal; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
     if platform.system() == "Darwin" and report_only:
         print("lobo-proxy-throughput: macOS CI uses its bounded short request window; calibration remains mandatory", flush=True)
     rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs,
