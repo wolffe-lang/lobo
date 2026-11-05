@@ -404,7 +404,11 @@ def wait_tcp_quiet(label, timeout=120, artifact=None):
             print(f"lobo-proxy-throughput: settling {label}: namespace TIME_WAIT={current} elapsed={now - began:.1f}", flush=True)
             noticed = now
         time.sleep(1)
-        current = time_wait_count()
+        try:
+            current = time_wait_count()
+        except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+            finish(None, time.monotonic(), "unavailable")
+            raise
 
 
 def verify_binary_digests(reference, head, expected):
