@@ -2,6 +2,24 @@
 
 ## Unreleased — 0.1.6
 
+### Shared-listener admission and connection metrics
+
+A full worker with no idle connection to evict now leaves inherited
+shared client listeners out of its wait for 20 ms before taking and
+refusing a connection. This gives a sibling with room a chance to
+accept it. Control, signals and established connections remain
+serviceable. When all workers are full, each refusal gains one pause;
+single-process and `reuseport` admission are unchanged.
+
+`/metrics` adds per-process `lobo_connections_refused_total`,
+`lobo_connections_evicted_total` and
+`lobo_accept_failures_total{reason="emfile|enfile|other"}`. Failed
+recovery accepts count too; accept-race timeouts do not. The existing
+`lobo_worker_id` identifies the worker whose counters were scraped.
+Descriptor reasons are attributed by an immediate descriptor probe;
+`other` means exhaustion could not be attributed. These counters survive
+reloads and reset on process restart.
+
 ### Incomplete worker reloads (lobo#101, partial)
 
 A master whose workers reject or do not acknowledge a reload now replies

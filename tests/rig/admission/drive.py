@@ -235,6 +235,54 @@ def accept_failure(binary, directory):
         server.close()
 
 
+def worker_counters(binary, directory):
+    server = Server(binary, directory, workers=2)
+    rows = {}
+    try:
+        for line in server.status().splitlines():
+            match = re.match(r"worker ([0-9]+): serving control=([^ ]+) .*pid=([0-9]+)", line)
+            if match:
+                rows[int(match[1])] = (match[2], int(match[3]))
+        assert set(rows) == {1, 2}, "both workers' own control endpoints and pids"
+
+        def live(ordinal):
+            endpoint = rows[ordinal][0]
+            with socket.create_connection(("127.0.0.1", int(endpoint.rsplit(":", 1)[1])), timeout=5) as sock:
+                sock.sendall(b"status\n")
+                text = b""
+                while True:
+                    piece = sock.recv(8192)
+                    if not piece:
+                        break
+                    text += piece
+                return text.decode()
+
+        os.kill(rows[2][1], signal.SIGSTOP)
+        assert server.downloads(15) == "2" * 14 + "1", "one awake worker's capacity"
+        for sock in server.sockets:
+            sock.close()
+        server.sockets.clear()
+        until(lambda: "generation 1: current live=0" in live(1), "first worker's releases")
+        body = server.fetch("/metrics")
+        assert sample(body, "lobo_worker_id") == 1
+        assert sample(body, "lobo_connections_refused_total") == 1
+        os.kill(rows[2][1], signal.SIGCONT)
+        os.kill(rows[1][1], signal.SIGSTOP)
+        body = server.fetch("/metrics")
+        assert sample(body, "lobo_worker_id") == 2
+        assert sample(body, "lobo_connections_refused_total") == 0
+        assert sample(body, "lobo_connections_evicted_total") == 0
+        for reason in ("emfile", "enfile", "other"):
+            assert sample(body, f'lobo_accept_failures_total{{reason="{reason}"}}') == 0
+    finally:
+        for _, pid in rows.values():
+            try:
+                os.kill(pid, signal.SIGCONT)
+            except ProcessLookupError:
+                pass
+        server.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("mode", choices=("admission", "counters", "oracle"))
@@ -248,7 +296,8 @@ def main():
     else:
         rows = [("connections-refused", lambda: refusal(args.binary, args.directory / "refused")),
                 ("connections-evicted", lambda: eviction(args.binary, args.directory / "evicted")),
-                ("accept-failures-emfile", lambda: accept_failure(args.binary, args.directory / "emfile"))]
+                ("accept-failures-emfile", lambda: accept_failure(args.binary, args.directory / "emfile")),
+                ("connection-counters-per-worker", lambda: worker_counters(args.binary, args.directory / "workers"))]
     red = 0
     for name, run in rows:
         try:

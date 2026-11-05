@@ -202,8 +202,15 @@ serve linux aarch64.
   recently used first, an eighth of them at a time, and the log says
   `[warn] 512 worker_connections are not enough, reusing connections`
   at most once a second. With none idle, the new connection is
-  accepted and closed at once, and the log says `[alert] 512
-  worker_connections are not enough`, one line each. Upstream
+  accepted and closed, and the log says `[alert] 512
+  worker_connections are not enough`, one line each. A full worker
+  on an inherited shared listener first leaves that listener out of
+  its wait for 20 ms, giving a sibling with room a chance to accept.
+  A single process and `reuseport` listeners still refuse immediately;
+  when every shared-listener worker is full, refusal gains one pause.
+  `/metrics` exposes per-process refused and idle-evicted connection
+  totals, plus failed accepts by `emfile`, `enfile` or `other` reason
+  ([metrics reference](docs/metrics.md)). Upstream
   connections count as nginx counts them: a proxied request is two
   connections while its exchange is out. A TLS connection while it is
   served is not counted (`docs/directives.md`). Through 0.1.3 the

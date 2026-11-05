@@ -735,10 +735,22 @@ instead of on the round.
   master). `worker_processes 4` with the default 512 and one `listen`
   serves 2,040 clients. Measured on the oracle: 14 at 16 with one
   worker, 28 with two.
-- **What a hand does at it** is the single process's (README, Limits):
-  idle connections are closed to make room, an eighth at a time; with
-  none idle the new connection is closed at once. Each hand logs its
-  own lines, with its `worker=N` field.
+- **What a hand does at it:** idle connections are closed to make
+  room, an eighth at a time. With none idle, a full hand on an inherited
+  shared listener leaves the client listeners out of its wait for
+  20 ms before taking and refusing a connection. A sibling with room
+  can take it instead. Control, signals and established connections
+  remain in the wait; when every hand is full, refusal gains one pause.
+  An expired pause buys one immediate queue probe, not a later arrival.
+  Single-process and `reuseport` listeners keep immediate refusal.
+  Each hand logs its own lines, with its `worker=N` field.
+- **Connection metrics are per hand:** `lobo_connections_refused_total`
+  counts new clients closed for lack of a slot;
+  `lobo_connections_evicted_total` counts idle clients closed to make
+  room; `lobo_accept_failures_total` counts failed client or control
+  accepts by `reason="emfile|enfile|other"`. A scrape reads one hand,
+  identified by `lobo_worker_id`, never a master-wide sum. The counters
+  survive reloads and reset with the process; see `docs/metrics.md`.
 - **The descriptor limit is each hand's too**, inherited from the
   master. The master prints nginx's start warning once
   (`N worker_connections exceed open file resource limit: M`); each
