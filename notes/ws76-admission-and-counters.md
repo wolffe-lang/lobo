@@ -215,6 +215,44 @@ before candidate judgment; the same 0.900 budget applies with control
 labels in either direction, and CI reporting cannot waive calibration.
 Five reference-self repetitions, head-self and head/reference must pass.
 
+### Throughput instrument — measured cause and selected repair
+
+On the same block and the exact same reference binary, the persistent
+backend read 0.722900 (first/second medians 16,751/12,076 req/s).
+Restarting the backend process on the **same port** still read 0.738918
+with the same low/high alternation. A fresh backend and **fresh port**
+per drive read 1.002966; its five paired ratios were
+1.002069, 1.002359, 1.004232, 0.997744 and 1.003480. Its first/second
+medians were 16,995/17,043 req/s, without the prior two-level pattern.
+
+The reused destinations retained 16,771 and 16,891 TIME_WAIT entries.
+Fresh destinations each retained about 14,600, while the namespace-wide
+count grew from 35,023 to 182,133 and the measurements stayed equal.
+The order effect therefore follows per-destination state, not backend
+process memory or total socket count. The exact kernel reuse algorithm
+is not inferred, and no network settings were changed. Restarting alone
+was insufficient; shuffling order would only average the contamination;
+waiting for old connections to expire would add an arbitrary delay.
+Fresh backend ports isolate the timed drives without changing their
+request count, five pairs or the 0.900 bar.
+
+The gate now requires a named reference-self control before collecting
+the candidate comparison. That control applies the existing 0.900
+budget with either label assigned to the identical binary; a favorable
+bias is also unsound. It remains fatal even where CI retains its old
+candidate-ratio reporting policy. No local reporting waiver is used.
+The new pure tests went red first (16 tests, four missing-feature
+errors), then all 18 passed after the repair. The two short unit takes
+used a light slot and one Python worker: average busy CPUs 0.907 red
+and 0.693 green, with a 6 GiB cap. Five reference-self repetitions,
+head-self and the actual head/reference tool gate are the hard
+precondition for the next full record; validation is pending here.
+
+The causal take is `backend-diagnosis.log`, SHA-256
+`fc30e581c1893bebeebb64d2339d78e045ca6b490948f69bd29799bc09e12631`.
+The original instrument controls are `order-controls.log`, SHA-256
+`ef8b52e588b41d3a820881f4abac4843b5dc4189bb6b0da6869806d9543e495b`.
+
 The final-head green and off-line plant records, their SHA-256s and
 every END line accompany the PR. Parser-shape smoke records were
 verified separately before the locked take; they are not merge evidence.
