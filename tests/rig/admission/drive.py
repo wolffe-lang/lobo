@@ -181,7 +181,7 @@ def admission(binary, directory):
     finally:
         server.close()
         usage = resource.getrusage(resource.RUSAGE_CHILDREN)
-        print(f"server-tree-cpu-ms={(usage.ru_utime + usage.ru_stime - cpu_before) * 1000:.3f}", flush=True)
+        print(f"child-cpu-ms={(usage.ru_utime + usage.ru_stime - cpu_before) * 1000:.3f}", flush=True)
 
 
 def measure_oracle(binary, directory):
