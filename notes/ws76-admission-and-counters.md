@@ -246,7 +246,8 @@ errors), then all 18 passed after the repair. The two short unit takes
 used a light slot and one Python worker: average busy CPUs 0.907 red
 and 0.693 green, with a 6 GiB cap. Five reference-self repetitions,
 head-self and the actual head/reference tool gate are the hard
-precondition for the next full record; validation is pending here.
+precondition for the next full record. At this stage they were pending;
+the later namespace failure and completed settled take are below.
 
 The causal take is `backend-diagnosis.log`, SHA-256
 `fc30e581c1893bebeebb64d2339d78e045ca6b490948f69bd29799bc09e12631`.
@@ -306,6 +307,37 @@ Completed evidence: `saturation-red.log` SHA-256
 `039a1ee26e2b746463351ceec7af89637a48e1467ac98c2f26e0bdfc6358538a`.
 A new private-namespace validation starts from scratch; none of the
 pre-settling ratios is counted toward its five required repetitions.
+
+### Settled validation from scratch
+
+The complete new take at instrument commit `149bc2e` passed, without
+using any pre-settling result:
+
+| comparison | median-rate ratio |
+|---|---|
+| reference-self 1 | 1.000105 |
+| reference-self 2 | 1.002966 |
+| reference-self 3 | 0.999752 |
+| reference-self 4 | 0.996945 |
+| reference-self 5 | 0.996314 |
+| head-self | 1.006311 |
+| actual tool head/reference | 1.025919 |
+
+All 25 reference-self paired ratios lay between 0.986716 and 1.011947,
+without the old 0.72/1.37 alternation. The head-self pair range was
+0.998984–1.008474; the real comparison 1.020756–1.030816. All 18 settles
+recorded status settled and after=0; the longest took 64.036227 seconds,
+below the unchanged 120-second ceiling. Every pairing printed binary
+SHA-256s, and no reporting waiver was used. The actual tool includes
+its mandatory reference-self preflight before candidate judgment.
+This is instrument validation, not a claim of server throughput recovery.
+
+`settled-validation.log` SHA-256:
+`af7dcd36dd92a8af23870a956ff6132c8c090c0927c56f41a94604a235ad4599`.
+The failed first full take remains `green-final-5c62a88.log`, despite its
+intended filename, with worst=1 at proxied-throughput; SHA-256
+`e33ab4a380494b1e3bf3a2fa2ffade98eb6b557622479ddc34f75dc53230d707`.
+It is preserved red evidence, never the merge record.
 
 The final-head green and off-line plant records, their SHA-256s and
 every END line accompany the PR. Parser-shape smoke records were
