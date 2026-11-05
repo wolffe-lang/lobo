@@ -1,5 +1,6 @@
 """A loopback-only relative throughput witness; Python standard library only."""
 import argparse
+import hashlib
 import json
 import math
 import os
@@ -218,7 +219,8 @@ class RatchetTests(unittest.TestCase):
             with mock.patch(__name__ + ".free_port", side_effect=[31001, 31002, 31003, 31004]), \
                  mock.patch(__name__ + ".wait_up"), mock.patch(__name__ + ".stop") as stop_child, \
                  mock.patch(__name__ + ".host_snapshot", return_value={}), \
-                 mock.patch(__name__ + ".tcp_snapshot", return_value={}), \
+                 mock.patch(__name__ + ".tcp_snapshot", return_value={"available": True, "tw": 0}), \
+                 mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
                  mock.patch(__name__ + ".wait_tcp_quiet") as quiet, \
                  mock.patch(__name__ + ".drive", return_value=(100, "Keep-Alive requests: 32\n")), \
                  mock.patch.object(subprocess, "check_output", return_value="up"), \
@@ -333,6 +335,84 @@ def drive(port, count, raw_path=None):
         raise ValueError(f"ApacheBench completed {got}, expected {count}")
     return speed, result.stdout
 
+def binary_digest(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def tcp_capacity_limit():
+    path = Path("/proc/sys/net/ipv4/tcp_max_tw_buckets")
+    return int(path.read_text().strip()) if path.exists() else None
+
+
+def check_tcp_capacity(current, limit):
+    if limit is None:
+        return
+    if current is None:
+        raise RuntimeError("[tcp-state] namespace TIME_WAIT count unavailable")
+    if current >= limit:
+        raise RuntimeError(f"[tcp-state] namespace TIME_WAIT {current} reached capacity {limit}; pairing refused")
+
+
+def time_wait_count():
+    snapshot = tcp_snapshot()
+    if snapshot.get("available") and "tw" in snapshot:
+        return snapshot["tw"]
+    if platform.system() == "Darwin":
+        result = subprocess.run(["netstat", "-an", "-p", "tcp"], capture_output=True, text=True, timeout=5)
+        if result.returncode == 0:
+            return sum("TIME_WAIT" in line.split() for line in result.stdout.splitlines())
+    raise RuntimeError("[tcp-settle] namespace TIME_WAIT is not observable")
+
+
+def wait_tcp_quiet(label, timeout=120, artifact=None):
+    """Observe actual namespace quietness, outside the timed AB drives."""
+    began = time.monotonic()
+    limit = tcp_capacity_limit()
+    before = None
+
+    def finish(after, now, status):
+        result = dict(label=label, before=before, after=after, elapsed_seconds=now - began,
+                      ceiling_seconds=timeout, capacity_limit=limit, status=status)
+        if artifact is not None:
+            Path(artifact).write_text(json.dumps(result, indent=2))
+        print("lobo-proxy-throughput: TCP SETTLE " + json.dumps(result), flush=True)
+        return result
+
+    try:
+        current = before = time_wait_count()
+    except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
+        finish(None, time.monotonic(), "unavailable")
+        raise
+    noticed = began - 10
+    while True:
+        now = time.monotonic()
+        try:
+            check_tcp_capacity(current, limit)
+        except RuntimeError:
+            finish(current, now, "saturated")
+            raise
+        if current == 0:
+            return finish(current, now, "settled")
+        if now - began >= timeout:
+            finish(current, now, "timeout")
+            raise RuntimeError(f"[tcp-settle] {label} did not settle in {timeout} seconds; pairing refused before timing")
+        if now - noticed >= 10:
+            print(f"lobo-proxy-throughput: settling {label}: namespace TIME_WAIT={current} elapsed={now - began:.1f}", flush=True)
+            noticed = now
+        time.sleep(1)
+        current = time_wait_count()
+
+
+def verify_binary_digests(reference, head, expected):
+    current = dict(reference=binary_digest(reference), head=binary_digest(head))
+    if current != expected:
+        raise RuntimeError("[binary-identity] binary bytes changed during the pairing; no ratio judged")
+
+
 def tcp_snapshot():
     """Fast Linux socket counters; diagnostic data, never an acceptance gate."""
     path = Path("/proc/net/sockstat")
@@ -377,14 +457,19 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
     scratch.mkdir(parents=True, exist_ok=True)
     (scratch / "logs").mkdir(exist_ok=True)
     (scratch / "body").write_bytes(b"PROXIED-BODY-16\n")
+    identities = dict(reference=binary_digest(reference), head=binary_digest(head))
+    limit = tcp_capacity_limit()
     parameters = dict(requests=requests, warmup=warmup, pairs=pairs, backend_lifetime=backend_lifetime,
-                      report_only=report_only)
+                      report_only=report_only, binary_sha256=identities, tcp_max_tw_buckets=limit,
+                      settle_ceiling_seconds=120)
+    print("lobo-proxy-throughput: binary SHA256 " + json.dumps(identities), flush=True)
     (scratch / "parameters.json").write_text(json.dumps(parameters, indent=2))
     (scratch / "host-before.json").write_text(json.dumps(host_snapshot(), indent=2))
     print("lobo-proxy-throughput: shape " + json.dumps(parameters), flush=True)
     children, rows, files = [], [], []
     used_ports = set()
     backend = None
+    namespace_ready = False
     backend_port = None if backend_lifetime == "fresh" else free_port()
 
     def launch(args, label):
@@ -395,6 +480,9 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
         return process
 
     try:
+        if backend_lifetime == "fresh":
+            wait_tcp_quiet("before " + str(scratch), artifact=scratch / "settle-before.json")
+        namespace_ready = True
         for round_ in range(pairs):
             order = [("reference", reference), ("head", head)]
             if round_ % 2:
@@ -418,6 +506,7 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
                     backend = launch([nginx, "-p", str(scratch), "-c", str(conf)], "backend-" + label)
                     wait_up(backend_port, backend)
                 before = tcp_snapshot()
+                check_tcp_capacity(before.get("tw"), limit)
                 port = free_port()
                 conf = scratch / (label + ".conf")
                 conf.write_text(f"pid {scratch}/{name}.pid; http {{access_log off; "
@@ -432,6 +521,7 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
                            backend_port=backend_port, tcp_before=before, tcp_after=tcp_snapshot())
                 rows.append(row)
                 print("lobo-proxy-throughput: " + json.dumps(row), flush=True)
+                check_tcp_capacity(row["tcp_after"].get("tw"), limit)
                 stop(process)
                 if backend_lifetime != "persistent":
                     stop(backend)
@@ -445,12 +535,15 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
         return rows
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
         (scratch / "host-failure.json").write_text(json.dumps(host_snapshot(), indent=2))
+        (scratch / "measurements-partial.json").write_text(json.dumps(rows, indent=2))
         raise
     finally:
         for process in reversed(children):
             stop(process)
         for file in files:
             file.close()
+        if namespace_ready and backend_lifetime == "fresh":
+            wait_tcp_quiet("after " + str(scratch), artifact=scratch / "settle-after.json")
 
 
 def _report_pairing(rows, pairs, label, report_only=False, control=False):
@@ -473,9 +566,12 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
     # Calibration is never advisory, including when CI only reports
     # the candidate ratio. Do not judge a candidate with an unsound rig.
     root = Path(scratch)
+    identities = dict(reference=binary_digest(reference), head=binary_digest(head))
+    print("lobo-proxy-throughput: requested binary SHA256 " + json.dumps(identities), flush=True)
     try:
         control_rows = _sample_pairing(nginx, reference, reference, root / "reference-self",
                                        requests, warmup, pairs)
+        verify_binary_digests(reference, head, identities)
         calibrated = _report_pairing(control_rows, pairs, "[reference-self]", control=True) == 0
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(f"lobo-proxy-throughput: FAILED — [reference-self] collection failed: {error}; candidate not judged", flush=True)
@@ -491,7 +587,9 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
         print("lobo-proxy-throughput: macOS CI uses its bounded short request window; calibration remains mandatory", flush=True)
     rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs,
                            report_only=report_only)
-    return _report_pairing(rows, pairs, "comparison", report_only)
+    verify_binary_digests(reference, head, identities)
+    identical = identities["reference"] == identities["head"]
+    return _report_pairing(rows, pairs, "[same-binary]" if identical else "comparison", report_only, control=identical)
 
 
 def main():
