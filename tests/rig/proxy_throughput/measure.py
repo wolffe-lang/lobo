@@ -399,7 +399,7 @@ def wait_tcp_quiet(label, timeout=120, artifact=None):
             return finish(current, now, "settled")
         if now - began >= timeout:
             finish(current, now, "timeout")
-            raise RuntimeError(f"[tcp-settle] {label} did not settle in {timeout} seconds; pairing refused before timing")
+            raise RuntimeError(f"[tcp-settle] {label} did not settle in {timeout} seconds; pairing refused and no further timed drive allowed")
         if now - noticed >= 10:
             print(f"lobo-proxy-throughput: settling {label}: namespace TIME_WAIT={current} elapsed={now - began:.1f}", flush=True)
             noticed = now
