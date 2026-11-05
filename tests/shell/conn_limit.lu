@@ -114,6 +114,23 @@ fn main() -> !int {
     )
     assert(shell.out_of_descriptors(24) && shell.out_of_descriptors(23), "EMFILE, ENFILE")
     assert(!shell.out_of_descriptors(2) && !shell.out_of_descriptors(0), "nothing else")
+    // ws76: only a full inherited-listener hand with nothing idle
+    // yields; single-process and reuseport admission stay immediate.
+    for inherited in [false, true] {
+        for reuseport in [false, true] {
+            for full in [false, true] {
+                for idle in [false, true] {
+                    let want = if inherited && !reuseport && full && !idle { 20 } else { 0 }
+                    assert(shell.admission_pause_ms(inherited, reuseport, full, idle) == want, "admission pause scope")
+                }
+            }
+        }
+    }
+    assert(shell.accept_failure_reason(24) == "emfile", "accept EMFILE")
+    assert(shell.accept_failure_reason(23) == "enfile", "accept ENFILE")
+    for code in [0, -1, 2, 22, 25] {
+        assert(shell.accept_failure_reason(code) == "other", "unattributed accept failure")
+    }
     print("conn limit ok")
     0
 }
