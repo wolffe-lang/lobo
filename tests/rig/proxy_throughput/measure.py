@@ -42,6 +42,13 @@ def passes(rows, pairs=5):
     return ratio(rows, pairs) >= .9
 
 
+def control_passes(rows, pairs=5):
+    # Identical bytes must satisfy the existing 0.900 budget with
+    # either label assigned to them; a favorable bias is unsound too.
+    value = ratio(rows, pairs)
+    return value >= .9 and 1 / value >= .9
+
+
 def settings(system, requests=None, warmup=None, pairs=None, report_only=False, ci=False):
     mac = system == "Darwin" and ci
     out = dict(requests=requests if requests is not None else (1000 if mac else 20000),
@@ -375,21 +382,38 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
             file.close()
 
 
-def _report_pairing(rows, pairs, label, report_only=False):
+def _report_pairing(rows, pairs, label, report_only=False, control=False):
     for name in ("reference", "head"):
         speeds = [r["rate"] for r in rows if r["name"] == name]
         print(f"lobo-proxy-throughput: {label} {name}: median {statistics.median(speeds):.2f} req/s [{min(speeds):.2f}, {max(speeds):.2f}]", flush=True)
     value = ratio(rows, pairs)
-    verdict = "REPORTED" if report_only else ("ok" if passes(rows, pairs) else "FAILED")
-    print(f"lobo-proxy-throughput: {verdict} — {label} head/reference {value:.3f}x (bar 0.900x{' advisory' if report_only else ''})", flush=True)
+    good = control_passes(rows, pairs) if control else passes(rows, pairs)
+    advisory = report_only and not control
+    verdict = "REPORTED" if advisory else ("ok" if good else "FAILED")
+    print(f"lobo-proxy-throughput: {verdict} — {label} head/reference {value:.3f}x (bar 0.900x{' both control directions' if control else ' advisory' if advisory else ''})", flush=True)
     paired = [next(r["rate"] for r in rows if r["round"] == i and r["name"] == "head") /
               next(r["rate"] for r in rows if r["round"] == i and r["name"] == "reference") for i in range(pairs)]
     print("lobo-proxy-throughput: paired ratios " + json.dumps(paired), flush=True)
-    return 0 if report_only or passes(rows, pairs) else 1
+    return 0 if advisory or good else 1
 
 
-def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5, report_only=False):
-    rows = _sample_pairing(nginx, reference, head, scratch, requests, warmup, pairs)
+def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5,
+            report_only=False, control_only=False):
+    # Calibration is never advisory, including when CI only reports
+    # the candidate ratio. Do not judge a candidate with an unsound rig.
+    root = Path(scratch)
+    control_rows = _sample_pairing(nginx, reference, reference, root / "reference-self",
+                                   requests, warmup, pairs)
+    if _report_pairing(control_rows, pairs, "[reference-self]", control=True) != 0:
+        print("lobo-proxy-throughput: REFUSED — reference-self instrument check failed; candidate not judged", flush=True)
+        return 1
+    if control_only:
+        return 0
+    if os.environ.get("GITHUB_ACTIONS") == "true":
+        print("lobo-proxy-throughput: CI MEASUREMENT — reference-self calibration is mandatory; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
+    if platform.system() == "Darwin" and report_only:
+        print("lobo-proxy-throughput: macOS CI uses its bounded short request window; calibration remains mandatory", flush=True)
+    rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs)
     return _report_pairing(rows, pairs, "comparison", report_only)
 
 
@@ -400,8 +424,9 @@ def main():
     parser.add_argument("nginx"); parser.add_argument("reference"); parser.add_argument("head"); parser.add_argument("scratch")
     parser.add_argument("--requests",type=int); parser.add_argument("--warmup",type=int); parser.add_argument("--pairs",type=int)
     parser.add_argument("--report-only",action="store_true")
+    parser.add_argument("--control-only",action="store_true")
     args=parser.parse_args()
-    return measure(args.nginx,args.reference,args.head,args.scratch,
+    return measure(args.nginx,args.reference,args.head,args.scratch,control_only=args.control_only,
                    **settings(platform.system(),args.requests,args.warmup,args.pairs,args.report_only,ci=os.environ.get("GITHUB_ACTIONS")=="true"))
 
 
