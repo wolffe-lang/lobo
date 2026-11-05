@@ -16,6 +16,9 @@ itself is below.
 | `lobo_config_generation_current` | gauge | — | The generation number currently accepting new connections. |
 | `lobo_config_generations` | gauge | `state` | Live configuration generations by state (current or draining). |
 | `lobo_connections_accepted_total` | counter | — | Connections accepted since start. |
+| `lobo_connections_refused_total` | counter | — | Accepted client connections refused because worker_connections had no free slot and no idle connection could be evicted, since process start. |
+| `lobo_connections_evicted_total` | counter | — | Idle client connections evicted to make room at worker_connections, since process start. |
+| `lobo_accept_failures_total` | counter | `reason` | Failed client or control accepts since process start, including failed recovery accepts; reason emfile or enfile when descriptor exhaustion is attributable, otherwise other. An accept timeout after a lost race is not a failure. |
 | `lobo_connections_active` | gauge | `gen` | Connections currently held, by the generation that accepted them. |
 | `lobo_connections_retired_total` | counter | `gen outcome` | Connections retired from a draining generation: outcome drained (finished) or aborted (worker_shutdown_timeout forced the close). A generation's series leave with it once its last connection retires; lobo_drained_connections_total keeps the sum. |
 | `lobo_drained_connections_total` | counter | `outcome` | Connections retired from draining generations since start, every generation together (outcome drained or aborted): unlike lobo_connections_retired_total it survives the generation, so a finished drain stays counted. |
@@ -36,6 +39,22 @@ itself is below.
 | `lobo_log_lines_dropped_total` | counter | — | Access-log lines dropped because a sink's bounded buffer was full (emit never blocks). |
 | `lobo_events_total` | counter | — | Vocabulary events emitted — the highest seq stamped. A log stream whose top seq matches this has no trailing hole. |
 | `lobo_worker_id` | gauge | — | Which process answered this scrape: 0 for a single-process lobo, the worker's ordinal under a master. A scrape reaches ONE worker; the master's status is the sum across workers. |
+
+## Connection counters
+
+These counters belong to the process that answered the scrape, named
+by `lobo_worker_id` (0 for a single process). They survive reloads and
+reset when the process restarts; a scrape is not a master-wide sum.
+
+`lobo_connections_refused_total` is the subset of accepted client
+connections closed for lack of a slot. `lobo_connections_evicted_total`
+counts idle clients closed to make room, not ordinary closes or drains.
+`lobo_accept_failures_total` includes failed client, control and recovery
+accept attempts, but not a timeout after a sibling won the accept race.
+The network API reports only io here: `emfile` and `enfile` are attributed
+by a descriptor-open probe immediately after the failure, and `other`
+means that probe could not attribute descriptor exhaustion. All three
+reason series are exposed from start, including zero values.
 
 ## The endpoint
 
