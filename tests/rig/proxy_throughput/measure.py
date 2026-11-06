@@ -488,6 +488,32 @@ def check_tcp_capacity(current, limit):
         raise RuntimeError(f"[tcp-state] namespace TIME_WAIT {current} reached capacity {limit}; pairing refused")
 
 
+# A drive starts only with room for one more drive's TIME_WAIT entries
+# under this fraction of the kernel-reported capacity. The other quarter
+# is margin for a drive larger than the largest measured one: 16,384
+# entries at a hosted runner's 65,536, more than a whole drive there.
+DRIVE_SETTLE_FRACTION = .75
+
+
+def drive_settle_target(current, increment, limit, fraction=DRIVE_SETTLE_FRACTION):
+    """The count a drive must wait for, or None when it already has room.
+
+    Room is the count plus one drive's measured increment at or under the
+    fraction of capacity. With no reported capacity, or no drive measured
+    yet (a pairing's first drive starts from its settled zero), there is
+    nothing to predict. An increment no wait could make room for refuses.
+    """
+    if limit is None or increment is None:
+        return None
+    threshold = math.floor(fraction * limit)
+    if current + increment <= threshold:
+        return None
+    if increment > threshold:
+        raise RuntimeError(f"[tcp-settle] one drive adds {increment} TIME_WAIT entries, more than "
+                           f"{fraction} of capacity {limit} ({threshold}); pairing refused")
+    return threshold - increment
+
+
 def time_wait_count():
     snapshot = tcp_snapshot()
     if snapshot.get("available") and "tw" in snapshot:
@@ -499,15 +525,21 @@ def time_wait_count():
     raise RuntimeError("[tcp-settle] namespace TIME_WAIT is not observable")
 
 
-def wait_tcp_quiet(label, timeout=120, artifact=None):
-    """Observe actual namespace quietness, outside the timed AB drives."""
+def wait_tcp_quiet(label, timeout=120, artifact=None, target=0, detail=None):
+    """Observe actual namespace quietness, outside the timed AB drives.
+
+    Around a pairing the target is zero. Before a drive it is the room
+    one more drive needs (drive_settle_target), with the prediction's
+    inputs in detail. The same bound, refusals and record apply to both.
+    """
     began = time.monotonic()
     limit = tcp_capacity_limit()
     before = None
+    goal = "" if target == 0 else f" to {target}"
 
     def finish(after, now, status):
-        result = dict(label=label, before=before, after=after, elapsed_seconds=now - began,
-                      ceiling_seconds=timeout, capacity_limit=limit, status=status)
+        result = dict(label=label, before=before, after=after, target=target, elapsed_seconds=now - began,
+                      ceiling_seconds=timeout, capacity_limit=limit, status=status, **(detail or {}))
         if artifact is not None:
             Path(artifact).write_text(json.dumps(result, indent=2))
         print("lobo-proxy-throughput: TCP SETTLE " + json.dumps(result), flush=True)
@@ -526,13 +558,13 @@ def wait_tcp_quiet(label, timeout=120, artifact=None):
         except RuntimeError:
             finish(current, now, "saturated")
             raise
-        if current == 0:
+        if current <= target:
             return finish(current, now, "settled")
         if now - began >= timeout:
             finish(current, now, "timeout")
-            raise RuntimeError(f"[tcp-settle] {label} did not settle in {timeout} seconds; pairing refused and no further timed drive allowed")
+            raise RuntimeError(f"[tcp-settle] {label} did not settle{goal} in {timeout} seconds; pairing refused and no further timed drive allowed")
         if now - noticed >= 10:
-            print(f"lobo-proxy-throughput: settling {label}: namespace TIME_WAIT={current} elapsed={now - began:.1f}", flush=True)
+            print(f"lobo-proxy-throughput: settling {label}{goal}: namespace TIME_WAIT={current} elapsed={now - began:.1f}", flush=True)
             noticed = now
         time.sleep(1)
         try:
@@ -540,6 +572,35 @@ def wait_tcp_quiet(label, timeout=120, artifact=None):
         except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired):
             finish(None, time.monotonic(), "unavailable")
             raise
+
+
+def settle_before_drive(label, limit, cycle_start, increment, artifact=None):
+    """Make room for one drive before its backend starts.
+
+    The caller runs this with every owned child stopped, so no settle can
+    fall inside a warm-up or a timed window. The increment is the largest
+    growth of any earlier drive cycle of the pairing (from one guard to
+    the next); the first cycle grows from the pairing's settled zero, so
+    its growth is exact. The returned record's start is the count the
+    next cycle grows from.
+    """
+    if limit is None:
+        return dict(status="no capacity reported")
+    current = time_wait_count()
+    if cycle_start is not None:
+        grown = current - cycle_start
+        increment = grown if increment is None else max(increment, grown)
+    guard = dict(count=current, increment=increment, fraction=DRIVE_SETTLE_FRACTION,
+                 threshold=math.floor(DRIVE_SETTLE_FRACTION * limit), capacity_limit=limit)
+    target = drive_settle_target(current, increment, limit)
+    if target is None:
+        guard.update(status="room", start=current)
+        return guard
+    settled = wait_tcp_quiet("before drive " + label, artifact=artifact, target=target,
+                             detail=dict(increment=increment, fraction=DRIVE_SETTLE_FRACTION,
+                                         threshold=guard["threshold"]))
+    guard.update(status="settled", target=target, start=settled["after"], settle=settled)
+    return guard
 
 
 def verify_binary_digests(reference, head, expected):
@@ -596,7 +657,9 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
     limit = tcp_capacity_limit()
     parameters = dict(requests=requests, warmup=warmup, pairs=pairs, backend_lifetime=backend_lifetime,
                       report_only=report_only, binary_sha256=identities, tcp_max_tw_buckets=limit,
-                      settle_ceiling_seconds=120, tcp_settle_scope="namespace before and after pairing")
+                      settle_ceiling_seconds=120, drive_settle_fraction=DRIVE_SETTLE_FRACTION,
+                      tcp_settle_scope="namespace before and after pairing, and before any drive whose "
+                                       "measured increment would pass the fraction of capacity")
     print("lobo-proxy-throughput: binary SHA256 " + json.dumps(identities), flush=True)
     (scratch / "parameters.json").write_text(json.dumps(parameters, indent=2))
     (scratch / "host-before.json").write_text(json.dumps(host_snapshot(), indent=2))
@@ -606,6 +669,7 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
     backend = None
     namespace_ready = False
     backend_port = None if backend_lifetime == "fresh" else free_port()
+    cycle_start, increment = None, None
 
     def launch(args, label):
         logfile = open(scratch / (label + ".stderr"), "w")
@@ -624,6 +688,14 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
                 order.reverse()
             for name, binary in order:
                 label = f"{name}-{round_}"
+                # Every owned child is stopped here, before this drive's
+                # backend starts: outside the warm-up and the timed window.
+                if backend_lifetime == "fresh":
+                    guard = settle_before_drive(f"{label} of {scratch}", limit, cycle_start, increment,
+                                                artifact=scratch / ("settle-" + label + ".json"))
+                    cycle_start, increment = guard.get("start"), guard.get("increment")
+                else:
+                    guard = dict(status="no settle: diagnostic backend lifetime")
                 if backend is None:
                     if backend_lifetime == "fresh":
                         for _ in range(100):
@@ -653,7 +725,8 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
                 drive(port, warmup, scratch / (label + "-warmup.ab"))
                 speed, raw = drive(port, requests, scratch / (label + ".ab"))
                 row = dict(round=round_, name=name, rate=speed, keepalive_requests=keepalive(raw),
-                           backend_port=backend_port, tcp_before=before, tcp_after=tcp_snapshot())
+                           backend_port=backend_port, tcp_before=before, tcp_after=tcp_snapshot(),
+                           tcp_guard=guard)
                 rows.append(row)
                 print("lobo-proxy-throughput: " + json.dumps(row), flush=True)
                 check_tcp_capacity(row["tcp_after"].get("tw"), limit)
@@ -717,7 +790,7 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
     if control_only:
         return 0
     if os.environ.get("GITHUB_ACTIONS") == "true":
-        print("lobo-proxy-throughput: CI MEASUREMENT — fresh backend/port per drive and bounded recorded TCP settling per pairing; SHA256 identity governs symmetric controls; reference-self calibration and saturation refusal are mandatory and fatal; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
+        print(f"lobo-proxy-throughput: CI MEASUREMENT — fresh backend/port per drive and bounded recorded TCP settling per pairing and before any drive that would pass {DRIVE_SETTLE_FRACTION} of capacity; SHA256 identity governs symmetric controls; reference-self calibration and saturation refusal are mandatory and fatal; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
     if platform.system() == "Darwin" and report_only:
         print("lobo-proxy-throughput: macOS CI uses its bounded short request window; calibration remains mandatory", flush=True)
     rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs,
