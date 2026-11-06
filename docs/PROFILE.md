@@ -2808,6 +2808,28 @@ single-client recovery. Failed, non-2xx, incomplete or non-keepalive runs
 remain fatal; unit tests cover calibration refusal, the unchanged bar,
 backend isolation and incomplete-pair handling.
 
+A hosted runner's namespace holds only 65,536 TIME_WAIT entries, and
+each 22,000-request drive left about 13,000 there. The fifth drive of
+the reference-self pairing saturated it, and the instrument refused by
+name, as designed: settling only between pairings can't make room
+inside one. Before every drive, with each owned child stopped and the
+drive's backend not yet started, the instrument now reads the namespace
+count. Where the kernel reports a capacity and the count plus one
+drive's measured increment would pass 0.75 of it, the drive waits under
+the same 120-second ceiling and record until the count is at most 0.75
+of capacity less the increment. The increment is the largest growth of
+any earlier drive cycle in the pairing. The first cycle grows from the
+pairing's settled zero, so its growth is exact. A timeout, saturation,
+or a single drive larger than the fraction refuses by name. The
+remaining quarter is margin for a drive larger than any measured: more
+than a whole drive at 65,536. At 262,144, ten drives fit below the
+fraction and no drive waits. Below capacity the kernel keeps TIME_WAIT
+entries as usual, and equal rates were measured from 35,023 to 182,133
+entries, so the wait changes no drive's starting conditions except to
+keep them below the ceiling. macOS reports no capacity and is unchanged.
+Each drive's decision is kept in its row as `tcp_guard`, and a wait's
+JSON as `settle-<drive>.json`.
+
 
 ### Hosted-runner method boundary (ws73 history)
 
