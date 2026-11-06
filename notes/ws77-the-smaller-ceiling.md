@@ -36,6 +36,7 @@ trunk, and no attribution trailers.
 | environment | hardware and bounds |
 |---|---|
 | Linux x86-64, Ubuntu 24.04 container | Intel Core i7-10870H, 16 logical CPUs; an eight-CPU affinity (four cores, both threads), 12 GiB memory cap |
+| Linux x86-64, Ubuntu 24.04 container | Intel Core i7-12700KF, 20 logical CPUs; a six-CPU affinity, 12 GiB memory cap, nothing beside it |
 | GitHub hosted runner (the red) | `ubuntu-latest`, TIME_WAIT capacity 65,536 |
 
 ## 3. Prediction (committed before any source change)
@@ -114,3 +115,114 @@ pairings), past the runner's job budget.
 **The plant:** one hunk in `tests/rig/proxy_throughput/measure.py` skips
 the per-drive settle. The new unit rows go red by name, and the 65,536
 drive refuses `[tcp-state]` exactly as at base.
+
+## 4. Evidence index
+
+### The red at base, reproduced (i7-10870H)
+
+At `e63bf31`, `tools/lobo-proxy-throughput` ran in a container namespace
+holding 65,536 entries; the host's value read 131,072 before and after.
+The namespace count after each reference-self drive:
+
+| drive | runner, run 42121284008 | here |
+|---|---|---|
+| reference, round 0 | 12,912 | 14,322 |
+| head, round 0 | 26,296 | 28,664 |
+| head, round 1 | 39,583 | 43,029 |
+| reference, round 1 | 52,763 | 57,385 |
+| reference, round 2 | 65,536 | 65,536 |
+
+Then, as on the runner, the after-pairing settle read `before 65536,
+after 65536, status saturated`, and the gate printed the same line byte
+for byte: `FAILED — [reference-self] collection failed: [tcp-state]
+namespace TIME_WAIT 65536 reached capacity 65536; pairing refused;
+candidate not judged`. The saturated drive read 16,523 req/s against
+14,515–14,792 for the four before it, the changed state the capacity
+check exists to refuse. Log `red-base.log`, SHA-256
+`5e4ef3dbc7974aa7a40dc4d315a3ecafc1dac522225f7a48719d9d743ab49283`.
+
+### The rows, red first
+
+`64765c7` added five rows to the instrument's self-test. At that commit
+26 ran with 5 errors: the simulated 65,536 pairing refused with the
+runner's own `[tcp-state] namespace TIME_WAIT 65536 reached capacity
+65536; pairing refused`, and the other four found no guard to call. Base
+`e63bf31` ran its 21 rows green in the same take. After the fix in
+`38a9a2b`, all 26 pass.
+
+### The fixed instrument at 65,536 (`cb80055`, i7-12700KF)
+
+The whole gate completed in 591 seconds, the reference build included:
+
+| pairing | waits before drives | largest count after a drive | ratio | paired range |
+|---|---|---|---|---|
+| reference-self | 4 (60.0, 1.0, 60.0, 58.0 s) | 45,292 | 1.003 | 0.995–1.012 |
+| comparison | 3 (61.0, 62.0, 61.0 s) | 47,553 | 1.009 | 1.003–1.017 |
+
+No count passed the 49,152 threshold. The measured increment was 14,944
+in reference-self and grew from 14,800 to 16,429 in the comparison, whose
+head drives leave about 1,600 more entries each than the reference's;
+the largest-growth estimate carried that. Each pairing's closing settle
+reached zero in 64 seconds. Every wait was recorded with its count,
+target and increment, and each ran before its drive's backend started,
+with every owned child stopped (the timeline row holds that order).
+
+### 262,144, unchanged
+
+The gate completed in 226 seconds, and no drive waited. The largest
+counts were 148,682 and 156,043, under the 196,608 threshold.
+Reference-self read 1.000 (paired 0.994–1.005) and the comparison 1.012
+(paired 1.007–1.019), in line with the previous lane's settled take on
+the same hardware (reference-self 0.996–1.003).
+
+### The previous lane's saturation witness
+
+A namespace filled to 262,144 by direct oracle drives refused at the
+pairing's opening settle, `[tcp-state] namespace TIME_WAIT 262144
+reached capacity 262144; pairing refused`, before any drive or ratio, in
+9 seconds. The witness is that lane's own, copied with only its paths
+changed.
+
+Validation log `valid-cb80055.log`, SHA-256
+`d353f00060377a819798902ceceda3c4ee163948b4673579a57f7c506d44c04d`.
+The host's value read 262,144 after every step. A second validation of
+the same commit, queued on the i7-10870H before the move to the other
+machine (`fixed-cb80055.log`), is not evidence: the final records come
+from the i7-12700KF.
+
+### On the runner
+
+The 65,536 gate's time is the TIME_WAIT lifetime, about three drives per
+60 seconds, not the drive rate. The runner drives at about 6,150 req/s
+against 17,200 here, which adds about a minute. So its throughput step
+should take 10–11 minutes, against 2.5 before the previous lane, and its
+gauntlet job about 36 of its 45 minutes.
+
+## 5. Done-when, limits and follow-ups
+
+Done when the final-head record is green, with the 65,536 reproduction,
+the 262,144 gate, the saturation witness and the unit rows in it, and
+when the one-hunk plant (the per-drive settle skipped) is red by name.
+The records, their SHA-256s and every END line accompany the PR.
+
+Decisions, recommended here and accepted:
+- **R-ws77-1, the fraction: 0.75.** The options were 0.5, 0.75, or
+  settling to zero before every drive. 0.5 costs one more wait in every
+  three drives for no soundness the margin doesn't give, and zero costs
+  about twenty minutes, past the runner's job budget.
+- **R-ws77-2, the runner's job timeout: unchanged at 45 minutes.** The
+  estimate above is about 36. If the labelled run measures over about
+  40, raising it is a separate CI change.
+
+Limits:
+- The increment is an estimate: the largest growth measured so far in
+  the pairing. A drive larger than that by more than a quarter of the
+  capacity would still saturate, and is then refused by name, never
+  judged.
+- macOS reports no capacity, so no drive there is guarded; its path is
+  unchanged and its short window is still reported, not gated.
+- The runner's time is a prediction until the labelled run measures it.
+
+README read: its one sentence on settling now names the per-drive wait.
+
+Footprint: module
