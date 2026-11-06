@@ -5,6 +5,10 @@
 # Every drive gets a fresh backend process and destination port. A
 # mandatory same-binary reference-self check precedes candidate judgment;
 # the five alternating pairs and 0.900 candidate bar are unchanged.
+# Bounded namespace TIME_WAIT settles run around each pairing and, with
+# every child stopped, before any drive whose measured increment would
+# pass 0.75 of the kernel-reported capacity (ws77: a hosted runner holds
+# 65,536, where five drives saturated a pairing).
 # Optional explicit reference/head binaries are measurement inputs,
 # never the gauntlet's default. nginx remains a binary oracle only.
 set -eu
