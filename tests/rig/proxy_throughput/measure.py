@@ -1,6 +1,7 @@
 """A loopback-only relative throughput witness; Python standard library only."""
 import argparse
 import hashlib
+import itertools
 import json
 import math
 import os
@@ -83,6 +84,54 @@ def host_snapshot():
         out["time_wait"] = sum("TIME_WAIT" in line for line in net.stdout.splitlines())
         out["established"] = sum("ESTABLISHED" in line for line in net.stdout.splitlines())
     return out
+
+
+class SimulatedNamespace:
+    """A namespace TIME_WAIT table on a fake clock, for the unit rows only.
+
+    Entries live 60 seconds and none are kept past the capacity. A drive
+    adds 0.6 entries per request (13,200 per warm-up and measured cycle,
+    about what a hosted runner showed) at 6,000 requests per second.
+    """
+
+    def __init__(self, capacity, per_request=.6, rate=6000.0):
+        self.capacity, self.per_request, self.rate = capacity, per_request, rate
+        self.now, self.entries, self.events, self.live = 1000.0, [], [], set()
+        self.saturated = False
+
+    def count(self):
+        self.entries = [(expiry, n) for expiry, n in self.entries if expiry > self.now]
+        return sum(n for _, n in self.entries)
+
+    def monotonic(self):
+        return self.now
+
+    def sleep(self, seconds):
+        self.events.append(("sleep", frozenset(self.live)))
+        self.now += seconds
+
+    def popen(self, args, **kwargs):
+        process = mock.Mock()
+        process.args = args
+        self.live.add(id(process))
+        process.poll.side_effect = lambda: None if id(process) in self.live else 0
+        self.events.append(("launch", args[0]))
+        return process
+
+    def stop(self, process):
+        if id(process) in self.live:
+            self.live.discard(id(process))
+            self.events.append(("stop", process.args[0]))
+
+    def drive(self, port, count, raw_path=None):
+        self.events.append(("drive", count))
+        added = round(count * self.per_request)
+        room = self.capacity - self.count()
+        if added >= room:
+            self.saturated = True
+        self.entries.append((self.now + 60, min(added, room)))
+        self.now += count / self.rate
+        return self.rate, f"Keep-Alive requests: {count}\n"
 
 
 class RatchetTests(unittest.TestCase):
@@ -267,6 +316,88 @@ class RatchetTests(unittest.TestCase):
         check_tcp_capacity(262143, 262144)
         with self.assertRaisesRegex(RuntimeError, "tcp-state"):
             check_tcp_capacity(262144, 262144)
+
+    def test_drive_settle_threshold_is_three_quarters_of_capacity(self):
+        self.assertEqual(DRIVE_SETTLE_FRACTION, .75)
+        self.assertIsNone(drive_settle_target(36152, 13000, 65536))
+        self.assertEqual(drive_settle_target(36153, 13000, 65536), 36152)
+        self.assertIsNone(drive_settle_target(0, None, 65536))
+        self.assertIsNone(drive_settle_target(65535, 13000, None))
+        self.assertIsNone(drive_settle_target(150000, 15000, 262144))
+        self.assertEqual(drive_settle_target(1, 49152, 65536), 0)
+        with self.assertRaisesRegex(RuntimeError, r"^\[tcp-settle\] .*49153.*0\.75"):
+            drive_settle_target(0, 49153, 65536)
+
+    def test_per_drive_settle_reaches_its_target_or_refuses_by_name(self):
+        with mock.patch(__name__ + ".time_wait_count", side_effect=[40000, 38000, 36000]), \
+             mock.patch(__name__ + ".tcp_capacity_limit", return_value=65536), \
+             mock.patch.object(time, "sleep") as sleep, mock.patch("builtins.print"):
+            result = wait_tcp_quiet("before drive unit", target=36152)
+            self.assertEqual((result["before"], result["after"], result["target"], result["status"]),
+                             (40000, 36000, 36152, "settled"))
+            self.assertEqual(sleep.call_count, 2)
+        with mock.patch(__name__ + ".time_wait_count", return_value=40000), \
+             mock.patch(__name__ + ".tcp_capacity_limit", return_value=65536), \
+             mock.patch.object(time, "monotonic", side_effect=[0, 121]), \
+             mock.patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, r"^\[tcp-settle\] before drive unit"):
+                wait_tcp_quiet("before drive unit", timeout=120, target=36152)
+        with mock.patch(__name__ + ".time_wait_count", return_value=65536), \
+             mock.patch(__name__ + ".tcp_capacity_limit", return_value=65536), \
+             mock.patch("builtins.print"):
+            with self.assertRaisesRegex(RuntimeError, r"^\[tcp-state\]"):
+                wait_tcp_quiet("before drive unit", target=36152)
+
+    def simulate_pairing(self, capacity):
+        fake = SimulatedNamespace(capacity)
+        parent = Path(os.environ.get("TMPDIR", "target"))
+        parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(dir=parent) as directory, \
+             mock.patch(__name__ + ".free_port", side_effect=itertools.count(31001)), \
+             mock.patch(__name__ + ".wait_up"), mock.patch(__name__ + ".stop", fake.stop), \
+             mock.patch(__name__ + ".host_snapshot", return_value={}), \
+             mock.patch(__name__ + ".tcp_snapshot", lambda: dict(available=True, tw=fake.count())), \
+             mock.patch(__name__ + ".time_wait_count", fake.count), \
+             mock.patch(__name__ + ".tcp_capacity_limit", return_value=capacity), \
+             mock.patch(__name__ + ".backend_tcp_states", return_value={"available": False}), \
+             mock.patch(__name__ + ".binary_digest", return_value="1" * 64), \
+             mock.patch(__name__ + ".drive", fake.drive), \
+             mock.patch.object(subprocess, "check_output", return_value="up"), \
+             mock.patch.object(subprocess, "Popen", fake.popen), \
+             mock.patch.object(time, "sleep", fake.sleep), \
+             mock.patch.object(time, "monotonic", fake.monotonic), \
+             mock.patch("builtins.print"):
+            rows = _sample_pairing("ng", "ref", "ref", directory)
+        return fake, rows
+
+    def test_a_whole_pairing_completes_in_a_65536_namespace(self):
+        fake, rows = self.simulate_pairing(65536)
+        self.assertEqual(len(rows), 10)
+        self.assertFalse(fake.saturated)
+        self.assertLessEqual(max(r["tcp_after"]["tw"] for r in rows), 49152)
+        settled = [r["tcp_guard"] for r in rows if r["tcp_guard"]["status"] == "settled"]
+        self.assertGreaterEqual(len(settled), 2)
+        self.assertTrue(all(g["settle"]["after"] <= g["target"] < g["count"] for g in settled))
+
+    def test_a_262144_namespace_never_settles_between_drives(self):
+        fake, rows = self.simulate_pairing(262144)
+        self.assertEqual(len(rows), 10)
+        self.assertFalse(fake.saturated)
+        self.assertEqual([r["tcp_guard"]["status"] for r in rows], ["room"] * 10)
+
+    def test_no_settle_falls_inside_a_timed_drive(self):
+        fake, rows = self.simulate_pairing(65536)
+        sleeps = [i for i, event in enumerate(fake.events) if event[0] == "sleep"]
+        drives = [i for i, event in enumerate(fake.events) if event[0] == "drive"]
+        self.assertEqual(len(drives), 20)
+        # Settles do happen between drive cycles, not only around the pairing.
+        self.assertTrue([i for i in sleeps if drives[0] < i < drives[-1]])
+        # A settle waits only while no owned child (backend or server) runs.
+        self.assertEqual([fake.events[i][1] for i in sleeps], [frozenset()] * len(sleeps))
+        # And never between a drive's warm-up and its measured requests.
+        for warm, timed in zip(drives[::2], drives[1::2]):
+            self.assertEqual((fake.events[warm][1], fake.events[timed][1]), (2000, 20000))
+            self.assertEqual([i for i in sleeps if warm < i < timed], [])
 
     def test_digest_not_name_controls_symmetric_judgement(self):
         parent = Path(os.environ.get("TMPDIR", "target"))
