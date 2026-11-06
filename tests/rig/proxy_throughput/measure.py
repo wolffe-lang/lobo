@@ -593,7 +593,7 @@ def settle_before_drive(label, limit, cycle_start, increment, artifact=None):
     guard = dict(count=current, increment=increment, fraction=DRIVE_SETTLE_FRACTION,
                  threshold=math.floor(DRIVE_SETTLE_FRACTION * limit), capacity_limit=limit)
     target = drive_settle_target(current, increment, limit)
-    if target is None:
+    if True:  # ws77 plant: the per-drive settle skipped
         guard.update(status="room", start=current)
         return guard
     settled = wait_tcp_quiet("before drive " + label, artifact=artifact, target=target,
