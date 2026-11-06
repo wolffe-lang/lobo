@@ -19,6 +19,16 @@ Both binary SHA-256s are printed. Only identical digests receive symmetric
 judgment; different digests retain the one-sided 0.900 rule. No network
 setting changes. This repairs the instrument, not the server's throughput.
 
+A drive now also waits, bounded and recorded the same way, when the
+namespace's TIME_WAIT count plus one drive's measured increment would
+pass 0.75 of the kernel-reported capacity. A hosted runner's namespace
+holds 65,536 entries, and with settles only between pairings five drives
+saturated the reference-self pairing there. The wait runs before the
+drive's backend starts, never inside a warm-up or a timed window. A
+timeout, saturation, or one drive larger than the fraction refuses by
+name. Larger namespaces and macOS, which reports no capacity, run as
+before.
+
 ### Shared-listener admission and connection metrics
 
 A full worker with no idle connection to evict now leaves inherited
