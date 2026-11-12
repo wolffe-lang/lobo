@@ -31,8 +31,8 @@
 #   tier pr       any other pull-request run (and a dispatch with tier pr):
 #                 the linux gauntlet.
 #   tier noop     the plan and the verdict: a pull request whose changed
-#                 paths are ALL prose (notes/, CLAUDE.md), or a label other
-#                 than `full-matrix`.
+#                 paths are ALL prose (notes/, CONTRIBUTING.md, CLAUDE.md),
+#                 or a label other than `full-matrix`.
 #   tier measure  a dispatch with parity, profile or syscalls: the linux
 #                 job alone, running the measurement instead of the
 #                 gauntlet, as before (never merge evidence).
@@ -317,7 +317,7 @@ jobs:
           cp objs/nginx "$GITHUB_WORKSPACE/lobo/tests/differential/bin/nginx"
           rm -rf /tmp/nginx-build
 
-      # The rig's host tools beyond the toolchain (CLAUDE.md's list):
+      # The rig's host tools beyond the toolchain (CONTRIBUTING.md's list):
       # POSIX sh, awk, jq, diff and a real OpenSSL 3.x for the TLS
       # steps, plus nc for the acme/proxy/metrics drives. ubuntu-latest
       # ships awk/jq/diff/openssl-3.x. Declare ApacheBench and Python

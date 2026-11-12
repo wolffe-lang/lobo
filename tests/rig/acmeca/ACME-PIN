@@ -14,8 +14,8 @@
 # plumbing's). This is the dogfood rule the whole rig already follows
 # (rigback, httpc, echosrv are all wolf); a vendored Go pebble would be
 # the ONLY non-wolf, non-nginx external artifact in the tree, against
-# CLAUDE.md's "Dependencies: none — the only external artifact is the
-# PINNED nginx binary". So there is nothing to FETCH and nothing to
+# CONTRIBUTING.md's "Dependencies: none ... the only external artifact is
+# the pinned nginx binary". So there is nothing to FETCH and nothing to
 # sha256: the CA's identity is its source under version control, built
 # fresh each run (sub-second) — the "cached build" the contract wants
 # is the wolf toolchain's own, already pinned in wolf-toolchain.toml.
