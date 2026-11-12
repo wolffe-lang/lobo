@@ -41,11 +41,11 @@ trunk (the merge base) exactly as a pull request's, so a plant can ask for
 the pull-request tier without opening one; a path no rule names runs full.
 
 PROSE IS NARROW (RULES, below): notes/ (the lanes' notes and evidence) and
-CLAUDE.md. Not prose, because the gauntlet reads it: docs/ (two pages are
-generated and held to their tables, and the dist stages the rest),
-CHANGELOG.md (the stamp and the release notes), README.md (the dist).
-ci/tiers-test.py trips when a line of tools/ or tests/ that reads a file
-starts naming a prose path.
+the two guides, CONTRIBUTING.md and CLAUDE.md. Not prose, because the
+gauntlet reads it: docs/ (two pages are generated and held to their tables,
+and the dist stages the rest), CHANGELOG.md (the stamp and the release
+notes), README.md (the dist). ci/tiers-test.py trips when a line of tools/
+or tests/ that reads a file starts naming a prose path.
 
 `verdict` checks a finished run: exit 0 when the plan succeeded, the jobs it
 chose are the tier's, every chosen job succeeded and every other job was
@@ -117,6 +117,7 @@ def special(a, every, log):
 RULES = [
     # Prose: no step reads it (ci/tiers-test.py T5).
     ("notes/**", PROSE),
+    ("CONTRIBUTING.md", PROSE),
     ("CLAUDE.md", PROSE),
     # The server, its tests and tools, its docs and pages, its pins, CI.
     ("src/**", LINUX),

@@ -5,7 +5,7 @@ via the language's builtin tiers. The pinned nginx under
 `tests/differential/` is test infrastructure. One directory = one
 module (D32); every module's public surface is a checked-in `.wolfi`
 snapshot beside it (the many-hands rule: internals are yours,
-surfaces are contracts; see `tools/lobo-interface` and CLAUDE.md).
+surfaces are contracts; see `tools/lobo-interface` and CONTRIBUTING.md).
 
 Everything below is read off the tree, not intended for it: the
 modules are `find src -name '*.lu'`, the arrows are the `use` lines,
