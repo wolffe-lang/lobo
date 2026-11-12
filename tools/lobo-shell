@@ -289,7 +289,7 @@ if ! "$WOLF" build "$rig_root"/tests/rig/climit.lu -o "$CLIMIT" > "$scratch/clim
     lim_ready=0
 fi
 if ! command -v curl > /dev/null 2>&1; then
-    echo "lobo-shell: FAILED — the limit rows poll a started server with curl, which this host lacks (CLAUDE.md's host tools)" >&2
+    echo "lobo-shell: FAILED — the limit rows poll a started server with curl, which this host lacks (CONTRIBUTING.md's host tools)" >&2
     lim_ready=0
 fi
 

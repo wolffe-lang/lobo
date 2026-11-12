@@ -1,5 +1,5 @@
 #!/bin/sh
-# lobo-gauntlet — the gate. GREEN BEFORE ANY COMMIT (CLAUDE.md hard
+# lobo-gauntlet — the gate. GREEN BEFORE ANY COMMIT (CONTRIBUTING.md
 # rule). Make-free shell entry (the wolf-std gate is a cargo xtask;
 # this repo has no Rust, so the gate is sh — the delta and its
 # reasoning are recorded in .docs/STYLE.md). Steps, in order, each
@@ -17,7 +17,7 @@
 #                     or drifted oracle; that refusal is a red gate,
 #                     and building the oracle once per
 #                     docs/DIFFERENTIAL.md is part of entering this
-#                     repo — see CLAUDE.md)
+#                     repo — see CONTRIBUTING.md)
 #   …  the witnesses, one tool each (proxy, control, log, …, dist)
 #   Z. census    — (ws25/ws29, lobo#1 + lobo#2) nothing of this
 #                  checkout's is still RUNNING and nothing of the
