@@ -14,6 +14,13 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
+# wolf 0.2.40 at release commit b333b9d, paired with lupin 0.1.62.
+# Release asset digests were read twice: Linux x86-64
+# bc2020e0b7400c18162a6072c299c65c0582ea74a0eba22aaa57ca04ae13e7e1;
+# macOS arm64 3f18a56562fb089da05a50a612e031cd297f20a617b9e6e7ada768fbeb69e72b.
+# Its bundled standard library is be1d10fa2798cc6bc2a1fd0b2e559e283469c9bf.
+#
+# Previous pin:
 # wolf-lang at the **v0.2.36 RELEASE TAG** (5adf3d9, r41p), the release
 # stamp `wolf 0.2.36 (wolfgang, pin 5adf3d9)`. Staged from the RELEASE
 # ARCHIVE by digest, NAMED MEMBERS ONLY (the std note below stands):
@@ -730,10 +737,16 @@
 # both ways and docs/BUDGET.md and docs/PARITY.md following. The
 # shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "5adf3d91f75b3545ff8d38e5b6693b0b9f367a05"
-version_line = "wolf 0.2.36 (wolfgang, pin 5adf3d9)"
+rev = "b333b9da8560e4e1dfd6e30099d14d98e752f9e1"
+version_line = "wolf 0.2.40 (wolfgang, pin b333b9d)"
 
 [lupin]
+# lupin 0.1.62 at release commit 72eff3c, conformance pin 5f1f1c9.
+# Release asset digests were read twice: Linux x86-64
+# 3b3bf9c23a9e545a4a99e65a5183d0c5e71e91d6bfb8a189147e2701c03e177f;
+# macOS arm64 228790ef3aef7605a2f9524abdcb6de5c8a5fa179437d82f3d3af262495a4e7f.
+#
+# Previous pin:
 # (r41p:) lupin at the **v0.1.58 RELEASE TAG** (6240efe), staged from
 # the release archive by digest: x86_64-unknown-linux-gnu
 # 34f52792bb59bc7565e0edc1235cd47d9a6ad13d5e6528993627f2e699b62193 and
@@ -1023,8 +1036,8 @@ version_line = "wolf 0.2.36 (wolfgang, pin 5adf3d9)"
 # not a calendar. Its conformance pin (2e4ca76) is information, not
 # this file's rev. Bumped together with [wolf] as always.
 repo = "wolffe-lang/wolf-interp"
-rev = "6240efe5570dba1a33ba6269e3ba44bae33dd972"
-version_line = "lupin 0.1.58 (wolf-interp, reference interpreter at pin a5378e3)"
+rev = "72eff3c99b3a9e434b059f5dd3e4b1d29c862ddc"
+version_line = "lupin 0.1.62 (wolf-interp, reference interpreter at pin 5f1f1c9)"
 
 [std]
 # wolf-std at **78b9d3cb** (r41p, 2026-10-31), the tree v0.2.36 bundles
@@ -1301,4 +1314,4 @@ version_line = "lupin 0.1.58 (wolf-interp, reference interpreter at pin a5378e3)
 # WOLF_MIDEND=0" was written at the twentieth measurement. #146 closed
 # 2026-09-15; ws52 took the flip-back at 0.2.24 — see [wolf].)
 repo = "wolffe-lang/wolf-std"
-rev = "78b9d3cbc41d51db44d18c40b6694403644d1c83"
+rev = "be1d10fa2798cc6bc2a1fd0b2e559e283469c9bf"
