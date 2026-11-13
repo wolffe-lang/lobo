@@ -1,14 +1,14 @@
 module pkg :: tls
-  wolfi v0 · toolchain 0.2.36 · edition v1
-  export_hash c432c6c1e350bf748c610fd6ef794fa46130e2f1ce356ce2af5f4ef978c3f42f
-  pkg_hash    c432c6c1e350bf748c610fd6ef794fa46130e2f1ce356ce2af5f4ef978c3f42f
+  wolfi v0 · toolchain 0.2.40 · edition v1
+  export_hash 18d5d633cf2bdb57a88d3575c9280aea033b71d2d40fb0b7a3d1f732ac60fb77
+  pkg_hash    18d5d633cf2bdb57a88d3575c9280aea033b71d2d40fb0b7a3d1f732ac60fb77
   deps:
-    config  ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
+    config  732b395bba34cacb010c3476cd57e3ac93558ea3b04af53281379d7aeaa47a0f
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
-    std.x.crypto.curve25519  ad4d209666678283c13835ca645a325b6cf065108eb6d553801931b914710d27
-    std.x.tls.cert  daea0d9c5e79a960033f0d461b469eb865d2b365caf0743e508562de83b0301e
-    std.x.tls.handshake  8c458f3f306bf7d277071fa2d007ed88a39a3f29367619def3c109c4780e3ed0
-    std.x.tls.record  1a000ac6507412be69377baca849e126d84650495e4bf00f0748a383f336d2ba
+    std.x.crypto.curve25519  82b20828faa5c6e19f77db2e9f3ddc4b4c87efee0174f17453fdde71f6fdaa27
+    std.x.tls.cert  e752edc267366e1b994c1eac0038b117418314cb9885d7260a721f99a9b71ddd
+    std.x.tls.handshake  6a08f8fde496f62d643ee5c2c2a24593d9bf794303996aa1b9c0ef57793e0717
+    std.x.tls.record  d956844bc353a0d67650aa051e2897d99c4e42ff713b6442354c65cd6807e01f
   items:
     [0] pub accept — fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> self.Sess ! {io, refused, timeout} · regions (-, ρ1, -) -> ρ_caller
     [1] pub alert_name — fn alert_name(code: int) -> str

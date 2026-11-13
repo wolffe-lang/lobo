@@ -1,10 +1,10 @@
 module pkg :: budget
-  wolfi v0 · toolchain 0.2.36 · edition v1
-  export_hash d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
-  pkg_hash    d37f4e132b99907cd986c3fa7609ab0328bedfb768cf5601c4514c2b4b8aab9c
+  wolfi v0 · toolchain 0.2.40 · edition v1
+  export_hash b13f7125439f6dc3d6aedcde38dec9e74b7d8e59935a1891a449dc62c9890277
+  pkg_hash    b13f7125439f6dc3d6aedcde38dec9e74b7d8e59935a1891a449dc62c9890277
   deps:
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
-    std.str  dc7ce11212aa0aefa04bfb36ce9514e82a7e3a81f51bfa61d26b0c931032be35
+    std.str  64e0174220b16896f192a8f500066d59a640c15224129537f79e9b7d98a53598
   items:
     [0] pub run_small — fn run_small(sock: int, path: str, head: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -, -) -> ρ_caller
     [1] pub run_stream — fn run_stream(sock: int, path: str, cap: int, pipe_w: int, pipe_r: int) -> self.Outcome · regions (-, -, -, -, -) -> ρ_caller

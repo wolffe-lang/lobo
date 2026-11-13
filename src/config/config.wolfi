@@ -1,15 +1,15 @@
 module pkg :: config
-  wolfi v0 · toolchain 0.2.36 · edition v1
-  export_hash ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
-  pkg_hash    ca9e88ea7c189a981ef131ac407905d817cf8880c154338dd0a84ea9acb22fdc
+  wolfi v0 · toolchain 0.2.40 · edition v1
+  export_hash 732b395bba34cacb010c3476cd57e3ac93558ea3b04af53281379d7aeaa47a0f
+  pkg_hash    732b395bba34cacb010c3476cd57e3ac93558ea3b04af53281379d7aeaa47a0f
   deps:
-    std.env  a9f78f9e3d9a3e1423a0cce830cc3029e02c1f8dbc8070c2e8dbf20bb6b799d5
+    std.env  b9e3479235546e20e4fb04f97f20f3506d1fe06aa56a6e6ca99363ae65ccec2d
     std.list  b867c3c66c3aa0dbae1cef22897684da1333874100bc1412d65681a5c310cfc9
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
     std.os.users  ff8a852c1b90f6706f39ad42143b76e3d12f41186160239e32eba37c79bc4068
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
-    std.x.crypto.curve25519  ad4d209666678283c13835ca645a325b6cf065108eb6d553801931b914710d27
-    std.x.tls.cert  daea0d9c5e79a960033f0d461b469eb865d2b365caf0743e508562de83b0301e
+    std.x.crypto.curve25519  82b20828faa5c6e19f77db2e9f3ddc4b4c87efee0174f17453fdde71f6fdaa27
+    std.x.tls.cert  e752edc267366e1b994c1eac0038b117418314cb9885d7260a721f99a9b71ddd
   items:
     [0] pub access_out_buffer — fn access_out_buffer(c: self.Conf, i: int) -> int · regions (ρ1, -) -> -
     [1] pub access_out_count — fn access_out_count(c: self.Conf) -> int · regions (ρ1) -> -
