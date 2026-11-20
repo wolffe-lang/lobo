@@ -62,7 +62,7 @@
     "ci.yml": "    - cron: \"7 9 * * *\""
   },
   "unchanged": {
-    "release.yml": "cd6730303a248d5b56db268f3b850cbbfb03428a44e7b101bbe08f36b6483449"
+    "release.yml": "985ec4aa3890f1940c0b994d0f1d1df12f17d93dc0f4a140f06685fb38b663bc"
   },
   "exempt_jobs": [
     "nightly-red",

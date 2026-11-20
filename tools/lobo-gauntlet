@@ -61,6 +61,12 @@ if ! tools/lobo-stamp --check; then
     exit 1
 fi
 
+step "release draft (a tag run leaves a draft: no workflow publishes)"
+if ! python3 -B -I ci/release-draft-test.py; then
+    echo "lobo-gauntlet: FAILED at release draft — a workflow publishes a release; publication is a person's step" >&2
+    exit 1
+fi
+
 step "signal names (ws63: a meaning is std.signal's name — no literal bit, no host number)"
 # [os.signal.set.stable] (wolf 0.2.29): a meaning's bit is permanent and
 # a program never writes one. Two shapes are refused, in src/ and

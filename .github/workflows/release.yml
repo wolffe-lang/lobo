@@ -10,8 +10,8 @@
 #      job FAILS, loudly. ci.yml may loud-skip (local runs remain that
 #      gate); a release job that publishes nothing while reporting
 #      green is a lie, so here the absence is an error.
-#   2. THE LEARNER SMOKE. After the release is public, a job with NO
-#      checkout downloads the PUBLISHED archive on a clean runner,
+#   2. THE LEARNER SMOKE. A job with NO checkout downloads the draft's
+#      archive on a clean runner,
 #      verifies its digest, unpacks it with the host's own tar, runs
 #      `lobo -v` against the archive's own BUILD record, tests and
 #      serves the stock config, fetches the page and compares the
@@ -20,7 +20,9 @@
 #      is a claim, not a fact.
 #
 # THE HOSTS: wolf's RELEASE tier — linux x86-64 and macOS aarch64. Two
-# archives, so `publish` refuses at fewer than two (#226's shape).
+# archives, so `draft-complete` refuses at fewer than two (#226's shape).
+# A tag run only ever leaves a DRAFT: no job here publishes. Publication
+# is a person's step, taken on the release page.
 # Windows x86-64 and linux aarch64 are NAMED REFUSALS until s60c
 # (wolf's LLVM release tier does not serve them; tools/lobo-dist
 # refuses them by name), and the release notes say so — never silence.
@@ -28,7 +30,10 @@
 # THE CLEAN-STRANGER TEST (ws47, lobo#33). lobo is public (it was the
 # org's one private repo when this file was written, and the smoke
 # below was then a clean-MACHINE test only, because an unauthenticated
-# download 404'd). On a tag run the smoke now downloads the published
+# download 404'd). The anonymous download of the published archive is
+# now the person's check after publication; before it, on a tag run the
+# smoke downloads the draft's assets with the run's token. The older
+# text follows: it downloaded the published
 # archive and its digest with plain `curl`, carrying NO token — exactly
 # what a person outside the org can do — so the half of W7's
 # falsifiable test that waited on the repo going public is the smoke
@@ -39,8 +44,8 @@
 # of untested code, and the tag is the orchestrator's act, not a
 # lane's. `workflow_dispatch` runs the SAME dist and smoke jobs from
 # any ref, with the archives handed from dist to smoke as workflow
-# artifacts instead of release assets; `publish` and the release
-# upload are the only steps a rehearsal skips, and those are wolf's
+# artifacts instead of release assets; the release
+# upload is the only step a rehearsal skips, and those are wolf's
 # proven lines. A rehearsal's archive is named `+dev` when the tree's
 # channel is (tools/lobo-stamp), so it can never be mistaken for a
 # release.
@@ -275,20 +280,17 @@ jobs:
             lobo/target/dist/*.tar.gz.sha256
           if-no-files-found: error
 
-  # `gh release create --draft` above is deliberate: a half-uploaded
-  # release page must never be public. `needs: dist` is the whole
-  # matrix; with `fail-fast: false` every host still runs, and this
-  # job runs ONLY if both succeeded. The count is the evidence in the
-  # log before the flag moves: two archives and two digests, one per
-  # host the release tier serves. Fewer, and it stays a draft.
-  publish:
-    name: publish (un-draft)
+  # The count is the evidence in the log: two archives and two digests,
+  # one per host the release tier serves. Fewer, and the run is red and
+  # the draft stays a draft. Nothing here changes the release.
+  draft-complete:
+    name: the draft carries both hosts
     if: github.event_name == 'push'
     needs: [create, dist]
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - name: publish the release, and prove there is exactly one
+      - name: count the draft's assets, and prove it is still a draft
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -301,40 +303,29 @@ jobs:
             --jq ".[] | select(.tag_name == \"${tag}\") | \"\(.id)\t\(.draft)\t\(.assets | length)\"" \
             | tee releases.tsv
           n=$(grep -c . releases.tsv || true)
-          if [ "$n" -ne 1 ]; then
-            echo "::error::$n releases carry $tag, wanted exactly one (lobo#30) — leaving it a draft" >&2
-            exit 1
-          fi
+          test "$n" -eq 1 || { echo "::error::$n releases carry $tag, wanted exactly one (lobo#30)"; exit 1; }
           test "$(cut -f1 releases.tsv)" = "$RELEASE_ID" \
-            || { echo "::error::the one release on $tag is $(cut -f1 releases.tsv), not the $RELEASE_ID this run created"; exit 1; }
+            || { echo "::error::the one release on $tag is not the $RELEASE_ID this run created"; exit 1; }
           test "$(cut -f2 releases.tsv)" = "true" \
-            || { echo "::error::release $RELEASE_ID is already public before publish ran"; exit 1; }
+            || { echo "::error::release $RELEASE_ID is public; a tag run leaves a draft"; exit 1; }
           gh api --paginate "repos/${GH_REPO}/releases/${RELEASE_ID}/assets" --jq '.[].name' | sort | tee assets.txt
           archives=$(grep -c "\.tar\.gz$" assets.txt || true)
           digests=$(grep -c "\.tar\.gz\.sha256$" assets.txt || true)
           if [ "$archives" -lt 2 ] || [ "$digests" -lt 2 ]; then
-            echo "publish: $tag carries $archives archives and $digests digests, wanted 2 and 2 (linux x86-64, macOS aarch64) — leaving it a draft" >&2
+            echo "::error::$tag carries $archives archives and $digests digests, wanted 2 and 2 (linux x86-64, macOS aarch64)"
             exit 1
           fi
-          gh api --method PATCH "repos/${GH_REPO}/releases/${RELEASE_ID}" -F draft=false --jq '"published \(.tag_name) (draft=\(.draft))"'
-          # After: still one release on the tag, no draft, four assets.
-          gh api --paginate "repos/${GH_REPO}/releases" \
-            --jq ".[] | select(.tag_name == \"${tag}\") | \"\(.id)\t\(.draft)\t\(.assets | length)\"" \
-            | tee after.tsv
-          test "$(grep -c . after.tsv)" = 1 || { echo "::error::more than one release on $tag after publish"; exit 1; }
-          test "$(cut -f2 after.tsv)" = "false" || { echo "::error::$tag is still a draft after publish"; exit 1; }
-          test "$(cut -f3 after.tsv)" -ge 4 || { echo "::error::$tag carries $(cut -f3 after.tsv) assets after publish, wanted 4"; exit 1; }
-          echo "publish: $tag is public: releases=1 drafts=0 assets=$(cut -f3 after.tsv) (windows x86-64 and linux aarch64 are named refusals until s60c — see the notes)"
+          echo "draft-complete: $tag is a draft with $archives archives and $digests digests (windows x86-64 and linux aarch64 are named refusals until s60c)"
 
   # THE LEARNER SMOKE. No checkout: this runner has no lobo source, no
   # wolf, nothing but what a stranger has — the archive it downloads,
   # curl, and the host's tar. On a tag run the archive is the PUBLISHED
-  # asset (after `publish`); on a rehearsal it is the dist leg's
+  # draft asset; on a rehearsal it is the dist leg's
   # artifact. Everything after the download is identical.
   smoke:
     name: learner smoke (${{ matrix.host }})
-    if: always() && needs.dist.result == 'success' && (github.event_name != 'push' || needs.publish.result == 'success')
-    needs: [dist, publish]
+    if: always() && needs.dist.result == 'success'
+    needs: [create, dist]
     strategy:
       fail-fast: false
       matrix:
@@ -349,17 +340,26 @@ jobs:
       # No GH_TOKEN, no gh: a stranger's download (lobo#33). The
       # archive name is tools/lobo-dist's: lobo-<version>-<host>, the
       # version the tag's, bare.
-      - name: download the published archive (anonymous — the clean-stranger test)
+      # A tag run leaves a DRAFT, and a draft is not downloadable by a
+      # stranger, so the smoke reads the draft's own assets by release
+      # id with the run's token. Publication is a person's step; the
+      # anonymous download of the published archive (lobo#33) is that
+      # person's check after it.
+      - name: download the draft's archive and digest
         if: github.event_name == 'push'
         env:
+          GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
+          RELEASE_ID: ${{ needs.create.outputs.release_id }}
         shell: bash
         run: |
           set -euo pipefail
           a="lobo-${GITHUB_REF_NAME#v}-${{ matrix.host }}.tar.gz"
-          base="https://github.com/${GH_REPO}/releases/download/${GITHUB_REF_NAME}"
-          curl -fsSL --retry 3 -o "$a" "$base/$a"
-          curl -fsSL --retry 3 -o "$a.sha256" "$base/$a.sha256"
+          for name in "$a" "$a.sha256"; do
+            aid=$(gh api --paginate "repos/${GH_REPO}/releases/${RELEASE_ID}/assets" --jq ".[] | select(.name == \"${name}\") | .id")
+            test -n "$aid" || { echo "::error::the draft carries no asset ${name}"; exit 1; }
+            gh api -H "Accept: application/octet-stream" "repos/${GH_REPO}/releases/assets/${aid}" > "$name"
+          done
           ls -l
 
       - name: take the rehearsal archive
