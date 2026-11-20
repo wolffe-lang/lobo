@@ -105,7 +105,7 @@ jobs:
           if [ "$n" -eq 0 ]; then
             id=$(gh api --method POST "repos/${GH_REPO}/releases" \
                    -f tag_name="$tag" -f name="lobo $tag" \
-                   -F draft=true -F prerelease=false \
+                   -F draft=false -F prerelease=false \
                    -F body=@target/release-notes.md --jq .id)
             echo "created draft release $id for $tag"
           elif [ "$n" -eq 1 ]; then
