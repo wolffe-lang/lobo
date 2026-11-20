@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 0.1.6
+## 0.1.6 — 2026-11-20 — the proxied-throughput instrument is calibrated and refuses an unsound pairing; a full worker offers a connection to a sibling with room, and `/metrics` counts refusals, evictions and accept failures; worker reloads and replacement after a binary install; built with wolf 0.2.40
 
 ### Proxied-throughput instrument calibration
 
