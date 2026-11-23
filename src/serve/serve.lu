@@ -3101,6 +3101,140 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
     }
 }
 
+/// Where a discard stands after `discard_scan`. `st` is the
+/// state: 0 the body is over; 1 a fixed-length body with `n` bytes to
+/// go; `discard_chunked()` + k a chunk-size line with k hex digits so
+/// far, `n` the size so far; 3 a chunk extension; 4 the size line's LF;
+/// 5 chunk data with `n` bytes to go; 6 and 7 the CRLF after the data;
+/// 8 the start of a trailer line or of the final CRLF; 9 inside a
+/// trailer line; 10 its LF; 11 the final LF. `t` is what the body has
+/// cost so far (its data, extensions and trailers). `end` is the index,
+/// in the bytes just scanned, of the first byte after the body (-1: the
+/// body goes on). `bad` is a malformed frame or a cost past the cap.
+pub struct Discard {
+    st: int,
+    n: int,
+    t: int,
+    end: int,
+    bad: bool,
+}
+
+/// The state a chunked body's discard starts in: a chunk-size line with
+/// no digit yet. Total.
+pub fn discard_chunked() -> int {
+    100
+}
+
+/// A hex digit's value, -1 for any other byte. Total.
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 {
+        return c - 48
+    }
+    if c >= 97 && c <= 102 {
+        return c - 87
+    }
+    if c >= 65 && c <= 70 {
+        return c - 55
+    }
+    -1
+}
+
+/// Run a discard over `b[from..]` from state (`st`, `n`, `t`) and say
+/// where it stands. Nothing is kept: a fixed-length body is a
+/// count, a chunked one the few ints of its frame. The chunked grammar
+/// is `http.decode_chunked`'s: `<hex size>[;ext]CRLF<data>CRLF`, at most
+/// `max_chunk_digits` (15) digits, a `0` chunk, then trailer lines and a
+/// final CRLF (RFC 9112 §7.1). A body whose data, extensions and
+/// trailers cost more than `cap` is `bad`. Pure and total.
+pub fn discard_scan(st0: int, n0: int, t0: int, b: List[byte], from: int, cap: int) -> Discard {
+    var st = st0
+    var n = n0
+    var t = t0
+    var i = from
+    let len = b.len
+    while i < len {
+        if st == 0 {
+            return Discard { st: 0, n: 0, t: t, end: i, bad: false }
+        }
+        if st == 1 || st == 5 {
+            let have = len - i
+            if have < n {
+                n = n - have
+                i = len
+            } else {
+                i = i + n
+                n = 0
+                st = if st == 1 { 0 } else { 6 }
+            }
+            continue
+        }
+        let c = b[i] as int
+        i = i + 1
+        var ok = true
+        if st >= 100 {
+            let k = st - 100
+            let v = hex_digit(c)
+            if v >= 0 {
+                ok = k < 15
+                n = n * 16 + v
+                st = st + 1
+            } else if k == 0 {
+                ok = false
+            } else if c == 59 {
+                st = 3
+            } else if c == 13 {
+                st = 4
+            } else {
+                ok = false
+            }
+        } else if st == 3 {
+            t = t + 1
+            if c == 13 {
+                st = 4
+            }
+        } else if st == 4 {
+            ok = c == 10
+            if n == 0 {
+                st = 8
+            } else {
+                t = t + n
+                st = 5
+            }
+        } else if st == 6 {
+            ok = c == 13
+            st = 7
+        } else if st == 7 {
+            ok = c == 10
+            st = 100
+            n = 0
+        } else if st == 8 {
+            if c == 13 {
+                st = 11
+            } else {
+                t = t + 1
+                st = 9
+            }
+        } else if st == 9 {
+            t = t + 1
+            if c == 13 {
+                st = 10
+            }
+        } else if st == 10 {
+            ok = c == 10
+            st = 8
+        } else if st == 11 {
+            ok = c == 10
+            st = 0
+        } else {
+            ok = false
+        }
+        if !ok || t > cap {
+            return Discard { st: st, n: n, t: t, end: -1, bad: true }
+        }
+    }
+    Discard { st: st, n: n, t: t, end: if st == 0 { i } else { -1 }, bad: false }
+}
+
 /// Serve one connection to completion: the full keepalive lifecycle.
 /// SPAWN-FREE. `local_port` is the port lobo is listening on (for the
 /// absolute Location of a directory redirect, matching nginx).
