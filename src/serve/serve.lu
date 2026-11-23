@@ -3184,6 +3184,11 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
             let whole = buf.get(0..end) else {
                 return bad
             }
+            // the bytes after the body are the next request's start, kept
+            // as a fixed length's are (`take_length`)
+            let after = buf.get(end..buf.len) else {
+                return bad
+            }
             let body = http.decode_chunked(whole, limits) else |e| match e {
                 malformed => {
                     return bad
@@ -3192,7 +3197,7 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
                     return big
                 },
             }
-            return ("", buf.len, body)
+            return (after, whole.len, body)
         }
         if buf.len > cap {
             return big
