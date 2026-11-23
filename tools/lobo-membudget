@@ -314,11 +314,13 @@ if [ "${1:-}" = --starts ]; then
     n_ok=0
     n_exit=0
     n_live=0
+    n_retry=0
     codes=""
     k=1
     while [ $k -le "$2" ]; do
         master_start
         mst=$?
+        n_retry=$((n_retry + mtries - 1))
         case $mst in
         0) n_ok=$((n_ok + 1)) ;;
         1)
@@ -336,7 +338,7 @@ if [ "${1:-}" = --starts ]; then
         master_stop
         k=$((k + 1))
     done
-    say "starts $2: started $n_ok, exited $n_exit (codes:${codes:- none}), alive without the line $n_live ($(uname -s) $(uname -m), $(getconf _NPROCESSORS_ONLN 2>/dev/null) cpus)"
+    say "starts $2: started $n_ok, exited $n_exit (codes:${codes:- none}), alive without the line $n_live; port retries $n_retry ($(uname -s) $(uname -m), $(getconf _NPROCESSORS_ONLN 2>/dev/null) cpus)"
     [ "$n_ok" = "$2" ] && exit 0
     exit 1
 fi
