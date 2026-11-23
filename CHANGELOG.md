@@ -2,6 +2,19 @@
 
 ## Unreleased — 0.1.6
 
+### The memory gate names a master that does not start (lobo#126)
+
+`tools/lobo-membudget`'s master row read only "the drive itself
+failed" when its master never started its fourth hand, with an earlier
+drive's empty stderr beside it. The start is now a named check of its
+own, `[membudget-master-start]`, decided within 10 s. A master that
+exited is shown with its exit code and the last lines of its log; one
+that is alive without its fourth hand is shown with its state and
+children. A start refused its port is retried on two new ports, as the
+free-port probe's own note asks of its callers. Only a master that
+started is watched for the 60 s window. `lobo-membudget --starts N` runs
+the start check alone, N times, and tallies the outcomes.
+
 ### A chunked request body reaches a proxied upstream (lobo#137)
 
 A request body sent with `Transfer-Encoding: chunked` to a `proxy_pass`
