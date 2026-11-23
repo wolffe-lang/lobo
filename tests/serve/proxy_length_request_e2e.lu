@@ -18,12 +18,20 @@
 //!   * `proxy-length-body`: and the body, `hello world`;
 //!   * `proxy-length-zero`: the empty body framed as the oracle frames
 //!     it.
+//! Each proxy is started on a probed port and waited for until it
+//! serves its static file: 15 s a start, watched for its exit, and a
+//! start that exits is retried on a new port (the probe's
+//! release-to-rebind race), at most three starts. An oracle that never
+//! serves, or answers a case with nothing, is its own failure:
+//!   * `proxy-length-oracle-silent`: what each start did (its exit
+//!     code, or alive and silent) and the last lines of its error log,
+//!     or the case it left unanswered. lobo is then not compared with
+//!     it, so the oracle's silence is never read as lobo's difference.
 //! Each proxy's forwarding in each case is printed as an `answered`
 //! line whatever the outcome. A failure prints
-//! `proxy_length_request: FAILED — [row]` with its reason, and the two
-//! rows a record most needs print last: a red corpus run keeps two
-//! lines of a row's own output. Then one assert (an assert's own message
-//! is not in the record, wolf-lang#150). Every server is stopped by its
+//! `proxy_length_request: FAILED — [row]` with its reason, the oracle's
+//! silence last. Then one assert (an assert's own message is not in the
+//! record, wolf-lang#150). Every server is stopped by its
 //! own handle. Loopback only, OS-chosen ports; the scratch trees are
 //! cleared at the start and at the end.
 
@@ -46,25 +54,102 @@ fn note(mut fails: List[str], row: str, msg: str) {
     (mut fails).push("{row} {one}")
 }
 
-/// Up when `GET /r.html` answers 200, asked for up to six seconds.
-/// Total.
-fn wait_port(port: int) -> bool {
-    var i: int = 0
-    while i < 120 {
-        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
-        if c >= 0 {
-            net_deadline(c, 500) else |_| {}
-            net_write(c, "GET /r.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
-            let r = net_read(c, 4096) else |_| { "" }
-            net_close(c) else |_| {}
-            if r.starts_with("HTTP/1.1 200 OK") {
-                return true
-            }
+/// Whether `GET /r.html` on `port` answers 200 now: one connection, a
+/// 500 ms read. Total.
+fn serves(port: int) -> bool {
+    let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+    if c < 0 {
+        return false
+    }
+    net_deadline(c, 500) else |_| {}
+    net_write(c, "GET /r.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+    let r = net_read(c, 4096) else |_| { "" }
+    net_close(c) else |_| {}
+    r.starts_with("HTTP/1.1 200 OK")
+}
+
+/// The last three lines of the oracle's error log, as ` (error log:
+/// …)`; "" for lobo (its stderr is the row's) or an empty log. Total.
+fn log_tail(kind: int, d: str) -> str {
+    if kind != 0 {
+        return ""
+    }
+    let text = fs_read_text("{d}/logs/ng.err") else |_| { "" }
+    var lines = List[str]()
+    for l in text.lines() {
+        if !l.trim().is_empty() {
+            (mut lines).push(l.trim())
         }
-        time_sleep_ms(50)
+    }
+    if lines.is_empty() {
+        return ""
+    }
+    var out = ""
+    var i = if lines.len > 3 { lines.len - 3 } else { 0 }
+    while i < lines.len {
+        out = if out.is_empty() { lines[i] } else { "{out} | {lines[i]}" }
         i = i + 1
     }
-    false
+    " (error log: {out})"
+}
+
+/// Start one proxy and wait until it serves its static file. Each start
+/// is on a newly probed port, given 15 s, and watched for its exit; a
+/// start that exits is retried on a new port (the probe's
+/// release-to-rebind race), at most three starts. `kind` 0 is the
+/// oracle, 1 a lobo. Answers (the child's handle, its port, "") once it
+/// serves, or (-1, 0, what each start did) when none did; a start that
+/// stays alive and silent is put down by its handle. Total.
+fn start(kind: int, bin: str, d: str, root: str, upp: int) -> (int, int, str) {
+    var why = ""
+    var k: int = 1
+    while k <= 3 {
+        let hp = free_port() else |_| { 0 }
+        var argv = List[str]()
+        (mut argv).push(bin)
+        if kind == 0 {
+            let conf = "daemon off;\nmaster_process off;\npid {root}/{d}/ng.pid;\nerror_log {root}/{d}/logs/ng.err;\nevents {{}}\nhttp {{\n  access_log off;\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    location = /r.html {{ root {root}/{d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
+            fs_write_text("{d}/ng.conf", conf) else |_| {}
+            (mut argv).push("-p")
+            (mut argv).push("{root}/{d}/")
+            (mut argv).push("-c")
+            (mut argv).push("{root}/{d}/ng.conf")
+        } else {
+            let conf = "pid {d}/lobo.pid;\nhttp {{\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    location = /r.html {{ root {d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
+            fs_write_text("{d}/lobo.conf", conf) else |_| {}
+            (mut argv).push("serve")
+            (mut argv).push("-p")
+            (mut argv).push(".")
+            (mut argv).push("-c")
+            (mut argv).push("{d}/lobo.conf")
+        }
+        let child = os_spawn(argv) else |_| {
+            return (-1, 0, "{why}start {k}: os_spawn failed (is {bin} there?)")
+        }
+        let t0 = time_now_ms()
+        var gone = false
+        var code: int = 0
+        while !gone && time_now_ms() - t0 < 15000 {
+            if serves(hp) {
+                return (child, hp, "")
+            }
+            let w = os_wait_poll() else |_| { (0, 0) }
+            if w.0 == child {
+                gone = true
+                code = w.1
+            } else {
+                time_sleep_ms(50)
+            }
+        }
+        if !gone {
+            os_kill(child) else |_| {}
+            let _w = os_wait(child) else |_| { -1 }
+            return (-1, 0, "{why}start {k} on port {hp}: alive and silent for 15000 ms{log_tail(kind, d)}")
+        }
+        why = "{why}start {k} on port {hp}: exited with code {code}{log_tail(kind, d)}; "
+        k = k + 1
+    }
+    (-1, 0, why)
 }
 
 /// What one proxy forwarded to the upstream in one case.
@@ -231,71 +316,56 @@ fn through(mut fails: List[str], who: str, kind: int, bin: str) -> List[Sent] {
     fs_create_dir_all("{d}/logs") else |_| {}
     fs_write_text("{d}/w/r.html", "READY\n") else |_| {}
     let root = os_cwd() else |_| "."
-    let hp = free_port() else |_| { 0 }
     let up = net_listen("127.0.0.1:0") else |_| {
         note(mut fails, "proxy-length-ready", "{who}: the upstream could not listen")
         return out
     }
     let upp = net_port(up) else |_| { 0 }
-    var argv = List[str]()
-    (mut argv).push(bin)
-    if kind == 0 {
-        let conf = "daemon off;\nmaster_process off;\npid {root}/{d}/ng.pid;\nerror_log {root}/{d}/logs/ng.err;\nevents {{}}\nhttp {{\n  access_log off;\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    location = /r.html {{ root {root}/{d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
-        fs_write_text("{d}/ng.conf", conf) else |_| {}
-        (mut argv).push("-p")
-        (mut argv).push("{root}/{d}/")
-        (mut argv).push("-c")
-        (mut argv).push("{root}/{d}/ng.conf")
-    } else {
-        let conf = "pid {d}/lobo.pid;\nhttp {{\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    location = /r.html {{ root {d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
-        fs_write_text("{d}/lobo.conf", conf) else |_| {}
-        (mut argv).push("serve")
-        (mut argv).push("-p")
-        (mut argv).push(".")
-        (mut argv).push("-c")
-        (mut argv).push("{d}/lobo.conf")
-    }
-    let child = os_spawn(argv) else |_| {
-        note(mut fails, "proxy-length-ready", "{who}: os_spawn failed (is {bin} there?)")
+    let st = start(kind, bin, d, root, upp)
+    let child = st.0
+    let hp = st.1
+    if child < 0 {
+        if kind == 0 {
+            note(
+                mut fails,
+                "proxy-length-oracle-silent",
+                "the oracle never served its static file: {st.2}",
+            )
+        } else {
+            note(mut fails, "proxy-length-ready", "{who} never served its static file: {st.2}")
+        }
         net_close(up) else |_| {}
+        fs_remove_dir_all(d) else |_| {}
         return out
     }
-    if !wait_port(hp) {
-        note(
-            mut fails,
-            "proxy-length-ready",
-            "{who}: the proxy never answered a GET for its static file",
-        )
-    } else {
-        for k in cases() {
-            var s = Sent {
-                kase: k.0,
-                line: "",
-                lengths: "none",
-                te: "none",
-                body: "",
-                extra: "",
-                reply: "",
-            }
-            let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
-            if c < 0 {
-                s.line = "(the proxy refused the client)"
-            } else {
-                net_write(c, k.1) else |_| {}
-                s = upstream(up, 3000)
-                s.kase = k.0
-                net_deadline(c, 3000) else |_| {}
-                let r = net_read(c, 4096) else |_| { "" }
-                let nl = r.find("\r\n") else -1
-                s.reply = if nl < 0 { r } else { r[0..nl] }
-                net_close(c) else |_| {}
-            }
-            let after = s.extra.replace("\r", "\\r").replace("\n", "\\n")
-            print(
-                "proxy_length_request: {who} {s.kase}: forwarded `{s.line}`, Content-Length {s.lengths}, Transfer-Encoding {s.te}, body `{s.body}` ({s.body.len} bytes), after it `{after}`; the client was answered `{s.reply}`",
-            )
-            (mut out).push(s)
+    for k in cases() {
+        var s = Sent {
+            kase: k.0,
+            line: "",
+            lengths: "none",
+            te: "none",
+            body: "",
+            extra: "",
+            reply: "",
         }
+        let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+        if c < 0 {
+            s.line = "(the proxy refused the client)"
+        } else {
+            net_write(c, k.1) else |_| {}
+            s = upstream(up, 3000)
+            s.kase = k.0
+            net_deadline(c, 3000) else |_| {}
+            let r = net_read(c, 4096) else |_| { "" }
+            let nl = r.find("\r\n") else -1
+            s.reply = if nl < 0 { r } else { r[0..nl] }
+            net_close(c) else |_| {}
+        }
+        let after = s.extra.replace("\r", "\\r").replace("\n", "\\n")
+        print(
+            "proxy_length_request: {who} {s.kase}: forwarded `{s.line}`, Content-Length {s.lengths}, Transfer-Encoding {s.te}, body `{s.body}` ({s.body.len} bytes), after it `{after}`; the client was answered `{s.reply}`",
+        )
+        (mut out).push(s)
     }
     os_kill(child) else |_| {}
     let _w = os_wait(child) else |_| { -1 }
@@ -335,35 +405,32 @@ fn main() -> !int {
     let lb = through(mut fails, "lobo", 1, "{root}/target/lobo-debug")
     let nl = pick(ng, "length")
     let ll = pick(lb, "length")
-    if nl.body != "hello world" || nl.lengths != "11" {
-        note(
-            mut fails,
-            "proxy-length-oracle",
-            "the oracle forwarded Content-Length {nl.lengths} and `{nl.body}`, not one 11 and `hello world`",
-        )
-    }
     let nz = pick(ng, "zero")
     let lz = pick(lb, "zero")
-    if shape(lz) != shape(nz) {
-        note(
-            mut fails,
-            "proxy-length-zero",
-            "with Content-Length 0, lobo {shape(lz)}; the oracle {shape(nz)}",
-        )
+    // the oracle's silence is the oracle's fault: a case it answered with
+    // nothing is named, and lobo is compared only with an oracle that
+    // answered every case (a start that never served is named in
+    // `through`)
+    var heard = !ng.is_empty()
+    for s in ng {
+        if s.reply.is_empty() {
+            heard = false
+            note(
+                mut fails,
+                "proxy-length-oracle-silent",
+                "the oracle answered `{s.kase}` with nothing within 3000 ms (its upstream saw `{s.line}`)",
+            )
+        }
     }
-    if ll.body != "hello world" {
+    if !lb.is_empty() && ll.body != "hello world" {
         note(
             mut fails,
             "proxy-length-body",
-            "the upstream received `{ll.body}` ({ll.body.len} bytes) from lobo, `{nl.body}` from the oracle, for `hello world`",
+            "the upstream received `{ll.body}` ({ll.body.len} bytes) from lobo, for `hello world`",
         )
     }
-    if ll.lengths != nl.lengths || ll.te != nl.te {
-        note(
-            mut fails,
-            "proxy-length-once",
-            "lobo sent Content-Length {ll.lengths} and Transfer-Encoding {ll.te}; the oracle Content-Length {nl.lengths} and Transfer-Encoding {nl.te}",
-        )
+    if heard {
+        check_against(mut fails, nl, ll, nz, lz)
     }
     if fails.is_empty() {
         print(
@@ -377,6 +444,7 @@ fn main() -> !int {
         "proxy-length-zero",
         "proxy-length-body",
         "proxy-length-once",
+        "proxy-length-oracle-silent",
     ]
     var last = ""
     for r in order {
@@ -393,4 +461,29 @@ fn main() -> !int {
     }
     assert(false, "{last}")
     0
+}
+
+/// lobo held to an oracle that answered every case. Total.
+fn check_against(mut fails: List[str], nl: Sent, ll: Sent, nz: Sent, lz: Sent) {
+    if nl.body != "hello world" || nl.lengths != "11" {
+        note(
+            mut fails,
+            "proxy-length-oracle",
+            "the oracle forwarded Content-Length {nl.lengths} and `{nl.body}`, not one 11 and `hello world`",
+        )
+    }
+    if shape(lz) != shape(nz) {
+        note(
+            mut fails,
+            "proxy-length-zero",
+            "with Content-Length 0, lobo {shape(lz)}; the oracle {shape(nz)}",
+        )
+    }
+    if ll.lengths != nl.lengths || ll.te != nl.te {
+        note(
+            mut fails,
+            "proxy-length-once",
+            "lobo sent Content-Length {ll.lengths} and Transfer-Encoding {ll.te}; the oracle Content-Length {nl.lengths} and Transfer-Encoding {nl.te}",
+        )
+    }
 }
