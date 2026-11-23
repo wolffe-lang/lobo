@@ -378,8 +378,11 @@ Two arms, and the posture of each.
 
 Arm 1, the loopback bind (always). The listener binds 127.0.0.1
 and nothing else, forever; a bare port in the directive becomes a
-loopback bind. This keeps the endpoint off the network. It does NOT
-keep it away from other users of the same host.
+loopback bind. A TCP address that is not loopback (anything but
+127.0.0.0/8, `localhost` or `[::1]`) is refused by name, by `-t` and at
+start: `"control" address "0.0.0.0:9001" is not a loopback address in
+…`. This keeps the endpoint off the network. It does NOT keep it away
+from other users of the same host.
 
 Arm 2, the token file (opt-in). `control <addr> token <file>` arms
 a shared secret. The wire line becomes `<secret> <verb>`; a line without
