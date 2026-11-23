@@ -249,6 +249,15 @@ flat() { # flat <label> <before_kb> <after_kb> <drove_ok(0/1)> <what> [bound_kb]
 # says a caller must retry the release-to-rebind race: a start that
 # exits refusing its port is retried with two new ports, at most twice,
 # each retry a printed note.
+master_alive() { # master_alive — the master runs: a zombie is not alive
+    # (sh reaps a background child only when it next waits, so kill -0
+    # alone would call an exited master alive until then)
+    kill -0 "$mpid" 2>/dev/null || return 1
+    case "$(ps -o stat= -p "$mpid" 2>/dev/null)" in
+    Z* | *Z*) return 1 ;;
+    esac
+    return 0
+}
 master_conf() { # master_conf — writes $mconf for the current ports
     printf 'worker_processes 4;\npid %s/lobo-master.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
         "$scratch" "$mcp" "$mhp" "$scratch" > "$mconf"
@@ -264,12 +273,12 @@ master_try() { # master_try — one start; sets mpid, mcode; returns 0, 1 or 2
     _i=0
     while [ $_i -lt 100 ]; do
         if grep -q "worker-started worker=4" "$scratch/lobo-master.log" 2>/dev/null; then return 0; fi
-        kill -0 "$mpid" 2>/dev/null || break
+        master_alive || break
         sleep 0.1
         _i=$((_i + 1))
     done
     if grep -q "worker-started worker=4" "$scratch/lobo-master.log" 2>/dev/null; then return 0; fi
-    if kill -0 "$mpid" 2>/dev/null; then return 2; fi
+    if master_alive; then return 2; fi
     wait "$mpid" 2>/dev/null
     mcode=$?
     return 1
@@ -294,14 +303,14 @@ master_evidence() { # master_evidence <status> — what a failed start leaves, a
     tail -20 "$scratch/lobo-master.log" 2>/dev/null | cut -c1-300 | sed 's|^|lobo-membudget:   master log: |'
 }
 master_stop() { # master_stop — ends the master this run started, bounded
-    kill -0 "$mpid" 2>/dev/null || { wait "$mpid" 2>/dev/null; return 0; }
+    master_alive || { wait "$mpid" 2>/dev/null; return 0; }
     "$LOBO" -s stop -p . -c "$mconf" > /dev/null 2>&1
     _i=0
-    while kill -0 "$mpid" 2>/dev/null && [ $_i -lt 100 ]; do
+    while master_alive && [ $_i -lt 100 ]; do
         sleep 0.1
         _i=$((_i + 1))
     done
-    if kill -0 "$mpid" 2>/dev/null; then
+    if master_alive; then
         say "note — the master $mpid did not stop within 10 s of -s stop; TERM to it"
         kill "$mpid" 2>/dev/null
     fi
@@ -686,7 +695,7 @@ if [ "$mst" = 0 ]; then
     mb=$(ps -o rss= -p "$mpid" | tr -d ' ')
     sleep 60
     ma=$(ps -o rss= -p "$mpid" | tr -d ' ')
-    if kill -0 "$mpid" 2>/dev/null; then
+    if master_alive; then
         flat "master, supervising four idle hands" "$mb" "$ma" 0 "60 s of supervision (four hands probed every 200 ms)" 64
     else
         wait "$mpid" 2>/dev/null
