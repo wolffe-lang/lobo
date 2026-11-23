@@ -1,0 +1,265 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! lobo#72: CONTROL CONNECTIONS NEVER DELAY CLIENTS, ONE AFTER ANOTHER.
+//! A control endpoint with a token; control connections that send
+//! nothing, each opened as soon as the server lets the last one go; and
+//! a GET every 100 ms for six seconds on fresh connections:
+//!   1. every GET is answered within 250 ms of its write;
+//!   2. the server lets each silent control connection go within its
+//!      2,000 ms, so at least three are opened in the six seconds;
+//!   3. `status` answers afterwards (with the token), and `quit` ends
+//!      the server.
+//! The pacing is this test's own bounded waits on its sockets, never a
+//! sleep. Every wait is bounded and fails by name, on a printed
+//! `control_flood: FAILED — [row]` line (an assert's own message is
+//! not in the record, wolf-lang#150), the server stopped by its own
+//! handle first. Loopback only, OS-chosen ports; the scratch tree is
+//! cleared at the start and at the end.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// End the server by its own handle, print the named failure, then
+/// trap. Total.
+fn fail(child: int, row: str, msg: str) {
+    os_kill(child) else |_| {}
+    let _w = os_wait(child) else |_| { -1 }
+    print("control_flood: FAILED — [{row}] {msg}")
+    // "{msg}", not a bare `msg`: the native tier refuses a name as an
+    // assert message and accepts an interpolation (wolf-lang#398)
+    assert(false, "{msg}")
+}
+
+/// Ready when `ping` answers (it needs no token), asked until `ms` have
+/// passed on the clock. Each ask is itself bounded by the client's
+/// 2,000 ms; a refused dial answers at once, so the 50 ms between asks
+/// is a backoff, not an ordering assumption. Total.
+fn wait_alive(ep: str, ms: int) -> bool {
+    let until = time_unix_ms() + ms
+    while time_unix_ms() < until {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+    }
+    false
+}
+
+/// A GET for `/a.html` that asks the server to close after its reply.
+/// Total.
+fn req() -> str {
+    "GET /a.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+}
+
+/// Everything `c` sends until it closes, under a `ms` deadline for
+/// each read; "" when nothing came. Total.
+fn read_all(c: int, ms: int) -> str {
+    net_deadline(c, ms) else |_| {}
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    buf
+}
+
+/// The file's body. Total.
+fn body() -> str {
+    "CONTROL-FLOOD-A\n"
+}
+
+/// A reply is a 200 carrying the file. Total.
+fn is_file(reply: str) -> bool {
+    reply.starts_with("HTTP/1.1 200 OK") && reply.ends_with(body())
+}
+
+/// The silent control connection's successor: the old one drained and
+/// closed, a new one opened; -1 when the endpoint refused it. Total.
+fn next_peer(old: int, ep: str) -> int {
+    let _said = read_all(old, 200)
+    net_close(old) else |_| {}
+    net_connect(ep) else |_| { -1 }
+}
+
+fn main() -> !int {
+    let d = "control_flood_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/a.html", body())?
+    let tok = "flood-token-7f3a"
+    fs_write_text("{d}/ctl.token", "{tok}\n")?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    assert(hp != cp, "control_flood: the two probed ports are distinct ({hp})")
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp} token {d}/ctl.token;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        print(
+            "control_flood: FAILED — [control-flood-ready] os_spawn failed (is the debug tier built?)",
+        )
+        assert(false, "control_flood: os_spawn failed")
+        0
+    }
+    if !wait_alive(ep, 6000) {
+        fail(child, "control-flood-ready", "lobo never answered ping within 6000 ms")
+    }
+
+    var pc = net_connect(ep) else |_| {
+        fail(
+            child,
+            "control-flood-setup",
+            "the control endpoint refused the first silent connection",
+        )
+        -1
+    }
+    var peers: int = 1
+    var gets: int = 0
+    var worst: int = 0
+    let t_start = time_unix_ms()
+    var next_at = t_start
+    while time_unix_ms() - t_start < 6000 {
+        // until the next GET is due, watch the silent connection: when
+        // the server lets it go, the next one is opened at once
+        var left = next_at - time_unix_ms()
+        while left > 0 {
+            let r = net_wait([pc], left) else |_| { List[int]() }
+            if r.len > 0 {
+                pc = next_peer(pc, ep)
+                if pc < 0 {
+                    fail(
+                        child,
+                        "control-flood-setup",
+                        "the control endpoint refused a silent connection",
+                    )
+                }
+                peers = peers + 1
+            }
+            left = next_at - time_unix_ms()
+        }
+
+        // a GET on a fresh connection, answered or not within 3,000 ms
+        let g = net_connect("127.0.0.1:{hp}") else |_| {
+            fail(child, "control-flood-setup", "the http port refused GET {gets}")
+            -1
+        }
+        net_write(g, req()) else |_| {
+            fail(child, "control-flood-setup", "GET {gets} could not be written")
+        }
+        let t_w = time_unix_ms()
+        var reply = ""
+        var answered = false
+        var waiting = true
+        while waiting {
+            let spent = time_unix_ms() - t_w
+            if spent >= 3000 {
+                waiting = false
+            } else {
+                let r = net_wait([g, pc], 3000 - spent) else |_| { List[int]() }
+                if r.is_empty() {
+                    waiting = false
+                }
+                for f in r {
+                    if f == g && !answered {
+                        reply = read_all(g, 1000)
+                        answered = true
+                        waiting = false
+                    } else if f == pc {
+                        pc = next_peer(pc, ep)
+                        if pc < 0 {
+                            fail(
+                                child,
+                                "control-flood-setup",
+                                "the control endpoint refused a silent connection",
+                            )
+                        }
+                        peers = peers + 1
+                    }
+                }
+            }
+        }
+        let ms = time_unix_ms() - t_w
+        net_close(g) else |_| {}
+        if !answered {
+            fail(
+                child,
+                "control-flood-get",
+                "GET {gets} waited >{ms} ms while control connections that sent nothing opened one after another ({peers} so far; bound 250 ms)",
+            )
+        }
+        if ms > 250 || !is_file(reply) {
+            fail(
+                child,
+                "control-flood-get",
+                "GET {gets} waited {ms} ms while control connections that sent nothing opened one after another ({peers} so far; bound 250 ms): {reply}",
+            )
+        }
+        if ms > worst {
+            worst = ms
+        }
+        gets = gets + 1
+        next_at = t_w + 100
+    }
+    print(
+        "control_flood: ok — {gets} GETs answered, the slowest in {worst} ms, while {peers} control connections that sent nothing opened one after another",
+    )
+
+    // 2. each silent connection was let go within its budget
+    if peers < 3 {
+        fail(
+            child,
+            "control-flood-peers",
+            "only {peers} control connections in six seconds: a silent one was not let go within its 2,000 ms",
+        )
+    }
+    print("control_flood: ok — the server let each silent control connection go within its budget")
+
+    // 3. the endpoint answers the token, and the server ends
+    net_close(pc) else |_| {}
+    let st = shell.control_send(ep, "{tok} status") else |_| { "" }
+    if !st.contains("live=") {
+        fail(child, "control-flood-status", "status did not answer after the flood: {st}")
+    }
+    print("control_flood: ok — status answers after the flood")
+    let rq = shell.control_send(ep, "{tok} quit") else |_| { "" }
+    if !rq.contains("draining then exiting") {
+        fail(child, "control-flood-quit", "quit was not announced: {rq}")
+    }
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "control_flood: lobo exited 0 (got {code})")
+    fs_remove_dir_all(d) else |_| {}
+    print("control_flood: ok — quit ended the server, exit 0")
+    0
+}
