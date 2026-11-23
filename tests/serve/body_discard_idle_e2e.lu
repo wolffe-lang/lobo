@@ -1,0 +1,140 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native
+//!
+//! A BODY THAT STOPS ARRIVING ENDS ITS CONNECTION AFTER THE READ
+//! TIMEOUT. A request whose route does not use its body is answered
+//! after its head, and the body is discarded beside the serving loop
+//! as it arrives (tests/serve/body_discard_e2e.lu). A discard waits
+//! `read_timeout` (60 s) between reads, the same budget the body read
+//! had: a client that sends `GET /f.html` with `Content-Length: 10`
+//! and 2 of its bytes, then nothing, has its connection closed 60,000
+//! to 62,500 ms after its last byte, with nothing more sent to it.
+//! GREEN AT TRUNK BY DESIGN: the body read there ended the same way, a
+//! 60 s read timeout and a close. This row holds the discard's own
+//! timer, which the serving loop keeps for every connection that is
+//! discarding (one native run, about 62 s). On a failure it prints
+//! `body_discard_idle: FAILED — [body-discard-idle] …` as its last
+//! line, then traps (an assert's own message is not in the record,
+//! wolf-lang#150); the server is stopped by its own handle first.
+//! Loopback only, an OS-chosen port; the scratch tree is cleared at
+//! the start and at the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// End the server by its handle, print the named failure as the last
+/// line, then trap. Total.
+fn fail(child: int, msg: str) {
+    os_kill(child) else |_| {}
+    let _w = os_wait(child) else |_| { -1 }
+    let one = msg.replace("\r", "").replace("\n", " | ")
+    print("body_discard_idle: FAILED — [body-discard-idle] {one}")
+    assert(false, "{msg}")
+}
+
+/// Up when a GET answers 200, asked for up to six seconds. Total.
+fn wait_port(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+        if c >= 0 {
+            net_deadline(c, 500) else |_| {}
+            net_write(c, "GET /f.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+            let r = net_read(c, 4096) else |_| { "" }
+            net_close(c) else |_| {}
+            if r.starts_with("HTTP/1.1 200 OK") {
+                return true
+            }
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+fn main() -> !int {
+    let d = "body_discard_idle_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/f.html", "BODY-DISCARD-IDLE<END>\n")?
+    let hp = free_port()?
+    let conf = "pid {d}/lobo.pid;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        print(
+            "body_discard_idle: FAILED — [body-discard-idle] os_spawn failed (is the debug tier built?)",
+        )
+        assert(false, "body_discard_idle: os_spawn failed")
+        0
+    }
+    if !wait_port(hp) {
+        fail(child, "the server never answered a GET")
+    }
+
+    let a = net_connect("127.0.0.1:{hp}") else |_| {
+        fail(child, "the connection was refused")
+        0
+    }
+    net_write(a, "GET /f.html HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\nab") else |_| {
+        fail(child, "the head could not be written")
+    }
+    let t_last = time_unix_ms()
+    // read to the close (whatever the server sends first), each read
+    // bounded so the wait ends by 70 s whatever happens
+    var t_end: int = -1
+    var got = ""
+    while t_end < 0 && time_unix_ms() - t_last < 70000 {
+        net_deadline(a, 70000 - (time_unix_ms() - t_last)) else |_| {}
+        var ended = false
+        let piece = net_read(a, 4096) else |e| match e {
+            timeout => { "" },
+            closed => {
+                ended = true
+                ""
+            },
+            utf8 => {
+                ended = true
+                ""
+            },
+            io => {
+                ended = true
+                ""
+            },
+        }
+        if ended || piece.is_empty() {
+            t_end = time_unix_ms() - t_last
+        } else {
+            got = "{got}{piece}"
+        }
+    }
+    net_close(a) else |_| {}
+    if t_end < 60000 || t_end > 62500 {
+        fail(
+            child,
+            "a body that stopped after 2 of its 10 bytes ended its connection after {t_end} ms (bound 60000 to 62500 ms; -1: not within 70000 ms); it was sent `{got}`",
+        )
+    }
+    print("body_discard_idle: ok — the connection ended {t_end} ms after the body's last byte")
+    os_kill(child) else |_| {}
+    let _w = os_wait(child) else |_| { -1 }
+    fs_remove_dir_all(d) else |_| {}
+    0
+}
