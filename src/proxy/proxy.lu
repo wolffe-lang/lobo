@@ -1022,7 +1022,8 @@ fn name_in(names: List[str], name: str) -> bool {
 /// client headers in client order (minus hop-by-hop, minus any the
 /// effective set or Host override). `body` is forwarded verbatim with
 /// an exact Content-Length when non-empty (the buffer is the one source
-/// of truth — never the inbound Content-Length). PURE.
+/// of truth — never the inbound Content-Length, which is then not
+/// forwarded: one Content-Length line, lobo#138). PURE.
 pub fn build_upstream(
     c: config.Conf,
     req: http.Request,
@@ -1058,10 +1059,15 @@ pub fn build_upstream(
         (mut override_names).push("Host")
     }
     // forwarded client headers, in client order (hnames are already
-    // lowercased by the request parser)
+    // lowercased by the request parser). lobo#138: a body forwarded
+    // here carries the one Content-Length built from it below, so the
+    // client's own is not forwarded beside it (it was: two lines, equal,
+    // which a strict upstream refuses); with no body the client's is the
+    // only one and is kept, as before
     var j: int = 0
     for cn in req.hnames {
-        if !is_hop_by_hop(cn) && !name_in(override_names, cn) {
+        let framed_here = cn == "content-length" && !body.is_empty()
+        if !is_hop_by_hop(cn) && !name_in(override_names, cn) && !framed_here {
             head = "{head}{cn}: {req.hvals[j]}\r\n"
         }
         j = j + 1
