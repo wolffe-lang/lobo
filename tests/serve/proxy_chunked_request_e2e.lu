@@ -8,16 +8,19 @@
 //! This test is the upstream, and it records what each proxy forwarded:
 //! the request line, every `Content-Length` line, any
 //! `Transfer-Encoding`, and the body's bytes (decoded when sent
-//! chunked). It also records what the client was answered. Two
+//! chunked). It also records what the client was answered. Three
 //! bodies, each sent whole, in this order:
 //!   * `chunked`: `hello world` in two chunks;
-//!   * `over`: 20 bytes in two chunks, over the limit.
-//! The same two go through the pinned nginx (the oracle,
+//!   * `over`: 20 bytes in two chunks, over the limit;
+//!   * `trailers`: `hello world` in two chunks, then a trailer field.
+//! The same three go through the pinned nginx (the oracle,
 //! tests/differential/bin/nginx) and lobo's debug tier, and lobo is held
 //! to the oracle:
 //!   * `proxy-chunked-body`: the upstream receives `hello world`;
 //!   * `proxy-chunked-framing`: with the oracle's `Content-Length` and
 //!     `Transfer-Encoding`;
+//!   * `proxy-chunked-trailers`: the trailer case forwarded and
+//!     answered as the oracle does;
 //!   * `proxy-chunked-over`: the body over the limit refused and kept
 //!     from the upstream as the oracle does.
 //! Each proxy's forwarding in each case is printed as an `answered`
@@ -212,16 +215,17 @@ fn upstream(up: int, ms: int) -> Sent {
     s
 }
 
-/// The two cases, in order: (name, the whole request). Total.
+/// The three cases, in order: (name, the whole request). Total.
 fn cases() -> List[(str, str)] {
     let h = "POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n"
     [
         ("chunked", "{h}5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n"),
         ("over", "{h}a\r\n0123456789\r\na\r\n0123456789\r\n0\r\n\r\n"),
+        ("trailers", "{h}5\r\nhello\r\n6\r\n world\r\n0\r\nX-Sum: 11\r\n\r\n"),
     ]
 }
 
-/// The two cases through one proxy: `kind` 0 is the oracle, 1 a lobo.
+/// The three cases through one proxy: `kind` 0 is the oracle, 1 a lobo.
 /// Total: a proxy that does not start is a named failure.
 fn through(mut fails: List[str], who: str, kind: int, bin: str) -> List[Sent] {
     var out = List[Sent]()
@@ -359,6 +363,15 @@ fn main() -> !int {
             "lobo framed the body with Content-Length {lc.lengths}, Transfer-Encoding {lc.te}; the oracle with Content-Length {nc.lengths}, Transfer-Encoding {nc.te}",
         )
     }
+    let nt = pick(ng, "trailers")
+    let lt = pick(lb, "trailers")
+    if shape(lt) != shape(nt) {
+        note(
+            mut fails,
+            "proxy-chunked-trailers",
+            "with a trailer, lobo {shape(lt)}; the oracle {shape(nt)}",
+        )
+    }
     if lc.body != "hello world" {
         note(
             mut fails,
@@ -368,7 +381,7 @@ fn main() -> !int {
     }
     if fails.is_empty() {
         print(
-            "proxy_chunked_request: ok — the oracle answered chunked: {shape(nc)}; over: {shape(no)}; lobo the same",
+            "proxy_chunked_request: ok — the oracle answered chunked: {shape(nc)}; over: {shape(no)}; trailers: {shape(nt)}; lobo the same",
         )
         return 0
     }
@@ -377,6 +390,7 @@ fn main() -> !int {
         "proxy-chunked-oracle",
         "proxy-chunked-over",
         "proxy-chunked-framing",
+        "proxy-chunked-trailers",
         "proxy-chunked-body",
     ]
     var last = ""
