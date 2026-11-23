@@ -1,0 +1,145 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! THE DISCARD'S FRAMES, PURE. A request whose route does not use its
+//! body is answered after its head, and the serving loop discards the
+//! body as it arrives with `serve.discard_scan`, keeping a few ints and
+//! none of the bytes. This row holds the scanner to the chunked grammar
+//! `http.decode_chunked` reads (`<hex size>[;ext]CRLF<data>CRLF`, at
+//! most 15 digits, a `0` chunk, trailer lines, a final CRLF) and to a
+//! fixed length's count, fed whole and fed one byte at a time:
+//!   * where a body ends, the index of the first byte after it;
+//!   * a body that goes on, its state carried to the next piece;
+//!   * a malformed frame, `bad`; a cost past the cap, `bad`.
+//! Each failing case prints a `discard_scan: FAILED — [row]` line; the
+//! run ends with one named summary line per failing row, printed last,
+//! and an assert that repeats the last of them (an assert's own message
+//! is not in the record, wolf-lang#150).
+
+use serve
+
+/// The bytes of `s`. Total.
+fn bytes_of(s: str) -> List[byte] {
+    var out = List[byte]()
+    for b in s.bytes() {
+        (mut out).push(b)
+    }
+    out
+}
+
+/// One byte of `s` at `i`, as a list. Total.
+fn one(s: str, i: int) -> List[byte] {
+    var out = List[byte]()
+    (mut out).push(s.bytes()[i])
+    out
+}
+
+/// One case: the state and count it starts from, its input, the cap,
+/// the end wanted (-1: the body goes on), whether it is bad, its row.
+struct Case {
+    st: int,
+    n: int,
+    s: str,
+    cap: int,
+    end: int,
+    bad: bool,
+    row: str,
+}
+
+fn kase(st: int, n: int, s: str, cap: int, end: int, bad: bool, row: str) -> Case {
+    Case { st: st, n: n, s: s, cap: cap, end: end, bad: bad, row: row }
+}
+
+/// The scan of `s` whole from (`st`, `n`), cap `cap`, and the same
+/// scan fed one byte at a time: (end of the body in `s` or -1, bad,
+/// the same answer both ways). Total.
+fn both(st: int, n: int, s: str, cap: int) -> (int, bool, bool) {
+    let whole = serve.discard_scan(st, n, 0, bytes_of(s), 0, cap)
+    var cs = st
+    var cn = n
+    var ct = 0
+    var end = -1
+    var bad = false
+    var i: int = 0
+    while i < s.len && end < 0 && !bad {
+        let d = serve.discard_scan(cs, cn, ct, one(s, i), 0, cap)
+        if d.bad {
+            bad = true
+        } else if d.end >= 0 {
+            end = i + d.end
+        } else {
+            cs = d.st
+            cn = d.n
+            ct = d.t
+        }
+        i = i + 1
+    }
+    (whole.end, whole.bad, whole.end == end && whole.bad == bad)
+}
+
+fn main() -> !int {
+    var fails = List[str]()
+    let ck = serve.discard_chunked()
+    let cases = [
+        kase(1, 10, "abcdefghij", 100, 10, false, "discard-length"),
+        kase(1, 10, "abcdefghijGET / HTTP/1.1", 100, 10, false, "discard-length"),
+        kase(1, 10, "abcd", 100, -1, false, "discard-length"),
+        kase(ck, 0, "5\r\nhello\r\n0\r\n\r\n", 100, 15, false, "discard-chunked"),
+        kase(ck, 0, "5\r\nhello\r\n0\r\n\r\nGET", 100, 15, false, "discard-chunked"),
+        kase(
+            ck,
+            0,
+            "5;name=v\r\nhello\r\n3\r\nabc\r\n0\r\n\r\n",
+            100,
+            30,
+            false,
+            "discard-chunked",
+        ),
+        kase(ck, 0, "A\r\n0123456789\r\n0\r\n\r\n", 100, 20, false, "discard-chunked"),
+        kase(ck, 0, "a\r\n0123456789\r\n0\r\n\r\n", 100, 20, false, "discard-chunked"),
+        kase(ck, 0, "0\r\nX-T: 1\r\n\r\n", 100, 13, false, "discard-trailer"),
+        kase(ck, 0, "5\r\nhel", 100, -1, false, "discard-chunked"),
+        kase(ck, 0, "zz\r\n", 100, -1, true, "discard-bad"),
+        kase(ck, 0, "\r\n", 100, -1, true, "discard-bad"),
+        kase(ck, 0, "5\r\nhelloXX", 100, -1, true, "discard-bad"),
+        kase(ck, 0, "5\rX", 100, -1, true, "discard-bad"),
+        kase(ck, 0, "5 \r\nhello\r\n", 100, -1, true, "discard-bad"),
+        kase(ck, 0, "1234567890abcdef\r\n", 999999999999999, -1, true, "discard-bad"),
+        kase(ck, 0, "0\r\nX\rY", 100, -1, true, "discard-bad"),
+        kase(ck, 0, "5\r\nhello\r\n0\r\n\r\n", 4, -1, true, "discard-cap"),
+        kase(ck, 0, "3\r\nabc\r\n3\r\nabc\r\n", 5, -1, true, "discard-cap"),
+    ]
+    for c in cases {
+        let got = both(c.st, c.n, c.s, c.cap)
+        if got.0 != c.end || got.1 != c.bad || !got.2 {
+            let shown = c.s.replace("\r", "\\r").replace("\n", "\\n")
+            print(
+                "discard_scan: FAILED — [{c.row}] `{shown}` from state {c.st}: end {got.0} bad {got.1} (wanted end {c.end} bad {c.bad}); byte by byte the same: {got.2}",
+            )
+            (mut fails).push(c.row)
+        }
+    }
+    if fails.is_empty() {
+        print("discard_scan: {cases.len} cases as the grammar, whole and byte by byte")
+        return 0
+    }
+    var said = List[str]()
+    var last = ""
+    for r in fails {
+        var dup = false
+        for x in said {
+            if x == r {
+                dup = true
+            }
+        }
+        if !dup {
+            (mut said).push(r)
+            last = "discard_scan: FAILED — [{r}] see the lines above"
+            print(last)
+        }
+    }
+    assert(false, "{last}")
+    0
+}
