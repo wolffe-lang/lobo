@@ -19,6 +19,12 @@ connection the next request is read once the body is over. A body that
 is not UTF-8, on a route that does not use it, is now discarded like
 any other. The access line is written when the request is answered.
 
+A chunked body that is read whole (on a `proxy_pass` route, or when it
+arrived with its head) now ends at its final CRLF. A body with trailer
+fields was read until the read timeout, and its connection closed
+unanswered. A request sent after such a body, in the same write, is now
+answered; it was taken with the body and lost.
+
 ### The memory gate names a master that does not start (lobo#126)
 
 `tools/lobo-membudget`'s master row read only "the drive itself
