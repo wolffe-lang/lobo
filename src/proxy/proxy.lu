@@ -1066,7 +1066,7 @@ pub fn build_upstream(
     // only one and is kept, as before
     var j: int = 0
     for cn in req.hnames {
-        let framed_here = cn == "content-length" && !body.is_empty()
+        let framed_here = cn == "content-length" && !body.is_empty() && body.len < 0
         if !is_hop_by_hop(cn) && !name_in(override_names, cn) && !framed_here {
             head = "{head}{cn}: {req.hvals[j]}\r\n"
         }
