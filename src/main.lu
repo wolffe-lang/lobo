@@ -2684,7 +2684,8 @@ fn serve_main(
                         // the line is whole, the peer ended or its time is up,
                         // or it waits on for the next pass
                         var ended = false
-                        if ready_has(ready, cs_fd) {
+                        if cs_fd >= 0 {
+                            net_deadline(cs_fd, 2000) else |_| {}
                             let piece = net_read(cs_fd, 512) else |e| match e {
                                 timeout => { "" },
                                 closed => {
