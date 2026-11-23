@@ -582,6 +582,15 @@ struct Charge {
     procs_ok: bool,
     oerr: int,
     opath: str,
+    // A body the request's route does not use, not all here
+    // when the request is answered — the discard the loop runs beside
+    // its other rows (`discard_scan`'s state; `disc_st` 0: none), or
+    // `disc_bad`, a malformed chunk frame already in hand (answered,
+    // then closed). Every exit after the decision carries it.
+    disc_st: int,
+    disc_n: int,
+    disc_t: int,
+    disc_bad: bool,
 }
 
 fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
@@ -600,6 +609,10 @@ fn charge_new(budget: int, pipe_w: int, pipe_r: int) -> Charge {
         procs_ok: true,
         oerr: 0,
         opath: "",
+        disc_st: 0,
+        disc_n: 0,
+        disc_t: 0,
+        disc_bad: false,
     }
 }
 
@@ -3101,6 +3114,55 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
     }
 }
 
+/// Whether a request's body has not all arrived in `rest` and the
+/// request may be answered before it does: false when the
+/// body is whole, and false when the head already decides a refusal the
+/// body read gives today — a declared length over `client_max_body_size`
+/// (413) or over the budget (503), a chunked body past twice the cap
+/// (413) or the budget (503), in `read_chunked`'s own order. Pure and
+/// total.
+fn body_short(mode: str, length: int, rest: str, limits: http.Limits, used: int) -> bool {
+    if mode == "length" {
+        if length > limits.max_body {
+            return false
+        }
+        if limits.memory_budget > 0 && used + length > limits.memory_budget {
+            return false
+        }
+        return rest.len < length
+    }
+    if mode == "chunked" {
+        if rest.ends_with("0\r\n\r\n") || rest.contains("\r\n0\r\n\r\n") {
+            return false
+        }
+        if rest.len > limits.max_body * 2 {
+            return false
+        }
+        if limits.memory_budget > 0 && used + rest.len > limits.memory_budget {
+            return false
+        }
+        return true
+    }
+    false
+}
+
+/// Whether the request for `path` is routed to a `proxy_pass`, the one
+/// route that uses a request's body. A path that does not
+/// decode or normalize is not: its 400 is answered without the body.
+/// Pure and total.
+fn route_proxied(c: config.Conf, srv: int, path: str) -> bool {
+    let decoded = http.percent_decode(path) else |_| {
+        return false
+    }
+    if http.has_control(decoded) {
+        return false
+    }
+    let norm = http.normalize_path(decoded) else {
+        return false
+    }
+    proxy.plan_at(c, srv, norm).is_proxy
+}
+
 /// Where a discard stands after `discard_scan`. `st` is the
 /// state: 0 the body is over; 1 a fixed-length body with `n` bytes to
 /// go; `discard_chunked()` + k a chunk-size line with k hex digits so
@@ -3572,6 +3634,10 @@ pub struct ReqOut {
     open_err: int,
     open_path: str,
     proxy_job: str,
+    disc_st: int,
+    disc_n: int,
+    disc_t: int,
+    disc_bad: bool,
 }
 
 /// A ReqOut off a finished (or refused) request — every serve_request
@@ -3601,6 +3667,10 @@ fn req_out(close: bool, carry: str, take acc: obs.Access, chg: Charge) -> ReqOut
         open_err: chg.oerr,
         open_path: chg.opath,
         proxy_job: "",
+        disc_st: chg.disc_st,
+        disc_n: chg.disc_n,
+        disc_t: chg.disc_t,
+        disc_bad: chg.disc_bad,
     }
 }
 
@@ -3633,6 +3703,10 @@ fn req_out_wait(take acc: obs.Access, chg: Charge, need: proxy.Need) -> ReqOut {
         open_err: 0,
         open_path: "",
         proxy_job: "",
+        disc_st: 0,
+        disc_n: 0,
+        disc_t: 0,
+        disc_bad: false,
     }
 }
 
@@ -3664,6 +3738,10 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
         open_err: 0,
         open_path: "",
         proxy_job: "",
+        disc_st: chg.disc_st,
+        disc_n: chg.disc_n,
+        disc_t: chg.disc_t,
+        disc_bad: chg.disc_bad,
     }
 }
 
@@ -3765,7 +3843,40 @@ pub fn serve_request(
 
     var rest = rest0
     var body = ""
-    if req.body_mode == "length" {
+    // A body that has not all arrived, on a route that does
+    // not use it, is not waited for. The request is answered now, as
+    // nginx answers it, and the loop discards the body beside its other
+    // rows as it arrives, keeping none of it (`discard_step`). The 413
+    // and the budget's 503 are still decided here, at the head
+    // (`body_short` answers false for them). A proxied route reads its
+    // body here, as before.
+    var whole = true
+    if body_short(req.body_mode, req.content_length, rest0, limits, chg.used) &&
+        !route_proxied(c, srv, req.path) {
+        whole = false
+        rest = ""
+        if req.body_mode == "length" {
+            chg.disc_st = 1
+            chg.disc_n = req.content_length - rest0.len
+        } else {
+            let d0 = discard_scan(discard_chunked(), 0, 0, rest0.bytes(), 0, limits.max_body)
+            if d0.bad {
+                chg.disc_bad = true
+            } else if d0.end >= 0 {
+                // the frame's exact end is inside what came (a trailer
+                // the quick check does not know): nothing to discard
+                rest = rest0.get(d0.end..rest0.len) else {
+                    chg.disc_bad = true
+                    ""
+                }
+            } else {
+                chg.disc_st = d0.st
+                chg.disc_n = d0.n
+                chg.disc_t = d0.t
+            }
+        }
+    }
+    if whole && req.body_mode == "length" {
         if req.content_length > limits.max_body {
             acc.status = 413
             acc.body_bytes = err_len(413, false, opts.token)
@@ -3800,7 +3911,7 @@ pub fn serve_request(
         body = taken.0
         rest = taken.1
         chg.used = chg.used + body.len
-    } else if req.body_mode == "chunked" {
+    } else if whole && req.body_mode == "chunked" {
         let ck = read_chunked(mut cn, rest, limits, chg.used) else |e| match e {
             bad => {
                 acc.status = 400
@@ -4061,6 +4172,11 @@ pub struct ConnStep {
     open_err: int,
     open_path: str,
     proxy_job: str,
+    // the row's discard after this step (`discard_scan`'s
+    // state; 0: none; negative: close once the body is over)
+    disc_st: int,
+    disc_n: int,
+    disc_t: int,
 }
 
 /// A ConnStep with NO served request (idle poll, peer close, a
@@ -4101,6 +4217,9 @@ fn step_out(
         open_err: 0,
         open_path: "",
         proxy_job: "",
+        disc_st: 0,
+        disc_n: 0,
+        disc_t: 0,
     }
 }
 
@@ -4156,6 +4275,9 @@ pub struct StepOut {
     open_err: int,
     proxying: bool,
     rare: List[StepRare],
+    disc_st: int,
+    disc_n: int,
+    disc_t: int,
 }
 
 /// Pack a step's result for the copy out of its region (`StepOut`).
@@ -4216,6 +4338,9 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
         open_err: s.open_err,
         proxying: proxying,
         rare: rare,
+        disc_st: s.disc_st,
+        disc_n: s.disc_n,
+        disc_t: s.disc_t,
     }
 }
 
@@ -4289,10 +4414,23 @@ fn step_serve(
         return w
     }
     let ns = served + 1
-    let ncarry = if ro.close { "" } else { ro.carry }
+    // A body left to discard rides out as the row's state; an
+    // answer that closes waits for the body's end (a close with the
+    // body still arriving would reset the connection under the answer),
+    // and a malformed frame already in hand closes at once
+    var dst = ro.disc_st
+    var nclose = ro.close
+    if ro.disc_bad {
+        nclose = true
+        dst = 0
+    } else if dst != 0 && nclose {
+        nclose = false
+        dst = 0 - dst
+    }
+    let ncarry = if nclose || dst != 0 { "" } else { ro.carry }
     ConnStep {
         active: true,
-        close: ro.close,
+        close: nclose,
         carry: ncarry,
         served: ns,
         logged: ro.logged,
@@ -4317,6 +4455,9 @@ fn step_serve(
         open_err: ro.open_err,
         open_path: ro.open_path,
         proxy_job: ro.proxy_job,
+        disc_st: dst,
+        disc_n: ro.disc_n,
+        disc_t: ro.disc_t,
     }
 }
 
@@ -4328,7 +4469,9 @@ fn step_serve(
 /// so the loop keeps its per-generation counter live, checks the idle
 /// clock itself, and moves on to poll siblings and the control channel.
 /// This is the whole reason an old generation's drain is watchable
-/// while a new one serves (ws08). Total.
+/// while a new one serves (ws08). A row discarding the body of
+/// a request already answered (`dst` not 0, with `dn` and `dt`, the
+/// state the last step left) takes `discard_step` instead. Total.
 pub fn conn_step(
     conn: int,
     c: config.Conf,
@@ -4342,7 +4485,13 @@ pub fn conn_step(
     rs: resolver.Resolver,
     ft: FileKinds,
     now: int,
+    dst: int,
+    dn: int,
+    dt: int,
 ) -> ConnStep {
+    if dst != 0 {
+        return discard_step(conn, limits, dst, dn, dt, served, poll_ms)
+    }
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
@@ -4400,6 +4549,93 @@ pub fn conn_step(
         return step_serve(conn, c, opts, limits, local_port, laddr, buf, cut, served, rs, ft, now)
     }
     step_out(true, false, buf, served, false, take obs.access_new())
+}
+
+/// One step of a row discarding the body of a request it has answered:
+/// up to 16 reads of what has arrived, the first under
+/// `poll_ms` and the rest under 1 ms, each piece run through
+/// `discard_scan` and dropped. Where the body ends, the bytes after it
+/// are the next request's carry, or the row closes when its answer
+/// said so (`dst` negative). A malformed frame, a body past its cap, the
+/// peer's close or a read error closes the row; a read that times out
+/// leaves the discard where it is. Total.
+fn discard_step(
+    conn: int,
+    limits: http.Limits,
+    dst: int,
+    dn: int,
+    dt: int,
+    served: int,
+    poll_ms: int,
+) -> ConnStep {
+    let close_after = dst < 0
+    var st = if close_after { 0 - dst } else { dst }
+    var n = dn
+    var t = dt
+    var got = false
+    var reads: int = 0
+    net_deadline(conn, poll_ms) else |_| {
+        return step_out(false, true, "", served, false, take obs.access_new())
+    }
+    while reads < 16 {
+        var waited = false
+        var gone = false
+        let b = net_read_bytes(conn, 4096) else |e| match e {
+            timeout => {
+                waited = true
+                List[byte]()
+            },
+            closed => {
+                gone = true
+                List[byte]()
+            },
+            io => {
+                gone = true
+                List[byte]()
+            },
+        }
+        if gone || !waited && b.len == 0 {
+            return step_out(got, true, "", served, false, take obs.access_new())
+        }
+        if waited {
+            reads = 16
+        } else {
+            got = true
+            let d = discard_scan(st, n, t, b, 0, limits.max_body)
+            if d.bad {
+                return step_out(true, true, "", served, false, take obs.access_new())
+            }
+            if d.end >= 0 {
+                if close_after {
+                    return step_out(true, true, "", served, false, take obs.access_new())
+                }
+                var lb = List[byte]()
+                var j = d.end
+                while j < b.len {
+                    (mut lb).push(b[j])
+                    j = j + 1
+                }
+                let left = str_from_utf8(lb) else |_| {
+                    return step_out(true, true, "", served, false, take obs.access_new())
+                }
+                var w = step_out(true, false, left, served, false, take obs.access_new())
+                w.has_head = carry_has_head(left)
+                return w
+            }
+            st = d.st
+            n = d.n
+            t = d.t
+            reads = reads + 1
+            if reads == 1 {
+                net_deadline(conn, 1) else |_| {}
+            }
+        }
+    }
+    var w = step_out(got, false, "", served, false, take obs.access_new())
+    w.disc_st = if close_after { 0 - st } else { st }
+    w.disc_n = n
+    w.disc_t = t
+    w
 }
 
 // ------------------------------------------------------------------
