@@ -3950,7 +3950,8 @@ pub fn serve_request(
     // body here, as before.
     var whole = true
     if body_short(req.body_mode, req.content_length, rest0, limits, chg.used) &&
-        !route_proxied(c, srv, req.path) {
+        !route_proxied(c, srv, req.path) &&
+        served < 0 {
         whole = false
         rest = ""
         if req.body_mode == "length" {
