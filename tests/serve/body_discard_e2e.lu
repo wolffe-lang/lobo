@@ -29,9 +29,10 @@
 //! Every wait is bounded, so a server that reads the body before it
 //! answers costs this test seconds, not its read timeout. Each failure
 //! prints a `body_discard: FAILED — [row]` line as it happens; the run
-//! ends with one named summary line per failing row, printed last, and
-//! one assert (an assert's own message is not in the record,
-//! wolf-lang#150). Every server is stopped by its own handle. Loopback
+//! ends with one named summary line per failing row, printed last in a
+//! fixed order (the early answer last), and one assert (an assert's own
+//! message is not in the record, wolf-lang#150). Every server is
+//! stopped by its own handle. Loopback
 //! only, OS-chosen ports; the scratch trees are cleared at the start
 //! and at the end.
 
@@ -405,18 +406,27 @@ fn main() -> !int {
         print("body_discard: every flow as the oracle, the body discarded beside the loop")
         return 0
     }
-    // one named summary line per failing row, printed last
-    var said = List[str]()
+    // one named summary line per failing row, printed last, in a fixed
+    // order: the corpus keeps a failing run's last three lines, so the
+    // rows that say the most (the early answer, the GET beside it, the
+    // status) come last
+    let order = [
+        "body-discard-ready",
+        "body-discard-next",
+        "body-discard-bad-frame",
+        "body-discard-status",
+        "body-discard-get",
+        "body-discard-early",
+    ]
     var last = ""
-    for r in fails {
-        var dup = false
-        for s in said {
-            if s == r {
-                dup = true
+    for r in order {
+        var hit = false
+        for f in fails {
+            if f == r {
+                hit = true
             }
         }
-        if !dup {
-            (mut said).push(r)
+        if hit {
             last = "body_discard: FAILED — [{r}] see the lines above"
             print(last)
         }
