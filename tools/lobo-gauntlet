@@ -111,6 +111,13 @@ if ! env -u WOLF_MIDEND "$WOLF" build --release ./src/main.lu -o target/lobo-rel
 fi
 echo "debug + release ok"
 
+# A scratch branch, never merged (lobo#126): the hosted runner's start
+# witness. After the build, only the master's start check, 200 times,
+# each bounded at 10 s; the gauntlet's exit is the witness's.
+step "membudget --starts 200 (the start witness)"
+tools/lobo-membudget --starts 200
+exit $?
+
 step "directive docs (docs/directives.md)"
 if ! tools/lobo-directives --check; then
     echo "lobo-gauntlet: FAILED at directives — see above for the ritual" >&2
