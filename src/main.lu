@@ -111,32 +111,30 @@ fn banner() {
 // the control loop's line reader and verb dispatch
 // ------------------------------------------------------------------
 
-/// Read one newline-terminated command line from `conn` (bounded — a
-/// control peer sends one short verb). Returns the line without the
-/// newline. Swallows net trouble into "" (the loop then replies with
-/// an error and moves on). Total.
-fn read_command(conn: int) -> str {
-    var buf = ""
-    var reading = true
-    while reading {
-        let nl = buf.find("\n") else -1
-        if nl >= 0 {
-            return buf[0..nl].trim()
-        }
-        if buf.len > 4096 {
-            return buf.trim()
-        }
-        let piece = net_read(conn, 512) else |_| {
-            reading = false
-            ""
-        }
-        if piece.is_empty() {
-            reading = false
-        } else {
-            buf = "{buf}{piece}"
-        }
+/// lobo#72: how long an order's connection has, from its accept, to
+/// send its whole line. Past it, what arrived is dispatched (an
+/// incomplete verb is answered `unknown verb`) and the connection is
+/// closed. The client's own wait is the same number
+/// (`shell.control_deadline_ms`). Total.
+fn control_line_ms() -> int {
+    2000
+}
+
+/// lobo#72: what an order's slot holds, read as a line: (true, the
+/// line) when it is whole — up to its newline — or past 4,096 bytes, or
+/// when `done` (the peer ended, or the slot's time is up) with what
+/// arrived; (false, "") while it may still grow. A loop calls it after
+/// at most one read of the slot, made only when its wait named the
+/// slot, so the line never holds the loop. Pure and total.
+fn slot_line(have: str, done: bool) -> (bool, str) {
+    let nl = have.find("\n") else -1
+    if nl >= 0 {
+        return (true, have[0..nl].trim())
     }
-    buf.trim()
+    if done || have.len > 4096 {
+        return (true, have.trim())
+    }
+    (false, "")
 }
 
 // ------------------------------------------------------------------
@@ -2117,6 +2115,20 @@ fn serve_main(
     // pause permits queue draining; only an empty eligible set renews it.
     var adm_off: int = 0
     var ctl_off: int = 0
+    // lobo#72: THE ORDER'S SLOT. An accepted control connection waits
+    // here (`cs_fd`, -1 for none) with the bytes of its line so far
+    // (`cs_n` of the buffer `cs_buf`, which last held `cs_was`) until a
+    // whole line is in, the peer ends, or `cs_until` passes; it is in
+    // the wait set, and a pass reads it only when the wait names it. The
+    // loop never waits on an order's bytes, so no control connection
+    // delays a client. One order at a time: while the slot is taken the
+    // control listener sits out of the wait set and the next connection
+    // waits in the kernel's queue.
+    var cs_fd: int = -1
+    var cs_until: int = 0
+    var cs_n: int = 0
+    var cs_was: int = 0
+    var cs_buf = List[byte]()
     // ws64: THE RESERVE. Two descriptors lobo holds and does not use,
     // so that out of descriptors it can still take an order: `rsv_a`
     // is let go when the control accept fails (the order's connection
@@ -2443,8 +2455,12 @@ fn serve_main(
                     }
                     let http_on = acc_on && (!pause_http || adm_off == 0 || now >= adm_off)
                     let tls_on = acc_on && (!pause_tls || adm_off == 0 || now >= adm_off)
-                    if have_ctrl && now >= ctl_off {
+                    if have_ctrl && cs_fd < 0 && now >= ctl_off {
                         (mut wfds).push(cl)
+                    }
+                    // lobo#72: an order waiting for the rest of its line
+                    if cs_fd >= 0 {
+                        (mut wfds).push(cs_fd)
                     }
                     // ws29: the forwarder's read end — the readiness handle a
                     // signal did not have until this sprint (lobo#8)
@@ -2523,6 +2539,10 @@ fn serve_main(
                     }
                     if have_ctrl && now < ctl_off && ctl_off - now < wms {
                         wms = ctl_off - now
+                    }
+                    // lobo#72: the wait ends when the order's time is up
+                    if cs_fd >= 0 && cs_until - now < wms {
+                        wms = if cs_until > now { cs_until - now } else { 0 }
                     }
                     var ready = List[int]()
                     if wfds.len > 0 {
@@ -2657,7 +2677,55 @@ fn serve_main(
                     var verb = ""
                     var cc = -1
                     var denied = false
-                    if have_ctrl && ready_has(ready, cl) {
+                    if cs_fd >= 0 {
+                        // lobo#72: the order's slot — one read, and only when
+                        // the wait named it (the slot's budget is 5 ms, armed
+                        // at its accept: a ready socket answers at once); then
+                        // the line is whole, the peer ended or its time is up,
+                        // or it waits on for the next pass
+                        var ended = false
+                        if ready_has(ready, cs_fd) {
+                            let piece = net_read(cs_fd, 512) else |e| match e {
+                                timeout => { "" },
+                                closed => {
+                                    ended = true
+                                    ""
+                                },
+                                utf8 => {
+                                    ended = true
+                                    ""
+                                },
+                                io => {
+                                    ended = true
+                                    ""
+                                },
+                            }
+                            if !piece.is_empty() {
+                                let sofar = if cs_n == 0 {
+                                    piece
+                                } else {
+                                    "{carry_str(cs_buf, cs_n)}{piece}"
+                                }
+                                in life {
+                                    carry_put(mut cs_buf, sofar, cs_was)
+                                }
+                                cs_was = sofar.len
+                                cs_n = sofar.len
+                            }
+                        }
+                        let got = slot_line(carry_str(cs_buf, cs_n), ended || tw >= cs_until)
+                        if got.0 {
+                            cc = cs_fd
+                            cs_fd = -1
+                            cs_n = 0
+                            net_deadline(cc, 2000) else |_| {}
+                            if shell.control_authorized(got.1, ctok) {
+                                verb = shell.control_verb_of(got.1, ctok)
+                            } else {
+                                denied = true
+                            }
+                        }
+                    } else if have_ctrl && ready_has(ready, cl) {
                         // ws64 (lobo#84): IS THERE A DESCRIPTOR FOR THE ORDER'S
                         // CONNECTION? Asked BEFORE the accept, because what a
                         // failed accept costs is the host's: linux leaves the
@@ -2725,14 +2793,11 @@ fn serve_main(
                             ev_log(mut elog, "crit", shell.accept_failed_text(why.0, why.1))
                         }
                         if got_ctrl {
-                            cc = cand
-                            net_deadline(cc, 2000) else |_| {}
-                            let line = read_command(cc)
-                            if shell.control_authorized(line, ctok) {
-                                verb = shell.control_verb_of(line, ctok)
-                            } else {
-                                denied = true
-                            }
+                            // lobo#72: into the slot, read when the wait names it
+                            net_deadline(cand, 5) else |_| {}
+                            cs_fd = cand
+                            cs_until = tw + control_line_ms()
+                            cs_n = 0
                         }
                     }
                     // an unauthorized line dispatches NOTHING and emits no
@@ -4554,6 +4619,10 @@ fn serve_main(
         if xl >= 0 {
             net_close(xl) else |_| {}
         }
+    }
+    // lobo#72: an order still in its slot when the loop ends
+    if cs_fd >= 0 {
+        net_close(cs_fd) else |_| {}
     }
     if have_ctrl {
         net_close(cl) else |_| {}
@@ -6546,6 +6615,15 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     if sig_on {
         (mut cwf).push(sig_r)
     }
+    // lobo#72: the master's order slot, the hands' shape (serve_main):
+    // an accepted control connection waits here for the rest of its
+    // line, in the wait set in place of the listener, read only when the
+    // wait names it
+    var ms_fd: int = -1
+    var ms_until: int = 0
+    var ms_n: int = 0
+    var ms_was: int = 0
+    var ms_buf = List[byte]()
     // ws62 (px25's finding (c)): THE REGIONS, as the hands have them
     // since ws57. `life` is where what the master keeps across passes
     // is built — a reload's frozen model and log output, bounded by the
@@ -6574,29 +6652,83 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             var cc = -1
             var denied = false
             var cready = List[int]()
-            if !cwf.is_empty() {
+            if ms_fd >= 0 {
+                // lobo#72: an order in the slot is waited on in place of
+                // the listener, and the wait ends when its time is up
+                var mwf = List[int]()
+                (mut mwf).push(ms_fd)
+                if sig_on {
+                    (mut mwf).push(sig_r)
+                }
+                var mwms = wait_budget(false)
+                if ms_until - now < mwms {
+                    mwms = if ms_until > now { ms_until - now } else { 0 }
+                }
+                cready = net_wait(mwf, mwms) else |_| {
+                    List[int]()
+                }
+            } else if !cwf.is_empty() {
                 // ws17: the master waits on its sockets the same way a
                 // hand waits on its set ([os.net.wait]); the supervision
                 // pass below is this loop's timer work
                 cready = net_wait(cwf, wait_budget(false)) else |_| {
                     List[int]()
                 }
-                var got_ctrl = have_ctrl && ready_has(cready, cl)
-                if got_ctrl {
-                    let cand = net_accept(cl) else |_| {
-                        got_ctrl = false
-                        0
+            }
+            let mtw = time_unix_ms()
+            if ms_fd >= 0 {
+                // lobo#72: one read of the slot, only when the wait named
+                // it, as the hands do
+                var ended = false
+                if ready_has(cready, ms_fd) {
+                    let piece = net_read(ms_fd, 512) else |e| match e {
+                        timeout => { "" },
+                        closed => {
+                            ended = true
+                            ""
+                        },
+                        utf8 => {
+                            ended = true
+                            ""
+                        },
+                        io => {
+                            ended = true
+                            ""
+                        },
                     }
-                    if got_ctrl {
-                        cc = cand
-                        net_deadline(cc, 2000) else |_| {}
-                        let line = read_command(cc)
-                        if shell.control_authorized(line, ctok) {
-                            verb = shell.control_verb_of(line, ctok)
+                    if !piece.is_empty() {
+                        let sofar = if ms_n == 0 {
+                            piece
                         } else {
-                            denied = true
+                            "{carry_str(ms_buf, ms_n)}{piece}"
                         }
+                        in life {
+                            carry_put(mut ms_buf, sofar, ms_was)
+                        }
+                        ms_was = sofar.len
+                        ms_n = sofar.len
                     }
+                }
+                let got = slot_line(carry_str(ms_buf, ms_n), ended || mtw >= ms_until)
+                if got.0 {
+                    cc = ms_fd
+                    ms_fd = -1
+                    ms_n = 0
+                    net_deadline(cc, 2000) else |_| {}
+                    if shell.control_authorized(got.1, ctok) {
+                        verb = shell.control_verb_of(got.1, ctok)
+                    } else {
+                        denied = true
+                    }
+                }
+            } else if have_ctrl && ready_has(cready, cl) {
+                let cand = net_accept(cl) else |_| { -1 }
+                if cand >= 0 {
+                    // lobo#72: into the slot, read when the wait names it
+                    net_deadline(cand, 5) else |_| {}
+                    ms_fd = cand
+                    ms_until = mtw + control_line_ms()
+                    ms_n = 0
                 }
             }
             if denied {
@@ -6938,6 +7070,10 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
         net_close(sig_r) else |_| {}
     }
     elog_st = reopen_elog(elog_st)
+    // lobo#72: an order still in the master's slot when it ends
+    if ms_fd >= 0 {
+        net_close(ms_fd) else |_| {}
+    }
     if have_ctrl {
         net_close(cl) else |_| {}
     }
