@@ -29,9 +29,11 @@
 //! Every wait is bounded, so a server that reads the body before it
 //! answers costs this test seconds, not its read timeout. Each failure
 //! prints a `body_discard: FAILED — [row]` line as it happens; the run
-//! ends with one named summary line per failing row, printed last in a
-//! fixed order (the early answer last), and one assert (an assert's own
-//! message is not in the record, wolf-lang#150). Every server is
+//! ends with one named line per failing row, each with its first
+//! reason, printed last in a fixed order (the early answer last), and
+//! one assert (an assert's own message is not in the record,
+//! wolf-lang#150). Each server's answers are printed as an `answered`
+//! line, and a passing run ends with the oracle's. Every server is
 //! stopped by its own handle. Loopback
 //! only, OS-chosen ports; the scratch trees are cleared at the start
 //! and at the end.
@@ -53,11 +55,12 @@ fn body() -> str {
     "BODY-DISCARD-FILE<END>\n"
 }
 
-/// Print a named failure and keep its row. Total.
+/// Print a named failure and keep it, as `<row> <who>: <reason>` on one
+/// line. Total.
 fn note(mut fails: List[str], row: str, who: str, msg: str) {
     let one = msg.replace("\r", "").replace("\n", " | ")
     print("body_discard: FAILED — [{row}] {who}: {one}")
-    (mut fails).push(row)
+    (mut fails).push("{row} {who}: {one}")
 }
 
 /// The declared Content-Length of a reply head, -1 when it has none.
@@ -360,7 +363,7 @@ fn rows(mut fails: List[str], who: str, kind: int, bin: str) -> Seen {
     let _w = os_wait(child) else |_| { -1 }
     fs_remove_dir_all(d) else |_| {}
     print(
-        "body_discard: {who}: early `{seen.length}` / `{seen.chunked}` / `{seen.post}`, a malformed frame: {seen.frame}",
+        "body_discard: {who} answered early `{seen.length}` / `{seen.chunked}` / `{seen.post}`; after a malformed chunk frame: {seen.frame}",
     )
     seen
 }
@@ -403,13 +406,17 @@ fn main() -> !int {
         )
     }
     if fails.is_empty() {
-        print("body_discard: every flow as the oracle, the body discarded beside the loop")
+        // what the oracle answered, in the line a passing run ends with
+        print(
+            "body_discard: ok — the oracle answered early `{ng.length}` / `{ng.chunked}` / `{ng.post}` and was `{ng.frame}` after a malformed chunk frame; lobo answered the same, each before the body",
+        )
         return 0
     }
-    // one named summary line per failing row, printed last, in a fixed
-    // order: the corpus keeps a failing run's last three lines, so the
-    // rows that say the most (the early answer, the GET beside it, the
-    // status) come last
+    // one named line per failing row, with the reason it failed first,
+    // printed last in a fixed order: the corpus keeps a failing run's
+    // last three lines of output, the last of them the empty one after
+    // the final newline, so the two rows that say the most (the GET
+    // beside a body, the early answer) come last
     let order = [
         "body-discard-ready",
         "body-discard-next",
@@ -420,14 +427,14 @@ fn main() -> !int {
     ]
     var last = ""
     for r in order {
-        var hit = false
+        var why = ""
         for f in fails {
-            if f == r {
-                hit = true
+            if why.is_empty() && f.starts_with("{r} ") {
+                why = f[r.len + 1..f.len]
             }
         }
-        if hit {
-            last = "body_discard: FAILED — [{r}] see the lines above"
+        if !why.is_empty() {
+            last = "body_discard: FAILED — [{r}] {why}"
             print(last)
         }
     }
