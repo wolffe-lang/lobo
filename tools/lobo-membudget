@@ -279,8 +279,8 @@ master_start() { # master_start — master_try, retried on a refused port; sets 
     while :; do
         master_try
         mst=$?
-        if [ "$mst" = 1 ] && [ "$mtries" -lt 3 ] && grep -qi "address already in use\|bind" "$scratch/lobo-master.log" 2>/dev/null; then
-            say "note — the master's start $mtries exited (code $mcode) refusing its ports $mhp/$mcp: $(grep -i "address already in use\|bind" "$scratch/lobo-master.log" | tail -1 | cut -c1-200); two new ports (freeport's race)"
+        if [ "$mst" = 1 ] && [ "$mtries" -lt 3 ] && grep -q "bind() to .* failed" "$scratch/lobo-master.log" 2>/dev/null; then
+            say "note — the master's start $mtries exited (code $mcode) refusing its ports $mhp/$mcp: $(grep "bind() to .* failed" "$scratch/lobo-master.log" | tail -1 | cut -c1-200); two new ports (freeport's race)"
             mtries=$((mtries + 1))
             continue
         fi
