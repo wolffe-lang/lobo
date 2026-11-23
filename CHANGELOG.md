@@ -2,6 +2,23 @@
 
 ## Unreleased — 0.1.6
 
+### A request whose route does not use its body is answered after its head
+
+A file, a redirect, a 405 or an error (every route but `proxy_pass`) is
+now answered as soon as the request's head has arrived, before its body,
+as nginx answers it. The body is then discarded as it arrives and none
+of it is kept: a fixed length is counted, a chunked body's frame is
+followed. The discard is bounded by `client_max_body_size` (decided from
+the head for a declared length; for a chunked body, its data, extensions
+and trailers) and waits 60 s between reads, as the body read did. A
+malformed chunk frame ends the connection, as nginx ends it.
+
+An answer that closes the connection (a 405, an error) waits for the
+body's end before the close, so the client can read it. On a kept
+connection the next request is read once the body is over. A body that
+is not UTF-8, on a route that does not use it, is now discarded like
+any other. The access line is written when the request is answered.
+
 ### A chunked request body reaches a proxied upstream (lobo#137)
 
 A request body sent with `Transfer-Encoding: chunked` to a `proxy_pass`
