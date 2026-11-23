@@ -25,6 +25,15 @@
 //! keep-alive GET answered on each, then all of them held open for
 //! `ms` — the idle server with clients attached, whose memory the
 //! gate samples while this driver sleeps.
+//!
+//! `upload <bytes>`: `count` connections, each a keep-alive GET with a
+//! `Content-Length: <bytes>` body that its route does not use. Every
+//! head goes out first with one byte of its body, then the bodies'
+//! remaining bytes in 4 KiB pieces, one piece per connection in turn,
+//! so all `count` bodies are arriving at once; then each connection's
+//! reply is read and one more GET is answered on it (the body was
+//! discarded exactly). The gate samples the server's RSS around this
+//! drive: a server that keeps no body bytes stays flat.
 
 /// Parse a decimal port from argv — `io` on anything not 1..65535 (a
 /// driver argument error, not a case outcome).
@@ -178,8 +187,55 @@ fn to_ms(s: str) -> int ! {io} {
 }
 
 fn usage() -> int {
-    eprint("usage: memdrive <port> <count> <abs-path> [close | hold <ms>]")
+    eprint("usage: memdrive <port> <count> <abs-path> [close | hold <ms> | upload <bytes>]")
     2
+}
+
+/// `count` uploads arriving at once, each `bytes` long, on keep-alive
+/// connections; then each one's reply and one more GET on it. Rows:
+/// `io`.
+fn uploads(port: int, count: int, path: str, bytes: int) -> int ! {io} {
+    var conns = List[int]()
+    while conns.len < count {
+        let c = net_connect("127.0.0.1:{port}") else |_| {
+            return io
+        }
+        net_deadline(c, 8000) else |_| {
+            return io
+        }
+        net_write(
+            c,
+            "GET {path} HTTP/1.1\r\nHost: x\r\nContent-Length: {bytes}\r\n\r\nu",
+        ) else |_| {
+            return io
+        }
+        (mut conns).push(c)
+    }
+    var piece = "u"
+    while piece.len < 4096 {
+        piece = "{piece}{piece}"
+    }
+    piece = piece[0..4096]
+    var sent: int = 1
+    while sent < bytes {
+        let n = if bytes - sent < 4096 { bytes - sent } else { 4096 }
+        let part = piece[0..n]
+        for c in conns {
+            net_write(c, part) else |_| {
+                return io
+            }
+        }
+        sent = sent + n
+    }
+    for c in conns {
+        let left = read_response(c, "")?
+        net_write(c, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: keep-alive\r\n\r\n") else |_| {
+            return io
+        }
+        let _rest = read_response(c, left)?
+        net_close(c) else |_| {}
+    }
+    conns.len
 }
 
 fn main() -> !int {
@@ -210,6 +266,12 @@ fn main() -> !int {
             done = done + 1
         }
         print("memdrive: served={done} conn={done}")
+        return 0
+    }
+    if args.len == 5 && args[3] == "upload" {
+        let n = to_count(args[4])?
+        let done = uploads(port, count, path, n)?
+        print("memdrive: uploads={done} bytes={n}")
         return 0
     }
     if args.len == 5 {
