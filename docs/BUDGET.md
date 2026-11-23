@@ -565,6 +565,19 @@ not a daemon setting: 2,000–60,000, in multiples of 400. It preserves the
 warm-up, connection shape and 512 KiB bound, and prints the short, 20k
 and 60k phases. A drive failure or CPU-query error is red, not a skip.
 
+The master row (four idle hands, the master's RSS across 60 s) starts
+with a check of its own, `[membudget-master-start]`: the master's
+`worker-started worker=4` line within 10 s. A master that exits first is
+red with its exit code and the last 20 lines of its log; one alive
+without the line is red with its state and children. A start whose
+listener cannot bind its probed port is retried on two new ports, at
+most twice, each retry a printed note. The start can be witnessed alone,
+N times, with a tally of the outcomes:
+
+```sh
+taskset -c 0-3 tools/lobo-membudget --starts 300
+```
+
 At frozen pool baseline `f32a1b7`, rebuilt at wolf 0.2.34, the original
 fixture's RSS readings were (KiB; totals include warm-up):
 
