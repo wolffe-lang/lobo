@@ -1,0 +1,426 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! A REQUEST WHOSE ROUTE DOES NOT USE ITS BODY IS ANSWERED AFTER ITS
+//! HEAD, AND THE BODY IS DISCARDED BESIDE THE SERVING LOOP. nginx
+//! answers a file, or a 405, without waiting for the request's body and
+//! discards the body as it arrives; lobo does the same, and keeps none
+//! of the body's bytes. The same flows run against the pinned nginx
+//! (the oracle, tests/differential/bin/nginx) and lobo's debug tier:
+//!   1. `GET /f.html` with `Content-Length: 10` and 2 of its bytes: the
+//!      file is answered within 1,000 ms, before the rest is sent
+//!      (`body-discard-early`);
+//!   2. while that body arrives one byte at a time, a GET on another
+//!      connection is answered within 250 ms each time
+//!      (`body-discard-get`);
+//!   3. once the rest is sent, a GET on the same connection is answered
+//!      with the file: the body was discarded exactly
+//!      (`body-discard-next`);
+//!   4. the same three with `Transfer-Encoding: chunked`, a chunk split
+//!      across sends;
+//!   5. `POST /f.html` with a short body is answered 405 within
+//!      1,000 ms;
+//!   6. lobo's first status line in 1, 4 and 5 equals the oracle's
+//!      (`body-discard-status`);
+//!   7. a malformed chunk frame while the body is discarded: lobo does
+//!      what the oracle does, the connection closed or a reply given
+//!      (`body-discard-bad-frame`).
+//! Every wait is bounded, so a server that reads the body before it
+//! answers costs this test seconds, not its read timeout. Each failure
+//! prints a `body_discard: FAILED — [row]` line as it happens; the run
+//! ends with one named summary line per failing row, printed last, and
+//! one assert (an assert's own message is not in the record,
+//! wolf-lang#150). Every server is stopped by its own handle. Loopback
+//! only, OS-chosen ports; the scratch trees are cleared at the start
+//! and at the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// The file every flow asks for. Total.
+fn body() -> str {
+    "BODY-DISCARD-FILE<END>\n"
+}
+
+/// Print a named failure and keep its row. Total.
+fn note(mut fails: List[str], row: str, who: str, msg: str) {
+    let one = msg.replace("\r", "").replace("\n", " | ")
+    print("body_discard: FAILED — [{row}] {who}: {one}")
+    (mut fails).push(row)
+}
+
+/// The declared Content-Length of a reply head, -1 when it has none.
+/// Total.
+fn clen(head: str) -> int {
+    let key = "\r\nContent-Length: "
+    let at = head.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    let hb = head.bytes()
+    var v: int = 0
+    var i = at + key.len
+    while i < hb.len {
+        let d = hb[i] as int
+        if d < 48 || d > 57 {
+            return v
+        }
+        v = v * 10 + (d - 48)
+        i = i + 1
+    }
+    v
+}
+
+/// Whether `buf` holds one whole reply (its head and its declared
+/// body). Total.
+fn reply_done(buf: str) -> bool {
+    let at = buf.find("\r\n\r\n") else -1
+    if at < 0 {
+        return false
+    }
+    let n = clen(buf[0..at + 2])
+    n >= 0 && buf.len >= at + 4 + n
+}
+
+/// Read one reply from `c` for at most `ms` on the clock: (what came,
+/// whether the peer closed). Total.
+fn read_reply(c: int, ms: int) -> (str, bool) {
+    let until = time_unix_ms() + ms
+    var buf = ""
+    while !reply_done(buf) {
+        let left = until - time_unix_ms()
+        if left <= 0 {
+            return (buf, false)
+        }
+        net_deadline(c, left) else |_| {}
+        var closed = false
+        var waited = false
+        let piece = net_read(c, 4096) else |e| match e {
+            timeout => {
+                waited = true
+                ""
+            },
+            closed => {
+                closed = true
+                ""
+            },
+            utf8 => {
+                closed = true
+                ""
+            },
+            io => {
+                closed = true
+                ""
+            },
+        }
+        if closed || !waited && piece.is_empty() {
+            return (buf, true)
+        }
+        if waited {
+            return (buf, false)
+        }
+        buf = "{buf}{piece}"
+    }
+    (buf, false)
+}
+
+/// Everything `c` sends until it closes or `ms` pass. Total.
+fn read_all(c: int, ms: int) -> str {
+    let until = time_unix_ms() + ms
+    var buf = ""
+    loop {
+        let left = until - time_unix_ms()
+        if left <= 0 {
+            return buf
+        }
+        net_deadline(c, left) else |_| {}
+        let piece = net_read(c, 4096) else |_| {
+            return buf
+        }
+        if piece.is_empty() {
+            return buf
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// The first line of a reply. Total.
+fn status_line(r: str) -> str {
+    let at = r.find("\r\n") else -1
+    if at < 0 {
+        return r
+    }
+    r[0..at]
+}
+
+/// A GET for the file on a connection of its own, answered within
+/// `ms`: the milliseconds it took, -1 when it was not. Total.
+fn timed_get(port: int, ms: int) -> int {
+    let t0 = time_unix_ms()
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return -1
+    }
+    net_write(c, "GET /f.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return -1
+    }
+    let r = read_reply(c, ms)
+    net_close(c) else |_| {}
+    if !r.0.starts_with("HTTP/1.1 200 OK") || !r.0.ends_with(body()) {
+        return -1
+    }
+    time_unix_ms() - t0
+}
+
+/// Up when a GET answers, asked for up to six seconds. Total.
+fn wait_port(port: int) -> bool {
+    var i: int = 0
+    while i < 120 {
+        if timed_get(port, 500) >= 0 {
+            return true
+        }
+        time_sleep_ms(50)
+        i = i + 1
+    }
+    false
+}
+
+/// One flow whose body arrives in `parts` (the first sent with the
+/// head): the early reply, the GETs beside it, the next request on the
+/// connection. Returns the early reply's status line. Total.
+fn flow(
+    mut fails: List[str],
+    who: str,
+    port: int,
+    head: str,
+    parts: List[str],
+    ask_next: bool,
+) -> str {
+    let a = net_connect("127.0.0.1:{port}") else |_| {
+        note(mut fails, "body-discard-early", who, "the connection was refused")
+        return ""
+    }
+    net_write(a, "{head}{parts[0]}") else |_| {
+        note(mut fails, "body-discard-early", who, "the head could not be written")
+        net_close(a) else |_| {}
+        return ""
+    }
+    let t0 = time_unix_ms()
+    let early = read_reply(a, 1000)
+    let t_early = time_unix_ms() - t0
+    if early.0.is_empty() || !reply_done(early.0) {
+        note(
+            mut fails,
+            "body-discard-early",
+            who,
+            "`{status_line(head)}` with part of its body: no whole reply within 1000 ms (got `{status_line(early.0)}`, {t_early} ms)",
+        )
+    }
+    // the body's middle parts, one at a time, a GET beside each
+    var i: int = 1
+    while i < parts.len - 1 {
+        let g = timed_get(port, 3000)
+        if g < 0 || g > 250 {
+            note(
+                mut fails,
+                "body-discard-get",
+                who,
+                "a GET took {g} ms (bound 250 ms; -1: none within 3000 ms) while `{status_line(head)}` had sent {i} of {parts.len} parts of its body",
+            )
+        }
+        net_write(a, parts[i]) else |_| {}
+        time_sleep_ms(200)
+        i = i + 1
+    }
+    net_write(a, parts[parts.len - 1]) else |_| {}
+    if ask_next {
+        net_write(a, "GET /f.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+        let after = read_all(a, 3000)
+        // the server that held its answer until the body arrived sends
+        // it now, before the next request's: the next is the last reply
+        if !after.ends_with("\r\n\r\n{body()}") || !after.contains("HTTP/1.1 200 OK") {
+            note(
+                mut fails,
+                "body-discard-next",
+                who,
+                "after the body, a GET on the same connection was not answered with the file: `{after}`",
+            )
+        }
+    }
+    net_close(a) else |_| {}
+    status_line(early.0)
+}
+
+/// A malformed chunk frame while the body is discarded: "closed" when
+/// the server ended the connection, "answered <status>" when it replied
+/// to the request that followed, "silent" when neither came. Total.
+fn bad_frame(port: int) -> str {
+    let a = net_connect("127.0.0.1:{port}") else |_| {
+        return "refused"
+    }
+    let head = "GET /f.html HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    net_write(a, "{head}5\r\nhel") else |_| {}
+    let _early = read_reply(a, 1000)
+    net_write(a, "lo\r\nzz\r\n") else |_| {}
+    time_sleep_ms(100)
+    net_write(a, "GET /f.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+    let r = read_reply(a, 1500)
+    net_close(a) else |_| {}
+    if r.0.starts_with("HTTP/1.1 ") {
+        return "answered {status_line(r.0)}"
+    }
+    if r.1 {
+        return "closed"
+    }
+    "silent"
+}
+
+/// What one server answered: the three early status lines and the
+/// malformed frame's outcome.
+struct Seen {
+    length: str,
+    chunked: str,
+    post: str,
+    frame: str,
+}
+
+/// Every flow against one server: `kind` 0 is the oracle, 1 a lobo.
+/// Total: a server that does not start is a named failure.
+fn rows(mut fails: List[str], who: str, kind: int, bin: str) -> Seen {
+    var seen = Seen { length: "", chunked: "", post: "", frame: "" }
+    let d = "body_discard_e2e_{who}"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w") else |_| {
+        note(mut fails, "body-discard-ready", who, "the scratch tree could not be made")
+        return seen
+    }
+    fs_create_dir_all("{d}/logs") else |_| {}
+    fs_write_text("{d}/w/f.html", body()) else |_| {}
+    let root = os_cwd() else |_| "."
+    let hp = free_port() else |_| {
+        note(mut fails, "body-discard-ready", who, "no free port")
+        return seen
+    }
+    var argv = List[str]()
+    (mut argv).push(bin)
+    if kind == 0 {
+        let conf = "daemon off;\nmaster_process off;\npid {root}/{d}/ng.pid;\nerror_log {root}/{d}/logs/ng.err;\nevents {{}}\nhttp {{\n  access_log off;\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {root}/{d}/w; }}\n}}\n"
+        fs_write_text("{d}/ng.conf", conf) else |_| {}
+        (mut argv).push("-p")
+        (mut argv).push("{root}/{d}/")
+        (mut argv).push("-c")
+        (mut argv).push("{root}/{d}/ng.conf")
+    } else {
+        let conf = "pid {d}/lobo.pid;\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+        fs_write_text("{d}/lobo.conf", conf) else |_| {}
+        (mut argv).push("serve")
+        (mut argv).push("-p")
+        (mut argv).push(".")
+        (mut argv).push("-c")
+        (mut argv).push("{d}/lobo.conf")
+    }
+    let child = os_spawn(argv) else |_| {
+        note(mut fails, "body-discard-ready", who, "os_spawn failed (is {bin} there?)")
+        return seen
+    }
+    if !wait_port(hp) {
+        note(mut fails, "body-discard-ready", who, "the server never answered a GET")
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| { -1 }
+        return seen
+    }
+
+    let lh = "GET /f.html HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n"
+    seen.length = flow(mut fails, who, hp, lh, ["ab", "c", "d", "e", "f", "ghij"], true)
+    let ch = "GET /f.html HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    seen.chunked = flow(
+        mut fails,
+        who,
+        hp,
+        ch,
+        ["5\r\nhel", "l", "o\r\n", "3\r\nab", "c\r\n0\r\n\r\n"],
+        true,
+    )
+    let ph = "POST /f.html HTTP/1.1\r\nHost: x\r\nContent-Length: 10\r\n\r\n"
+    seen.post = flow(mut fails, who, hp, ph, ["ab", "cdefghij"], false)
+    seen.frame = bad_frame(hp)
+
+    os_kill(child) else |_| {}
+    let _w = os_wait(child) else |_| { -1 }
+    fs_remove_dir_all(d) else |_| {}
+    print(
+        "body_discard: {who}: early `{seen.length}` / `{seen.chunked}` / `{seen.post}`, a malformed frame: {seen.frame}",
+    )
+    seen
+}
+
+fn main() -> !int {
+    var fails = List[str]()
+    let root = os_cwd() else |_| "."
+    let oracle = "{root}/tests/differential/bin/nginx"
+    if !fs_exists(oracle) {
+        note(
+            mut fails,
+            "body-discard-ready",
+            "nginx",
+            "the pinned oracle is at tests/differential/bin/nginx (docs/DIFFERENTIAL.md)",
+        )
+    }
+    let ng = rows(mut fails, "nginx", 0, oracle)
+    let lb = rows(mut fails, "lobo", 1, "{root}/target/lobo-debug")
+    let pairs = [
+        ("length", ng.length, lb.length),
+        ("chunked", ng.chunked, lb.chunked),
+        ("post", ng.post, lb.post),
+    ]
+    for p in pairs {
+        if p.1 != p.2 || p.2.is_empty() {
+            note(
+                mut fails,
+                "body-discard-status",
+                "lobo",
+                "the {p.0} flow's early reply `{p.2}`, the oracle's `{p.1}`",
+            )
+        }
+    }
+    if ng.frame != lb.frame {
+        note(
+            mut fails,
+            "body-discard-bad-frame",
+            "lobo",
+            "after a malformed chunk frame lobo was `{lb.frame}`, the oracle `{ng.frame}`",
+        )
+    }
+    if fails.is_empty() {
+        print("body_discard: every flow as the oracle, the body discarded beside the loop")
+        return 0
+    }
+    // one named summary line per failing row, printed last
+    var said = List[str]()
+    var last = ""
+    for r in fails {
+        var dup = false
+        for s in said {
+            if s == r {
+                dup = true
+            }
+        }
+        if !dup {
+            (mut said).push(r)
+            last = "body_discard: FAILED — [{r}] see the lines above"
+            print(last)
+        }
+    }
+    assert(false, "{last}")
+    0
+}
