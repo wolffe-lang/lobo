@@ -12,11 +12,30 @@
 //! fail at the check, not at the first reload.
 //! docs/CONTROL.md carries the design and the nginx deltas.
 
+/// Whether a `control` address names a loopback endpoint: a
+/// `unix:<path>`, a bare port (the reader binds it on 127.0.0.1), or a
+/// `host:port` whose host is in 127.0.0.0/8, `localhost` or `[::1]`.
+/// docs/CONTROL.md promises the TCP endpoint is never on another
+/// interface; until this check the reader passed any `host:port`
+/// through as written. Pure and total.
+fn control_loopback(addr: str) -> bool {
+    if addr.starts_with("unix:") || !addr.contains(":") {
+        return true
+    }
+    if addr.starts_with("[") {
+        return addr.starts_with("[::1]:")
+    }
+    let colon = addr.find(":") else -1
+    let host = addr[0..colon]
+    host == "localhost" || host.starts_with("127.")
+}
+
 /// The `control` directive's `-t` check: the ADDRESS is a loopback
-/// endpoint or (ws17) a `unix:<path>` with a path in it, and the
-/// optional second arm is spelled exactly `token <file>` and nothing
-/// else — a two-argument `control` (the keyword with no file), an
-/// unknown keyword, an empty token path or a bare `unix:` is a NAMED
+/// endpoint (`control_loopback`; anything else is refused by name, at
+/// `-t` and so at start) or (ws17) a `unix:<path>` with a path in it,
+/// and the optional second arm is spelled exactly `token <file>` and
+/// nothing else — a two-argument `control` (the keyword with no file),
+/// an unknown keyword, an empty token path or a bare `unix:` is a NAMED
 /// error rather than a silently ignored one.
 ///
 /// What is NOT checked here is whether the host HAS unix-domain
@@ -35,6 +54,9 @@ pub fn control_check(c: Conf) -> str {
                 let addr = c.argp[c.args_at[i]]
                 if addr == "unix:" {
                     return "\"control\" names an empty unix socket path in {c.files[i]}:{c.lines[i]}"
+                }
+                if !control_loopback(addr) {
+                    return "\"control\" address \"{addr}\" is not a loopback address in {c.files[i]}:{c.lines[i]} (a TCP control endpoint binds 127.0.0.1, localhost or [::1]; use unix:<path> for anything else)"
                 }
             }
             if n == 2 {
