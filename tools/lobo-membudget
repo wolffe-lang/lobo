@@ -49,6 +49,16 @@
 # times, and tallies the starts: the witness for a start that fails once
 # in many.
 #
+# DISCARDED BODIES. A request whose route does not use its body is
+# answered after its head and its body is discarded beside the serving
+# loop as it arrives, with none of its bytes kept. A fifth flat row
+# holds that: 64 uploads of 64 KiB each, all arriving at once on
+# keep-alive connections to a file, each connection asked once more
+# after its body (tests/rig/memdrive.lu's `upload` shape), under the
+# same 512 KB. A server that kept each waiting body in its connection's
+# buffers would keep about 4 MB after the drive. Green at trunk too,
+# where each body was read in its own request's region (one at a time).
+#
 # THE FILE MEMO (ws58, lobo#67). The plain server now keeps a small
 # file's bytes (at most 32 KiB a file, inside the memo region's
 # 1 MiB) and proves them with one stat a request, so a file that is
@@ -444,6 +454,14 @@ flat_kept() { # flat_kept <label>
     flat "$1" "$b" "$(rss_kb)" "$ok" "4,000 keepalive requests for a kept 16 KiB file"
 }
 flat_kept "flat, the file memo"
+flat_uploads() { # flat_uploads <label>
+    ok=0
+    quiet_drive 64 /small.html upload 65536 || ok=1
+    b=$(rss_kb)
+    quiet_drive 64 /small.html upload 65536 || ok=1
+    flat "$1" "$b" "$(rss_kb)" "$ok" "64 uploads of 64 KiB arriving at once, their bodies discarded"
+}
+flat_uploads "flat, discarded bodies"
 
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
