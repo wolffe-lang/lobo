@@ -55,7 +55,7 @@ pub fn control_check(c: Conf) -> str {
                 if addr == "unix:" {
                     return "\"control\" names an empty unix socket path in {c.files[i]}:{c.lines[i]}"
                 }
-                if !control_loopback(addr) {
+                if !control_loopback("unix:{addr}") {
                     return "\"control\" address \"{addr}\" is not a loopback address in {c.files[i]}:{c.lines[i]} (a TCP control endpoint binds 127.0.0.1, localhost or [::1]; use unix:<path> for anything else)"
                 }
             }
