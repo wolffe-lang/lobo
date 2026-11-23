@@ -2,6 +2,16 @@
 
 ## Unreleased — 0.1.6
 
+### A chunked request body reaches a proxied upstream (lobo#137)
+
+A request body sent with `Transfer-Encoding: chunked` to a `proxy_pass`
+route was read, validated and then dropped: the upstream received the
+request head with no body and no framing, answered it, and the client
+got that answer. The decoded body is now forwarded with an exact
+`Content-Length`, as nginx forwards it. A chunked body over
+`client_max_body_size` is still refused with 413 and nothing reaches the
+upstream, as nginx refuses it.
+
 ### A proxied request's body is framed once (lobo#138)
 
 A request with a `Content-Length` body to a `proxy_pass` route reached
