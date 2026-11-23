@@ -39,6 +39,16 @@
 # the page compressor's shrink (below) can only help it, never trip
 # it.
 #
+# THE MASTER'S START (lobo#126). The master row's start is a named
+# check of its own, `[membudget-master-start]`, decided within 10 s: a
+# master that exits before its fourth hand is named with its exit code
+# and the last lines of its log, one alive without it with its state and
+# children, and a start refused its port is retried on two new ports
+# (freeport's race), each retry a note. Only a started master is
+# watched for the 60 s window. `--starts N` runs that check alone, N
+# times, and tallies the starts: the witness for a start that fails once
+# in many.
+#
 # THE FILE MEMO (ws58, lobo#67). The plain server now keeps a small
 # file's bytes (at most 32 KiB a file, inside the memo region's
 # 1 MiB) and proves them with one stat a request, so a file that is
@@ -109,9 +119,22 @@ set -u
 # bound, but runs it alone. The optional long drive uses the same 400-
 # request connections, and prints the 20k/60k phases rather than hiding
 # warm-up behind a wider bound.
+# --starts N (lobo#126) runs only the master's named start check, N
+# times, and tallies each start as started, exited or alive without its
+# fourth hand: the start witness the nightly red asked for. It never
+# runs in the gauntlet.
 case "${1:-}" in
 ""|--proxy-census) ;;
-*) echo "lobo-membudget: FAILED — usage: lobo-membudget [--proxy-census]" >&2; exit 2 ;;
+--starts)
+    case "${2:-}" in
+    "" | 0* | *[!0-9]*) echo "lobo-membudget: FAILED — usage: lobo-membudget --starts N (1..1000)" >&2; exit 2 ;;
+    esac
+    if [ "$2" -gt 1000 ]; then
+        echo "lobo-membudget: FAILED — usage: lobo-membudget --starts N (1..1000)" >&2
+        exit 2
+    fi
+    ;;
+*) echo "lobo-membudget: FAILED — usage: lobo-membudget [--proxy-census | --starts N]" >&2; exit 2 ;;
 esac
 px_requests=${LOBO_MEMBUDGET_PROXY_REQUESTS:-2000}
 case "$px_requests" in
@@ -213,6 +236,110 @@ flat() { # flat <label> <before_kb> <after_kb> <drove_ok(0/1)> <what> [bound_kb]
         check "$1: RSS grew ${g} KB over $5 (>= ${fb} KB; ${3} KB resident) — memory is NOT returned (lobo#66)" 1
     fi
 }
+
+# lobo#126: THE MASTER'S START, a named check of its own. The master
+# writes `worker-started worker=4` within milliseconds of its start,
+# before its loop; a start that does not reach it within 10 s is told
+# apart here, not left to the 60 s window that follows:
+#   0  started — the line is there;
+#   1  exited — the master is gone: its exit code (`mcode`) and the last
+#      20 lines of its log are the evidence;
+#   2  alive without the line — its state, threads and children are.
+# Its two ports come from two freeport probes, and freeport's own header
+# says a caller must retry the release-to-rebind race: a start that
+# exits refusing its port is retried with two new ports, at most twice,
+# each retry a printed note.
+master_conf() { # master_conf — writes $mconf for the current ports
+    printf 'worker_processes 4;\npid %s/lobo-master.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
+        "$scratch" "$mcp" "$mhp" "$scratch" > "$mconf"
+}
+master_try() { # master_try — one start; sets mpid, mcode; returns 0, 1 or 2
+    mhp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    mcp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
+    master_conf
+    : > "$scratch/lobo-master.log"
+    "$LOBO" serve -p . -c "$mconf" 2> "$scratch/lobo-master.log" &
+    mpid=$!
+    mcode=""
+    _i=0
+    while [ $_i -lt 100 ]; do
+        if grep -q "worker-started worker=4" "$scratch/lobo-master.log" 2>/dev/null; then return 0; fi
+        kill -0 "$mpid" 2>/dev/null || break
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    if grep -q "worker-started worker=4" "$scratch/lobo-master.log" 2>/dev/null; then return 0; fi
+    if kill -0 "$mpid" 2>/dev/null; then return 2; fi
+    wait "$mpid" 2>/dev/null
+    mcode=$?
+    return 1
+}
+master_start() { # master_start — master_try, retried on a refused port; sets mtries
+    mtries=1
+    while :; do
+        master_try
+        mst=$?
+        if [ "$mst" = 1 ] && [ "$mtries" -lt 3 ] && grep -qi "address already in use\|bind" "$scratch/lobo-master.log" 2>/dev/null; then
+            say "note — the master's start $mtries exited (code $mcode) refusing its ports $mhp/$mcp: $(grep -i "address already in use\|bind" "$scratch/lobo-master.log" | tail -1 | cut -c1-200); two new ports (freeport's race)"
+            mtries=$((mtries + 1))
+            continue
+        fi
+        return "$mst"
+    done
+}
+master_evidence() { # master_evidence <status> — what a failed start leaves, as lines
+    if [ "$1" = 2 ]; then
+        say "  master pid $mpid: $(ps -o stat=,etime= -p "$mpid" 2>/dev/null | tr -s ' ') threads $(sed -n 's/^Threads:[[:space:]]*//p' "/proc/$mpid/status" 2>/dev/null) children $(pgrep -P "$mpid" 2>/dev/null | tr '\n' ' ')"
+    fi
+    tail -20 "$scratch/lobo-master.log" 2>/dev/null | cut -c1-300 | sed 's|^|lobo-membudget:   master log: |'
+}
+master_stop() { # master_stop — ends the master this run started, bounded
+    kill -0 "$mpid" 2>/dev/null || { wait "$mpid" 2>/dev/null; return 0; }
+    "$LOBO" -s stop -p . -c "$mconf" > /dev/null 2>&1
+    _i=0
+    while kill -0 "$mpid" 2>/dev/null && [ $_i -lt 100 ]; do
+        sleep 0.1
+        _i=$((_i + 1))
+    done
+    if kill -0 "$mpid" 2>/dev/null; then
+        say "note — the master $mpid did not stop within 10 s of -s stop; TERM to it"
+        kill "$mpid" 2>/dev/null
+    fi
+    wait "$mpid" 2>/dev/null
+    return 0
+}
+mconf="$scratch/lobo-master.conf"
+
+if [ "${1:-}" = --starts ]; then
+    n_ok=0
+    n_exit=0
+    n_live=0
+    codes=""
+    k=1
+    while [ $k -le "$2" ]; do
+        master_start
+        mst=$?
+        case $mst in
+        0) n_ok=$((n_ok + 1)) ;;
+        1)
+            n_exit=$((n_exit + 1))
+            codes="$codes $mcode"
+            say "start $k: EXITED with code $mcode (attempt $mtries, ports $mhp/$mcp)"
+            master_evidence 1
+            ;;
+        2)
+            n_live=$((n_live + 1))
+            say "start $k: ALIVE without its fourth hand after 10 s (attempt $mtries, ports $mhp/$mcp)"
+            master_evidence 2
+            ;;
+        esac
+        master_stop
+        k=$((k + 1))
+    done
+    say "starts $2: started $n_ok, exited $n_exit (codes:${codes:- none}), alive without the line $n_live ($(uname -s) $(uname -m), $(getconf _NPROCESSORS_ONLN 2>/dev/null) cpus)"
+    [ "$n_ok" = "$2" ] && exit 0
+    exit 1
+fi
 
 if [ "${1:-}" != --proxy-census ]; then
 hp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
@@ -538,28 +665,37 @@ if [ "${1:-}" != --proxy-census ]; then
 # row: four hands, nothing served, the master's RSS across 60 s after
 # a 20 s warm-up, under 64 KB.
 # ---------------------------------------------------------------
-mhp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
-mcp=$("$WOLF" run "$rig_root"/tests/rig/freeport.lu)
-mconf="$scratch/lobo-master.conf"
-printf 'worker_processes 4;\npid %s/lobo-master.pid;\ncontrol 127.0.0.1:%s;\nhttp {\n  types { text/html html; }\n  server { listen 127.0.0.1:%s; root %s/w; }\n}\n' \
-    "$scratch" "$mcp" "$mhp" "$scratch" > "$mconf"
-"$LOBO" serve -p . -c "$mconf" 2> "$scratch/lobo-master.log" &
-mpid=$!
-i=0
-while [ $i -lt 100 ]; do
-    if grep -q "worker-started worker=4" "$scratch/lobo-master.log" 2>/dev/null; then break; fi
-    sleep 0.1
-    i=$((i + 1))
-done
-sleep 20
-mb=$(ps -o rss= -p "$mpid" | tr -d ' ')
-sleep 60
-ma=$(ps -o rss= -p "$mpid" | tr -d ' ')
-mok=0
-grep -q "worker-started worker=4" "$scratch/lobo-master.log" 2>/dev/null || mok=1
-flat "master, supervising four idle hands" "$mb" "$ma" "$mok" "60 s of supervision (four hands probed every 200 ms)" 64
-"$LOBO" -s stop -p . -c "$mconf" > /dev/null 2>&1
-wait "$mpid" 2>/dev/null
+# lobo#126: the start first, by name; the window only after it
+master_start
+mst=$?
+case $mst in
+0) check "[membudget-master-start] master, four hands started within 10 s (start attempt $mtries, ports $mhp/$mcp)" 0 ;;
+1)
+    check "[membudget-master-start] master, four hands started: the master EXITED with code $mcode before its fourth hand, within 10 s (start attempt $mtries, ports $mhp/$mcp); its log's last lines follow" 1
+    master_evidence 1
+    ;;
+2)
+    check "[membudget-master-start] master, four hands started: the master is ALIVE without its fourth hand after 10 s (start attempt $mtries, ports $mhp/$mcp); its state and log follow" 1
+    master_evidence 2
+    ;;
+esac
+if [ "$mst" = 0 ]; then
+    sleep 20
+    mb=$(ps -o rss= -p "$mpid" | tr -d ' ')
+    sleep 60
+    ma=$(ps -o rss= -p "$mpid" | tr -d ' ')
+    if kill -0 "$mpid" 2>/dev/null; then
+        flat "master, supervising four idle hands" "$mb" "$ma" 0 "60 s of supervision (four hands probed every 200 ms)" 64
+    else
+        wait "$mpid" 2>/dev/null
+        mcode=$?
+        check "master, supervising four idle hands: the master EXITED with code $mcode during the 60 s window; its log's last lines follow" 1
+        master_evidence 1
+    fi
+else
+    say "the master's supervision row is not run: its start failed (above)"
+fi
+master_stop
 
 fi
 
