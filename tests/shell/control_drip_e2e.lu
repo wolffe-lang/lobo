@@ -1,0 +1,260 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! lobo#72: A CONTROL CONNECTION NEVER DELAYS A CLIENT. The server
+//! reads an order's line beside its serving loop: an accepted control
+//! connection waits in a slot with the bytes of its line so far, and a
+//! pass reads it only when its bytes have arrived. The whole line has
+//! 2,000 ms from the accept; when that is spent, what arrived is
+//! answered and the connection is closed.
+//!   0. a GET with no control peer is answered (the rig's own bound);
+//!   1. a control peer sends `s` and no newline, and a GET is written on
+//!      another connection; for up to nine seconds, every second in
+//!      which neither is answered, the peer sends one more byte (never
+//!      a newline). The pacing is this test's own bounded wait on the
+//!      two sockets, never a sleep;
+//!   2. the GET is answered within 250 ms of its own write;
+//!   3. the peer is let go (a reply or the end of the stream) within
+//!      3,000 ms of its first byte;
+//!   4. `status` answers afterwards, and `quit` ends the server.
+//! Every wait is bounded and fails by name, on a printed
+//! `control_drip: FAILED — [row]` line (an assert's own message is
+//! not in the record, wolf-lang#150), the server stopped by its own
+//! handle first.
+//! Loopback only, OS-chosen ports; the scratch tree is cleared at the
+//! start and at the end.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// End the server by its own handle, print the named failure, then
+/// trap. Total.
+fn fail(child: int, row: str, msg: str) {
+    os_kill(child) else |_| {}
+    let _w = os_wait(child) else |_| { -1 }
+    print("control_drip: FAILED — [{row}] {msg}")
+    // "{msg}", not a bare `msg`: the native tier refuses a name as an
+    // assert message and accepts an interpolation (wolf-lang#398)
+    assert(false, "{msg}")
+}
+
+/// Ready when `ping` answers, asked until `ms` have passed on the
+/// clock. Each ask is itself bounded by the client's 2,000 ms; a
+/// refused dial (nothing bound yet) answers at once, so the 50 ms
+/// between asks is a backoff, not an ordering assumption. Total.
+fn wait_alive(ep: str, ms: int) -> bool {
+    let until = time_unix_ms() + ms
+    while time_unix_ms() < until {
+        if shell.control_alive(ep) {
+            return true
+        }
+        time_sleep_ms(50)
+    }
+    false
+}
+
+/// A GET for `/a.html` that asks the server to close after its reply.
+/// Total.
+fn req() -> str {
+    "GET /a.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+}
+
+/// Everything `c` sends until it closes, under a `ms` deadline for
+/// each read; "" when nothing came. Total.
+fn read_all(c: int, ms: int) -> str {
+    net_deadline(c, ms) else |_| {}
+    var buf = ""
+    var reading = true
+    while reading {
+        let piece = net_read(c, 4096) else |_| {
+            reading = false
+            ""
+        }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    buf
+}
+
+/// The file's body. Total.
+fn body() -> str {
+    "CONTROL-DRIP-A\n"
+}
+
+/// A reply is a 200 carrying the file. Total.
+fn is_file(reply: str) -> bool {
+    reply.starts_with("HTTP/1.1 200 OK") && reply.ends_with(body())
+}
+
+fn main() -> !int {
+    let d = "control_drip_e2e"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w")?
+    fs_write_text("{d}/w/a.html", body())?
+
+    let hp = free_port()?
+    let cp = free_port()?
+    assert(hp != cp, "control_drip: the two probed ports are distinct ({hp})")
+    let ep = "127.0.0.1:{cp}"
+    let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/w; }}\n}}\n"
+    fs_write_text("{d}/lobo.conf", conf)?
+
+    var argv = List[str]()
+    let root = os_cwd() else |_| "."
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        print(
+            "control_drip: FAILED — [control-drip-ready] os_spawn failed (is the debug tier built?)",
+        )
+        assert(false, "control_drip: os_spawn failed")
+        0
+    }
+    if !wait_alive(ep, 6000) {
+        fail(child, "control-drip-ready", "lobo never answered ping within 6000 ms")
+    }
+
+    // 0. the baseline: a GET with no control peer
+    let t_b = time_unix_ms()
+    let b = net_connect("127.0.0.1:{hp}") else |_| {
+        fail(child, "control-drip-baseline", "the http port refused a connection")
+        0
+    }
+    net_write(b, req()) else |_| {
+        fail(child, "control-drip-baseline", "the GET could not be written")
+    }
+    let rb = read_all(b, 2500)
+    net_close(b) else |_| {}
+    let ms_b = time_unix_ms() - t_b
+    if !is_file(rb) || ms_b > 2500 {
+        fail(
+            child,
+            "control-drip-baseline",
+            "a GET with no control peer took {ms_b} ms (bound 2500 ms): {rb}",
+        )
+    }
+    print("control_drip: ok — [baseline] a GET with no control peer answered in {ms_b} ms")
+
+    // 1. the peer: part of a line, then a byte for every silent second
+    let drip = "status-xxxx"
+    let pd = net_connect(ep) else |_| {
+        fail(child, "control-drip-setup", "the control endpoint refused the peer's connection")
+        0
+    }
+    let t0 = time_unix_ms()
+    net_write(pd, "s") else |_| {
+        fail(child, "control-drip-setup", "the peer's first byte could not be written")
+    }
+    var sent: int = 1
+    let h = net_connect("127.0.0.1:{hp}") else |_| {
+        fail(child, "control-drip-setup", "the http port refused the GET's connection")
+        0
+    }
+    net_write(h, req()) else |_| {
+        fail(child, "control-drip-setup", "the GET could not be written")
+    }
+    let t_w = time_unix_ms()
+    var t_get: int = -1
+    var t_peer: int = -1
+    var reply = ""
+    var peer_says = ""
+    var rounds: int = 0
+    while rounds < 9 && (t_get < 0 || t_peer < 0) {
+        var set = List[int]()
+        if t_get < 0 {
+            (mut set).push(h)
+        }
+        if t_peer < 0 {
+            (mut set).push(pd)
+        }
+        let ready = net_wait(set, 1000) else |_| {
+            fail(child, "control-drip-setup", "net_wait refused the test's own two sockets")
+            List[int]()
+        }
+        if ready.is_empty() {
+            // a silent second: one more byte, never a newline, while
+            // the peer is still held and has bytes left to send
+            if t_peer < 0 && sent < drip.len {
+                net_write(pd, drip[sent..sent + 1]) else |_| {}
+                sent = sent + 1
+            }
+        }
+        for f in ready {
+            if f == pd && t_peer < 0 {
+                peer_says = read_all(pd, 1000)
+                t_peer = time_unix_ms() - t0
+            } else if f == h && t_get < 0 {
+                reply = read_all(h, 4000)
+                t_get = time_unix_ms() - t_w
+            }
+        }
+        rounds = rounds + 1
+    }
+    net_close(h) else |_| {}
+    net_close(pd) else |_| {}
+
+    // 2. the GET, answered inside the bound
+    if t_get < 0 {
+        fail(
+            child,
+            "control-drip-get",
+            "a GET waited >{time_unix_ms() - t_w} ms while a control connection sent {sent} bytes and no newline (bound 250 ms)",
+        )
+    }
+    if t_get > 250 || !is_file(reply) {
+        fail(
+            child,
+            "control-drip-get",
+            "a GET waited {t_get} ms while a control connection sent {sent} bytes and no newline (bound 250 ms): {reply}",
+        )
+    }
+    print(
+        "control_drip: ok — the GET was answered {t_get} ms after its write, while a control connection sent part of a line",
+    )
+
+    // 3. the peer, let go inside its budget
+    if t_peer < 0 || t_peer > 3000 {
+        fail(
+            child,
+            "control-drip-peer",
+            "the dripping peer was let go after {t_peer} ms (bound 3000 ms; -1: not in the window)",
+        )
+    }
+    print("control_drip: ok — the dripping peer was let go after {t_peer} ms ({peer_says.trim()})")
+
+    // 4. the endpoint answers, and the server ends
+    let st = shell.control_send(ep, "status") else |_| { "" }
+    if !st.contains("live=") {
+        fail(child, "control-drip-status", "status did not answer after the peer was gone: {st}")
+    }
+    print("control_drip: ok — status answers after the peer is gone")
+    let rq = shell.control_send(ep, "quit") else |_| { "" }
+    if !rq.contains("draining then exiting") {
+        fail(child, "control-drip-quit", "quit was not announced: {rq}")
+    }
+    let code = os_wait(child) else |_| -1
+    assert(code == 0, "control_drip: lobo exited 0 (got {code})")
+    fs_remove_dir_all(d) else |_| {}
+    print("control_drip: ok — quit ended the server, exit 0")
+    0
+}
