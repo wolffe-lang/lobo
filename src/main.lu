@@ -2183,6 +2183,12 @@ fn serve_main(
     var ccbuf = List[int]()
     var cclen = List[int]()
     var chead = List[int]()
+    // A row discarding the body of a request it has answered —
+    // `serve.discard_scan`'s state (`cdst` 0: none; negative: close when
+    // the body is over), kept as three ints; no byte of the body is
+    var cdst = List[int]()
+    var cdn = List[int]()
+    var cdt = List[int]()
     // ws62 (px25's finding (a)): the plaintext listener a row was
     // accepted on — 0 the primary, k the extra `xls[k - 1]` — whose
     // address picks the request's server and whose port a redirect's
@@ -3227,6 +3233,7 @@ fn serve_main(
                                             cwait,
                                             cstream,
                                             cclen,
+                                            cdst,
                                             cidle,
                                             upto,
                                         )
@@ -3286,6 +3293,9 @@ fn serve_main(
                                             ccbuf[crows] = -1
                                             cclen[crows] = 0
                                             chead[crows] = 0
+                                            cdst[crows] = 0
+                                            cdn[crows] = 0
+                                            cdt[crows] = 0
                                             clst[crows] = lsel
                                         } else {
                                             in life {
@@ -3299,6 +3309,9 @@ fn serve_main(
                                                 (mut ccbuf).push(-1)
                                                 (mut cclen).push(0)
                                                 (mut chead).push(0)
+                                                (mut cdst).push(0)
+                                                (mut cdn).push(0)
+                                                (mut cdt).push(0)
                                                 (mut clst).push(lsel)
                                             }
                                         }
@@ -3382,7 +3395,15 @@ fn serve_main(
                                 }
                             }
                             if got_tls && crows - cdead >= croom {
-                                let picks = idle_pick(cfds, cwait, cstream, cclen, cidle, crows)
+                                let picks = idle_pick(
+                                    cfds,
+                                    cwait,
+                                    cstream,
+                                    cclen,
+                                    cdst,
+                                    cidle,
+                                    crows,
+                                )
                                 for r in picks {
                                     net_close(cfds[r]) else |_| {}
                                     cfds[r] = -1
@@ -3532,6 +3553,9 @@ fn serve_main(
                         let cbuf0 = ccbuf[k]
                         let clen0 = cclen[k]
                         let hh0 = chead[k]
+                        let dst0 = cdst[k]
+                        let dn0 = cdn[k]
+                        let dt0 = cdt[k]
                         let cl0 = clst[k]
                         // what the row becomes: stored at `w` when it stays
                         var keep = true
@@ -3543,6 +3567,9 @@ fn serve_main(
                         var n_cbuf = cbuf0
                         var n_clen = clen0
                         var n_head = hh0
+                        var n_dst = dst0
+                        var n_dn = dn0
+                        var n_dt = dt0
                         // the carry a step left, stored below when the row stays
                         var carry_set = false
                         var carry_new = ""
@@ -3804,7 +3831,7 @@ fn serve_main(
                                 if clen0 == 0 {
                                     n_start = now
                                 }
-                                if now - idle0 >= opts.keepalive_timeout_ms {
+                                if now - idle0 >= row_idle_ms(dst0, opts) {
                                     close_it = true
                                 }
                             } else {
@@ -3837,6 +3864,9 @@ fn serve_main(
                                             rs,
                                             ft,
                                             now,
+                                            dst0,
+                                            dn0,
+                                            dt0,
                                         )
                                     } else {
                                         serve.conn_step(
@@ -3852,6 +3882,9 @@ fn serve_main(
                                             rs,
                                             ft,
                                             now,
+                                            dst0,
+                                            dn0,
+                                            dt0,
                                         )
                                     }
                                     // only what the loop needs leaves the region (`step_pack`)
@@ -3986,6 +4019,9 @@ fn serve_main(
                                 carry_set = true
                                 carry_new = st.carry
                                 n_head = if st.has_head { 1 } else { 0 }
+                                n_dst = st.disc_st
+                                n_dn = st.disc_n
+                                n_dt = st.disc_t
                                 // ws13: serve asked to WAIT on a name — park the row
                                 // and make sure a query is in flight (start is a
                                 // no-op while one is, or while the cache is fresh).
@@ -4184,7 +4220,7 @@ fn serve_main(
                                 }
                                 if !close_it &&
                                     !st.active &&
-                                    now - n_idle >= opts.keepalive_timeout_ms {
+                                    now - n_idle >= row_idle_ms(n_dst, opts) {
                                     close_it = true
                                 }
                                 streaming_now = st.streaming
@@ -4403,6 +4439,9 @@ fn serve_main(
                             ccbuf[w] = n_cbuf
                             cclen[w] = n_clen
                             chead[w] = n_head
+                            cdst[w] = n_dst
+                            cdn[w] = n_dn
+                            cdt[w] = n_dt
                             clst[w] = cl0
                             w = w + 1
                         }
@@ -5647,26 +5686,39 @@ fn has_idle(
     false
 }
 
+/// How long a row may go without a byte before it is closed: a row
+/// discarding a body waits `read_timeout` between reads, the body read's
+/// own budget; every other row the keep-alive timeout. Pure
+/// and total.
+fn row_idle_ms(dst: int, opts: serve.ServerOpts) -> int {
+    if dst != 0 {
+        return opts.read_timeout_ms
+    }
+    opts.keepalive_timeout_ms
+}
+
 /// ws64 (lobo#84): the rows one round of making room closes — the
 /// least recently active of the IDLE rows among the first `rows`
 /// (`shell.reuse_batch` of them; ties go to the older row). A row is
 /// idle when it waits on its client with nothing of a request held:
-/// not parked on a name, not streaming, no carry — a connection that
-/// has sent nothing yet, or a keep-alive connection between requests,
-/// which are the two the oracle closes. A row already closed this pass
-/// (descriptor -1) is not there to pick. Pure and total.
+/// not parked on a name, not streaming, no carry, no body being
+/// discarded — a connection that has sent nothing yet, or a keep-alive
+/// connection between requests, which are the two the oracle closes. A
+/// row already closed this pass (descriptor -1) is not there to pick.
+/// Pure and total.
 fn idle_pick(
     cfds: List[int],
     cwait: List[int],
     cstream: List[int],
     cclen: List[int],
+    cdst: List[int],
     cidle: List[int],
     rows: int,
 ) -> List[int] {
     var idle = List[int]()
     var i: int = 0
     while i < rows {
-        if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 {
+        if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 && cdst[i] == 0 {
             (mut idle).push(i)
         }
         i = i + 1
