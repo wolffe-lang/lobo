@@ -3070,7 +3070,95 @@ fn half_close_drain(mut cn: conn.Conn) {
     }
 }
 
-/// Accumulate a chunked body until its terminating zero-chunk, then
+/// Where a chunked body that starts at `buf`'s first byte ends: the
+/// index of the first byte after its final CRLF, -1 while it has not
+/// ended, -2 when its framing is malformed. The grammar is
+/// `http.decode_chunked`'s: `<hex size>[;ext]CRLF<data>CRLF`, at most
+/// `max_digits` digits a size, a `0` chunk, then trailer lines and the
+/// final CRLF (RFC 9112 §7.1). Exact where the old stop signal guessed
+/// (a body ending `0\r\n\r\n`, or holding `\r\n0\r\n\r\n` anywhere): a
+/// trailer never ended it, and a chunk's data could. Pure and total.
+fn chunked_end(buf: str, max_digits: int) -> int {
+    let b = buf.bytes()
+    let n = b.len
+    var i: int = 0
+    loop {
+        // the size line: hex digits, an optional extension, CRLF
+        var size: int = 0
+        var digits: int = 0
+        var ext = false
+        var lf = -1
+        while lf < 0 {
+            if i >= n {
+                return -1
+            }
+            let c = b[i] as int
+            if c == 13 {
+                if i + 1 >= n {
+                    return -1
+                }
+                if b[i + 1] as int != 10 || digits == 0 {
+                    return -2
+                }
+                lf = i + 1
+            } else if ext {
+                // inside an extension: its bytes are passed over
+            } else if c == 59 && digits > 0 {
+                ext = true
+            } else {
+                var v = -1
+                if c >= 48 && c <= 57 {
+                    v = c - 48
+                } else if c >= 97 && c <= 102 {
+                    v = c - 87
+                } else if c >= 65 && c <= 70 {
+                    v = c - 55
+                }
+                if v < 0 || digits >= max_digits {
+                    return -2
+                }
+                size = size * 16 + v
+                digits = digits + 1
+            }
+            i = i + 1
+        }
+        i = lf + 1
+        if size == 0 {
+            // trailer lines, then the final CRLF
+            loop {
+                if i + 1 >= n {
+                    return -1
+                }
+                if b[i] as int == 13 {
+                    if b[i + 1] as int != 10 {
+                        return -2
+                    }
+                    return i + 2
+                }
+                while i < n && b[i] as int != 13 {
+                    i = i + 1
+                }
+                if i + 1 >= n {
+                    return -1
+                }
+                if b[i + 1] as int != 10 {
+                    return -2
+                }
+                i = i + 2
+            }
+        }
+        // the data, then its CRLF
+        if i + size + 2 > n {
+            return -1
+        }
+        if b[i + size] as int != 13 || b[i + size + 1] as int != 10 {
+            return -2
+        }
+        i = i + size + 2
+    }
+}
+
+/// Accumulate a chunked body until its final CRLF (`chunked_end`), then
 /// validate and decode it through http.decode_chunked. Returns
 /// (leftover after the body, admitted body bytes, the decoded body —
 /// lobo#137: a proxied route forwards it). A framing error is `bad` (→ 400),
@@ -3088,10 +3176,15 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
     var buf = carry
     let cap = limits.max_body * 2
     loop {
-        // the terminating "0" chunk followed by CRLFCRLF (no trailers)
-        // or a "\r\n0\r\n\r\n" boundary is our stop signal
-        if buf.ends_with("0\r\n\r\n") || buf.contains("\r\n0\r\n\r\n") {
-            let body = http.decode_chunked(buf, limits) else |e| match e {
+        let end = chunked_end(buf, limits.max_chunk_digits)
+        if end == -2 {
+            return bad
+        }
+        if end >= 0 {
+            let whole = buf.get(0..end) else {
+                return bad
+            }
+            let body = http.decode_chunked(whole, limits) else |e| match e {
                 malformed => {
                     return bad
                 },
