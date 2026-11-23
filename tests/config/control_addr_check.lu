@@ -18,7 +18,9 @@
 //!             <file>:<line> …`.
 //! Pure: no socket, no process; all three lanes. Each failing case prints
 //! a `control_addr_check: FAILED — [row]` line (an assert's own message
-//! is not in the record, wolf-lang#150), then one assert ends the run.
+//! is not in the record, wolf-lang#150). The corpus keeps a failing run's
+//! last three lines, so the run ends with one named summary line per
+//! failing row, printed last, and an assert that repeats the last of them.
 
 use config
 
@@ -54,8 +56,10 @@ fn refused(line: str, addr: str) -> int {
 }
 
 fn main() -> !int {
-    var ok: int = 0
-    var all: int = 0
+    var acc_ok: int = 0
+    var acc_all: int = 0
+    var ref_ok: int = 0
+    var ref_all: int = 0
     let good = [
         "control 127.0.0.1:9001;",
         "control 127.0.0.2:9001;",
@@ -68,8 +72,8 @@ fn main() -> !int {
         "control unix:logs/c.sock token ctl.token;",
     ]
     for line in good {
-        ok = ok + accepted(line)
-        all = all + 1
+        acc_ok = acc_ok + accepted(line)
+        acc_all = acc_all + 1
     }
     let bad = [
         "0.0.0.0:9001",
@@ -80,11 +84,26 @@ fn main() -> !int {
         "example.org:9001",
     ]
     for addr in bad {
-        ok = ok + refused("control {addr};", addr)
-        ok = ok + refused("control {addr} token ctl.token;", addr)
-        all = all + 2
+        ref_ok = ref_ok + refused("control {addr};", addr)
+        ref_ok = ref_ok + refused("control {addr} token ctl.token;", addr)
+        ref_all = ref_all + 2
     }
-    print("control_addr_check: {ok}/{all} cases as documented")
-    assert(ok == all, "control_addr_check: {ok}/{all} cases as documented")
+    let ok = acc_ok + ref_ok
+    let all = acc_all + ref_all
+    if ok == all {
+        print("control_addr_check: {ok}/{all} cases as documented")
+        return 0
+    }
+    // the named summary is the run's last line, one per failing row
+    var last = ""
+    if acc_ok < acc_all {
+        last = "control_addr_check: FAILED — [control-addr-accepted] {acc_all - acc_ok} of {acc_all} loopback or unix: addresses refused; {ok}/{all} cases as documented"
+        print(last)
+    }
+    if ref_ok < ref_all {
+        last = "control_addr_check: FAILED — [control-addr-refused] {ref_all - ref_ok} of {ref_all} other addresses not refused by name; {ok}/{all} cases as documented"
+        print(last)
+    }
+    assert(false, last)
     0
 }
