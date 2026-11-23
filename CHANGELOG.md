@@ -2,6 +2,18 @@
 
 ## Unreleased — 0.1.6
 
+### A control connection no longer delays clients (lobo#72)
+
+The server now reads a control command line beside its serving loop, in
+a single process and in a master alike: the loop reads the line only
+when its bytes have arrived, and serves its clients meanwhile. The whole
+line, up to its newline, the peer's close or 4,096 bytes, has 2,000 ms
+from the connection's accept. When that time is spent, what arrived is
+dispatched (an incomplete verb is answered `unknown verb`) and the
+connection is closed. Orders are read one at a time, as before. Clients
+that send their line at once, as `lobo status`, `lobo control` and
+`lobo -s` do, see no change.
+
 ### Proxied-throughput instrument calibration
 
 Every timed drive now gets a fresh loopback backend process and port.
