@@ -323,7 +323,7 @@ pub fn table() -> Table {
         1,
         1,
         "implemented",
-        "request body cap -> 413; 0 = unlimited (nginx's rule), default 1m (ws10). Location-level rows are named-inert at v0 (L009) — limits resolve at http/server while server selection is host-blind",
+        "request body cap -> 413; 0 = unlimited (nginx's rule), default 1m (ws10). Location-level rows are named-inert at v0 (L009) — limits resolve at http/server while server selection is host-blind. A request whose route does not use its body (every route but proxy_pass) is answered after its head, before its body, as nginx answers it, and the body is then discarded as it arrives with none of it kept: at most this size (a chunked body's data, extensions and trailers), 60 s between reads, and a malformed chunk frame ends the connection, as nginx ends it",
     )
     row(
         mut t,
