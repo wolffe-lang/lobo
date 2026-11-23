@@ -3058,27 +3058,27 @@ fn half_close_drain(mut cn: conn.Conn) {
 }
 
 /// Accumulate a chunked body until its terminating zero-chunk, then
-/// validate it through http.decode_chunked. Returns (leftover after
-/// the body, admitted body bytes). A framing error is `bad` (→ 400),
+/// validate and decode it through http.decode_chunked. Returns
+/// (leftover after the body, admitted body bytes, the decoded body —
+/// lobo#137: a proxied route forwards it). A framing error is `bad` (→ 400),
 /// an over-limit body `big` (→ 413), a body that would blow the
 /// memory budget `over` (→ 503 — checked WHILE accumulating, the
 /// fence's `big` first at each step, per docs/BUDGET.md's order;
 /// `used` is the request's charge so far); net trouble is `io`.
 /// Bounded by twice `max_body` so a peer dribbling forever cannot
 /// pin memory.
-fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -> (str, int) ! {
-    bad,
-    big,
-    over,
-    io,
-} {
+fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -> (
+    str,
+    int,
+    str,
+) ! {bad, big, over, io} {
     var buf = carry
     let cap = limits.max_body * 2
     loop {
         // the terminating "0" chunk followed by CRLFCRLF (no trailers)
         // or a "\r\n0\r\n\r\n" boundary is our stop signal
         if buf.ends_with("0\r\n\r\n") || buf.contains("\r\n0\r\n\r\n") {
-            let _ = http.decode_chunked(buf, limits) else |e| match e {
+            let body = http.decode_chunked(buf, limits) else |e| match e {
                 malformed => {
                     return bad
                 },
@@ -3086,7 +3086,7 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
                     return big
                 },
             }
-            return ("", buf.len)
+            return ("", buf.len, body)
         }
         if buf.len > cap {
             return big
@@ -3698,6 +3698,10 @@ pub fn serve_request(
         }
         rest = ck.0
         chg.used = chg.used + ck.1
+        // lobo#137: the decoded body is the request's body, as a
+        // fixed length's is: a proxied route forwards it with an exact
+        // Content-Length (`proxy.build_upstream`), as nginx does
+        body = ck.2
     }
 
     let decoded = http.percent_decode(req.path) else |_| {
