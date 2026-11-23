@@ -196,7 +196,16 @@ run_lane() { # run_lane <lane> <file> — the observation record in $rec, the ex
 lane_stderr() {
     if [ -n "$rec" ]; then
         printf '%s' "$rec" | jq -r '(.diagnostics // [])[] | "corpus:   diagnostic: \(.)"' 2>/dev/null | cut -c1-300 >&2
-        printf '%s' "$rec" | jq -r '.stdout_inline // ""' 2>/dev/null | tail -3 | sed 's|^|corpus:   stdout: |' >&2
+        # a red keeps every named failure of the run (each distinct
+        # `FAILED — [row]` line, at most 16, in the order printed), then
+        # its last three other lines that are not empty. It used to keep
+        # only the last three lines, the third the empty line after the
+        # final newline: two lines of a row's own output, so a row that
+        # named three failures lost its first, often the cause (a proxy
+        # that never started)
+        _out=$(printf '%s' "$rec" | jq -r '.stdout_inline // ""' 2>/dev/null)
+        printf '%s\n' "$_out" | grep -F 'FAILED — [' | awk '!seen[$0]++' | head -16 | cut -c1-600 | sed 's|^|corpus:   stdout: |' >&2
+        printf '%s\n' "$_out" | grep -v -F 'FAILED — [' | grep -v '^[[:space:]]*$' | tail -3 | cut -c1-600 | sed 's|^|corpus:   stdout: |' >&2
         # the checked machine records the trap's SPAN (bytes into the
         # entry) and neither machine records the assert's message
         # (wolf-lang#150): the line is what a runner in sh can give
