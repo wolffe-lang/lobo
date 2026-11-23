@@ -34,11 +34,14 @@ fn free_port() -> int ! {io} {
 }
 
 /// End the server by its own handle, print the named failure, then
-/// trap. Total.
+/// trap. The failure is ONE line and the last this run prints: the
+/// corpus keeps a failing run's last three lines of output, and a reply
+/// quoted in the message would push the name out of them. Total.
 fn fail(child: int, row: str, msg: str) {
     os_kill(child) else |_| {}
     let _w = os_wait(child) else |_| { -1 }
-    print("control_flood: FAILED — [{row}] {msg}")
+    let one = msg.replace("\r", "").replace("\n", " | ")
+    print("control_flood: FAILED — [{row}] {one}")
     // "{msg}", not a bare `msg`: the native tier refuses a name as an
     // assert message and accepts an interpolation (wolf-lang#398)
     assert(false, "{msg}")
