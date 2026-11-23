@@ -3701,7 +3701,7 @@ pub fn serve_request(
         // lobo#137: the decoded body is the request's body, as a
         // fixed length's is: a proxied route forwards it with an exact
         // Content-Length (`proxy.build_upstream`), as nginx does
-        body = ck.2
+        body = ""
     }
 
     let decoded = http.percent_decode(req.path) else |_| {
