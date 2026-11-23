@@ -2,6 +2,18 @@
 
 ## Unreleased — 0.1.6
 
+### The control endpoint is loopback only, as documented
+
+A `control` directive whose TCP address is not a loopback address,
+anything but 127.0.0.0/8, `localhost` or `[::1]` (for example
+`0.0.0.0:9001`), is now refused by name, by `lobo -t` and at start. **A
+configuration that binds the control endpoint to a public address no
+longer starts.** docs/CONTROL.md has always said the endpoint binds a
+loopback address only, but the address was used as written. Use a
+loopback address, with the token arm on a shared host, or `unix:<path>`.
+The `control` directive's other `-t` errors (a misspelt token arm, an
+empty path) now refuse a start too.
+
 ### Proxied-throughput instrument calibration
 
 Every timed drive now gets a fresh loopback backend process and port.
