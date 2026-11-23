@@ -357,7 +357,10 @@ if [ "${1:-}" = --starts ]; then
         master_stop
         k=$((k + 1))
     done
-    say "starts $2: started $n_ok, exited $n_exit (codes:${codes:- none}), alive without the line $n_live; port retries $n_retry ($(uname -s) $(uname -m), $(getconf _NPROCESSORS_ONLN 2>/dev/null) cpus)"
+    # the schedulable cpus (os_cpus), as the proxied row reports them: a
+    # count of the host's would mislabel a pinned run
+    scpus=$("$WOLF" run "$rig_root"/tests/rig/cpus/cpus.lu 2> /dev/null) || scpus="unknown"
+    say "starts $2: started $n_ok, exited $n_exit (codes:${codes:- none}), alive without the line $n_live; port retries $n_retry ($(uname -s) $(uname -m), cpus=$scpus)"
     [ "$n_ok" = "$2" ] && exit 0
     exit 1
 fi
