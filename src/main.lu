@@ -1351,6 +1351,16 @@ fn serve_main(
         eprint("lobo: [emerg] {conn_err}")
         return 1
     }
+    // the control endpoint's address is refused at start as at -t: a
+    // TCP endpoint is loopback, as docs/CONTROL.md promises (a hand's
+    // endpoint is its master's to choose, and the master checked)
+    if worker == 0 {
+        let ctl_err = config.control_check(c0)
+        if !ctl_err.is_empty() {
+            eprint("lobo: [emerg] {ctl_err}")
+            return 1
+        }
+    }
     if worker == 0 {
         let nn = config.nofile_note(c0, config.nofile_limit())
         if !nn.is_empty() {
@@ -6295,6 +6305,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
     let conn_err = config.conn_check(c0)
     if !conn_err.is_empty() {
         eprint("lobo: [emerg] {conn_err}")
+        return 1
+    }
+    // as serve_main's: a TCP control endpoint is loopback, at start as
+    // at -t
+    let ctl_err = config.control_check(c0)
+    if !ctl_err.is_empty() {
+        eprint("lobo: [emerg] {ctl_err}")
         return 1
     }
     let nn = config.nofile_note(c0, config.nofile_limit())
