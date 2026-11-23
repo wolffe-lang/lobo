@@ -1,0 +1,90 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: config
+//!
+//! The `control` directive's ADDRESS at -t. docs/CONTROL.md: a TCP
+//! control endpoint binds a loopback address and nothing else, and a
+//! bare port is a loopback bind; `unix:<path>` is the other transport.
+//! The check refuses, by name, a TCP address that is not loopback, so a
+//! configuration cannot put the endpoint on another interface:
+//!   accepted: `127.0.0.1:9001`, any `127.x.y.z`, a bare port,
+//!             `localhost:9001`, `[::1]:9001`, `unix:logs/c.sock`, each
+//!             with and without the token arm;
+//!   refused:  `0.0.0.0:9001`, `10.0.0.1:9001`, `192.168.1.5:9001`,
+//!             `[::]:9001`, `[2001:db8::1]:9001`, `example.org:9001`, with
+//!             and without the token arm — each answered
+//!             `"control" address "<addr>" is not a loopback address in
+//!             <file>:<line> …`.
+//! Pure: no socket, no process; all three lanes. Each failing case prints
+//! a `control_addr_check: FAILED — [row]` line (an assert's own message
+//! is not in the record, wolf-lang#150), then one assert ends the run.
+
+use config
+
+fn conf_of(main: str) -> config.Conf {
+    config.parse_str("{main}\nhttp {{\n  server {{ listen 8080; }}\n}}\n", "t.conf")
+}
+
+/// 1 when `line`'s address passes the check, printing a named failure
+/// when it does not. Total.
+fn accepted(line: str) -> int {
+    let c = conf_of(line)
+    let e = config.control_check(c)
+    if e.is_empty() {
+        return 1
+    }
+    print("control_addr_check: FAILED — [control-addr-accepted] `{line}` was refused: {e}")
+    0
+}
+
+/// 1 when `line`'s address `addr` is refused by name, printing a named
+/// failure when it is not. Total.
+fn refused(line: str, addr: str) -> int {
+    let c = conf_of(line)
+    let e = config.control_check(c)
+    let want = "\"control\" address \"{addr}\" is not a loopback address in t.conf:1"
+    if e.starts_with(want) {
+        return 1
+    }
+    print(
+        "control_addr_check: FAILED — [control-addr-refused] `{line}` answered `{e}`, wanted `{want} …`",
+    )
+    0
+}
+
+fn main() -> !int {
+    var ok: int = 0
+    var all: int = 0
+    let good = [
+        "control 127.0.0.1:9001;",
+        "control 127.0.0.2:9001;",
+        "control 9001;",
+        "control localhost:9001;",
+        "control [::1]:9001;",
+        "control unix:logs/c.sock;",
+        "control 127.0.0.1:9001 token ctl.token;",
+        "control [::1]:9001 token ctl.token;",
+        "control unix:logs/c.sock token ctl.token;",
+    ]
+    for line in good {
+        ok = ok + accepted(line)
+        all = all + 1
+    }
+    let bad = [
+        "0.0.0.0:9001",
+        "10.0.0.1:9001",
+        "192.168.1.5:9001",
+        "[::]:9001",
+        "[2001:db8::1]:9001",
+        "example.org:9001",
+    ]
+    for addr in bad {
+        ok = ok + refused("control {addr};", addr)
+        ok = ok + refused("control {addr} token ctl.token;", addr)
+        all = all + 2
+    }
+    print("control_addr_check: {ok}/{all} cases as documented")
+    assert(ok == all, "control_addr_check: {ok}/{all} cases as documented")
+    0
+}
