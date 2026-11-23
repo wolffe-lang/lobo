@@ -2,6 +2,18 @@
 
 ## Unreleased — 0.1.6
 
+### A proxied request's body is framed once (lobo#138)
+
+A request with a `Content-Length` body to a `proxy_pass` route reached
+the upstream with the header twice: the client's own, forwarded as a
+client header, and the one lobo builds from the body it forwards. The
+values were equal and the body correct, but an upstream may refuse a
+message with two `Content-Length` lines (RFC 9110 §8.6), and a strict
+one answers 400. The client's header is no longer forwarded beside
+lobo's, so the upstream receives one, as nginx sends it. A request
+whose `Content-Length` is 0 is forwarded as before, with the client's
+header.
+
 ### A control connection no longer delays clients (lobo#72)
 
 The server now reads a control command line beside its serving loop, in
