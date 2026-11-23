@@ -182,6 +182,18 @@ read as an empty reply: a blank line and exit 0, so `lobo status |
 grep …` could not tell "no answer" from "no match". A peer that closes
 without a byte is `control channel error`, exit 1.
 
+**The server reads an order beside its serving loop** (lobo#72). An
+accepted control connection waits in a slot until its whole line, up to
+its newline, the peer's close or 4,096 bytes, has arrived, and the loop
+reads it only when its bytes are there, so a control connection never
+delays the clients. The line has 2000 ms from the accept. When that time
+is spent, the server dispatches what arrived (an incomplete verb is
+answered `unknown verb`, or `unauthorized` where a token is configured)
+and closes the connection. Orders are read one at a time: the next
+control connection is accepted when the slot is free. A master reads its
+own orders the same way. `tests/shell/control_drip_e2e.lu` and
+`tests/shell/control_flood_e2e.lu` hold this against the binary.
+
 Why `upgrade` exists before it works: it is the one verb the
 endpoint reaches that no signal does. On unix, UPGRADE's bit is lobo's
 own probe — through ws28 the poll the serve loop self-raised to bound
