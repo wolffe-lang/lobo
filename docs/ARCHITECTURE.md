@@ -129,6 +129,26 @@ loop), and kills the proc as it kills a stream only when the byte has
 not landed in 100 ms (a write parked on a client that does not read),
 then closes the upstream descriptor the proc noted open.
 
+A request BODY that its route does not use stays out of the loop as
+well. Every route but `proxy_pass` answers without the body: a file, a
+redirect, a 405, an error. Such a request is answered as soon as its
+head is in, before its body arrives, as nginx answers it, and the row
+then discards the body as it comes. A fixed length is a count; a
+chunked body is the few ints of its frame (`serve.discard_scan`, the
+grammar `http.decode_chunked` reads). The bytes are read as bytes and
+dropped, so no byte of the body is kept anywhere. A row discarding a
+body is stepped only when its socket has bytes, waits `read_timeout`
+(60 s) between them, and is never closed to make room. The discard is
+bounded by `client_max_body_size` (for a chunked body: its data,
+extensions and trailers). A malformed chunk frame ends the connection,
+as nginx ends it. An answer that closes the connection waits for the
+body's end before it closes, so the close does not reset the connection
+under the answer. Once the body is over, the bytes after it are the
+next request. The access line is written when the request is answered.
+`tests/serve/body_discard_e2e.lu` runs these flows against the pinned
+nginx and lobo, and `tools/lobo-membudget`'s `flat, discarded bodies`
+row holds the memory flat across 64 bodies arriving at once.
+
 The readiness set is made before `main`. Through wolf 0.2.30 the
 runtime made it at the first call that parked, and asserted on the
 descriptors it asked for. The loop itself never parks (`net_wait` is a
