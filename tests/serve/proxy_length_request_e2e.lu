@@ -405,7 +405,7 @@ fn main() -> !int {
     var fails = List[str]()
     let root = os_cwd() else |_| "."
     let oracle = "{root}/tests/differential/bin/nginx"
-    let ng = through(mut fails, "nginx", 0, oracle)
+    let ng = through(mut fails, "nginx", 0, "{oracle}-planted-missing")
     let lb = through(mut fails, "lobo", 1, "{root}/target/lobo-debug")
     let nl = pick(ng, "length")
     let ll = pick(lb, "length")
