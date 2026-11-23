@@ -153,7 +153,11 @@ fn start(kind: int, bin: str, d: str, root: str, upp: int) -> (int, int, str) {
         if !gone {
             os_kill(child) else |_| {}
             let _w = os_wait(child) else |_| { -1 }
-            return (-1, 0, "{why}start {k} on port {hp}: alive and silent for 15000 ms{log_tail(kind, d)}")
+            return (
+                -1,
+                0,
+                "{why}start {k} on port {hp}: alive and silent for 15000 ms{log_tail(kind, d)}",
+            )
         }
         why = "{why}start {k} on port {hp}: exited with code {code}{log_tail(kind, d)}; "
         k = k + 1
