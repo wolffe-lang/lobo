@@ -149,6 +149,36 @@ next request. The access line is written when the request is answered.
 nginx and lobo, and `tools/lobo-membudget`'s `flat, discarded bodies`
 row holds the memory flat across 64 bodies arriving at once.
 
+A body that a `proxy_pass` route does use is not waited for on the
+loop either (lobo#142). When it has not all come with its head, the
+step makes the exchange's job as for any proxied request, with the
+body OWED: the bytes that came with the head, how the body is framed,
+the limits the loop's own read applies, and the loop's 400, 413 and
+503 pages (`proxy.owe`). Each peer's upstream request is then a head
+left open, without the client's `Content-Length`. The exchange reads
+the body first, before it connects, as nginx does with
+`proxy_request_buffering on`, in the loop's order and under its
+limits: `client_max_body_size` (413), the memory budget (503 at site
+`body-chunked`, its event written by the loop from the account), a
+malformed chunk frame (400), and `read_timeout` between two reads
+(408, nothing sent; a client that closes is logged 400, as nginx logs
+it). It reads bytes, so a read that ends inside a code point is no
+failure; the body must be UTF-8 once whole. Then it frames the body
+with one `Content-Length`, as `proxy.build_upstream` does, and the
+exchange goes on as before. What followed the body in its reads goes
+back with the account as the next request's start, in front of
+anything the client sent while the exchange waited. The account adds
+the body's bytes as framed (the generation's `mem-hw`), and a refusal,
+which is logged with no upstream. The job's text is unchanged for a
+request whose body came whole. Where no job socket can be made the
+exchange, and so the body's read, runs in the step, as before
+(lobo#148). `tests/serve/proxy_body_wait_e2e.lu` and
+`tests/serve/proxy_body_idle_e2e.lu` run these flows against the
+pinned nginx and lobo, `tests/serve/proxy_body_refusal_e2e.lu` holds
+the refusals to the loop's own, and `tools/lobo-membudget`'s `flat,
+proxied uploads` row holds the memory flat across 64 proxied bodies
+arriving at once.
+
 The readiness set is made before `main`. Through wolf 0.2.30 the
 runtime made it at the first call that parked, and asserted on the
 descriptors it asked for. The loop itself never parks (`net_wait` is a
