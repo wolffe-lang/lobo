@@ -3926,7 +3926,7 @@ pub fn serve_request(
     var owed = false
     let short = body_short(req.body_mode, req.content_length, rest0, limits, chg.used)
     let admin_on = opts.metrics_on && (req.method == "GET" || req.method == "HEAD")
-    if short && opts.stream_w >= 0 && owed_route(c, srv, req.path, admin_on) {
+    if short && opts.stream_w >= 0 && owed_route(c, srv, req.path, admin_on) && served < 0 {
         whole = false
         owed = true
         rest = ""
