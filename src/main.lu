@@ -3721,7 +3721,7 @@ fn serve_main(
                                     // the request asked no upstream: logged as
                                     // the loop logs its own refusal, a budget one
                                     // with its event
-                                    let px_hit = !d.bud_site.is_empty()
+                                    let px_hit = d.bud_site == "never"
                                     let via = !d.refused
                                     if px_logs && px_hit {
                                         ev_event(
