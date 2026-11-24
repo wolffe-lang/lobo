@@ -49,16 +49,31 @@ fn free_port() -> int ! {io} {
     p
 }
 
-fn wait_alive(ep: str) -> bool {
+/// Wait for a started lobo: 0 once it answers on its control endpoint
+/// `ep`, 1 once its stderr (`err`) carries its own bind-failure line
+/// (`bind() to … failed`: a port this row chose was taken before lobo
+/// bound it, lobo#152), 2 if neither within 6 s. Total.
+fn wait_start(ep: str, err: str) -> int {
     var i: int = 0
     while i < 120 {
         if shell.control_alive(ep) {
-            return true
+            return 0
+        }
+        if bind_refused(err) {
+            return 1
         }
         time_sleep_ms(50)
         i = i + 1
     }
-    false
+    if bind_refused(err) {
+        return 1
+    }
+    2
+}
+
+fn bind_refused(err: str) -> bool {
+    let e = fs_read_text(err) else |_| ""
+    e.contains("bind() to ") && e.contains(" failed")
 }
 
 /// One whole short exchange on a fresh connection: the reply, or "" if
@@ -109,9 +124,12 @@ fn drain_all(c: int, ms: int) -> int {
 }
 
 /// Start lobo on two fresh ports, its main context carrying
-/// `main_extra` and its server block `extra`, and print the ports. With
-/// `hold`, the first start's control port is held by a listener of this
-/// row's own, so that start cannot bind it. Answers (the child, the
+/// `main_extra` and its server block `extra`, and print the ports. The
+/// two probes never return one port. A start whose lobo printed its own
+/// bind-failure line is retried on two new ports, at most twice, each
+/// retry printed (lobo#152); any other start failure is not retried.
+/// With `hold`, the first start's control port is held by a listener of
+/// this row's own, so that start cannot bind it. Answers (the child, the
 /// listen port, the control port, the starts retried, 1 if lobo answers
 /// on its control port else 0). Total.
 fn start(name: str, root: str, d: str, main_extra: str, extra: str, hold: bool) -> (
@@ -121,53 +139,91 @@ fn start(name: str, root: str, d: str, main_extra: str, extra: str, hold: bool) 
     int,
     int,
 ) {
-    let hp = free_port() else |_| 0
-    let cp = free_port() else |_| 0
-    var held: int = -1
-    if hold {
-        let h = net_listen("127.0.0.1:{cp}") else |_| -1
-        held = h
-    }
-    print(
-        "{name}: ports listen {hp} control {cp}{if held >= 0 { " (the control port held by the row)" } else { "" }}",
-    )
-    let ep = "127.0.0.1:{cp}"
-    fs_write_text(
-        "{d}/lobo.conf",
-        "pid {d}/lobo.pid;\ncontrol {ep};\n{main_extra}\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; {extra} }}\n}}\n",
-    ) else |_| {
+    var tries: int = 0
+    var hp: int = 0
+    var cp: int = 0
+    while tries <= 2 {
+        let h0 = free_port() else |_| 0
+        hp = h0
+        let c0 = free_port() else |_| 0
+        cp = c0
+        var k: int = 0
+        while cp == hp && k < 8 {
+            let c1 = free_port() else |_| 0
+            cp = c1
+            k = k + 1
+        }
+        if cp == hp {
+            print(
+                "stream_abort: FAILED — [port-pick] {name}: the control probe returned the listen port {hp} nine times",
+            )
+            return (-1, hp, cp, tries, 0)
+        }
+        var held: int = -1
+        if hold && tries == 0 {
+            let h = net_listen("127.0.0.1:{cp}") else |_| -1
+            held = h
+        }
+        print(
+            "{name}: ports listen {hp} control {cp}{if held >= 0 { " (the control port held by the row)" } else { "" }}",
+        )
+        let ep = "127.0.0.1:{cp}"
+        let err = "{d}/lobo-start-{tries}.err"
+        fs_write_text(
+            "{d}/lobo.conf",
+            "pid {d}/lobo.pid;\ncontrol {ep};\n{main_extra}\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; {extra} }}\n}}\n",
+        ) else |_| {
+            if held >= 0 {
+                net_close(held) else |_| {}
+            }
+            return (-1, hp, cp, tries, 0)
+        }
+        fs_write_text(err, "") else |_| {}
+        // lobo's stderr kept for this start; `exec` keeps the child's
+        // pid lobo's own, so the kill and the wait below act on lobo
+        var argv = List[str]()
+        (mut argv).push("/bin/sh")
+        (mut argv).push("-c")
+        (mut argv).push("exec \"$0\" \"$@\" 2> '{err}'")
+        (mut argv).push("{root}/target/lobo-debug")
+        (mut argv).push("serve")
+        (mut argv).push("-p")
+        (mut argv).push(".")
+        (mut argv).push("-c")
+        (mut argv).push("{d}/lobo.conf")
+        let child = os_spawn(argv) else |_| {
+            print("{name}: could not spawn target/lobo-debug")
+            if held >= 0 {
+                net_close(held) else |_| {}
+            }
+            return (-1, hp, cp, tries, 0)
+        }
+        let w = wait_start(ep, err)
         if held >= 0 {
             net_close(held) else |_| {}
         }
-        return (-1, hp, cp, 0, 0)
-    }
-    var argv = List[str]()
-    (mut argv).push("{root}/target/lobo-debug")
-    (mut argv).push("serve")
-    (mut argv).push("-p")
-    (mut argv).push(".")
-    (mut argv).push("-c")
-    (mut argv).push("{d}/lobo.conf")
-    let child = os_spawn(argv) else |_| {
-        print("{name}: could not spawn target/lobo-debug")
-        if held >= 0 {
-            net_close(held) else |_| {}
+        if w == 0 {
+            return (child, hp, cp, tries, 1)
         }
-        return (-1, hp, cp, 0, 0)
-    }
-    if !wait_alive(ep) {
         os_kill(child) else |_| {}
         let _w = os_wait(child) else |_| 0
-        print("{name}: the server never answered on {ep}")
-        if held >= 0 {
-            net_close(held) else |_| {}
+        let e = fs_read_text(err) else |_| ""
+        if w == 2 {
+            print("{name}: the server never answered on {ep}; its stderr: [{e}]")
+            return (-1, hp, cp, tries, 0)
         }
-        return (-1, hp, cp, 0, 0)
+        if tries == 2 {
+            print(
+                "stream_abort: FAILED — [port-retry] {name}: lobo could not bind its ports on three starts, the last listen {hp} control {cp}: [{e}]",
+            )
+            return (-1, hp, cp, tries, 0)
+        }
+        tries = tries + 1
+        print(
+            "{name}: lobo could not bind its ports (listen {hp}, control {cp}): retry {tries} of 2 on two new ports",
+        )
     }
-    if held >= 0 {
-        net_close(held) else |_| {}
-    }
-    (child, hp, cp, 0, 1)
+    (-1, hp, cp, tries, 0)
 }
 
 /// The retry's own witness: the first start's control port is held by
