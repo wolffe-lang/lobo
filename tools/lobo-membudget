@@ -90,11 +90,15 @@
 # (the body comes whole with its head, nothing is owed: what 64
 # exchanges at once cost of themselves), then of 64 KiB. The second
 # drive's rise, per upload, is what an owed body costs at its peak, and
-# it must stay under twice the body, 128 KB: the body held once, as it
-# was read, and room for the allocator's rounding. A read that kept
-# every byte in a growing list and copied the body three more times
-# held about nine times the body. Where /proc is not there (macOS) the
-# row says so and is not counted.
+# it must stay under three times the body, 192 KB. The body is 64 KiB;
+# held once, as it was read, it read 88 to 140 KB an upload over sixteen
+# readings on one Linux x86-64 host (the body, the allocator's rounding
+# and the exchange's own share), so twice the body, 128 KB, sat inside
+# that spread. A read that kept every byte in a growing list and copied
+# the body three more times read 453 to 513 KB an upload, and is red
+# under 192. The row gates where its figures are taken; on a hosted
+# runner it is reported and not counted. Where /proc is not there
+# (macOS) the row says so and is not counted.
 #
 # THE FILE MEMO (ws58, lobo#67). The plain server now keeps a small
 # file's bytes (at most 32 KiB a file, inside the memo region's
@@ -813,10 +817,10 @@ if [ -r "/proc/$pid/status" ]; then
     cwhat="64 proxied uploads of 64 KiB arriving at once raised the high water $((h2 - h1)) KB, $cper KB an upload, after 64 of 1 byte (nothing owed) raised it $((h1 - h0)) KB; cpus=$pcpus, $h2 KB at its highest"
     if [ "$cok" != 0 ]; then
         check "cost, proxied uploads: a drive failed ($cwhat; stderr: $(tail -c 120 "$scratch/drive.err"))" 1
-    elif [ "$cper" -lt 128 ]; then
-        gated 0 "cost, proxied uploads: $cwhat (< 128 KB an upload: twice the body) — an owed body is held once"
+    elif [ "$cper" -lt 192 ]; then
+        gated 0 "cost, proxied uploads: $cwhat (< 192 KB an upload: three times the body) — an owed body is held once"
     else
-        gated 1 "cost, proxied uploads: $cwhat (>= 128 KB an upload: twice the body) — an owed body is held more than once"
+        gated 1 "cost, proxied uploads: $cwhat (>= 192 KB an upload: three times the body) — an owed body is held more than once"
     fi
 else
     say "cost, proxied uploads: not measured — the high water is /proc's VmHWM, and this host has no /proc (a named platform gap; the row is not counted)"
