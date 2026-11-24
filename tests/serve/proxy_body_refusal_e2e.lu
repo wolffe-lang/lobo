@@ -1,0 +1,486 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config obs
+//!
+//! A PROXIED BODY'S REFUSALS, READ BESIDE THE SERVING LOOP, ARE THE
+//! LOOP'S OWN (lobo#142). On the serving loop a proxied request's body
+//! that has not all come with its head is read by its exchange, beside
+//! the loop; this holds what that read refuses, and what it admits, to
+//! what the loop's own read did. GREEN AT TRUNK BY DESIGN: there the
+//! loop read these bodies itself, and these are its answers. lobo's
+//! debug tier runs under `memory_budget 2k` (nginx has no such budget:
+//! no oracle here) with a `proxy_pass` to this test's upstream, and
+//! three chunked bodies arrive in two parts each, 300 ms apart:
+//!   * `budget`: a chunk of 2048 bytes, past the budget in its second
+//!     part: `proxy-body-refusal-budget` is the 503 answered, and
+//!     `proxy-body-refusal-event` the `budget-exceeded` event in the
+//!     error log, `gen=1 site=body-chunked budget=2048 would=2049`;
+//!   * `malformed`: a size line that is not hex in its second part:
+//!     `proxy-body-refusal-malformed` is the 400 answered;
+//!   * `served`: `hello` in one chunk, under the budget:
+//!     `proxy-body-refusal-served` is the 200 relayed and `hello`
+//!     forwarded, and `proxy-body-refusal-admitted` the generation's
+//!     `mem-hw` in the status stanza, the head's bytes and the body's as
+//!     framed (what the loop's read charged).
+//! `proxy-body-refusal-upstream`: the upstream is asked once, for
+//! `served`. `proxy-body-refusal-logged`: the access log has the three
+//! requests as `503 -`, `400 -`, `200 200` (`$status
+//! $upstream_status`), the refusals with no upstream. lobo is started
+//! as tests/serve/proxy_body_wait_e2e.lu starts it (a start that never
+//! serves is `proxy-body-refusal-ready`). A failure prints
+//! `proxy_body_refusal: FAILED — [row]` with its reason, the rows in a
+//! fixed order, then one assert (an assert's own message is not in the
+//! record, wolf-lang#150). The server is stopped by its control
+//! socket's `quit`, or by its own handle. Loopback only, OS-chosen
+//! ports; the scratch tree is cleared at the start and at the end.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Print a named failure and keep it as `<row> <reason>`. Total.
+fn note(mut fails: List[str], row: str, msg: str) {
+    let one = msg.replace("\r", "\\r").replace("\n", "\\n")
+    print("proxy_body_refusal: FAILED — [{row}] {one}")
+    (mut fails).push("{row} {one}")
+}
+
+/// Whether `GET /r.html` on `port` answers 200 now: one connection, a
+/// 500 ms read. Total.
+fn serves(port: int) -> bool {
+    let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+    if c < 0 {
+        return false
+    }
+    net_deadline(c, 500) else |_| {}
+    net_write(c, "GET /r.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+    let r = net_read(c, 4096) else |_| { "" }
+    net_close(c) else |_| {}
+    r.starts_with("HTTP/1.1 200 OK")
+}
+
+/// What one proxy forwarded to the upstream in one case.
+struct Sent {
+    kase: str,
+    line: str,
+    lengths: str,
+    te: str,
+    body: str,
+    extra: str,
+    reply: str,
+}
+
+/// The values of every header line named `name` (any case) in `head`,
+/// joined by `,`; `none` when there is none. Total.
+fn header_values(head: str, name: str) -> str {
+    var out = ""
+    let want = name.lower()
+    for line in head.lines() {
+        let at = line.find(":") else -1
+        if at > 0 && line[0..at].lower() == want {
+            let v = line[at + 1..line.len].trim()
+            out = if out.is_empty() { v } else { "{out},{v}" }
+        }
+    }
+    if out.is_empty() { "none" } else { out }
+}
+
+/// Decode a whole chunked body in `raw` (sizes in hex, no extensions
+/// expected from a proxy); "" and false when it is not whole or not
+/// chunked. Total.
+fn dechunk(raw: str) -> (str, bool) {
+    var out = ""
+    var rest = raw
+    loop {
+        let nl = rest.find("\r\n") else -1
+        if nl < 0 {
+            return ("", false)
+        }
+        var n: int = 0
+        for b_raw in rest[0..nl].bytes() {
+            let b = b_raw as int
+            var v = -1
+            if b >= 48 && b <= 57 {
+                v = b - 48
+            } else if b >= 97 && b <= 102 {
+                v = b - 87
+            } else if b >= 65 && b <= 70 {
+                v = b - 55
+            }
+            if v < 0 {
+                return ("", false)
+            }
+            n = n * 16 + v
+        }
+        let from = nl + 2
+        if n == 0 {
+            return (out, true)
+        }
+        if rest.len < from + n + 2 {
+            return ("", false)
+        }
+        out = "{out}{rest[from..from + n]}"
+        rest = rest[from + n + 2..rest.len]
+    }
+}
+
+/// The upstream's side: accept within `ms`, read the request's head,
+/// its body by the framing the head declares, and whatever else comes
+/// within 300 ms; answer `ok` and close. Total.
+fn upstream(up: int, ms: int) -> Sent {
+    var s = Sent { kase: "", line: "", lengths: "none", te: "none", body: "", extra: "", reply: "" }
+    net_deadline(up, ms) else |_| {}
+    let uc = net_accept(up) else |_| {
+        s.line = "(no connection within {ms} ms)"
+        return s
+    }
+    net_deadline(uc, 3000) else |_| {}
+    var got = ""
+    while !got.contains("\r\n\r\n") {
+        let piece = net_read(uc, 4096) else |_| { "" }
+        if piece.is_empty() {
+            s.line = "(the head never ended: `{got}`)"
+            net_close(uc) else |_| {}
+            return s
+        }
+        got = "{got}{piece}"
+    }
+    let at = got.find("\r\n\r\n") else -1
+    let head = got[0..at]
+    var rest = got[at + 4..got.len]
+    let first = head.find("\r\n") else -1
+    s.line = if first < 0 { head } else { head[0..first] }
+    s.lengths = header_values(head, "content-length")
+    s.te = header_values(head, "transfer-encoding")
+    // the body, as the head frames it, then anything more within 300 ms
+    var want = -1
+    if s.lengths != "none" {
+        var n: int = 0
+        var digits = true
+        for b_raw in s.lengths.bytes() {
+            let b = b_raw as int
+            if digits && b >= 48 && b <= 57 {
+                n = n * 10 + b - 48
+            } else {
+                digits = false
+            }
+        }
+        want = n
+    }
+    let chunked = s.te.lower().contains("chunked")
+    var done = false
+    while !done {
+        if want >= 0 && rest.len >= want {
+            done = true
+        } else if chunked && rest.ends_with("0\r\n\r\n") {
+            done = true
+        } else if want < 0 && !chunked {
+            done = true
+        } else {
+            let piece = net_read(uc, 4096) else |_| { "" }
+            if piece.is_empty() {
+                done = true
+            } else {
+                rest = "{rest}{piece}"
+            }
+        }
+    }
+    if chunked {
+        let d = dechunk(rest)
+        s.body = if d.1 { d.0 } else { "(not a whole chunked body: `{rest}`)" }
+    } else if want >= 0 && rest.len >= want {
+        s.body = rest[0..want]
+        s.extra = rest[want..rest.len]
+    } else {
+        s.extra = rest
+    }
+    net_deadline(uc, 300) else |_| {}
+    let more = net_read(uc, 4096) else |_| { "" }
+    s.extra = "{s.extra}{more}"
+    net_write(uc, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok") else |_| {}
+    net_close(uc) else |_| {}
+    s
+}
+
+/// Start lobo under the budget and wait until it serves its static
+/// file: each start on newly probed ports, given 15 s and watched for
+/// its exit, at most three starts. Answers (the child's handle, its
+/// port, its control address, "") once it serves, or (-1, 0, "", what
+/// each start did). Total.
+fn start(bin: str, d: str, upp: int) -> (int, int, str, str) {
+    var why = ""
+    var k: int = 1
+    while k <= 3 {
+        let hp = free_port() else |_| { 0 }
+        let cp = free_port() else |_| { 0 }
+        let conf = "pid {d}/lobo.pid;\ncontrol 127.0.0.1:{cp};\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status $upstream_status \"$request\"';\n  access_log {d}/access.log t;\n  error_log {d}/error.log info;\n  memory_budget 2k;\n  server {{\n    listen 127.0.0.1:{hp};\n    location = /r.html {{ root {d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
+        fs_write_text("{d}/lobo.conf", conf) else |_| {}
+        var argv = List[str]()
+        (mut argv).push(bin)
+        (mut argv).push("serve")
+        (mut argv).push("-p")
+        (mut argv).push(".")
+        (mut argv).push("-c")
+        (mut argv).push("{d}/lobo.conf")
+        let child = os_spawn(argv) else |_| {
+            return (-1, 0, "", "{why}start {k}: os_spawn failed (is {bin} there?)")
+        }
+        let t0 = time_now_ms()
+        var gone = false
+        var code: int = 0
+        while !gone && time_now_ms() - t0 < 15000 {
+            if serves(hp) {
+                return (child, hp, "127.0.0.1:{cp}", "")
+            }
+            let w = os_wait_poll() else |_| { (0, 0) }
+            if w.0 == child {
+                gone = true
+                code = w.1
+            } else {
+                time_sleep_ms(50)
+            }
+        }
+        if !gone {
+            os_kill(child) else |_| {}
+            let _w = os_wait(child) else |_| { -1 }
+            return (-1, 0, "", "{why}start {k} on port {hp}: alive and silent for 15000 ms")
+        }
+        why = "{why}start {k} on port {hp}: exited with code {code}; "
+        k = k + 1
+    }
+    (-1, 0, "", why)
+}
+
+/// `n` bytes of `p`. Total.
+fn pad(n: int) -> str {
+    var v = "p"
+    while v.len < n {
+        v = "{v}{v}"
+    }
+    v[0..n]
+}
+
+/// One request in two parts, 300 ms apart, and its reply's first line
+/// within 3000 ms after the second (`(none)` for nothing). Total.
+fn two_parts(port: int, first: str, second: str) -> str {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return "(the proxy refused the client)"
+    }
+    net_write(c, first) else |_| {}
+    time_sleep_ms(300)
+    net_write(c, second) else |_| {}
+    net_deadline(c, 3000) else |_| {}
+    var got = ""
+    var reading = true
+    while reading && !got.contains("\r\n") {
+        let piece = net_read(c, 4096) else |_| { "" }
+        if piece.is_empty() {
+            reading = false
+        } else {
+            got = "{got}{piece}"
+        }
+    }
+    net_close(c) else |_| {}
+    let at = got.find("\r\n") else -1
+    if at < 0 {
+        return if got.is_empty() { "(none)" } else { got }
+    }
+    got[0..at]
+}
+
+/// The first line of `text` holding `needle`, or "". Total.
+fn line_with(text: str, needle: str) -> str {
+    for l in text.lines() {
+        if l.contains(needle) {
+            return l
+        }
+    }
+    ""
+}
+
+/// The access log's `POST /up` lines, `$status $upstream_status` each,
+/// joined by `, `. Total.
+fn logged(text: str) -> str {
+    var out = ""
+    for l in text.lines() {
+        if l.contains("\"POST /up ") {
+            let q = l.find(" \"") else -1
+            let st = if q > 0 { l[0..q] } else { l }
+            out = if out.is_empty() { st } else { "{out}, {st}" }
+        }
+    }
+    if out.is_empty() { "(none)" } else { out }
+}
+
+fn main() -> !int {
+    var fails = List[str]()
+    let d = "proxy_body_refusal"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w") else |_| {}
+    fs_write_text("{d}/w/r.html", "READY\n") else |_| {}
+    let root = os_cwd() else |_| "."
+    let up = net_listen("127.0.0.1:0") else |_| {
+        note(mut fails, "proxy-body-refusal-ready", "the upstream could not listen")
+        assert(false, "the upstream could not listen")
+        return 1
+    }
+    let upp = net_port(up) else |_| { 0 }
+    let st = start("{root}/target/lobo-debug", d, upp)
+    let child = st.0
+    if child < 0 {
+        note(mut fails, "proxy-body-refusal-ready", "lobo never served its static file: {st.3}")
+        net_close(up) else |_| {}
+        fs_remove_dir_all(d) else |_| {}
+        assert(false, "lobo never served")
+        return 1
+    }
+    let hp = st.1
+    let ep = st.2
+    let h = "POST /up HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n"
+    // what the loop's read charged a request: its head (the bytes
+    // before the blank line) and its body's bytes as framed
+    let head_bytes = h.len - 4
+    let r_budget = two_parts(hp, "{h}800\r\n{pad(900)}", pad(1100))
+    let r_bad = two_parts(hp, "{h}5\r\nhel", "lo\r\nzz\r\n")
+    let served_body = "5\r\nhello\r\n0\r\n\r\n"
+    let c = net_connect("127.0.0.1:{hp}") else |_| { -1 }
+    var r_ok = "(the proxy refused the client)"
+    var sent = Sent {
+        kase: "served",
+        line: "(not run)",
+        lengths: "none",
+        te: "none",
+        body: "",
+        extra: "",
+        reply: "",
+    }
+    if c >= 0 {
+        net_write(c, "{h}5\r\nhel") else |_| {}
+        time_sleep_ms(300)
+        net_write(c, "lo\r\n0\r\n\r\n") else |_| {}
+        sent = upstream(up, 3000)
+        net_deadline(c, 3000) else |_| {}
+        let got = net_read(c, 4096) else |_| { "" }
+        let at = got.find("\r\n") else -1
+        r_ok = if at < 0 { "(none)" } else { got[0..at] }
+        net_close(c) else |_| {}
+    }
+    // asked again only if a refusal reached it: nothing within 500 ms
+    let again = upstream(up, 500)
+    time_sleep_ms(200)
+    let stz = shell.control_fetch(ep, "status") else |_| { "" }
+    let g1 = line_with(stz, "generation 1:")
+    let quit = shell.control_send(ep, "quit") else |_| { "" }
+    var code = -1
+    if quit.contains("draining then exiting") {
+        code = os_wait(child) else |_| { -1 }
+    } else {
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| { -1 }
+    }
+    net_close(up) else |_| {}
+    let el = fs_read_text("{d}/error.log") else |_| { "" }
+    let acc = fs_read_text("{d}/access.log") else |_| { "" }
+    let ev = line_with(el, "budget-exceeded")
+    let lg = logged(acc)
+    print(
+        "proxy_body_refusal: budget answered `{r_budget}`, malformed `{r_bad}`, served `{r_ok}` (forwarded `{sent.body}`); the upstream after: `{again.line}`",
+    )
+    print(
+        "proxy_body_refusal: the event `{ev}`; the stanza `{g1}`; logged {lg}; lobo exited {code}",
+    )
+    if !r_budget.starts_with("HTTP/1.1 503 ") {
+        note(
+            mut fails,
+            "proxy-body-refusal-budget",
+            "a chunked body past the budget was answered `{r_budget}`, not 503",
+        )
+    }
+    if !ev.contains("[error]") ||
+        !ev.contains("budget-exceeded gen=1 site=body-chunked budget=2048 would=2049") {
+        note(
+            mut fails,
+            "proxy-body-refusal-event",
+            "the error log's budget event is `{ev}`, not `budget-exceeded gen=1 site=body-chunked budget=2048 would=2049` at [error]",
+        )
+    }
+    if !r_bad.starts_with("HTTP/1.1 400 ") {
+        note(
+            mut fails,
+            "proxy-body-refusal-malformed",
+            "a chunked body whose size line is not hex was answered `{r_bad}`, not 400",
+        )
+    }
+    if !r_ok.starts_with("HTTP/1.1 200 OK") || sent.body != "hello" {
+        note(
+            mut fails,
+            "proxy-body-refusal-served",
+            "a chunked body under the budget was answered `{r_ok}`, and the upstream received `{sent.body}`",
+        )
+    }
+    let want_hw = "mem-hw={head_bytes + served_body.len} "
+    if !g1.contains(want_hw) {
+        note(
+            mut fails,
+            "proxy-body-refusal-admitted",
+            "the stanza is `{g1}`, not `{want_hw}` (the head's {head_bytes} bytes and the body's {served_body.len})",
+        )
+    }
+    if !again.line.starts_with("(no connection") {
+        note(
+            mut fails,
+            "proxy-body-refusal-upstream",
+            "the upstream was asked again: `{again.line}`",
+        )
+    }
+    if lg != "503 -, 400 -, 200 200" {
+        note(
+            mut fails,
+            "proxy-body-refusal-logged",
+            "the access log has `{lg}`, not `503 -, 400 -, 200 200`",
+        )
+    }
+    fs_remove_dir_all(d) else |_| {}
+    if fails.is_empty() {
+        print(
+            "proxy_body_refusal: ok — 503 with its event, 400, 200 with `hello` forwarded, {want_hw.trim()}, logged {lg}",
+        )
+        return 0
+    }
+    let order = [
+        "proxy-body-refusal-ready",
+        "proxy-body-refusal-budget",
+        "proxy-body-refusal-event",
+        "proxy-body-refusal-malformed",
+        "proxy-body-refusal-served",
+        "proxy-body-refusal-admitted",
+        "proxy-body-refusal-upstream",
+        "proxy-body-refusal-logged",
+    ]
+    var last = ""
+    for r in order {
+        var why = ""
+        for f in fails {
+            if why.is_empty() && f.starts_with("{r} ") {
+                why = f[r.len + 1..f.len]
+            }
+        }
+        if !why.is_empty() {
+            last = "proxy_body_refusal: FAILED — [{r}] {why}"
+            print(last)
+        }
+    }
+    assert(false, "{last}")
+    0
+}
