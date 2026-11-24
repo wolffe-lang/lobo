@@ -1114,6 +1114,14 @@ fn finish(head: str, body: str) -> str {
     "{head}Content-Length: {body.len}\r\n\r\n{body}"
 }
 
+/// An open head closed for an owed length body of `n` bytes that is
+/// sent after it as its own pieces (`attempt`'s gathered write): the
+/// head `build_upstream` makes for that body, without the body. Pure
+/// and total.
+fn finish_length(head: str, n: int) -> str {
+    "{head}Content-Length: {n}\r\n\r\n"
+}
+
 // ==================================================================
 // IO LEG (native + checked) — connect, send, read, relay, under
 // deadlines, with peer failover. Held to the pinned nginx by the
@@ -1677,6 +1685,7 @@ fn tls_read_close(mut cli: tlsc.Client, up: int, mut w: Watch, carry: str, cap: 
 fn attempt_tls(
     client: int,
     upreq: str,
+    body: List[List[byte]],
     phost: str,
     pport: int,
     sni_host: str,
@@ -1758,6 +1767,22 @@ fn attempt_tls(
     }
 
     tlsc.write(mut cli, upreq.bytes()) else |_| {
+        eprint("lobo: [error] upstream TLS to {phost}:{pport}: request write failed; answering 502")
+        up_note(notes, "x", up)
+        tlsc.close(take cli) else |_| {}
+        return 502
+    }
+    // lobo#142: an owed length body follows its head as the pieces it
+    // was read in
+    var bw = true
+    for part in body {
+        if bw {
+            tlsc.write(mut cli, part) else |_| {
+                bw = false
+            }
+        }
+    }
+    if !bw {
         eprint("lobo: [error] upstream TLS to {phost}:{pport}: request write failed; answering 502")
         up_note(notes, "x", up)
         tlsc.close(take cli) else |_| {}
@@ -2004,6 +2029,7 @@ pub fn status_code_of(status_line: str) -> int {
 fn attempt(
     client: int,
     upreq: str,
+    body: List[List[byte]],
     phost: str,
     pport: int,
     read_ms: int,
@@ -2023,7 +2049,19 @@ fn attempt(
         up_close(notes, up)
         return 502
     }
-    net_write(up, upreq) else |_| {
+    // lobo#142: an owed length body is the pieces it was read in, sent
+    // behind its head in one gathered write, nothing copied
+    var wok = true
+    if body.is_empty() {
+        net_write(up, upreq) else |_| {
+            wok = false
+        }
+    } else {
+        net_writev_head(up, upreq, body) else |_| {
+            wok = false
+        }
+    }
+    if !wok {
         up_close(notes, up)
         return 502
     }
@@ -2515,16 +2553,21 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
     let owed = j.owed.mode != 0
     var done = List[str]()
     var after = ""
+    var t = took(0)
     if owed {
         acc.owed = true
-        let t = read_owed(client, notes, j.owed)
+        t = read_owed(client, notes, j.owed)
         if t.code != 0 {
             return owed_refuse(client, j.owed, t, mut acc)?
         }
         acc.admitted = t.raw
         after = t.after
         for h in j.reqs {
-            (mut done).push(finish(h, t.body))
+            if j.owed.mode == 1 {
+                (mut done).push(finish_length(h, t.raw))
+            } else {
+                (mut done).push(finish(h, t.body))
+            }
         }
     }
     if j.fail != 0 {
@@ -2558,6 +2601,7 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
             st = attempt_tls(
                 client,
                 upreq,
+                t.parts,
                 phost,
                 pport,
                 sni,
@@ -2573,6 +2617,7 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
             st = attempt(
                 client,
                 upreq,
+                t.parts,
                 phost,
                 pport,
                 j.read_ms,
@@ -2626,16 +2671,20 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
 }
 
 /// What an exchange's read of its owed body came to (lobo#142): `code`
-/// 0 when the body is whole (`body` its content, decoded when chunked;
-/// `after` what followed it in the reads; `raw` its bytes as framed),
-/// else the status the request is logged with: 400 (the framing is
-/// malformed, the bytes are not UTF-8, or the client closed), 408 (the
-/// client sent nothing for the read timeout), 413, 503 (the budget:
-/// `site` and `would` as the loop's read named them) or 497 (the loop
-/// stopped the exchange, ws69).
+/// 0 when the body is whole, else the status the request is logged
+/// with: 400 (the framing is malformed, the bytes are not UTF-8, or the
+/// client closed: `gone`), 408 (the client sent nothing for the read
+/// timeout), 413, 503 (the budget: `site` and `would` as the loop's read
+/// named them) or 497 (the loop stopped the exchange, ws69). A whole
+/// length body is `parts`, the pieces its reads returned, kept as they
+/// came (nothing is copied: `attempt` sends them behind the head in one
+/// gathered write); a whole chunked body is `body`, decoded, with
+/// `after` what followed it in the reads. `raw` is the body's bytes as
+/// framed.
 struct Took {
     code: int,
     body: str,
+    parts: List[List[byte]],
     after: str,
     raw: int,
     gone: bool,
@@ -2644,39 +2693,75 @@ struct Took {
 }
 
 fn took(code: int) -> Took {
-    Took { code: code, body: "", after: "", raw: 0, gone: false, site: "", would: 0 }
+    Took {
+        code: code,
+        body: "",
+        parts: List[List[byte]](),
+        after: "",
+        raw: 0,
+        gone: false,
+        site: "",
+        would: 0,
+    }
+}
+
+/// A client that closed mid-body: 400, nothing sent (nginx's log). Total.
+fn took_gone() -> Took {
+    var t = took(400)
+    t.gone = true
+    t
+}
+
+/// Wait for the client's next bytes of an owed body, at most `ms`, with
+/// the loop's stop on `notes` beside it (`up_wait`'s shape): 0 when the
+/// client has bytes, 408 when the time passed with none, 497 for a stop
+/// (left unread for the proc's next wait), 400 when the wait failed.
+/// net tier. Total.
+fn owed_wait(client: int, notes: int, ms: int) -> int {
+    var set = [client]
+    if notes >= 0 {
+        (mut set).push(notes)
+    }
+    let ready = net_wait(set, ms) else |_| {
+        return 400
+    }
+    if ready.is_empty() {
+        return 408
+    }
+    for f in ready {
+        if notes >= 0 && f == notes {
+            return 497
+        }
+    }
+    0
 }
 
 /// Read the owed body `o` from `client` (lobo#142), in the loop's own
 /// read's order and under its limits (`serve.take_length`,
-/// `serve.read_chunked`): a length body until it has `want` bytes; a
-/// chunked body until its final CRLF (`http.chunked_end`), a malformed
-/// frame a 400, past twice `client_max_body_size` raw a 413, past the
-/// budget a 503 at site `body-chunked`, and decoded
-/// (`http.decode_chunked`: a size past `client_max_body_size` is a
-/// 413). Between two reads it waits at most `read_ms` (nginx's
-/// `client_body_timeout`, one timer between successive reads): then a
-/// 408, and a client that closes a 400, each with nothing sent, as the
-/// pinned nginx logs them. The bytes are read as bytes, so a read that
-/// ends inside a code point is no failure; the body and what follows
-/// it must be UTF-8 (lobo is str-only on a body at this pin), else a
-/// 400. The loop's stop on `notes` ends it as 497, unread (`up_wait`).
-/// Nothing here watches for a pipelined request: every byte the client
-/// sends is the body's until it is whole. net tier. Total.
+/// `serve.read_chunked`). Between two reads it waits at most `read_ms`
+/// (nginx's `client_body_timeout`, one timer between successive reads):
+/// then a 408, and a client that closes a 400, each with nothing sent,
+/// as the pinned nginx logs them. The loop's stop on `notes` ends it as
+/// 497, unread (`up_wait`). Nothing here watches for a pipelined
+/// request: every byte the client sends is the body's until it is
+/// whole. A length body is `read_owed_length`'s. A chunked one is read
+/// as bytes into one buffer until its final CRLF (`http.chunked_end`):
+/// a malformed frame a 400, past twice `client_max_body_size` raw a
+/// 413, past the budget a 503 at site `body-chunked`, then decoded
+/// (`http.decode_chunked`: a size past `client_max_body_size` is a 413);
+/// a read that ends inside a code point is no failure, and the body and
+/// what follows it must be UTF-8 once whole, else a 400. net tier.
+/// Total.
 fn read_owed(client: int, notes: int, o: Owed) -> Took {
+    if o.mode == 1 {
+        return read_owed_length(client, notes, o)
+    }
     var buf = o.have.bytes()
     let cap = o.max_body * 2
     loop {
-        var end = -1
-        if o.mode == 1 {
-            if buf.len >= o.want {
-                end = o.want
-            }
-        } else {
-            end = http.chunked_end(buf, o.max_digits)
-            if end == -2 {
-                return took(400)
-            }
+        let end = http.chunked_end(buf, o.max_digits)
+        if end == -2 {
+            return took(400)
         }
         if end >= 0 {
             let whole = str_from_utf8(buf[0..end]) else |_| {
@@ -2685,24 +2770,21 @@ fn read_owed(client: int, notes: int, o: Owed) -> Took {
             let after = str_from_utf8(buf[end..buf.len]) else |_| {
                 return took(400)
             }
-            var body = whole
-            if o.mode == 2 {
-                var lim = http.default_limits()
-                lim.max_body = o.max_body
-                lim.max_chunk_digits = o.max_digits
-                var big = false
-                body = http.decode_chunked(whole, lim) else |e| match e {
-                    malformed => {
-                        return took(400)
-                    },
-                    too_large => {
-                        big = true
-                        ""
-                    },
-                }
-                if big {
-                    return took(413)
-                }
+            var lim = http.default_limits()
+            lim.max_body = o.max_body
+            lim.max_chunk_digits = o.max_digits
+            var big = false
+            let body = http.decode_chunked(whole, lim) else |e| match e {
+                malformed => {
+                    return took(400)
+                },
+                too_large => {
+                    big = true
+                    ""
+                },
+            }
+            if big {
+                return took(413)
             }
             var t = took(0)
             t.body = body
@@ -2710,60 +2792,100 @@ fn read_owed(client: int, notes: int, o: Owed) -> Took {
             t.raw = end
             return t
         }
-        if o.mode == 2 {
-            if buf.len > cap {
-                return took(413)
-            }
-            if o.bud_limit > 0 && o.bud_used + buf.len > o.bud_limit {
-                var t = took(503)
-                t.site = "body-chunked"
-                t.would = o.bud_limit + 1
-                return t
-            }
+        if buf.len > cap {
+            return took(413)
         }
-        var set = [client]
-        if notes >= 0 {
-            (mut set).push(notes)
-        }
-        let ready = net_wait(set, o.read_ms) else |_| {
-            var t = took(400)
-            t.gone = true
+        if o.bud_limit > 0 && o.bud_used + buf.len > o.bud_limit {
+            var t = took(503)
+            t.site = "body-chunked"
+            t.would = o.bud_limit + 1
             return t
         }
-        if ready.is_empty() {
-            return took(408)
+        let w = owed_wait(client, notes, o.read_ms)
+        if w == 400 {
+            return took_gone()
         }
-        for f in ready {
-            if notes >= 0 && f == notes {
-                return took(497)
-            }
+        if w != 0 {
+            return took(w)
         }
         var spurious = false
         let piece = net_read_bytes(client, 4096) else |e| match e {
             closed => {
-                var t = took(400)
-                t.gone = true
-                return t
+                return took_gone()
             },
             timeout => {
                 spurious = true
                 List[byte]()
             },
             io => {
-                var t = took(400)
-                t.gone = true
-                return t
+                return took_gone()
             },
         }
         if !spurious && piece.is_empty() {
-            var t = took(400)
-            t.gone = true
-            return t
+            return took_gone()
         }
         for b in piece {
             (mut buf).push(b)
         }
     }
+}
+
+/// An owed length body (lobo#142): `want` bytes, of which `have` came
+/// with the head. Each read asks for at most what the body still owes
+/// (and at most 64 KiB), so no byte after the body is taken: the next
+/// request stays in the socket for the exchange's watch and the loop.
+/// Each read's piece is kept as it came, so the body is held once, in
+/// the pieces, and never copied; once whole it must be UTF-8
+/// (`http.utf8_parts`), else a 400. The waits are `read_owed`'s. net tier.
+/// Total.
+fn read_owed_length(client: int, notes: int, o: Owed) -> Took {
+    var parts = List[List[byte]]()
+    var n = 0
+    var first = o.have.bytes()
+    if !first.is_empty() {
+        n = first.len
+        (mut parts).push(take first)
+    }
+    while n < o.want {
+        let w = owed_wait(client, notes, o.read_ms)
+        if w == 400 {
+            return took_gone()
+        }
+        if w != 0 {
+            return took(w)
+        }
+        var ask = o.want - n
+        if ask > 65536 {
+            ask = 65536
+        }
+        var spurious = false
+        var piece = net_read_bytes(client, ask) else |e| match e {
+            closed => {
+                return took_gone()
+            },
+            timeout => {
+                spurious = true
+                List[byte]()
+            },
+            io => {
+                return took_gone()
+            },
+        }
+        if !spurious && piece.is_empty() {
+            return took_gone()
+        }
+        if !piece.is_empty() {
+            n = n + piece.len
+            (mut parts).push(take piece)
+        }
+    }
+    if !http.utf8_parts(parts) {
+        return took(400)
+    }
+    var t = took(0)
+    t.raw = n
+    t.parts = parts
+    t
 }
 
 /// The answer to an owed body's read that did not end whole
