@@ -56,7 +56,7 @@ exchange still runs on the serving loop, and so does this body read
 
 `tools/lobo-membudget` has two rows for it. `cost, proxied uploads`
 reads what one proxied upload of 64 KiB holds at its peak, 64 arriving
-at once, and holds it under twice the body (on a host with /proc).
+at once, and holds it under three times the body (on a host with /proc).
 `late, proxied uploads` drives the same uploads a hundred times to warm
 the server and a hundred more, and holds the high water's rise over the
 second hundred under 256 KB (on a host with /proc). Its `--starts` tally now names the cpus the run
