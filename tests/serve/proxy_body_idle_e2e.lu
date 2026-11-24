@@ -1,0 +1,347 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native
+//!
+//! A PROXIED REQUEST'S BODY THAT STOPS ARRIVING ENDS AS THE ORACLE ENDS
+//! IT (lobo#142). A client sends `POST /up` with `Content-Length: 11`
+//! and 2 of its bytes to a `proxy_pass` route, then nothing. The same
+//! client goes to the pinned nginx (the oracle,
+//! tests/differential/bin/nginx) and to lobo's debug tier at the same
+//! time, and the test watches both connections for 70 s:
+//!   * `proxy-body-idle-close`: lobo closes the connection 60,000 to
+//!     62,500 ms after the last byte, when the oracle closes its own in
+//!     that window too (`read_timeout`, nginx's `client_body_timeout`);
+//!   * `proxy-body-idle-sent`: what lobo sent before the close is what
+//!     the oracle sent (its status line, or nothing);
+//!   * `proxy-body-idle-logged`: the status lobo logged for the request
+//!     is the status the oracle logged (both access logs read).
+//! The upstream listens and is never called. Each proxy is started as
+//! tests/serve/proxy_body_wait_e2e.lu starts it, and an oracle that
+//! never serves is `proxy-body-idle-oracle-silent`. One native run,
+//! about 70 s. A failure prints `proxy_body_idle: FAILED — [row]` with
+//! its reason, the rows in a fixed order, then one assert (an assert's
+//! own message is not in the record, wolf-lang#150). Every server is
+//! stopped by its own handle. Loopback only, OS-chosen ports; the
+//! scratch trees are cleared at the start and at the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Print a named failure and keep it as `<row> <reason>`. Total.
+fn note(mut fails: List[str], row: str, msg: str) {
+    let one = msg.replace("\r", "\\r").replace("\n", "\\n")
+    print("proxy_body_idle: FAILED — [{row}] {one}")
+    (mut fails).push("{row} {one}")
+}
+
+/// Whether `GET /r.html` on `port` answers 200 now: one connection, a
+/// 500 ms read. Total.
+fn serves(port: int) -> bool {
+    let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+    if c < 0 {
+        return false
+    }
+    net_deadline(c, 500) else |_| {}
+    net_write(c, "GET /r.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+    let r = net_read(c, 4096) else |_| { "" }
+    net_close(c) else |_| {}
+    r.starts_with("HTTP/1.1 200 OK")
+}
+
+/// The last three lines of the oracle's error log, as ` (error log:
+/// …)`; "" for lobo (its stderr is the row's) or an empty log. Total.
+fn log_tail(kind: int, d: str) -> str {
+    if kind != 0 {
+        return ""
+    }
+    let text = fs_read_text("{d}/logs/ng.err") else |_| { "" }
+    var lines = List[str]()
+    for l in text.lines() {
+        if !l.trim().is_empty() {
+            (mut lines).push(l.trim())
+        }
+    }
+    if lines.is_empty() {
+        return ""
+    }
+    var out = ""
+    var i = if lines.len > 3 { lines.len - 3 } else { 0 }
+    while i < lines.len {
+        out = if out.is_empty() { lines[i] } else { "{out} | {lines[i]}" }
+        i = i + 1
+    }
+    " (error log: {out})"
+}
+
+/// Start one proxy and wait until it serves its static file. Each start
+/// is on a newly probed port, given 15 s, and watched for its exit; a
+/// start that exits is retried on a new port (the probe's
+/// release-to-rebind race), at most three starts. `kind` 0 is the
+/// oracle, 1 a lobo. Answers (the child's handle, its port, "") once it
+/// serves, or (-1, 0, what each start did) when none did; a start that
+/// stays alive and silent is put down by its handle. Total.
+fn start(kind: int, bin: str, d: str, root: str, upp: int) -> (int, int, str) {
+    var why = ""
+    var k: int = 1
+    while k <= 3 {
+        let hp = free_port() else |_| { 0 }
+        var argv = List[str]()
+        (mut argv).push(bin)
+        if kind == 0 {
+            let conf = "daemon off;\nmaster_process off;\npid {root}/{d}/ng.pid;\nerror_log {root}/{d}/logs/ng.err;\nevents {{}}\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status \"$request\"';\n  access_log {root}/{d}/logs/access.log t;\n  server {{\n    listen 127.0.0.1:{hp};\n    client_max_body_size 16;\n    location = /r.html {{ root {root}/{d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
+            fs_write_text("{d}/ng.conf", conf) else |_| {}
+            (mut argv).push("-p")
+            (mut argv).push("{root}/{d}/")
+            (mut argv).push("-c")
+            (mut argv).push("{root}/{d}/ng.conf")
+        } else {
+            let conf = "pid {d}/lobo.pid;\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status \"$request\"';\n  access_log {d}/logs/access.log t;\n  server {{\n    listen 127.0.0.1:{hp};\n    client_max_body_size 16;\n    location = /r.html {{ root {d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
+            fs_write_text("{d}/lobo.conf", conf) else |_| {}
+            (mut argv).push("serve")
+            (mut argv).push("-p")
+            (mut argv).push(".")
+            (mut argv).push("-c")
+            (mut argv).push("{d}/lobo.conf")
+        }
+        let child = os_spawn(argv) else |_| {
+            return (-1, 0, "{why}start {k}: os_spawn failed (is {bin} there?)")
+        }
+        let t0 = time_now_ms()
+        var gone = false
+        var code: int = 0
+        while !gone && time_now_ms() - t0 < 15000 {
+            if serves(hp) {
+                return (child, hp, "")
+            }
+            let w = os_wait_poll() else |_| { (0, 0) }
+            if w.0 == child {
+                gone = true
+                code = w.1
+            } else {
+                time_sleep_ms(50)
+            }
+        }
+        if !gone {
+            os_kill(child) else |_| {}
+            let _w = os_wait(child) else |_| { -1 }
+            return (
+                -1,
+                0,
+                "{why}start {k} on port {hp}: alive and silent for 15000 ms{log_tail(kind, d)}",
+            )
+        }
+        why = "{why}start {k} on port {hp}: exited with code {code}{log_tail(kind, d)}; "
+        k = k + 1
+    }
+    (-1, 0, why)
+}
+
+/// The access log's statuses for `POST /up`, in the order logged,
+/// joined by ` `. Total.
+fn logged(d: str) -> str {
+    let text = fs_read_text("{d}/logs/access.log") else |_| { "" }
+    var out = ""
+    for l in text.lines() {
+        if l.contains("\"POST /up ") {
+            let sp = l.find(" ") else -1
+            let st = if sp > 0 { l[0..sp] } else { l }
+            out = if out.is_empty() { st } else { "{out} {st}" }
+        }
+    }
+    if out.is_empty() { "(none)" } else { out }
+}
+
+/// One proxy under the idle client: its handle, port, scratch tree and
+/// upstream listener, or -1 when it did not start.
+struct Proxy {
+    child: int,
+    port: int,
+    d: str,
+    up: int,
+}
+
+/// Start one proxy: `kind` 0 is the oracle, 1 a lobo. Total.
+fn bring_up(mut fails: List[str], who: str, kind: int, bin: str) -> Proxy {
+    var p = Proxy { child: -1, port: 0, d: "proxy_body_idle_{who}", up: -1 }
+    fs_remove_dir_all(p.d) else |_| {}
+    fs_create_dir_all("{p.d}/w") else |_| {}
+    fs_create_dir_all("{p.d}/logs") else |_| {}
+    fs_write_text("{p.d}/w/r.html", "READY\n") else |_| {}
+    let root = os_cwd() else |_| "."
+    p.up = net_listen("127.0.0.1:0") else |_| {
+        note(mut fails, "proxy-body-idle-ready", "{who}: the upstream could not listen")
+        return p
+    }
+    let upp = net_port(p.up) else |_| { 0 }
+    let st = start(kind, bin, p.d, root, upp)
+    if st.0 < 0 {
+        if kind == 0 {
+            note(
+                mut fails,
+                "proxy-body-idle-oracle-silent",
+                "the oracle never served its static file: {st.2}",
+            )
+        } else {
+            note(mut fails, "proxy-body-idle-ready", "{who} never served its static file: {st.2}")
+        }
+        return p
+    }
+    p.child = st.0
+    p.port = st.1
+    p
+}
+
+fn main() -> !int {
+    var fails = List[str]()
+    let root = os_cwd() else |_| "."
+    let ng = bring_up(mut fails, "nginx", 0, "{root}/tests/differential/bin/nginx")
+    let lb = bring_up(mut fails, "lobo", 1, "{root}/target/lobo-debug")
+    var c = [-1, -1]
+    var sent = ["", ""]
+    var closed_ms = [-1, -1]
+    let req = "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhe"
+    let ports = [ng.port, lb.port]
+    let up = [ng.child >= 0, lb.child >= 0]
+    var i: int = 0
+    while i < 2 {
+        if up[i] {
+            c[i] = net_connect("127.0.0.1:{ports[i]}") else |_| { -1 }
+            if c[i] >= 0 {
+                net_write(c[i], req) else |_| {}
+            }
+        }
+        i = i + 1
+    }
+    let t0 = time_unix_ms()
+    var open = 0
+    for x in c {
+        if x >= 0 {
+            open = open + 1
+        }
+    }
+    while open > 0 && time_unix_ms() - t0 < 70000 {
+        var set = List[int]()
+        var q: int = 0
+        while q < 2 {
+            if c[q] >= 0 && closed_ms[q] < 0 {
+                (mut set).push(c[q])
+            }
+            q = q + 1
+        }
+        let ready = net_wait(set, 500) else |_| { List[int]() }
+        var k: int = 0
+        while k < 2 {
+            if c[k] >= 0 && closed_ms[k] < 0 {
+                var is_ready = false
+                for r in ready {
+                    if r == c[k] {
+                        is_ready = true
+                    }
+                }
+                if is_ready {
+                    net_deadline(c[k], 100) else |_| {}
+                    let piece = net_read(c[k], 4096) else |_| { "" }
+                    if piece.is_empty() {
+                        closed_ms[k] = time_unix_ms() - t0
+                        net_close(c[k]) else |_| {}
+                        open = open - 1
+                    } else {
+                        sent[k] = "{sent[k]}{piece}"
+                    }
+                }
+            }
+            k = k + 1
+        }
+    }
+    time_sleep_ms(500)
+    let ng_log = if up[0] { logged(ng.d) } else { "(not run)" }
+    let lb_log = if up[1] { logged(lb.d) } else { "(not run)" }
+    var j: int = 0
+    while j < 2 {
+        if c[j] >= 0 && closed_ms[j] < 0 {
+            net_close(c[j]) else |_| {}
+        }
+        j = j + 1
+    }
+    for p in [ng, lb] {
+        if p.child >= 0 {
+            os_kill(p.child) else |_| {}
+            let _w = os_wait(p.child) else |_| { -1 }
+        }
+        if p.up >= 0 {
+            net_close(p.up) else |_| {}
+        }
+        fs_remove_dir_all(p.d) else |_| {}
+    }
+    let ng_sent = status_of(sent[0])
+    let lb_sent = status_of(sent[1])
+    print("proxy_body_idle: nginx closed at {closed_ms[0]} ms, sent `{ng_sent}`, logged {ng_log}")
+    print("proxy_body_idle: lobo closed at {closed_ms[1]} ms, sent `{lb_sent}`, logged {lb_log}")
+    if up[0] && up[1] {
+        let in_window = closed_ms[1] >= 60000 && closed_ms[1] <= 62500
+        let ng_window = closed_ms[0] >= 60000 && closed_ms[0] <= 62500
+        if in_window != ng_window {
+            note(
+                mut fails,
+                "proxy-body-idle-close",
+                "lobo closed at {closed_ms[1]} ms; the oracle at {closed_ms[0]} ms (window 60000..62500; -1: not within 70000)",
+            )
+        }
+        if lb_sent != ng_sent {
+            note(
+                mut fails,
+                "proxy-body-idle-sent",
+                "before the close lobo sent `{lb_sent}`; the oracle `{ng_sent}`",
+            )
+        }
+        if lb_log != ng_log {
+            note(mut fails, "proxy-body-idle-logged", "lobo logged {lb_log}; the oracle {ng_log}")
+        }
+    }
+    if fails.is_empty() {
+        print(
+            "proxy_body_idle: ok — the oracle closed at {closed_ms[0]} ms, sent `{ng_sent}`, logged {ng_log}; lobo the same",
+        )
+        return 0
+    }
+    let order = [
+        "proxy-body-idle-ready",
+        "proxy-body-idle-close",
+        "proxy-body-idle-sent",
+        "proxy-body-idle-logged",
+        "proxy-body-idle-oracle-silent",
+    ]
+    var last = ""
+    for r in order {
+        var why = ""
+        for f in fails {
+            if why.is_empty() && f.starts_with("{r} ") {
+                why = f[r.len + 1..f.len]
+            }
+        }
+        if !why.is_empty() {
+            last = "proxy_body_idle: FAILED — [{r}] {why}"
+            print(last)
+        }
+    }
+    assert(false, "{last}")
+    0
+}
+
+/// A reply's status line, or `nothing`. Total.
+fn status_of(r: str) -> str {
+    if r.is_empty() {
+        return "nothing"
+    }
+    let at = r.find("\r\n") else -1
+    if at < 0 { r } else { r[0..at] }
+}
