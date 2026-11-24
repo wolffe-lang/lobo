@@ -1,32 +1,33 @@
 module pkg :: http
   wolfi v0 · toolchain 0.2.40 · edition v1
-  export_hash 39dc6dc2f0720ea53dcc7e2007a512501d5e0312b7bc07bb1497a6750cd609b1
-  pkg_hash    39dc6dc2f0720ea53dcc7e2007a512501d5e0312b7bc07bb1497a6750cd609b1
+  export_hash fd0ec7865c099b51e853fd9650269b319bea7dd87b9797e197eae649ffa0404f
+  pkg_hash    fd0ec7865c099b51e853fd9650269b319bea7dd87b9797e197eae649ffa0404f
   deps:
     config  732b395bba34cacb010c3476cd57e3ac93558ea3b04af53281379d7aeaa47a0f
     std.map  06c74e1447dcc4ae7f339d85daf1b2ddaa6ea48223ee00a29a39f2acdfb2f20d
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
   items:
-    [0] pub decode_chunked — fn decode_chunked(body: str, limits: self.Limits) -> str ! {malformed, too_large} · regions (-, ρ1) -> -
-    [1] pub default_limits — fn default_limits() -> self.Limits · regions () -> ρ_caller
-    [2] pub has_control — fn has_control(s: str) -> bool
-    [3] pub header — fn header(r: self.Request, name: str) -> str ! {none} · regions (ρ1, -) -> -
-    [4] pub header_count — fn header_count(r: self.Request) -> int · regions (ρ1) -> -
-    [5] pub is_digit — fn is_digit(b: int) -> bool
-    [6] pub is_target_bad — fn is_target_bad(b: int) -> bool
-    [7] pub is_tchar — fn is_tchar(b: int) -> bool
-    [8] pub is_token — fn is_token(s: str) -> bool
-    [9] pub normalize_path — fn normalize_path(p: str) -> str ! {malformed}
-    [10] pub parse_request — fn parse_request(head: str, limits: self.Limits) -> self.Request ! {malformed, too_large, unimplemented, uri_too_long} · regions (-, ρ1) -> ρ_caller
-    [11] pub percent_decode — fn percent_decode(s: str) -> str ! {invalid, malformed}
-    [12] pub route — fn route(c: config.Conf, path: str) -> self.Decision · regions (ρ1, -) -> ρ_caller
-    [13] pub route_at — fn route_at(c: config.Conf, s: int, path: str) -> self.Decision · regions (ρ1, -, -) -> ρ_caller
-    [14] pub route_traced — fn route_traced(c: config.Conf, path: str, mut tr: self.RouteTrace, want: bool) -> self.Decision · regions (ρ1, -, ρ2, -) -> ρ_caller
-    [15] pub route_traced_at — fn route_traced_at(c: config.Conf, s: int, why: str, path: str, mut tr: self.RouteTrace, want: bool) -> self.Decision · regions (ρ1, -, -, -, ρ2, -) -> ρ_caller
-    [16] pub trace_new — fn trace_new() -> self.RouteTrace · regions () -> ρ_caller
-    [17] pub version — fn version() -> str
-    [18] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str, max_ranges: int }
-    [19] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int, memory_budget: int, nodelay: bool }
-    [20] pub Request — struct Request { method: str, target: str, version: str, host: str, path: str, query: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int, keepalive: bool }
-    [21] pub RouteTrace — struct RouteTrace { kinds: prelude.List[str], rows: prelude.List[int], mods: prelude.List[str], prefixes: prelude.List[str], outcomes: prelude.List[str], whys: prelude.List[str], details: prelude.List[str] }
+    [0] pub chunked_end — fn chunked_end(b: prelude.List[byte], max_digits: int) -> int · regions (ρ1, -) -> -
+    [1] pub decode_chunked — fn decode_chunked(body: str, limits: self.Limits) -> str ! {malformed, too_large} · regions (-, ρ1) -> -
+    [2] pub default_limits — fn default_limits() -> self.Limits · regions () -> ρ_caller
+    [3] pub has_control — fn has_control(s: str) -> bool
+    [4] pub header — fn header(r: self.Request, name: str) -> str ! {none} · regions (ρ1, -) -> -
+    [5] pub header_count — fn header_count(r: self.Request) -> int · regions (ρ1) -> -
+    [6] pub is_digit — fn is_digit(b: int) -> bool
+    [7] pub is_target_bad — fn is_target_bad(b: int) -> bool
+    [8] pub is_tchar — fn is_tchar(b: int) -> bool
+    [9] pub is_token — fn is_token(s: str) -> bool
+    [10] pub normalize_path — fn normalize_path(p: str) -> str ! {malformed}
+    [11] pub parse_request — fn parse_request(head: str, limits: self.Limits) -> self.Request ! {malformed, too_large, unimplemented, uri_too_long} · regions (-, ρ1) -> ρ_caller
+    [12] pub percent_decode — fn percent_decode(s: str) -> str ! {invalid, malformed}
+    [13] pub route — fn route(c: config.Conf, path: str) -> self.Decision · regions (ρ1, -) -> ρ_caller
+    [14] pub route_at — fn route_at(c: config.Conf, s: int, path: str) -> self.Decision · regions (ρ1, -, -) -> ρ_caller
+    [15] pub route_traced — fn route_traced(c: config.Conf, path: str, mut tr: self.RouteTrace, want: bool) -> self.Decision · regions (ρ1, -, ρ2, -) -> ρ_caller
+    [16] pub route_traced_at — fn route_traced_at(c: config.Conf, s: int, why: str, path: str, mut tr: self.RouteTrace, want: bool) -> self.Decision · regions (ρ1, -, -, -, ρ2, -) -> ρ_caller
+    [17] pub trace_new — fn trace_new() -> self.RouteTrace · regions () -> ρ_caller
+    [18] pub version — fn version() -> str
+    [19] pub Decision — struct Decision { status: int, fs_path: str, matched: str, is_alias: bool, index: prelude.List[str], redirect: str, max_ranges: int }
+    [20] pub Limits — struct Limits { max_request_line: int, max_header_line: int, max_headers: int, max_header_total: int, max_chunk_digits: int, max_body: int, memory_budget: int, nodelay: bool }
+    [21] pub Request — struct Request { method: str, target: str, version: str, host: str, path: str, query: str, hnames: prelude.List[str], hvals: prelude.List[str], body_mode: str, content_length: int, keepalive: bool }
+    [22] pub RouteTrace — struct RouteTrace { kinds: prelude.List[str], rows: prelude.List[int], mods: prelude.List[str], prefixes: prelude.List[str], outcomes: prelude.List[str], whys: prelude.List[str], details: prelude.List[str] }
 
