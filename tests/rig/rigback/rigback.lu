@@ -142,28 +142,34 @@ fn main() -> !int {
 
     var served: int = 0
     while served < maxex {
-        let conn = net_accept(l) else |_| {
-            continue
-        }
-        let got = read_request(conn) else |_| ""
-        // append the received request to the record file, separated
-        let prior = fs_read_text(record) else ""
-        fs_write_text(record, "{prior}=== EXCHANGE ===\n{got}") else |_| {}
-        if delay_ms > 0 {
-            time_sleep_ms(delay_ms)
-        }
-        if close_n >= 0 {
-            let n = close_n
-            var to_send = out_body
-            if n < out_body.len {
-                to_send = out_body[0..n]
+        // everything one exchange makes (the request as it grows, the
+        // record's text, the reply's slice) lives in this block and dies
+        // at its brace; in main's own region every request read stayed
+        // until the backend exited
+        region exchange {
+            let conn = net_accept(l) else |_| { -1 }
+            if conn >= 0 {
+                let got = read_request(conn) else |_| ""
+                // append the received request to the record file, separated
+                let prior = fs_read_text(record) else ""
+                fs_write_text(record, "{prior}=== EXCHANGE ===\n{got}") else |_| {}
+                if delay_ms > 0 {
+                    time_sleep_ms(delay_ms)
+                }
+                if close_n >= 0 {
+                    let n = close_n
+                    var to_send = out_body
+                    if n < out_body.len {
+                        to_send = out_body[0..n]
+                    }
+                    net_write(conn, to_send) else |_| {}
+                } else {
+                    net_write(conn, out_body) else |_| {}
+                }
+                net_close(conn) else |_| {}
+                served = served + 1
             }
-            net_write(conn, to_send) else |_| {}
-        } else {
-            net_write(conn, out_body) else |_| {}
         }
-        net_close(conn) else |_| {}
-        served = served + 1
     }
     net_close(l) else |_| {}
     0
