@@ -15,7 +15,11 @@
 //!   * `trailers`: `hello world` in two chunks, then a trailer field;
 //!   * `pipelined`: the `chunked` body on a kept-alive connection, a
 //!     `GET /r.html` in the same write after it;
-//!   * `pipelined-file`: the same, its `POST` to the static file.
+//!   * `pipelined-file`: the same body and request after it, on a `GET`
+//!     of the static file (a route that reads the body whole when it
+//!     arrived with its head). Not a `POST`: lobo answers a POST to a
+//!     file 405 and closes, where nginx keeps the connection, a delta of
+//!     its own that this row does not hold.
 //! The same five go through the pinned nginx (the oracle,
 //! tests/differential/bin/nginx) and lobo's debug tier, and lobo is held
 //! to the oracle:
@@ -318,7 +322,7 @@ fn cases() -> List[(str, str)] {
         ("over", "{h}a\r\n0123456789\r\na\r\n0123456789\r\n0\r\n\r\n"),
         ("trailers", "{h}5\r\nhello\r\n6\r\n world\r\n0\r\nX-Sum: 11\r\n\r\n"),
         ("pipelined", "POST /up HTTP/1.1\r\n{ka}{next}"),
-        ("pipelined-file", "POST /r.html HTTP/1.1\r\n{ka}{next}"),
+        ("pipelined-file", "GET /r.html HTTP/1.1\r\n{ka}{next}"),
     ]
 }
 
