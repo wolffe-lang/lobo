@@ -1,0 +1,116 @@
+//! check: run(exit=0, stdout="job owed ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: proxy http config resolver
+//!
+//! A JOB WITH ITS BODY OWED, AS TEXT (lobo#142). On the serving loop a
+//! proxied request whose body has not all come is handed to its
+//! exchange with the body OWED (`proxy.owe`): the part not yet read and
+//! the limits its read runs under, after the peers in the job's text.
+//! For one fixed request (`POST /up`, `Content-Length: 11`, `he` read
+//! with the head, one peer) this holds:
+//!   * each peer's request is the head left open for the body's
+//!     framing: the client's `Content-Length` dropped and no blank line
+//!     (the exchange writes the one length once it has the body);
+//!   * the text reads back (`proxy.job_parse`) to a job that writes the
+//!     same text, its owed part field for field;
+//!   * the text is the no-owed text's fields, then the owed part:
+//!     nothing of a job's text before the peers changes;
+//!   * a text whose owed mode is not 1 or 2, or that ends inside the
+//!     owed part, does not read back.
+//! tests/proxy/job_text_pin.lu pins the text of a job with nothing owed.
+//! Lane: all three (a config model, a parsed request, the job's text;
+//! CRLF compared rendered as `|`).
+
+use config
+use http
+use proxy
+use resolver
+
+/// Whether `t` reads back as a job. Total.
+fn parses(t: str) -> bool {
+    let _j = proxy.job_parse(t) else |_| {
+        return false
+    }
+    true
+}
+
+fn main() -> int {
+    // DOUBLED braces: a `"""` block is an f-string (D6).
+    let src = """
+http {{
+  server {{
+    listen 127.0.0.1:8080;
+    location /up {{ proxy_pass http://127.0.0.1:9401; }}
+  }}
+}}
+"""
+    let c = config.parse_str(src, "owed.conf")
+    let lim = http.default_limits()
+    let head = "POST /up HTTP/1.1\r\nHost: front.example\r\nContent-Length: 11"
+    let req = http.parse_request(head, lim) else |_| {
+        assert(false, "request must parse")
+        return 1
+    }
+    let pl = proxy.plan(c, "/up")
+    assert(pl.is_proxy, "must be a proxy location")
+    var rs = resolver.new()
+    let date = "Mon, 24 Nov 2026 00:00:00 GMT"
+    let plain = proxy.prepare(c, req, "", pl, "127.0.0.1", "lobo", date, true, mut rs)
+    let o = proxy.Owed {
+        mode: 1,
+        have: "he",
+        want: 11,
+        max_body: 1048576,
+        max_digits: 16,
+        read_ms: 60000,
+        bud_limit: 2048,
+        bud_used: 56,
+        p400: "HTTP/1.1 400 Bad Request\r\n\r\nb",
+        p413: "HTTP/1.1 413 Request Entity Too Large\r\n\r\nl",
+        p503: "HTTP/1.1 503 Service Temporarily Unavailable\r\n\r\nu",
+    }
+    let job = proxy.owe(c, req, pl, "127.0.0.1", plain, o)
+    assert(job.reqs.len == 1, "one peer, one request: {job.reqs.len}")
+    let open = job.reqs[0].replace("\r\n", "|")
+    assert(open == "POST /up HTTP/1.1|Host: 127.0.0.1:9401|", "the open head: {open}")
+
+    let text = proxy.job_text(job)
+    let back = proxy.job_parse(text) else |_| {
+        assert(false, "an owed job's text must read back: {text.replace("\r\n", "|")}")
+        return 1
+    }
+    assert(proxy.job_text(back) == text, "the text read back must write the same text")
+    let b = back.owed
+    assert(
+        b.mode == 1 &&
+            b.have == "he" &&
+            b.want == 11 &&
+            b.max_body == 1048576 &&
+            b.max_digits == 16 &&
+            b.read_ms == 60000 &&
+            b.bud_limit == 2048 &&
+            b.bud_used == 56 &&
+            b.p400 == o.p400 &&
+            b.p413 == o.p413 &&
+            b.p503 == o.p503,
+        "the owed part read back field for field",
+    )
+    assert(back.reqs.len == 1 && back.reqs[0] == job.reqs[0], "the open head read back")
+
+    // the fields before the peers are the no-owed job's
+    let pt = proxy.job_text(plain)
+    let cut = pt.find("1;9:127.0.0.1") else -1
+    assert(cut > 0, "the plain text names its one peer: {pt}")
+    assert(text.starts_with(pt[0..cut]), "an owed job's text before its peers is the plain job's")
+
+    // an owed mode that is not 1 or 2, or a text cut inside the owed part
+    var bad = job
+    bad.owed.mode = 3
+    assert(!parses(proxy.job_text(bad)), "an owed mode of 3 must not read back")
+    assert(!parses(text[0..text.len - 3]), "a text cut inside the owed part must not read back")
+    assert(parses(pt), "the plain text reads back")
+    print("job owed ok")
+    0
+}
