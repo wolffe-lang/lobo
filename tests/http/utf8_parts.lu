@@ -1,0 +1,114 @@
+//! check: run(exit=0, stdout="utf8 parts ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: http config
+//!
+//! UTF-8 ACROSS A BODY'S PIECES (lobo#142). An exchange forwards an owed
+//! length body as the pieces its reads returned, never joined and never
+//! made a `str`; `http.utf8_parts` is the check the `str` was (lobo is
+//! str-only on a body at this pin, and a body that is not UTF-8 is a
+//! 400). This holds it to `str_from_utf8` on the whole, for a table of
+//! byte strings (one- to four-byte forms, the edges of each range, and
+//! the ill-formed ones: a lone continuation, an overlong form, a
+//! surrogate, past U+10FFFF, a truncated end, a byte no form starts
+//! with), each split into two pieces at every position and into one
+//! piece a byte: the answer must be `str_from_utf8`'s every time, and
+//! the table must hold both answers. Lane: all three (pure).
+
+use http
+
+/// Whether `b` is UTF-8 by `str_from_utf8`. Total.
+fn whole_ok(b: List[byte]) -> bool {
+    let _s = str_from_utf8(b) else |_| {
+        return false
+    }
+    true
+}
+
+/// `v` written as its numbers, for a failure's message. Total.
+fn show(v: List[int]) -> str {
+    var out = ""
+    for x in v {
+        out = if out.is_empty() { "{x}" } else { "{out} {x}" }
+    }
+    "[{out}]"
+}
+
+/// `v` as a list of bytes. Total.
+fn bytes_of(v: List[int]) -> List[byte] {
+    var out = List[byte]()
+    for x in v {
+        (mut out).push(x as byte)
+    }
+    out
+}
+
+fn main() -> int {
+    let table = [
+        [104, 105],
+        [195, 169],
+        [226, 130, 172],
+        [240, 159, 152, 128],
+        [104, 195, 169, 108, 108, 111],
+        [194, 128],
+        [223, 191],
+        [224, 160, 128],
+        [239, 191, 191],
+        [237, 159, 191],
+        [238, 128, 128],
+        [240, 144, 128, 128],
+        [244, 143, 191, 191],
+        [128],
+        [191, 104],
+        [192, 128],
+        [193, 191],
+        [224, 128, 128],
+        [224, 159, 191],
+        [237, 160, 128],
+        [237, 191, 191],
+        [240, 128, 128, 128],
+        [240, 143, 191, 191],
+        [244, 144, 128, 128],
+        [245, 128, 128, 128],
+        [255],
+        [195],
+        [226, 130],
+        [240, 159, 152],
+        [104, 195],
+        [195, 104],
+    ]
+    var good = 0
+    var bad = 0
+    for v in table {
+        let b = bytes_of(v)
+        let want = whole_ok(b)
+        if want {
+            good = good + 1
+        } else {
+            bad = bad + 1
+        }
+        // every split into two pieces
+        var cut = 0
+        while cut <= b.len {
+            var parts = List[List[byte]]()
+            (mut parts).push(b[0..cut])
+            (mut parts).push(b[cut..b.len])
+            let got = http.utf8_parts(parts)
+            assert(got == want, "{show(v)} cut at {cut}: utf8_parts {got}, str_from_utf8 {want}")
+            cut = cut + 1
+        }
+        // one piece a byte
+        var each = List[List[byte]]()
+        for x in b {
+            var one = List[byte]()
+            (mut one).push(x)
+            (mut each).push(one)
+        }
+        let got1 = http.utf8_parts(each)
+        assert(got1 == want, "{show(v)} a byte a piece: utf8_parts {got1}, str_from_utf8 {want}")
+    }
+    assert(good >= 10 && bad >= 10, "the table holds both answers: {good} well-formed, {bad} not")
+    assert(http.utf8_parts(List[List[byte]]()), "no pieces is an empty body, well-formed")
+    print("utf8 parts ok")
+    0
+}
