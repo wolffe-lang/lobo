@@ -43,8 +43,8 @@ before the body is whole, and the upstream receives it with one
 `Content-Length`, as before. The bytes after the body are the next
 request's start, as before. A body read this way may split a code point
 between two reads; it must still be UTF-8 once whole, else 400. A body
-with a `Content-Length` is held once, as it was read, and sent behind
-its head in one write.
+with a `Content-Length` is held once, as it was read, in pieces of
+4 KiB, and sent behind its head in one write.
 
 A request whose body stops arriving is now logged 408, and one whose
 client closes mid-body 400, as nginx logs them. Both still close the
