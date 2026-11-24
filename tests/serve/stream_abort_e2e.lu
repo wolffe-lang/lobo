@@ -28,6 +28,12 @@
 //! 3 s after the reload — the deadline is the directive's, not the
 //! reload's. Loopback only; OS-chosen ports; scratch under target/,
 //! cleared at START.
+//!
+//! Each start prints its two ports (lobo#152). First, before the three
+//! cases above, a short one holds the control port the row chose for
+//! lobo's first start, so that start cannot bind it: the start must be
+//! retried once on two new ports (`[port-held-retry]`) and the retried
+//! lobo must answer and stop (`[port-held-serves]`).
 
 use shell
 
@@ -102,6 +108,101 @@ fn drain_all(c: int, ms: int) -> int {
     got
 }
 
+/// Start lobo on two fresh ports, its main context carrying
+/// `main_extra` and its server block `extra`, and print the ports. With
+/// `hold`, the first start's control port is held by a listener of this
+/// row's own, so that start cannot bind it. Answers (the child, the
+/// listen port, the control port, the starts retried, 1 if lobo answers
+/// on its control port else 0). Total.
+fn start(name: str, root: str, d: str, main_extra: str, extra: str, hold: bool) -> (
+    int,
+    int,
+    int,
+    int,
+    int,
+) {
+    let hp = free_port() else |_| 0
+    let cp = free_port() else |_| 0
+    var held: int = -1
+    if hold {
+        let h = net_listen("127.0.0.1:{cp}") else |_| -1
+        held = h
+    }
+    print(
+        "{name}: ports listen {hp} control {cp}{if held >= 0 { " (the control port held by the row)" } else { "" }}",
+    )
+    let ep = "127.0.0.1:{cp}"
+    fs_write_text(
+        "{d}/lobo.conf",
+        "pid {d}/lobo.pid;\ncontrol {ep};\n{main_extra}\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; {extra} }}\n}}\n",
+    ) else |_| {
+        if held >= 0 {
+            net_close(held) else |_| {}
+        }
+        return (-1, hp, cp, 0, 0)
+    }
+    var argv = List[str]()
+    (mut argv).push("{root}/target/lobo-debug")
+    (mut argv).push("serve")
+    (mut argv).push("-p")
+    (mut argv).push(".")
+    (mut argv).push("-c")
+    (mut argv).push("{d}/lobo.conf")
+    let child = os_spawn(argv) else |_| {
+        print("{name}: could not spawn target/lobo-debug")
+        if held >= 0 {
+            net_close(held) else |_| {}
+        }
+        return (-1, hp, cp, 0, 0)
+    }
+    if !wait_alive(ep) {
+        os_kill(child) else |_| {}
+        let _w = os_wait(child) else |_| 0
+        print("{name}: the server never answered on {ep}")
+        if held >= 0 {
+            net_close(held) else |_| {}
+        }
+        return (-1, hp, cp, 0, 0)
+    }
+    if held >= 0 {
+        net_close(held) else |_| {}
+    }
+    (child, hp, cp, 0, 1)
+}
+
+/// The retry's own witness: the first start's control port is held by
+/// this row, so lobo cannot bind it. The start must be retried once on
+/// two new ports, and the retried lobo must answer and stop. Answers its
+/// wrong answers. Total.
+fn held_case(root: str, d: str) -> int {
+    var bad: int = 0
+    let s = start("held control port", root, d, "", "", true)
+    if s.3 != 1 {
+        print(
+            "stream_abort: FAILED — [port-held-retry] a start on a control port the row held was retried {s.3} times, not once",
+        )
+        bad = bad + 1
+    }
+    if s.4 == 0 {
+        print(
+            "stream_abort: FAILED — [port-held-serves] no lobo answered on control port {s.2} after the held port",
+        )
+        return bad + 1
+    }
+    let ep = "127.0.0.1:{s.2}"
+    let st = shell.control_fetch(ep, "status") else |_| { "" }
+    if !st.contains("current generation: 1") {
+        print("stream_abort: FAILED — [port-held-serves] the retried lobo's status was [{st}]")
+        bad = bad + 1
+    }
+    shell.control_fetch(ep, "stop") else |_| {
+        os_kill(s.0) else |_| {}
+        ""
+    }
+    let _w = os_wait(s.0) else |_| 0
+    bad
+}
+
 /// One server whose main context carries `main_extra` and whose server
 /// block carries `extra`: a stalled download, one reload, and how long
 /// generation 1 stays in the status table (up to `watch_ms`). Answers
@@ -113,32 +214,13 @@ fn one(name: str, root: str, d: str, main_extra: str, extra: str, watch_ms: int)
     int,
 ) {
     var bad: int = 0
-    let hp = free_port() else |_| 0
-    let cp = free_port() else |_| 0
-    let ep = "127.0.0.1:{cp}"
-    fs_write_text(
-        "{d}/lobo.conf",
-        "pid {d}/lobo.pid;\ncontrol {ep};\n{main_extra}\nhttp {{\n  types {{ text/html html; application/octet-stream bin; }}\n  server {{ listen 127.0.0.1:{hp}; root {d}/www; {extra} }}\n}}\n",
-    ) else |_| {
+    let s = start(name, root, d, main_extra, extra, false)
+    if s.4 == 0 {
         return (1, -1, 0)
     }
-    var argv = List[str]()
-    (mut argv).push("{root}/target/lobo-debug")
-    (mut argv).push("serve")
-    (mut argv).push("-p")
-    (mut argv).push(".")
-    (mut argv).push("-c")
-    (mut argv).push("{d}/lobo.conf")
-    let child = os_spawn(argv) else |_| {
-        print("{name}: could not spawn target/lobo-debug")
-        return (1, -1, 0)
-    }
-    if !wait_alive(ep) {
-        os_kill(child) else |_| {}
-        let _w = os_wait(child) else |_| 0
-        print("{name}: the server never answered on {ep}")
-        return (1, -1, 0)
-    }
+    let child = s.0
+    let hp = s.1
+    let ep = "127.0.0.1:{s.2}"
 
     // the stalled client: the head and one piece, then nothing
     let a = net_connect("127.0.0.1:{hp}") else |_| {
@@ -218,6 +300,7 @@ fn main() -> !int {
     let mk = os_wait(h)?
     assert(mk == 0, "the 24 MiB file is written")
 
+    let held = held_case(root, d)
     let a = one("2s", root, d, "worker_shutdown_timeout 2s;", "", 8000)
     print(
         "2s: generation 1 left {a.1} ms after the reload; the stalled client got {a.2} of {size} bytes",
@@ -238,6 +321,7 @@ fn main() -> !int {
         "no timeout: generation 1 {if c.1 < 0 { "still draining after 3000 ms" } else { "left early" }}",
     )
 
+    assert(held == 0, "the held control port's start was retried once and served ({held} wrong)")
     assert(
         a.0 == 0 && b.0 == 0 && c.0 == 0,
         "every side answer was right ({a.0}, {b.0}, {c.0} wrong)",
