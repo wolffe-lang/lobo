@@ -59,8 +59,13 @@ reads what one proxied upload of 64 KiB holds at its peak, 64 arriving
 at once, and holds it under three times the body (on a host with /proc).
 `late, proxied uploads` drives the same uploads a hundred times to warm
 the server and a hundred more, and holds the high water's rise over the
-second hundred under 256 KB (on a host with /proc). Its `--starts` tally now names the cpus the run
-may use, not the host's.
+second hundred under 4 MB (on a host with /proc): nothing is kept past
+the warm-up. It does not gate the allocator's spread, which a correct
+read shows now and then as a step; `tests/proxy/owed_read_size.lu`
+holds the 4 KiB read itself, through the new `proxy.owed_pieces`. The
+rig's backend (`tests/rig/rigback`) frees each exchange's work at the
+exchange's end; it kept every request it read until it exited. Its
+`--starts` tally now names the cpus the run may use, not the host's.
 
 ### The memory gate names a master that does not start (lobo#126)
 
