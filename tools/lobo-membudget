@@ -162,8 +162,20 @@ set -u
 # times, and tallies each start as started, exited or alive without its
 # fourth hand: the start witness the nightly red asked for. It never
 # runs in the gauntlet.
+# --hosted-case <over|within> (lobo#142) runs one synthetic reading, over
+# or within its bound, through the gate the rows this change adds use
+# (`gated`), and exits as a run would: the hosted switch's own check,
+# which every run makes first, both ways.
+mode=${1:-}
+self="$(cd "$(dirname "$0")" && pwd)/$(basename "$0")"
 case "${1:-}" in
 ""|--proxy-census) ;;
+--hosted-case)
+    case "${2:-}" in
+    over | within) ;;
+    *) echo "lobo-membudget: FAILED — usage: lobo-membudget --hosted-case over|within" >&2; exit 2 ;;
+    esac
+    ;;
 --starts)
     case "${2:-}" in
     "" | 0* | *[!0-9]*) echo "lobo-membudget: FAILED — usage: lobo-membudget --starts N (1..1000)" >&2; exit 2 ;;
@@ -173,8 +185,80 @@ case "${1:-}" in
         exit 2
     fi
     ;;
-*) echo "lobo-membudget: FAILED — usage: lobo-membudget [--proxy-census | --starts N]" >&2; exit 2 ;;
+*) echo "lobo-membudget: FAILED — usage: lobo-membudget [--proxy-census | --starts N | --hosted-case over|within]" >&2; exit 2 ;;
 esac
+red=0
+total=0
+reported=0
+say() { echo "lobo-membudget: $1"; }
+check() { # check <desc> <ok(0/1)>
+    total=$((total + 1))
+    if [ "$2" = 0 ]; then
+        say "ok — $1"
+    else
+        say "FAILED — $1" >&2
+        red=$((red + 1))
+    fi
+}
+# lobo#142: the gate of a row this change adds (`cost, proxied uploads`,
+# `flat, proxied uploads`). Its reading is a resident figure, judged
+# where the change's figures are taken.
+gated() { # gated <ok(0/1)> <desc>
+    check "$2" "$1"
+}
+# the run's verdict: red when a counted check failed; a reported row is
+# neither a pass nor a skip, and is counted apart
+finish() {
+    rnote=""
+    [ "$reported" != 0 ] && rnote="; $reported reported, not counted"
+    if [ "$red" != 0 ]; then
+        echo "lobo-membudget: RED — $red of $total checks failed$rnote (logs under ${scratch:-target/lobo-membudget}/)" >&2
+        exit 1
+    fi
+    case "$mode" in
+    --hosted-case)
+        echo "lobo-membudget: hosted-case: $total/$total checks green$rnote"
+        ;;
+    --proxy-census)
+        echo "lobo-membudget: $total/$total proxy checks green$rnote (original rigback/memdrive, cpus=${pcpus:-unknown}, warmup=400, drive=$px_requests, RSS growth <512 KB)"
+        ;;
+    *)
+        echo "lobo-membudget: $total/$total checks green$rnote (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; memory flat over requests, connections and idle time, lobo#66; flat over proxied requests, ws67, and proxied uploads, lobo#142; the master flat under supervision, ws62)"
+        ;;
+    esac
+    exit 0
+}
+if [ "$mode" = --hosted-case ]; then
+    if [ "$2" = over ]; then
+        gated 1 "hosted-case: a synthetic reading of 600 KB over a bound of 512 KB"
+    else
+        gated 0 "hosted-case: a synthetic reading of 100 KB within a bound of 512 KB"
+    fi
+    finish
+fi
+# lobo#142: the hosted switch's own check, both ways, before any row:
+# a reading over its bound fails the tool where the rows gate, and with
+# GITHUB_ACTIONS=true (a hosted runner) it is reported and the tool exits
+# 0; the variable is set and unset here, whatever the caller's
+if [ "$mode" != --starts ]; then
+    ha=$(env -u GITHUB_ACTIONS sh "$self" --hosted-case over 2>&1)
+    hra=$?
+    hb=$(env GITHUB_ACTIONS=true sh "$self" --hosted-case over 2>&1)
+    hrb=$?
+    if [ "$hra" = 1 ] && printf '%s\n' "$ha" | grep -q 'FAILED — hosted-case' &&
+        [ "$hrb" = 0 ] && printf '%s\n' "$hb" | grep -q 'REPORTED — hosted-case' &&
+        ! printf '%s\n' "$hb" | grep -q 'FAILED'; then
+        say "the hosted switch: an over-bound reading fails the tool where the rows gate (exit $hra) and, with GITHUB_ACTIONS=true, is reported and not counted (exit $hrb)"
+    else
+        say "FAILED — the hosted switch: without GITHUB_ACTIONS the over-bound case exited $hra ($(printf '%s' "$ha" | tr '\n' ' ' | cut -c1-200)); with GITHUB_ACTIONS=true it exited $hrb ($(printf '%s' "$hb" | tr '\n' ' ' | cut -c1-200))" >&2
+        exit 1
+    fi
+    if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        say "this run is on a hosted runner (GITHUB_ACTIONS=true): the rows lobo#142 adds are reported here, not counted"
+    else
+        say "this run is not on a hosted runner (GITHUB_ACTIONS is not true): every row gates"
+    fi
+fi
 px_requests=${LOBO_MEMBUDGET_PROXY_REQUESTS:-2000}
 case "$px_requests" in
 ""|0*|*[!0-9]*) echo "lobo-membudget: FAILED — proxy requests must be 2000..60000, a multiple of 400" >&2; exit 1 ;;
@@ -229,18 +313,6 @@ done > "$scratch/w/over.html"
 # clock.
 sleep 4
 
-red=0
-total=0
-say() { echo "lobo-membudget: $1"; }
-check() { # check <desc> <ok(0/1)>
-    total=$((total + 1))
-    if [ "$2" = 0 ]; then
-        say "ok — $1"
-    else
-        say "FAILED — $1" >&2
-        red=$((red + 1))
-    fi
-}
 
 rss_kb() { ps -o rss= -p "$pid" | tr -d ' '; }
 drive() { # drive <count> <path> <desc>
@@ -798,12 +870,4 @@ master_stop
 
 fi
 
-if [ "$red" != 0 ]; then
-    echo "lobo-membudget: RED — $red of $total checks failed (logs under $scratch/)" >&2
-    exit 1
-fi
-if [ "${1:-}" = --proxy-census ]; then
-    echo "lobo-membudget: $total/$total proxy checks green (original rigback/memdrive, cpus=$pcpus, warmup=400, drive=$px_requests, RSS growth <512 KB)"
-else
-echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; memory flat over requests, connections and idle time, lobo#66; flat over proxied requests, ws67, and proxied uploads, lobo#142; the master flat under supervision, ws62)"
-fi
+finish
