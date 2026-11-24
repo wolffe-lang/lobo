@@ -2937,7 +2937,7 @@ pub fn job_text(j: Job) -> str {
     // lobo#142: an owed body follows the peers; a job with none ends
     // there, its text as it was before an exchange could read a body
     let o = j.owed
-    if o.mode != 0 {
+    if o.mode >= 0 {
         out = "{out}{w_int(o.mode)}{w_str(o.have)}{w_int(o.want)}{w_int(o.max_body)}{w_int(o.max_digits)}{w_int(o.read_ms)}{w_int(o.bud_limit)}{w_int(o.bud_used)}{w_str(o.p400)}{w_str(o.p413)}{w_str(o.p503)}"
     }
     out
