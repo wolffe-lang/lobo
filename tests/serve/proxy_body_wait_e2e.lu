@@ -1,0 +1,711 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! A PROXIED REQUEST'S BODY IS READ BESIDE THE SERVING LOOP (lobo#142).
+//! A client sends `POST /up` to a `proxy_pass` route, its body arriving
+//! a few bytes at a time. This test is the upstream, and it is beside
+//! the pinned nginx (the oracle, tests/differential/bin/nginx) as a
+//! second proxy, with the same flows against both, under
+//! `client_max_body_size 16`:
+//!   * `length`: `Content-Length: 11` and `hello world` in six parts;
+//!   * `chunked`: `hello world` in two chunks and a trailer field, in
+//!     four parts;
+//!   * `over`: two chunks of ten bytes, over the limit;
+//!   * `gone`: a length body whose client closes after two bytes.
+//! lobo is held to the oracle:
+//!   * `proxy-body-get`: while a body arrives, a GET for the static
+//!     file on another connection is answered within 250 ms each time;
+//!   * `proxy-body-early`: nothing reaches the upstream before the body
+//!     is whole, nginx's order;
+//!   * `proxy-body-forwarded`: the upstream then receives the body's
+//!     bytes with one `Content-Length`, as the oracle forwards them;
+//!   * `proxy-body-next`: a request sent after the body, on the same
+//!     connection, is answered;
+//!   * `proxy-body-over`: the body over the limit is answered as the
+//!     oracle answers it;
+//!   * `proxy-body-gone`: the request whose client closed mid-body is
+//!     logged with the status the oracle logs (both access logs read).
+//! Each proxy is started on a probed port and waited for until it
+//! serves its static file: 15 s a start, watched for its exit, and a
+//! start that exits is retried on a new port, at most three starts. An
+//! oracle that never serves, or leaves a flow unanswered, is
+//! `proxy-body-oracle-silent`, and lobo is then not compared with it.
+//! Each proxy's flows are printed as `answered` lines whatever the
+//! outcome; a failure prints `proxy_body_wait: FAILED — [row]` with
+//! its reason, the rows in a fixed order with the oracle's silence
+//! last, and a pass ends with the oracle's answers. Then one assert (an
+//! assert's own message is not in the record, wolf-lang#150). Every
+//! server is stopped by its own handle. Loopback only, OS-chosen
+//! ports; the scratch trees are cleared at the start and at the end.
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+/// Print a named failure and keep it as `<row> <reason>`. Total.
+fn note(mut fails: List[str], row: str, msg: str) {
+    let one = msg.replace("\r", "\\r").replace("\n", "\\n")
+    print("proxy_body_wait: FAILED — [{row}] {one}")
+    (mut fails).push("{row} {one}")
+}
+
+/// Whether `GET /r.html` on `port` answers 200 now: one connection, a
+/// 500 ms read. Total.
+fn serves(port: int) -> bool {
+    let c = net_connect("127.0.0.1:{port}") else |_| { -1 }
+    if c < 0 {
+        return false
+    }
+    net_deadline(c, 500) else |_| {}
+    net_write(c, "GET /r.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {}
+    let r = net_read(c, 4096) else |_| { "" }
+    net_close(c) else |_| {}
+    r.starts_with("HTTP/1.1 200 OK")
+}
+
+/// The last three lines of the oracle's error log, as ` (error log:
+/// …)`; "" for lobo (its stderr is the row's) or an empty log. Total.
+fn log_tail(kind: int, d: str) -> str {
+    if kind != 0 {
+        return ""
+    }
+    let text = fs_read_text("{d}/logs/ng.err") else |_| { "" }
+    var lines = List[str]()
+    for l in text.lines() {
+        if !l.trim().is_empty() {
+            (mut lines).push(l.trim())
+        }
+    }
+    if lines.is_empty() {
+        return ""
+    }
+    var out = ""
+    var i = if lines.len > 3 { lines.len - 3 } else { 0 }
+    while i < lines.len {
+        out = if out.is_empty() { lines[i] } else { "{out} | {lines[i]}" }
+        i = i + 1
+    }
+    " (error log: {out})"
+}
+
+/// Start one proxy and wait until it serves its static file. Each start
+/// is on a newly probed port, given 15 s, and watched for its exit; a
+/// start that exits is retried on a new port (the probe's
+/// release-to-rebind race), at most three starts. `kind` 0 is the
+/// oracle, 1 a lobo. Answers (the child's handle, its port, "") once it
+/// serves, or (-1, 0, what each start did) when none did; a start that
+/// stays alive and silent is put down by its handle. Total.
+fn start(kind: int, bin: str, d: str, root: str, upp: int) -> (int, int, str) {
+    var why = ""
+    var k: int = 1
+    while k <= 3 {
+        let hp = free_port() else |_| { 0 }
+        var argv = List[str]()
+        (mut argv).push(bin)
+        if kind == 0 {
+            let conf = "daemon off;\nmaster_process off;\npid {root}/{d}/ng.pid;\nerror_log {root}/{d}/logs/ng.err;\nevents {{}}\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status \"$request\"';\n  access_log {root}/{d}/logs/access.log t;\n  server {{\n    listen 127.0.0.1:{hp};\n    client_max_body_size 16;\n    location = /r.html {{ root {root}/{d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
+            fs_write_text("{d}/ng.conf", conf) else |_| {}
+            (mut argv).push("-p")
+            (mut argv).push("{root}/{d}/")
+            (mut argv).push("-c")
+            (mut argv).push("{root}/{d}/ng.conf")
+        } else {
+            let conf = "pid {d}/lobo.pid;\nhttp {{\n  types {{ text/html html; }}\n  log_format t '$status \"$request\"';\n  access_log {d}/logs/access.log t;\n  server {{\n    listen 127.0.0.1:{hp};\n    client_max_body_size 16;\n    location = /r.html {{ root {d}/w; }}\n    location / {{ proxy_pass http://127.0.0.1:{upp}; }}\n  }}\n}}\n"
+            fs_write_text("{d}/lobo.conf", conf) else |_| {}
+            (mut argv).push("serve")
+            (mut argv).push("-p")
+            (mut argv).push(".")
+            (mut argv).push("-c")
+            (mut argv).push("{d}/lobo.conf")
+        }
+        let child = os_spawn(argv) else |_| {
+            return (-1, 0, "{why}start {k}: os_spawn failed (is {bin} there?)")
+        }
+        let t0 = time_now_ms()
+        var gone = false
+        var code: int = 0
+        while !gone && time_now_ms() - t0 < 15000 {
+            if serves(hp) {
+                return (child, hp, "")
+            }
+            let w = os_wait_poll() else |_| { (0, 0) }
+            if w.0 == child {
+                gone = true
+                code = w.1
+            } else {
+                time_sleep_ms(50)
+            }
+        }
+        if !gone {
+            os_kill(child) else |_| {}
+            let _w = os_wait(child) else |_| { -1 }
+            return (
+                -1,
+                0,
+                "{why}start {k} on port {hp}: alive and silent for 15000 ms{log_tail(kind, d)}",
+            )
+        }
+        why = "{why}start {k} on port {hp}: exited with code {code}{log_tail(kind, d)}; "
+        k = k + 1
+    }
+    (-1, 0, why)
+}
+
+/// What one proxy forwarded to the upstream in one case.
+struct Sent {
+    kase: str,
+    line: str,
+    lengths: str,
+    te: str,
+    body: str,
+    extra: str,
+    reply: str,
+}
+
+/// The values of every header line named `name` (any case) in `head`,
+/// joined by `,`; `none` when there is none. Total.
+fn header_values(head: str, name: str) -> str {
+    var out = ""
+    let want = name.lower()
+    for line in head.lines() {
+        let at = line.find(":") else -1
+        if at > 0 && line[0..at].lower() == want {
+            let v = line[at + 1..line.len].trim()
+            out = if out.is_empty() { v } else { "{out},{v}" }
+        }
+    }
+    if out.is_empty() { "none" } else { out }
+}
+
+/// Decode a whole chunked body in `raw` (sizes in hex, no extensions
+/// expected from a proxy); "" and false when it is not whole or not
+/// chunked. Total.
+fn dechunk(raw: str) -> (str, bool) {
+    var out = ""
+    var rest = raw
+    loop {
+        let nl = rest.find("\r\n") else -1
+        if nl < 0 {
+            return ("", false)
+        }
+        var n: int = 0
+        for b_raw in rest[0..nl].bytes() {
+            let b = b_raw as int
+            var v = -1
+            if b >= 48 && b <= 57 {
+                v = b - 48
+            } else if b >= 97 && b <= 102 {
+                v = b - 87
+            } else if b >= 65 && b <= 70 {
+                v = b - 55
+            }
+            if v < 0 {
+                return ("", false)
+            }
+            n = n * 16 + v
+        }
+        let from = nl + 2
+        if n == 0 {
+            return (out, true)
+        }
+        if rest.len < from + n + 2 {
+            return ("", false)
+        }
+        out = "{out}{rest[from..from + n]}"
+        rest = rest[from + n + 2..rest.len]
+    }
+}
+
+/// The upstream's side: accept within `ms`, read the request's head,
+/// its body by the framing the head declares, and whatever else comes
+/// within 300 ms; answer `ok` and close. Total.
+fn upstream(up: int, ms: int) -> Sent {
+    var s = Sent { kase: "", line: "", lengths: "none", te: "none", body: "", extra: "", reply: "" }
+    net_deadline(up, ms) else |_| {}
+    let uc = net_accept(up) else |_| {
+        s.line = "(no connection within {ms} ms)"
+        return s
+    }
+    net_deadline(uc, 3000) else |_| {}
+    var got = ""
+    while !got.contains("\r\n\r\n") {
+        let piece = net_read(uc, 4096) else |_| { "" }
+        if piece.is_empty() {
+            s.line = "(the head never ended: `{got}`)"
+            net_close(uc) else |_| {}
+            return s
+        }
+        got = "{got}{piece}"
+    }
+    let at = got.find("\r\n\r\n") else -1
+    let head = got[0..at]
+    var rest = got[at + 4..got.len]
+    let first = head.find("\r\n") else -1
+    s.line = if first < 0 { head } else { head[0..first] }
+    s.lengths = header_values(head, "content-length")
+    s.te = header_values(head, "transfer-encoding")
+    // the body, as the head frames it, then anything more within 300 ms
+    var want = -1
+    if s.lengths != "none" {
+        var n: int = 0
+        var digits = true
+        for b_raw in s.lengths.bytes() {
+            let b = b_raw as int
+            if digits && b >= 48 && b <= 57 {
+                n = n * 10 + b - 48
+            } else {
+                digits = false
+            }
+        }
+        want = n
+    }
+    let chunked = s.te.lower().contains("chunked")
+    var done = false
+    while !done {
+        if want >= 0 && rest.len >= want {
+            done = true
+        } else if chunked && rest.ends_with("0\r\n\r\n") {
+            done = true
+        } else if want < 0 && !chunked {
+            done = true
+        } else {
+            let piece = net_read(uc, 4096) else |_| { "" }
+            if piece.is_empty() {
+                done = true
+            } else {
+                rest = "{rest}{piece}"
+            }
+        }
+    }
+    if chunked {
+        let d = dechunk(rest)
+        s.body = if d.1 { d.0 } else { "(not a whole chunked body: `{rest}`)" }
+    } else if want >= 0 && rest.len >= want {
+        s.body = rest[0..want]
+        s.extra = rest[want..rest.len]
+    } else {
+        s.extra = rest
+    }
+    net_deadline(uc, 300) else |_| {}
+    let more = net_read(uc, 4096) else |_| { "" }
+    s.extra = "{s.extra}{more}"
+    net_write(uc, "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok") else |_| {}
+    net_close(uc) else |_| {}
+    s
+}
+
+/// Read one reply from `c` for at most `ms` on the clock: what came,
+/// up to a whole reply (its head and its `Content-Length`), or what
+/// came before the close or the clock. Total.
+fn read_reply(c: int, ms: int) -> str {
+    let until = time_unix_ms() + ms
+    var buf = ""
+    loop {
+        let at = buf.find("\r\n\r\n") else -1
+        if at >= 0 {
+            let n = header_values(buf[0..at], "content-length")
+            var want: int = 0
+            for b_raw in n.bytes() {
+                let b = b_raw as int
+                if b >= 48 && b <= 57 {
+                    want = want * 10 + b - 48
+                }
+            }
+            if n == "none" || buf.len >= at + 4 + want {
+                return buf
+            }
+        }
+        let left = until - time_unix_ms()
+        if left <= 0 {
+            return buf
+        }
+        net_deadline(c, left) else |_| {}
+        let piece = net_read(c, 4096) else |_| { "" }
+        if piece.is_empty() {
+            return buf
+        }
+        buf = "{buf}{piece}"
+    }
+}
+
+/// The first line of a reply. Total.
+fn status_line(r: str) -> str {
+    let at = r.find("\r\n") else -1
+    if at < 0 { r } else { r[0..at] }
+}
+
+/// A GET for the static file on a connection of its own, answered
+/// within `ms`: the milliseconds it took, -1 when it was not. Total.
+fn timed_get(port: int, ms: int) -> int {
+    let t0 = time_unix_ms()
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return -1
+    }
+    net_write(c, "GET /r.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n") else |_| {
+        net_close(c) else |_| {}
+        return -1
+    }
+    let r = read_reply(c, ms)
+    net_close(c) else |_| {}
+    if !r.starts_with("HTTP/1.1 200 OK") || !r.ends_with("READY\n") {
+        return -1
+    }
+    time_unix_ms() - t0
+}
+
+/// Whether the proxy has connected to the upstream yet: a connection
+/// waiting on `up`, looked at without waiting. Total.
+fn upstream_called(up: int) -> bool {
+    let ready = net_wait([up], 0) else |_| { List[int]() }
+    !ready.is_empty()
+}
+
+/// What one flow saw at one proxy.
+struct Flow {
+    name: str,
+    early: bool,
+    slow: str,
+    sent: Sent,
+    reply: str,
+    next: str,
+}
+
+/// One flow whose body arrives in `parts` (the first sent with the
+/// head): a GET beside each middle part, the upstream watched for an
+/// early connection, then the exchange, the reply and, when
+/// `ask_next`, a GET on the same connection. Total.
+fn flow(port: int, up: int, name: str, head: str, parts: List[str], ask_next: bool) -> Flow {
+    var f = Flow {
+        name: name,
+        early: false,
+        slow: "",
+        sent: Sent {
+            kase: name,
+            line: "(not run)",
+            lengths: "none",
+            te: "none",
+            body: "",
+            extra: "",
+            reply: "",
+        },
+        reply: "",
+        next: "",
+    }
+    let a = net_connect("127.0.0.1:{port}") else |_| {
+        f.reply = "(the proxy refused the client)"
+        return f
+    }
+    net_write(a, "{head}{parts[0]}") else |_| {}
+    var i: int = 1
+    while i < parts.len - 1 {
+        let g = timed_get(port, 3000)
+        if g < 0 || g > 250 {
+            let one = "{g} ms after part {i} of {parts.len}"
+            f.slow = if f.slow.is_empty() { one } else { "{f.slow}, {one}" }
+        }
+        if upstream_called(up) {
+            f.early = true
+        }
+        net_write(a, parts[i]) else |_| {}
+        time_sleep_ms(150)
+        i = i + 1
+    }
+    if upstream_called(up) {
+        f.early = true
+    }
+    let last = if ask_next {
+        "{parts[parts.len - 1]}GET /r.html HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n"
+    } else {
+        parts[parts.len - 1]
+    }
+    net_write(a, last) else |_| {}
+    let wait = if name == "over" { 1500 } else { 3000 }
+    f.sent = upstream(up, wait)
+    f.sent.kase = name
+    let r = read_reply(a, 3000)
+    f.reply = status_line(r)
+    if ask_next {
+        let after = read_reply(a, 3000)
+        // the next request's reply follows the first one's, or came with it
+        var rest = after
+        if rest.is_empty() {
+            let at = r.find("\r\n\r\n") else -1
+            rest = if at >= 0 { r[at + 4..r.len] } else { "" }
+            let k = rest.find("HTTP/1.") else -1
+            rest = if k >= 0 { rest[k..rest.len] } else { "" }
+        }
+        f.next = if rest.contains("READY\n") {
+            status_line(rest)
+        } else {
+            "(none: `{status_line(rest)}`)"
+        }
+    }
+    net_close(a) else |_| {}
+    f
+}
+
+/// The `gone` flow: a length body whose client closes after two bytes.
+/// Nothing is read back; the access log tells what was logged. Total.
+fn gone(port: int) {
+    let a = net_connect("127.0.0.1:{port}") else |_| {
+        return
+    }
+    net_write(a, "POST /up HTTP/1.1\r\nHost: x\r\nContent-Length: 11\r\n\r\nhe") else |_| {}
+    time_sleep_ms(300)
+    net_close(a) else |_| {}
+}
+
+/// The access log's line for `POST /up` flows, in the order logged:
+/// each line's status, joined by ` `. Total.
+fn logged(d: str) -> str {
+    let text = fs_read_text("{d}/logs/access.log") else |_| { "" }
+    var out = ""
+    for l in text.lines() {
+        if l.contains("\"POST /up ") {
+            let sp = l.find(" ") else -1
+            let st = if sp > 0 { l[0..sp] } else { l }
+            out = if out.is_empty() { st } else { "{out} {st}" }
+        }
+    }
+    if out.is_empty() { "(none)" } else { out }
+}
+
+/// What one proxy did in every flow, and what it logged.
+struct Seen {
+    started: bool,
+    flows: List[Flow],
+    log: str,
+}
+
+/// Every flow through one proxy: `kind` 0 is the oracle, 1 a lobo.
+/// Total: a proxy that does not start is a named failure.
+fn through(mut fails: List[str], who: str, kind: int, bin: str) -> Seen {
+    var seen = Seen { started: false, flows: List[Flow](), log: "" }
+    let d = "proxy_body_wait_{who}"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/w") else |_| {}
+    fs_create_dir_all("{d}/logs") else |_| {}
+    fs_write_text("{d}/w/r.html", "READY\n") else |_| {}
+    let root = os_cwd() else |_| "."
+    let up = net_listen("127.0.0.1:0") else |_| {
+        note(mut fails, "proxy-body-ready", "{who}: the upstream could not listen")
+        return seen
+    }
+    let upp = net_port(up) else |_| { 0 }
+    let st = start(kind, bin, d, root, upp)
+    let child = st.0
+    let hp = st.1
+    if child < 0 {
+        if kind == 0 {
+            note(
+                mut fails,
+                "proxy-body-oracle-silent",
+                "the oracle never served its static file: {st.2}",
+            )
+        } else {
+            note(mut fails, "proxy-body-ready", "{who} never served its static file: {st.2}")
+        }
+        net_close(up) else |_| {}
+        fs_remove_dir_all(d) else |_| {}
+        return seen
+    }
+    seen.started = true
+    let h = "POST /up HTTP/1.1\r\nHost: x\r\n"
+    (mut seen.flows).push(
+        flow(
+            hp,
+            up,
+            "length",
+            "{h}Content-Length: 11\r\n\r\n",
+            ["he", "l", "l", "o", " ", "world"],
+            true,
+        ),
+    )
+    (mut seen.flows).push(
+        flow(
+            hp,
+            up,
+            "chunked",
+            "{h}Transfer-Encoding: chunked\r\n\r\n",
+            ["5\r\nhel", "lo\r\n", "6\r\n wor", "ld\r\n0\r\nX-Sum: 11\r\n\r\n"],
+            true,
+        ),
+    )
+    (mut seen.flows).push(
+        flow(
+            hp,
+            up,
+            "over",
+            "{h}Transfer-Encoding: chunked\r\nConnection: close\r\n\r\n",
+            ["a\r\n01234", "56789\r\n", "a\r\n0123456789\r\n0\r\n\r\n"],
+            false,
+        ),
+    )
+    gone(hp)
+    time_sleep_ms(1000)
+    seen.log = logged(d)
+    for f in seen.flows {
+        let early = if f.early { "; the upstream was called before the body was whole" } else { "" }
+        let slow = if f.slow.is_empty() { "" } else { "; slow GETs beside it: {f.slow}" }
+        print(
+            "proxy_body_wait: {who} {f.name}: forwarded `{f.sent.line}`, Content-Length {f.sent.lengths}, Transfer-Encoding {f.sent.te}, body `{f.sent.body}`; answered `{f.reply}`, next `{f.next}`{early}{slow}",
+        )
+    }
+    print("proxy_body_wait: {who} logged the POSTs: {seen.log}")
+    os_kill(child) else |_| {}
+    let _w = os_wait(child) else |_| { -1 }
+    net_close(up) else |_| {}
+    fs_remove_dir_all(d) else |_| {}
+    seen
+}
+
+/// The flow `name` in `list`, or an empty one. Total.
+fn pick(list: List[Flow], name: str) -> Flow {
+    for f in list {
+        if f.name == name {
+            return f
+        }
+    }
+    Flow {
+        name: name,
+        early: false,
+        slow: "",
+        sent: Sent {
+            kase: name,
+            line: "(not run)",
+            lengths: "none",
+            te: "none",
+            body: "",
+            extra: "",
+            reply: "",
+        },
+        reply: "(not run)",
+        next: "",
+    }
+}
+
+/// One flow as the oracle comparison reads it. Total.
+fn shape(f: Flow) -> str {
+    "answered `{f.reply}`, next `{f.next}`, upstream `{f.sent.line}` Content-Length {f.sent.lengths} Transfer-Encoding {f.sent.te} body `{f.sent.body}`"
+}
+
+fn main() -> !int {
+    var fails = List[str]()
+    let root = os_cwd() else |_| "."
+    let ng = through(mut fails, "nginx", 0, "{root}/tests/differential/bin/nginx")
+    let lb = through(mut fails, "lobo", 1, "{root}/target/lobo-debug")
+    // the oracle's silence is the oracle's fault: lobo is compared only
+    // with an oracle that answered every flow
+    var heard = ng.started
+    for f in ng.flows {
+        if f.reply.is_empty() {
+            heard = false
+            note(
+                mut fails,
+                "proxy-body-oracle-silent",
+                "the oracle answered `{f.name}` with nothing within 3000 ms",
+            )
+        }
+    }
+    if lb.started {
+        for f in lb.flows {
+            if !f.slow.is_empty() {
+                note(
+                    mut fails,
+                    "proxy-body-get",
+                    "lobo: a GET beside the `{f.name}` body took {f.slow} (bound 250 ms; -1: none within 3000 ms)",
+                )
+            }
+        }
+    }
+    if heard && lb.started {
+        for n in ["length", "chunked", "over"] {
+            let o = pick(ng.flows, n)
+            let l = pick(lb.flows, n)
+            if l.early != o.early {
+                note(
+                    mut fails,
+                    "proxy-body-early",
+                    "`{n}`: lobo called the upstream before the body was whole: {l.early}; the oracle: {o.early}",
+                )
+            }
+            if n != "over" &&
+                (
+                    l.sent.body != o.sent.body ||
+                        l.sent.lengths != o.sent.lengths ||
+                        l.sent.te != o.sent.te
+                ) {
+                note(
+                    mut fails,
+                    "proxy-body-forwarded",
+                    "`{n}`: lobo forwarded Content-Length {l.sent.lengths}, Transfer-Encoding {l.sent.te}, body `{l.sent.body}`; the oracle Content-Length {o.sent.lengths}, Transfer-Encoding {o.sent.te}, body `{o.sent.body}`",
+                )
+            }
+            if n != "over" && l.next != o.next {
+                note(
+                    mut fails,
+                    "proxy-body-next",
+                    "`{n}`: after the body, lobo answered the next request `{l.next}`; the oracle `{o.next}`",
+                )
+            }
+            if n == "over" && shape(l) != shape(o) {
+                note(
+                    mut fails,
+                    "proxy-body-over",
+                    "over the limit, lobo {shape(l)}; the oracle {shape(o)}",
+                )
+            }
+        }
+        if lb.log != ng.log {
+            note(
+                mut fails,
+                "proxy-body-gone",
+                "lobo logged the POSTs `{lb.log}`; the oracle `{ng.log}` (the last is the client that closed mid-body)",
+            )
+        }
+    }
+    if fails.is_empty() {
+        var all = ""
+        for f in ng.flows {
+            all = "{all}{f.name}: {shape(f)}; "
+        }
+        print(
+            "proxy_body_wait: ok — the oracle {all}logged {ng.log}; lobo the same, and no GET waited on a body",
+        )
+        return 0
+    }
+    let order = [
+        "proxy-body-ready",
+        "proxy-body-forwarded",
+        "proxy-body-next",
+        "proxy-body-over",
+        "proxy-body-gone",
+        "proxy-body-early",
+        "proxy-body-get",
+        "proxy-body-oracle-silent",
+    ]
+    var last = ""
+    for r in order {
+        var why = ""
+        for f in fails {
+            if why.is_empty() && f.starts_with("{r} ") {
+                why = f[r.len + 1..f.len]
+            }
+        }
+        if !why.is_empty() {
+            last = "proxy_body_wait: FAILED — [{r}] {why}"
+            print(last)
+        }
+    }
+    assert(false, "{last}")
+    0
+}
