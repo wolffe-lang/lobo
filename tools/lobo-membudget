@@ -359,6 +359,27 @@ flat() { # flat <label> <before_kb> <after_kb> <drove_ok(0/1)> <what> [bound_kb]
     fi
 }
 
+# lobo#142: `flat` for a row this change adds: a drive that failed or a
+# sample that is missing is counted as `flat` counts it; the growth is a
+# resident figure, so its verdict goes through `gated`.
+flat_gated() { # flat_gated <label> <before_kb> <after_kb> <drove_ok(0/1)> <what> [bound_kb]
+    fb="${6:-$flat_kb}"
+    if [ "$4" != 0 ]; then
+        check "$1: the drive itself failed ($5; stderr: $(tail -c 120 "$scratch/drive.err"))" 1
+        return
+    fi
+    if [ -z "$2" ] || [ -z "$3" ]; then
+        check "$1: RSS sampled (before='$2' after='$3')" 1
+        return
+    fi
+    g=$(($3 - $2))
+    if [ "$g" -lt "$fb" ]; then
+        gated 0 "$1: RSS grew ${g} KB over $5 (< ${fb} KB; ${3} KB resident) — memory is returned (lobo#66)"
+    else
+        gated 1 "$1: RSS grew ${g} KB over $5 (>= ${fb} KB; ${3} KB resident) — memory is NOT returned (lobo#66)"
+    fi
+}
+
 # lobo#126: THE MASTER'S START, a named check of its own. The master
 # writes `worker-started worker=4` within milliseconds of its start,
 # before its loop; a start that does not reach it within 10 s is told
@@ -803,9 +824,9 @@ if [ -r "/proc/$pid/status" ]; then
     if [ "$cok" != 0 ]; then
         check "cost, proxied uploads: a drive failed ($cwhat; stderr: $(tail -c 120 "$scratch/drive.err"))" 1
     elif [ "$cper" -lt 128 ]; then
-        check "cost, proxied uploads: $cwhat (< 128 KB an upload: twice the body) — an owed body is held once" 0
+        gated 0 "cost, proxied uploads: $cwhat (< 128 KB an upload: twice the body) — an owed body is held once"
     else
-        check "cost, proxied uploads: $cwhat (>= 128 KB an upload: twice the body) — an owed body is held more than once" 1
+        gated 1 "cost, proxied uploads: $cwhat (>= 128 KB an upload: twice the body) — an owed body is held more than once"
     fi
 else
     say "cost, proxied uploads: not measured — the high water is /proc's VmHWM, and this host has no /proc (a named platform gap; the row is not counted)"
@@ -821,7 +842,7 @@ uok=$dok
 ub=$(rss_kb)
 "$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || uok=1
 "$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || uok=1
-flat "flat, proxied uploads" "$ub" "$(rss_kb)" "$uok" "two drives of 64 proxied uploads of 64 KiB arriving at once, each read by its exchange beside the loop (lobo#142), after two that warm it; cpus=$pcpus"
+flat_gated "flat, proxied uploads" "$ub" "$(rss_kb)" "$uok" "two drives of 64 proxied uploads of 64 KiB arriving at once, each read by its exchange beside the loop (lobo#142), after two that warm it; cpus=$pcpus"
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 # the backend ends after its last exchange; a row that failed short of
