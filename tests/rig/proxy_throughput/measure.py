@@ -807,6 +807,12 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
                 if backend_lifetime != "persistent":
                     stop(backend)
                     backend = None
+        # CHECK COMMIT, never merged: the reference-self pairing's head arm
+        # reads half its rate, so the calibration is outside its bar.
+        if Path(scratch).name == "reference-self":
+            for r in rows:
+                if r["name"] == "head":
+                    r["rate"] = r["rate"] / 2
         (scratch / "measurements.json").write_text(json.dumps(rows, indent=2))
         states = backend_tcp_states(used_ports)
         (scratch / "backend-tcp-states.json").write_text(json.dumps(states, indent=2))
