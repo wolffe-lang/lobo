@@ -59,6 +59,16 @@
 # buffers would keep about 4 MB after the drive. Green at trunk too,
 # where each body was read in its own request's region (one at a time).
 #
+# PROXIED UPLOADS (lobo#142). On the serving loop a proxied request
+# whose body has not all come is handed to its exchange, which reads
+# the body beside the loop and then forwards it. The proxied server's
+# row has a second flat row beside it, `flat, proxied uploads`: the
+# same 64 uploads of 64 KiB arriving at once, to the proxied location,
+# each read by its own exchange (64 at once, each in the exchange's
+# own region) and forwarded to the backend, each connection asked once
+# more after its reply, under 512 KB. Green at trunk too, where the
+# loop read each body itself, one at a time.
+#
 # THE FILE MEMO (ws58, lobo#67). The plain server now keeps a small
 # file's bytes (at most 32 KiB a file, inside the memo region's
 # 1 MiB) and proves them with one stat a request, so a file that is
@@ -622,8 +632,9 @@ printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\
 # reading the whole record back and writing it out again, so 2,400
 # padded requests recorded to a file grew it past 24 GB resident
 # (measured on kasumi), and on the 16 GB CI runner the host stopped the
-# runner
-"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
+# runner. lobo#142: and 256 more for the uploads row after it (two
+# drives of 64 uploads, each connection asked once more)
+"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests + 256))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
 bpid=$!
 bp=""
 i=0
@@ -672,6 +683,12 @@ while [ $i -lt "$((px_requests / 400))" ]; do
     case "$((i * 400))" in 2000|20000|60000) px_snapshot "$((400 + i * 400))" ;; esac
 done
 flat "flat, proxied" "$pb" "$(rss_kb)" "$pok" "$px_requests proxied keepalive requests on $((px_requests / 400)) connections, cpus=$pcpus, exchange pool (ws69)"
+# lobo#142: proxied bodies arriving at once, each read by its exchange
+uok=0
+quiet_drive 64 /up/x upload 65536 || uok=1
+ub=$(rss_kb)
+quiet_drive 64 /up/x upload 65536 || uok=1
+flat "flat, proxied uploads" "$ub" "$(rss_kb)" "$uok" "64 proxied uploads of 64 KiB arriving at once, each read by its exchange beside the loop (lobo#142), cpus=$pcpus"
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 # the backend ends after its last exchange; a row that failed short of
@@ -738,5 +755,5 @@ fi
 if [ "${1:-}" = --proxy-census ]; then
     echo "lobo-membudget: $total/$total proxy checks green (original rigback/memdrive, cpus=$pcpus, warmup=400, drive=$px_requests, RSS growth <512 KB)"
 else
-echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; memory flat over requests, connections and idle time, lobo#66; flat over proxied requests, ws67; the master flat under supervision, ws62)"
+echo "lobo-membudget: $total/$total checks green (bodies O(1) per response, through the capped proc too; D40's band closed — the ws14 breach serves 200 and the meter alone refuses, through a real socket; memory flat over requests, connections and idle time, lobo#66; flat over proxied requests, ws67, and proxied uploads, lobo#142; the master flat under supervision, ws62)"
 fi
