@@ -81,7 +81,12 @@
 # that compared two drives after two that warmed it: a window that
 # short reads the spread's steps as noise around its bound. Where /proc
 # is not there (macOS) the row says so and is not counted, and its
-# drives are not run.
+# drives are not run. The row drives 300 more after the warm-up and
+# prints the high water's rise over drives 101-200, 101-300 and
+# 101-400, each with the number of drives that raised it by more than
+# 16 KB (read by the shell between drives, no process started), so the
+# steps of a correct read can be told from a steady rise; it gates on
+# the first window.
 #
 # WHAT A PROXIED UPLOAD COSTS (lobo#142). Before that row, `cost,
 # proxied uploads` reads the proxied server's high water (/proc's VmHWM)
@@ -748,9 +753,9 @@ printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\
 # (measured on kasumi), and on the 16 GB CI runner the host stopped the
 # runner. lobo#142: and 128 more for each drive of 64 uploads after it
 # (each connection is asked once more): the cost row's two, and the
-# late row's 200 where there is a /proc to read them by
+# late row's 400 where there is a /proc to read them by
 late_n=0
-[ -r /proc/self/status ] && late_n=200
+[ -r /proc/self/status ] && late_n=400
 "$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests + 256 + late_n * 128))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
 bpid=$!
 bp=""
@@ -829,31 +834,76 @@ else
 fi
 # lobo#142: proxied bodies arriving at once, each read by its exchange:
 # a hundred drives warm it, and the high water's rise over the next
-# hundred is the row; the first drive that fails ends the row (the
-# backend then waits for exchanges that never come, and is reaped below)
+# hundred is the row; it reads on to drive 400 and prints the rise over
+# 101-300 and 101-400 too, each with its count of drives that raised the
+# high water by more than 16 KB. The first drive that fails ends the row
+# (the backend then waits for exchanges that never come, and is reaped
+# below)
 late_kb=256
+# the server's high water into $hv, read by the shell itself, so nothing
+# runs between two drives but a read of /proc
+hwm_read() {
+    hv=""
+    while read -r hk hn _; do
+        if [ "$hk" = VmHWM: ]; then
+            hv=$hn
+            break
+        fi
+    done < "/proc/$pid/status"
+}
 if [ "$late_n" != 0 ] && [ -r "/proc/$pid/status" ]; then
     uok=$dok
+    lw=$((late_n / 4))
     i=0
     la=""
+    lp=""
+    lsteps=0
+    ls1=0
+    lw2=""
+    lw3=""
+    ls2=0
+    ls3=0
+    lb=""
     while [ $i -lt "$late_n" ]; do
         "$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || {
             uok=1
             break
         }
         i=$((i + 1))
-        [ $i = $((late_n / 2)) ] && la=$(hwm_kb)
+        if [ $i -ge "$lw" ]; then
+            hwm_read
+            if [ $i = "$lw" ]; then
+                la=$hv
+            elif [ -n "$hv" ] && [ -n "$lp" ] && [ $((hv - lp)) -gt 16 ]; then
+                lsteps=$((lsteps + 1))
+            fi
+            lp=$hv
+            if [ $i = $((lw * 2)) ]; then
+                lb=$hv
+                ls1=$lsteps
+            fi
+            if [ $i = $((lw * 3)) ]; then
+                lw2=$hv
+                ls2=$lsteps
+            fi
+            if [ $i = $((lw * 4)) ]; then
+                lw3=$hv
+                ls3=$lsteps
+            fi
+        fi
     done
-    lb=$(hwm_kb)
-    lwhat="drives $((late_n / 2 + 1))-$late_n of 64 proxied uploads of 64 KiB arriving at once, each read by its exchange beside the loop, after $((late_n / 2)) that warm it; cpus=$pcpus"
+    lwhat="drives $((lw + 1))-$((lw * 2)) of 64 proxied uploads of 64 KiB arriving at once, each read by its exchange beside the loop, after $lw that warm it; cpus=$pcpus"
     if [ "$uok" != 0 ]; then
         check "late, proxied uploads: drive $((i + 1)) of $late_n failed ($lwhat; stderr: $(tail -c 120 "$scratch/drive.err"))" 1
-    elif [ -z "$la" ] || [ -z "$lb" ]; then
-        check "late, proxied uploads: the high water sampled (before='$la' after='$lb')" 1
-    elif [ $((lb - la)) -lt "$late_kb" ]; then
-        gated 0 "late, proxied uploads: the high water rose $((lb - la)) KB over $lwhat (< $late_kb KB; $lb KB at its highest) — an owed body leaves nothing behind"
+    elif [ -z "$la" ] || [ -z "$lb" ] || [ -z "$lw2" ] || [ -z "$lw3" ]; then
+        check "late, proxied uploads: the high water sampled (at $lw '$la', $((lw * 2)) '$lb', $((lw * 3)) '$lw2', $((lw * 4)) '$lw3')" 1
     else
-        gated 1 "late, proxied uploads: the high water rose $((lb - la)) KB over $lwhat (>= $late_kb KB; $lb KB at its highest) — the memory still grows past the warm-up"
+        say "late, proxied uploads: windows: $((lw + 1))-$((lw * 2)) rose $((lb - la)) KB in $ls1 steps; $((lw + 1))-$((lw * 3)) rose $((lw2 - la)) KB in $ls2 steps; $((lw + 1))-$((lw * 4)) rose $((lw3 - la)) KB in $ls3 steps (a step: a drive that raised the high water more than 16 KB; $lw3 KB at its highest)"
+        if [ $((lb - la)) -lt "$late_kb" ]; then
+            gated 0 "late, proxied uploads: the high water rose $((lb - la)) KB over $lwhat (< $late_kb KB; $lb KB at its highest) — an owed body leaves nothing behind"
+        else
+            gated 1 "late, proxied uploads: the high water rose $((lb - la)) KB over $lwhat (>= $late_kb KB; $lb KB at its highest) — the memory still grows past the warm-up"
+        fi
     fi
 else
     say "late, proxied uploads: not measured — the high water is /proc's VmHWM, and this host has no /proc (a named platform gap; the row is not counted, and its drives are not run)"
