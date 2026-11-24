@@ -2831,13 +2831,17 @@ fn read_owed(client: int, notes: int, o: Owed) -> Took {
 }
 
 /// An owed length body (lobo#142): `want` bytes, of which `have` came
-/// with the head. Each read asks for at most what the body still owes
-/// (and at most 64 KiB), so no byte after the body is taken: the next
-/// request stays in the socket for the exchange's watch and the loop.
-/// Each read's piece is kept as it came, so the body is held once, in
-/// the pieces, and never copied; once whole it must be UTF-8
-/// (`http.utf8_parts`), else a 400. The waits are `read_owed`'s. net tier.
-/// Total.
+/// with the head. Each read asks for at most what the body still owes,
+/// so no byte after the body is taken: the next request stays in the
+/// socket for the exchange's watch and the loop. Each read also asks
+/// for at most 4 KiB, so every piece after the head's is of one size
+/// but the last: pieces of whatever size each read returned (up to
+/// 64 KiB) spread the allocator's free space, and the high water kept
+/// rising long after the bodies were gone (`tools/lobo-membudget`'s
+/// `late, proxied uploads`). Each read's piece is kept as it came, so
+/// the body is held once, in the pieces, and never copied; once whole
+/// it must be UTF-8 (`http.utf8_parts`), else a 400. The waits are
+/// `read_owed`'s. net tier. Total.
 fn read_owed_length(client: int, notes: int, o: Owed) -> Took {
     var parts = List[List[byte]]()
     var n = 0
@@ -2855,8 +2859,8 @@ fn read_owed_length(client: int, notes: int, o: Owed) -> Took {
             return took(w)
         }
         var ask = o.want - n
-        if ask > 65536 {
-            ask = 65536
+        if ask > 4096 {
+            ask = 4096
         }
         var spurious = false
         var piece = net_read_bytes(client, ask) else |e| match e {
