@@ -202,8 +202,19 @@ check() { # check <desc> <ok(0/1)>
 }
 # lobo#142: the gate of a row this change adds (`cost, proxied uploads`,
 # `flat, proxied uploads`). Its reading is a resident figure, judged
-# where the change's figures are taken.
+# where the change's figures are taken, and a hosted runner's resident
+# figures move with the runner: there (GitHub sets GITHUB_ACTIONS=true on
+# every hosted job) the row is REPORTED, its reading printed and its
+# verdict said, and not counted — it is neither a pass nor a skip, and
+# the summary counts it apart. Every other host counts it. The rows that
+# gated on hosted runners before this change still do.
 gated() { # gated <ok(0/1)> <desc>
+    if [ "${GITHUB_ACTIONS:-}" = true ]; then
+        reported=$((reported + 1))
+        if [ "$1" = 0 ]; then gv="within its bound"; else gv="OVER its bound"; fi
+        say "REPORTED — $2 — $gv; not counted: a hosted runner (GITHUB_ACTIONS=true), where this row's resident figures are not judged; it gates where they are"
+        return 0
+    fi
     check "$2" "$1"
 }
 # the run's verdict: red when a counted check failed; a reported row is
