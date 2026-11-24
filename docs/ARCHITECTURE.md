@@ -165,7 +165,9 @@ malformed chunk frame (400), and `read_timeout` between two reads
 it). It reads bytes, so a read that ends inside a code point is no
 failure; the body must be UTF-8 once whole. A length body is held
 once, as the pieces its reads returned, and never joined: each read
-asks for no more than the body still owes, the pieces are checked as
+asks for no more than the body still owes and no more than 4 KiB (so
+the pieces are of one size, and do not spread the allocator's free
+space as pieces of every size did), the pieces are checked as
 UTF-8 across their joins (`http.utf8_parts`), and the exchange sends
 the head, with the one `Content-Length` `proxy.build_upstream` would
 write, and the pieces behind it in one gathered write
