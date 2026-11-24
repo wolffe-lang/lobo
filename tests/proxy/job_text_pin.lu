@@ -1,0 +1,68 @@
+//! check: run(exit=0, stdout="job pin ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! conforms: err.union
+//! stage-src: proxy http config resolver
+//!
+//! THE EXCHANGE'S JOB TEXT, PINNED (lobo#142). The serving loop hands a
+//! proxied request to an exchange proc as text (`proxy.job_text`), and
+//! the proc reads it back (`proxy.job_parse`). A request whose body was
+//! read whole before the hand-over travels as it did before any body
+//! could be read by the exchange: this pins that text byte for byte,
+//! for one fixed request (`POST /up` with `hello world`, one peer), and
+//! that it reads back to the same job. The pin was taken at trunk
+//! `623c21e`, before the exchange learned to read a body, and a change
+//! that alters it is red here. Lane: all three (a config model, a
+//! parsed request, the job's text; CRLF compared rendered as `|`).
+
+use config
+use http
+use proxy
+use resolver
+
+fn main() -> int {
+    // DOUBLED braces: a `"""` block is an f-string (D6).
+    let src = """
+http {{
+  server {{
+    listen 127.0.0.1:8080;
+    location /up {{ proxy_pass http://127.0.0.1:9401; }}
+  }}
+}}
+"""
+    let c = config.parse_str(src, "pin.conf")
+    let lim = http.default_limits()
+    let head = "POST /up HTTP/1.1\r\nHost: front.example\r\nContent-Length: 11"
+    let req = http.parse_request(head, lim) else |_| {
+        assert(false, "request must parse")
+        return 1
+    }
+    let pl = proxy.plan(c, "/up")
+    assert(pl.is_proxy, "must be a proxy location")
+    var rs = resolver.new()
+    let job = proxy.prepare(
+        c,
+        req,
+        "hello world",
+        pl,
+        "127.0.0.1",
+        "lobo",
+        "Mon, 24 Nov 2026 00:00:00 GMT",
+        true,
+        mut rs,
+    )
+    let text = proxy.job_text(job)
+    let got = text.replace("\r\n", "|")
+    let want = "0;0:4:http0:60000;4:lobo29:Mon, 24 Nov 2026 00:00:00 GMT1;0:1;9:127.0.0.19401;74:POST /up HTTP/1.1|Host: 127.0.0.1:9401|Content-Length: 11||hello world"
+    if got != want {
+        print("job text: {got}")
+    }
+    assert(got == want, "job text:\n got: {got}\nwant: {want}")
+    let back = proxy.job_parse(text) else |_| {
+        assert(false, "the pinned text must read back")
+        return 1
+    }
+    assert(proxy.job_text(back) == text, "the text read back must write the same text")
+    print("job pin ok")
+    0
+}
