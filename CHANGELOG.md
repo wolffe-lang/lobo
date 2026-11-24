@@ -134,9 +134,10 @@ against itself: restarting the backend on the same port retained the
 alternation, while a fresh port removed it. The gate now requires a
 same-binary reference-self control before judging the candidate, refusing
 an unsound instrument by name. Five alternating pairs and the 0.900 bar
-are unchanged; calibration is never advisory, including on CI. The
-existing CI candidate-ratio reporting policy and macOS short sample stay
-unchanged. Pairings also wait for observed namespace TIME_WAIT to drain,
+are unchanged; calibration is never advisory (on a hosted runner, see
+the next entry). The existing CI candidate-ratio reporting policy and
+macOS short sample stay unchanged. Pairings also wait for observed
+namespace TIME_WAIT to drain,
 recording both counts and elapsed time with a 120-second bound; timeout
 or saturation refuses the pairing by name, never as a candidate ratio.
 Both binary SHA-256s are printed. Only identical digests receive symmetric
@@ -152,6 +153,19 @@ drive's backend starts, never inside a warm-up or a timed window. A
 timeout, saturation, or one drive larger than the fraction refuses by
 name. Larger namespaces and macOS, which reports no capacity, run as
 before.
+
+### A hosted runner's calibration noise no longer stops the gauntlet (lobo#134)
+
+On a hosted runner (`GITHUB_ACTIONS=true`), a reference-self calibration
+outside its bar is now reported, and the gauntlet goes on to its later
+steps. The runner's own noise can put one binary outside the bar against
+itself, and did on about one macOS run in ten. Before, such a run stopped
+the gauntlet at the throughput step, although nothing about lobo had been
+measured. The row reads `REPORTED — [reference-self] … outside it`, then
+`NOT JUDGED`. The candidate is neither measured nor judged on that run.
+On a dedicated machine a refused calibration is fatal, as before, and a
+failure to collect it is fatal everywhere. The bar, the pairs and the
+request counts are unchanged.
 
 ### Shared-listener admission and connection metrics
 
