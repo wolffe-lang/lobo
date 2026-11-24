@@ -911,10 +911,25 @@ fn read_head(mut cn: conn.Conn, carry: str, limits: http.Limits) -> HeadRead ! {
 /// is a broken request → the caller closes, so they ride out as `io`.
 /// Read exactly `want` bytes of a fixed-length body, returning
 /// (body, leftover-after-body).
-fn take_length(mut cn: conn.Conn, carry: str, want: int) -> (str, str) ! {io, bad} {
+fn take_length(mut cn: conn.Conn, carry: str, want: int) -> (str, str) ! {io, idle, bad} {
     var buf = carry
     while buf.len < want {
-        let piece = conn.conn_read(mut cn, 4096) else |_| {
+        // lobo#142: a client that went quiet for the read timeout is
+        // `idle` (nginx logs it 408), any other end `io` (400)
+        var quiet = false
+        let piece = conn.conn_read(mut cn, 4096) else |e| match e {
+            timeout => {
+                quiet = true
+                ""
+            },
+            closed => { return io },
+            utf8 => { return io },
+            io => { return io },
+        }
+        if quiet {
+            return idle
+        }
+        if piece.is_empty() {
             return io
         }
         buf = "{buf}{piece}"
@@ -3077,14 +3092,16 @@ fn half_close_drain(mut cn: conn.Conn) {
 /// an over-limit body `big` (→ 413), a body that would blow the
 /// memory budget `over` (→ 503 — checked WHILE accumulating, the
 /// fence's `big` first at each step, per docs/BUDGET.md's order;
-/// `used` is the request's charge so far); net trouble is `io`.
+/// `used` is the request's charge so far); a client quiet for the read
+/// timeout is `idle`, and a close or other net trouble `io` (lobo#142:
+/// logged 408 and 400, nothing sent, as the pinned nginx logs them).
 /// Bounded by twice `max_body` so a peer dribbling forever cannot
 /// pin memory.
 fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -> (
     str,
     int,
     str,
-) ! {bad, big, over, io} {
+) ! {bad, big, over, io, idle} {
     var buf = carry
     let cap = limits.max_body * 2
     loop {
@@ -3117,7 +3134,20 @@ fn read_chunked(mut cn: conn.Conn, carry: str, limits: http.Limits, used: int) -
         if limits.memory_budget > 0 && used + buf.len > limits.memory_budget {
             return over
         }
-        let piece = conn.conn_read(mut cn, 4096) else |_| {
+        var quiet = false
+        let piece = conn.conn_read(mut cn, 4096) else |e| match e {
+            timeout => {
+                quiet = true
+                ""
+            },
+            closed => { return io },
+            utf8 => { return io },
+            io => { return io },
+        }
+        if quiet {
+            return idle
+        }
+        if piece.is_empty() {
             return io
         }
         buf = "{buf}{piece}"
@@ -3444,6 +3474,10 @@ pub fn serve_conn_cn(
                     conn.conn_close(mut cn)
                     return
                 },
+                idle => {
+                    conn.conn_close(mut cn)
+                    return
+                },
                 bad => {
                     // ws60: a body splitting a UTF-8 scalar — 400, close
                     send_err(mut cn, 400, false, opts.token)
@@ -3474,6 +3508,10 @@ pub fn serve_conn_cn(
                     return
                 },
                 io => {
+                    conn.conn_close(mut cn)
+                    return
+                },
+                idle => {
                     conn.conn_close(mut cn)
                     return
                 },
@@ -3907,6 +3945,15 @@ pub fn serve_request(
         }
         let taken = take_length(mut cn, rest, req.content_length) else |e| match e {
             io => {
+                // lobo#142: the client closed mid-body; nginx logs 400
+                // and sends nothing
+                acc.status = 400
+                return req_out(true, "", take acc, chg)
+            },
+            idle => {
+                // lobo#142: nothing for the read timeout; nginx logs
+                // 408 and sends nothing
+                acc.status = 408
                 return req_out(true, "", take acc, chg)
             },
             bad => {
@@ -3948,6 +3995,11 @@ pub fn serve_request(
                 return req_out(true, "", take acc, chg)
             },
             io => {
+                acc.status = 400
+                return req_out(true, "", take acc, chg)
+            },
+            idle => {
+                acc.status = 408
                 return req_out(true, "", take acc, chg)
             },
         }
