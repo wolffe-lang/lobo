@@ -68,6 +68,19 @@
 # own region) and forwarded to the backend, each connection asked once
 # more after its reply, under 512 KB.
 #
+# WHAT A PROXIED UPLOAD COSTS (lobo#142). Before that row, `cost,
+# proxied uploads` reads the proxied server's high water (/proc's VmHWM)
+# around two drives, each 64 uploads arriving at once, the drive
+# prebuilt so the pool's procs are the same for both: first of 1 byte
+# (the body comes whole with its head, nothing is owed: what 64
+# exchanges at once cost of themselves), then of 64 KiB. The second
+# drive's rise, per upload, is what an owed body costs at its peak, and
+# it must stay under twice the body, 128 KB: the body held once, as it
+# was read, and room for the allocator's rounding. A read that kept
+# every byte in a growing list and copied the body three more times
+# held about nine times the body. Where /proc is not there (macOS) the
+# row says so and is not counted.
+#
 # THE FILE MEMO (ws58, lobo#67). The plain server now keeps a small
 # file's bytes (at most 32 KiB a file, inside the memo region's
 # 1 MiB) and proves them with one stat a request, so a file that is
@@ -631,9 +644,9 @@ printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\
 # reading the whole record back and writing it out again, so 2,400
 # padded requests recorded to a file grew it past 24 GB resident
 # (measured on kasumi), and on the 16 GB CI runner the host stopped the
-# runner. lobo#142: and 256 more for the uploads row after it (two
-# drives of 64 uploads, each connection asked once more)
-"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests + 256))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
+# runner. lobo#142: and 512 more for the cost and uploads rows after it
+# (four drives of 64 uploads, each connection asked once more)
+"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests + 512))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
 bpid=$!
 bp=""
 i=0
@@ -682,6 +695,31 @@ while [ $i -lt "$((px_requests / 400))" ]; do
     case "$((i * 400))" in 2000|20000|60000) px_snapshot "$((400 + i * 400))" ;; esac
 done
 flat "flat, proxied" "$pb" "$(rss_kb)" "$pok" "$px_requests proxied keepalive requests on $((px_requests / 400)) connections, cpus=$pcpus, exchange pool (ws69)"
+# lobo#142: what one proxied upload costs at its peak, the drive prebuilt
+# so nothing sits between the two drives but the high water's read
+if [ -r "/proc/$pid/status" ]; then
+    hwm_kb() { awk '/^VmHWM:/ {print $2}' "/proc/$pid/status"; }
+    cok=0
+    "$WOLF" build "$rig_root"/tests/rig/memdrive.lu -o "$scratch/memdrive" > "$scratch/memdrive.build" 2>&1 || cok=1
+    h0=$(hwm_kb)
+    "$scratch/memdrive" "$hp" 64 /up/x upload 1 > "$scratch/drive.out" 2> "$scratch/drive.err" || cok=1
+    h1=$(hwm_kb)
+    "$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || cok=1
+    h2=$(hwm_kb)
+    cper=$(((h2 - h1) / 64))
+    cwhat="64 proxied uploads of 64 KiB arriving at once raised the high water $((h2 - h1)) KB, $cper KB an upload, after 64 of 1 byte (nothing owed) raised it $((h1 - h0)) KB; cpus=$pcpus, $h2 KB at its highest"
+    if [ "$cok" != 0 ]; then
+        check "cost, proxied uploads: a drive failed ($cwhat; stderr: $(tail -c 120 "$scratch/drive.err"))" 1
+    elif [ "$cper" -lt 128 ]; then
+        check "cost, proxied uploads: $cwhat (< 128 KB an upload: twice the body) — an owed body is held once" 0
+    else
+        check "cost, proxied uploads: $cwhat (>= 128 KB an upload: twice the body) — an owed body is held more than once" 1
+    fi
+else
+    say "cost, proxied uploads: not measured — the high water is /proc's VmHWM, and this host has no /proc (a named platform gap; the row is not counted)"
+    "$WOLF" run "$rig_root"/tests/rig/memdrive.lu "$hp" 64 /up/x upload 1 > "$scratch/drive.out" 2> "$scratch/drive.err"
+    "$WOLF" run "$rig_root"/tests/rig/memdrive.lu "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err"
+fi
 # lobo#142: proxied bodies arriving at once, each read by its exchange
 uok=0
 quiet_drive 64 /up/x upload 65536 || uok=1
