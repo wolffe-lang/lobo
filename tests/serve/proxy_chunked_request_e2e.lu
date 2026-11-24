@@ -401,7 +401,9 @@ fn through(mut fails: List[str], who: str, kind: int, bin: str) -> List[Sent] {
 /// Every response a pipelined case was answered on its connection, read
 /// to its close (the second request asks for it) or for three seconds:
 /// each response's status line, joined by ` + `, and ` (READY)` when the
-/// static file's body came. Total.
+/// static file's body came. A status line is found wherever it starts,
+/// not only at a line's start: a body without a final CRLF (`READY\n`,
+/// `ok`) runs straight into the next response's status line. Total.
 fn status_lines(c: int, first: str) -> str {
     var r = first
     var more = !first.is_empty()
@@ -414,10 +416,15 @@ fn status_lines(c: int, first: str) -> str {
         }
     }
     var out = ""
-    for line in r.split("\r\n") {
-        if line.starts_with("HTTP/") {
-            out = if out.is_empty() { line } else { "{out} + {line}" }
-        }
+    var rest = r
+    var at = rest.find("HTTP/1.") else -1
+    while at >= 0 {
+        let tail = rest[at..rest.len]
+        let nl = tail.find("\r\n") else -1
+        let line = if nl < 0 { tail } else { tail[0..nl] }
+        out = if out.is_empty() { line } else { "{out} + {line}" }
+        rest = tail[7..tail.len]
+        at = rest.find("HTTP/1.") else -1
     }
     if r.contains("READY\n") {
         out = "{out} (READY)"
