@@ -185,7 +185,7 @@ exchange, and so the body's read, runs in the step, as before
 pinned nginx and lobo, `tests/serve/proxy_body_refusal_e2e.lu` holds
 the refusals to the loop's own, and `tools/lobo-membudget`'s `cost,
 proxied uploads` row holds what one upload holds at its peak under
-twice its body, and `late, proxied uploads` the high water's rise
+three times its body, and `late, proxied uploads` the high water's rise
 under 256 KB over a hundred drives of 64 proxied bodies arriving at
 once, after a hundred that warm it.
 
