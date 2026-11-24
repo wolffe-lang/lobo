@@ -827,15 +827,18 @@ def _sample_pairing(nginx, reference, head, scratch, requests=20000, warmup=2000
             wait_tcp_quiet("after " + str(scratch), artifact=scratch / "settle-after.json")
 
 
-def _report_pairing(rows, pairs, label, report_only=False, control=False):
+def _report_pairing(rows, pairs, label, report_only=False, control=False, hosted=False):
+    # hosted: the reference-self check on a hosted runner, where a check
+    # outside the bar is reported, not failed (#134); measure() decides.
     for name in ("reference", "head"):
         speeds = [r["rate"] for r in rows if r["name"] == name]
         print(f"lobo-proxy-throughput: {label} {name}: median {statistics.median(speeds):.2f} req/s [{min(speeds):.2f}, {max(speeds):.2f}]", flush=True)
     value = ratio(rows, pairs)
     good = control_passes(rows, pairs) if control else passes(rows, pairs)
     advisory = report_only and not control
-    verdict = "REPORTED" if advisory else ("ok" if good else "FAILED")
-    print(f"lobo-proxy-throughput: {verdict} — {label} head/reference {value:.3f}x (bar 0.900x{' both control directions' if control else ' advisory' if advisory else ''})", flush=True)
+    outside = control and hosted and not good
+    verdict = "REPORTED" if advisory or outside else ("ok" if good else "FAILED")
+    print(f"lobo-proxy-throughput: {verdict} — {label} head/reference {value:.3f}x (bar 0.900x{' both control directions' if control else ' advisory' if advisory else ''}{'; outside it' if outside else ''})", flush=True)
     paired = [next(r["rate"] for r in rows if r["round"] == i and r["name"] == "head") /
               next(r["rate"] for r in rows if r["round"] == i and r["name"] == "reference") for i in range(pairs)]
     print("lobo-proxy-throughput: paired ratios " + json.dumps(paired), flush=True)
@@ -844,8 +847,13 @@ def _report_pairing(rows, pairs, label, report_only=False, control=False):
 
 def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=5,
             report_only=False, control_only=False):
-    # Calibration is never advisory, including when CI only reports
-    # the candidate ratio. Do not judge a candidate with an unsound rig.
+    # Never judge a candidate with an unsound rig. On a dedicated
+    # machine a refused calibration is fatal. On a hosted runner
+    # (GITHUB_ACTIONS=true) the runner's own noise can put a binary
+    # outside the bar against itself (#134), so a refused calibration
+    # is reported, the candidate is neither measured nor judged, and
+    # the gate goes on. A collection failure is fatal everywhere.
+    hosted = os.environ.get("GITHUB_ACTIONS") == "true"
     root = Path(scratch)
     identities = dict(reference=binary_digest(reference), head=binary_digest(head))
     print("lobo-proxy-throughput: requested binary SHA256 " + json.dumps(identities), flush=True)
@@ -853,17 +861,20 @@ def measure(nginx, reference, head, scratch, requests=20000, warmup=2000, pairs=
         control_rows = _sample_pairing(nginx, reference, reference, root / "reference-self",
                                        requests, warmup, pairs)
         verify_binary_digests(reference, head, identities)
-        calibrated = _report_pairing(control_rows, pairs, "[reference-self]", control=True) == 0
+        calibrated = _report_pairing(control_rows, pairs, "[reference-self]", control=True, hosted=hosted) == 0
     except (OSError, ValueError, RuntimeError, subprocess.TimeoutExpired) as error:
         print(f"lobo-proxy-throughput: FAILED — [reference-self] collection failed: {error}; candidate not judged", flush=True)
         return 1
+    if not calibrated and hosted:
+        print("lobo-proxy-throughput: NOT JUDGED — the reference-self check is outside the bar on a hosted runner (GITHUB_ACTIONS=true), where the runner's own noise can put a binary outside it against itself (#134); the candidate is not measured and not judged here; the check is fatal where the machine is dedicated", flush=True)
+        return 0
     if not calibrated:
         print("lobo-proxy-throughput: REFUSED — reference-self instrument check failed; candidate not judged", flush=True)
         return 1
     if control_only:
         return 0
-    if os.environ.get("GITHUB_ACTIONS") == "true":
-        print(f"lobo-proxy-throughput: CI MEASUREMENT — fresh backend/port per drive and bounded recorded TCP settling per pairing and before any drive that would pass {DRIVE_SETTLE_FRACTION} of capacity; SHA256 identity governs symmetric controls; reference-self calibration and saturation refusal are mandatory and fatal; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
+    if hosted:
+        print(f"lobo-proxy-throughput: CI MEASUREMENT — fresh backend/port per drive and bounded recorded TCP settling per pairing and before any drive that would pass {DRIVE_SETTLE_FRACTION} of capacity; SHA256 identity governs symmetric controls; reference-self calibration is mandatory, and outside its bar here it is reported and the candidate not judged; saturation refusal is fatal; only the candidate ratio remains advisory; transport, application, incomplete and non-keepalive failures remain fatal", flush=True)
     if platform.system() == "Darwin" and report_only:
         print("lobo-proxy-throughput: macOS CI uses its bounded short request window; calibration remains mandatory", flush=True)
     rows = _sample_pairing(nginx, reference, head, root / "comparison", requests, warmup, pairs,
