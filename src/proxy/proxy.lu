@@ -2892,6 +2892,22 @@ fn read_owed_length(client: int, notes: int, o: Owed) -> Took {
     t
 }
 
+/// The size of each piece an owed body's read keeps, in order, for a
+/// body read from `client` as an exchange reads it (`read_owed`);
+/// empty for a read that did not end whole. A length body's reads ask
+/// for at most 4 KiB each (`read_owed_length`), and this is where a row
+/// can hold that without a resident figure. net tier. Total.
+pub fn owed_pieces(client: int, notes: int, o: Owed) -> List[int] {
+    let t = read_owed(client, notes, o)
+    var sizes = List[int]()
+    if t.code == 0 {
+        for p in t.parts {
+            (mut sizes).push(p.len)
+        }
+    }
+    sizes
+}
+
 /// The answer to an owed body's read that did not end whole
 /// (`read_owed`): the page for a 400 of the framing, a 413 or a 503,
 /// written and the connection then drained briefly as the loop drains
