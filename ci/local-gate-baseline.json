@@ -59,7 +59,7 @@
     }
   },
   "schedules": {
-    "ci.yml": "    - cron: \"7 9 * * *\""
+    "ci.yml": "    - cron: \"7 18 * * *\""
   },
   "unchanged": {
     "release.yml": "cd6730303a248d5b56db268f3b850cbbfb03428a44e7b101bbe08f36b6483449"
