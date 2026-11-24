@@ -1,5 +1,6 @@
 """A loopback-only relative throughput witness; Python standard library only."""
 import argparse
+import contextlib
 import hashlib
 import itertools
 import json
@@ -134,6 +135,18 @@ class SimulatedNamespace:
         return self.rate, f"Keep-Alive requests: {count}\n"
 
 
+@contextlib.contextmanager
+def runner(hosted):
+    # GITHUB_ACTIONS as a hosted runner sets it, or absent as on a
+    # dedicated machine: the self-test runs on both, so a row that
+    # depends on it sets it.
+    with mock.patch.dict(os.environ):
+        os.environ.pop("GITHUB_ACTIONS", None)
+        if hosted:
+            os.environ["GITHUB_ACTIONS"] = "true"
+        yield
+
+
 class RatchetTests(unittest.TestCase):
     def rows(self, head):
         return [dict(round=i, name=name, rate=speed) for i in range(5)
@@ -233,7 +246,8 @@ class RatchetTests(unittest.TestCase):
 
     def test_unsound_reference_self_prevents_candidate_judgement(self):
         for advisory in (False, True):
-            with mock.patch(__name__ + "._sample_pairing", return_value=self.rows(80)) as sample, \
+            with runner(hosted=False), \
+                 mock.patch(__name__ + "._sample_pairing", return_value=self.rows(80)) as sample, \
                  mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
                  mock.patch("builtins.print"):
                 self.assertEqual(measure("ng", "ref", "head", "unused", report_only=advisory), 1)
@@ -241,12 +255,71 @@ class RatchetTests(unittest.TestCase):
                 self.assertEqual(sample.call_args.args[1:3], ("ref", "ref"))
 
     def test_control_collection_failure_is_named_and_stops_judgement(self):
-        with mock.patch(__name__ + "._sample_pairing", side_effect=RuntimeError("transport failed")) as sample, \
+        with runner(hosted=False), \
+             mock.patch(__name__ + "._sample_pairing", side_effect=RuntimeError("transport failed")) as sample, \
              mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
              mock.patch("builtins.print") as output:
             self.assertEqual(measure("ng", "ref", "head", "unused"), 1)
             self.assertEqual(sample.call_count, 1)
             self.assertTrue(any("[reference-self]" in str(c.args[0]) for c in output.call_args_list))
+
+    def refused_control(self, hosted, speed, advisory):
+        # One measure() with the reference-self pairing outside the bar
+        # (speed 80: head slower; 112: head faster, a favourable bias).
+        with runner(hosted), \
+             mock.patch(__name__ + "._sample_pairing", return_value=self.rows(speed)) as sample, \
+             mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
+             mock.patch("builtins.print") as output:
+            code = measure("ng", "ref", "head", "unused", report_only=advisory)
+        lines = [str(c.args[0]) for c in output.call_args_list if c.args]
+        return code, sample, lines
+
+    def test_hosted_refused_calibration_is_reported_and_not_judged(self):
+        # #134: on a hosted runner the runner's own noise can put a
+        # binary outside the bar against itself. The check reports it,
+        # does not measure or judge the candidate, and lets the gate go
+        # on; nothing about lobo was measured.
+        for speed in (80, 112):
+            for advisory in (False, True):
+                code, sample, lines = self.refused_control(True, speed, advisory)
+                self.assertEqual(code, 0, (speed, advisory, lines))
+                self.assertEqual(sample.call_count, 1)
+                self.assertEqual(sample.call_args.args[1:3], ("ref", "ref"))
+                self.assertTrue(any(l.startswith("lobo-proxy-throughput: REPORTED — [reference-self] head/reference ") and "outside it" in l for l in lines), lines)
+                self.assertTrue(any(l.startswith("lobo-proxy-throughput: NOT JUDGED — ") and "not judged" in l for l in lines), lines)
+                self.assertFalse(any(" FAILED — " in l or " REFUSED — " in l for l in lines), lines)
+
+    def test_hosted_refused_calibration_lets_the_gauntlet_go_on(self):
+        # The gauntlet's step is `if ! tools/lobo-proxy-throughput; then
+        # exit 1`: the tool's exit status is what lets its later steps run.
+        argv = ["measure.py", "ng", "ref", "head", "unused"]
+        with runner(hosted=True), mock.patch.object(sys, "argv", argv), \
+             mock.patch(__name__ + "._sample_pairing", return_value=self.rows(80)) as sample, \
+             mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
+             mock.patch("builtins.print"):
+            self.assertEqual(main(), 0)
+            self.assertEqual(sample.call_count, 1)
+
+    def test_dedicated_refused_calibration_stays_fatal(self):
+        for speed in (80, 112):
+            for advisory in (False, True):
+                code, sample, lines = self.refused_control(False, speed, advisory)
+                self.assertEqual(code, 1, (speed, advisory, lines))
+                self.assertEqual(sample.call_count, 1)
+                self.assertTrue(any(l.startswith("lobo-proxy-throughput: FAILED — [reference-self] head/reference ") for l in lines), lines)
+                self.assertIn("lobo-proxy-throughput: REFUSED — reference-self instrument check failed; candidate not judged", lines)
+                self.assertFalse(any("NOT JUDGED" in l for l in lines), lines)
+
+    def test_hosted_collection_failure_stays_fatal(self):
+        with runner(hosted=True), \
+             mock.patch(__name__ + "._sample_pairing", side_effect=RuntimeError("transport failed")) as sample, \
+             mock.patch(__name__ + ".binary_digest", side_effect=lambda path: ("1" if str(path) == "ref" else "2") * 64), \
+             mock.patch("builtins.print") as output:
+            self.assertEqual(measure("ng", "ref", "head", "unused", report_only=True), 1)
+            self.assertEqual(sample.call_count, 1)
+            lines = [str(c.args[0]) for c in output.call_args_list if c.args]
+            self.assertTrue(any("FAILED — [reference-self] collection failed: transport failed" in l for l in lines), lines)
+            self.assertFalse(any("NOT JUDGED" in l for l in lines), lines)
 
     def test_control_precedes_unchanged_candidate_bar(self):
         for speed, expected in ((90, 0), (89.999, 1)):
