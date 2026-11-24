@@ -186,8 +186,11 @@ pinned nginx and lobo, `tests/serve/proxy_body_refusal_e2e.lu` holds
 the refusals to the loop's own, and `tools/lobo-membudget`'s `cost,
 proxied uploads` row holds what one upload holds at its peak under
 three times its body, and `late, proxied uploads` the high water's rise
-under 256 KB over a hundred drives of 64 proxied bodies arriving at
-once, after a hundred that warm it.
+under 4 MB over a hundred drives of 64 proxied bodies arriving at once,
+after a hundred that warm it: nothing kept past the warm-up (a correct
+read's high water still steps now and then, and no single run gates
+that). `tests/proxy/owed_read_size.lu` holds the 4 KiB read itself,
+through `proxy.owed_pieces`, the size of each piece a read kept.
 
 The readiness set is made before `main`. Through wolf 0.2.30 the
 runtime made it at the first call that parked, and asserted on the
