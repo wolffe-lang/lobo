@@ -3186,6 +3186,26 @@ fn body_short(mode: str, length: int, rest: str, limits: http.Limits, used: int)
     false
 }
 
+/// Whether a request for `path` whose body has not all come is owed
+/// to its exchange (lobo#142): routed to a `proxy_pass` (`route_proxied`)
+/// and not the admin endpoint's (`admin_on`: metrics on and a GET or
+/// HEAD), which is answered before any route and reads its body here.
+/// Pure and total.
+fn owed_route(c: config.Conf, srv: int, path: str, admin_on: bool) -> bool {
+    if admin_on {
+        let decoded = http.percent_decode(path) else |_| {
+            return false
+        }
+        let norm = http.normalize_path(decoded) else {
+            return false
+        }
+        if !admin_kind(true, norm).is_empty() {
+            return false
+        }
+    }
+    route_proxied(c, srv, path)
+}
+
 /// Whether the request for `path` is routed to a `proxy_pass`, the one
 /// route that uses a request's body. A path that does not
 /// decode or normalize is not: its 400 is answered without the body.
@@ -3896,11 +3916,21 @@ pub fn serve_request(
     // nginx answers it, and the loop discards the body beside its other
     // rows as it arrives, keeping none of it (`discard_step`). The 413
     // and the budget's 503 are still decided here, at the head
-    // (`body_short` answers false for them). A proxied route reads its
-    // body here, as before.
+    // (`body_short` answers false for them). lobo#142: on the serving
+    // loop a proxied route's body is not waited for here either: it is
+    // OWED to the exchange, which reads it beside the loop before it
+    // connects (`proxy.owe`), under the same limits. Any other caller,
+    // and a proxied path that is also the admin endpoint's, reads it
+    // here, as before.
     var whole = true
-    if body_short(req.body_mode, req.content_length, rest0, limits, chg.used) &&
-        !route_proxied(c, srv, req.path) {
+    var owed = false
+    let short = body_short(req.body_mode, req.content_length, rest0, limits, chg.used)
+    let admin_on = opts.metrics_on && (req.method == "GET" || req.method == "HEAD")
+    if short && opts.stream_w >= 0 && owed_route(c, srv, req.path, admin_on) {
+        whole = false
+        owed = true
+        rest = ""
+    } else if short && !route_proxied(c, srv, req.path) {
         whole = false
         rest = ""
         if req.body_mode == "length" {
@@ -4060,20 +4090,29 @@ pub fn serve_request(
         // — nothing here waits on the upstream — and hands the job back
         // unanswered and unlogged; the loop starts the proc, and the
         // access line and the counters are written when it reports. A
-        // refusal the plan already knows (502) is answered here, now.
-        // Every other caller keeps the inline exchange.
-        let job = proxy.prepare(
-            c,
-            req,
-            body,
-            pplan,
-            "127.0.0.1",
-            opts.token,
-            now_date(),
-            keep,
-            mut rsx,
-        )
-        if opts.stream_w >= 0 && job.fail == 0 {
+        // refusal the plan already knows (502) is answered here, now,
+        // unless the body is owed: the exchange then reads it first and
+        // answers the refusal after, as this step did. Every other
+        // caller keeps the inline exchange.
+        let date = now_date()
+        var job = proxy.prepare(c, req, body, pplan, "127.0.0.1", opts.token, date, keep, mut rsx)
+        if owed {
+            let o = proxy.Owed {
+                mode: if req.body_mode == "length" { 1 } else { 2 },
+                have: rest0,
+                want: req.content_length,
+                max_body: limits.max_body,
+                max_digits: limits.max_chunk_digits,
+                read_ms: opts.read_timeout_ms,
+                bud_limit: chg.limit,
+                bud_used: chg.used,
+                p400: error_response(400, false, date, opts.token),
+                p413: error_response(413, false, date, opts.token),
+                p503: error_response(503, false, date, opts.token),
+            }
+            job = proxy.owe(c, req, pplan, "127.0.0.1", job, o)
+        }
+        if opts.stream_w >= 0 && (job.fail == 0 || owed) {
             acc.proxied = true
             var hand = req_out(!keep, if keep { rest } else { "" }, take acc, chg)
             hand.logged = false
@@ -4126,7 +4165,10 @@ pub fn serve_request(
             raised = true
             true
         }
-        if raised {
+        if raised || owed {
+            // lobo#142: an owed body is unread here, so the connection
+            // cannot be kept (a proxied route is owed one, and every
+            // owed request returns above: this is a guard)
             return req_out(true, "", take acc, chg)
         }
     }
