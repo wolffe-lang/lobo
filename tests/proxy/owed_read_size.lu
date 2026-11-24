@@ -1,0 +1,111 @@
+//! check: run(exit=0, stdout="owed read size ok\n")
+//! phase: run
+//! lanes: native checked
+//! conforms: err.union
+//! stage-src: proxy http config resolver
+//!
+//! AN OWED LENGTH BODY IS READ AT MOST 4 KiB AT A TIME (lobo#142). An
+//! exchange reads a body owed to it in reads that each ask for at most
+//! 4 KiB, so its pieces are of one size (pieces of whatever size each
+//! read returned spread the allocator's free space, and the high water
+//! kept rising: `tools/lobo-membudget`'s `late, proxied uploads`). This
+//! holds the read's size itself, which no resident figure can: a body
+//! is written into a loopback connection in one write and left to
+//! arrive whole, then read as an exchange reads it
+//! (`proxy.owed_pieces`), and every piece a read returned must be at
+//! most 4,096 bytes:
+//!   * `owed-read-4k`: a body of 64 KiB with nothing read with the
+//!     head; 20,000 bytes after 300 that came with the head (that first
+//!     piece is the head's, and any size); and 12,289 bytes (three
+//!     reads of 4,096 and one byte);
+//!   * `owed-read-whole`: the pieces are the body, byte count for byte
+//!     count.
+//! A failure prints `owed_read_size: FAILED — [row]` with the pieces'
+//! sizes, then one assert. Loopback only, an OS-chosen port, each
+//! connection closed by its own handle. Lane: native and checked (a
+//! socket).
+
+use proxy
+
+/// `v` written as its numbers, for a failure's message. Total.
+fn show(v: List[int]) -> str {
+    var out = ""
+    for x in v {
+        out = if out.is_empty() { "{x}" } else { "{out} {x}" }
+    }
+    "[{out}]"
+}
+
+/// `n` bytes of `c`. Total.
+fn fill(n: int, c: str) -> str {
+    var out = c
+    while out.len < n {
+        out = "{out}{out}"
+    }
+    out[0..n]
+}
+
+/// Read `body` (all of it written first, in one write) as an exchange
+/// reads an owed length body with `have` read with the head; returns
+/// the pieces' sizes. Row: the net's errors.
+fn pieces(have: str, body: str) -> List[int] ! {io, refused, timeout, closed} {
+    let l = net_listen("127.0.0.1:0")?
+    let port = net_port(l)?
+    let w = net_connect("127.0.0.1:{port}")?
+    let r = net_accept(l)?
+    net_write(w, body)?
+    // the whole body sits in the reader's buffer before the first read
+    time_sleep_ms(100)
+    var o = proxy.owed_none()
+    o.mode = 1
+    o.have = have
+    o.want = have.len + body.len
+    o.read_ms = 3000
+    let sizes = proxy.owed_pieces(r, -1, o)
+    net_close(w)?
+    net_close(r)?
+    net_close(l)?
+    sizes
+}
+
+/// Check one body's pieces; a failure is printed by name and kept.
+/// Total.
+fn check(mut fails: List[str], what: str, have: str, sizes: List[int], want: int) {
+    var total = 0
+    var i = 0
+    for s in sizes {
+        total = total + s
+        // the head's piece, if any, came with the head and is any size
+        let head_piece = i == 0 && !have.is_empty()
+        if !head_piece && s > 4096 {
+            print(
+                "owed_read_size: FAILED — [owed-read-4k] {what}: a read returned {s} bytes, over 4,096; the pieces {show(sizes)}",
+            )
+            (mut fails).push("owed-read-4k {what}")
+        }
+        i = i + 1
+    }
+    if total != want {
+        print(
+            "owed_read_size: FAILED — [owed-read-whole] {what}: the pieces hold {total} bytes, the body {want}; the pieces {show(sizes)}",
+        )
+        (mut fails).push("owed-read-whole {what}")
+    }
+}
+
+fn main() -> !int {
+    var fails = List[str]()
+    let big = fill(65536, "b")
+    let a = pieces("", big)?
+    check(mut fails, "64 KiB, nothing with the head", "", a, 65536)
+    let head = fill(300, "h")
+    let mid = fill(20000, "m")
+    let b = pieces(head, mid)?
+    check(mut fails, "20,000 after 300 with the head", head, b, 20300)
+    let odd = fill(12289, "o")
+    let c = pieces("", odd)?
+    check(mut fails, "12,289, nothing with the head", "", c, 12289)
+    assert(fails.is_empty(), "owed read size: {fails.len} failures")
+    print("owed read size ok")
+    0
+}
