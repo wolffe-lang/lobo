@@ -1033,6 +1033,24 @@ pub fn build_upstream(
     remote_addr: str,
     body: str,
 ) -> str {
+    upstream_text(c, req, pl, phost, pport, remote_addr, body, false)
+}
+
+/// `build_upstream`'s request, or with `owed` (lobo#142) its head left
+/// open for a body not yet read: every header line but the framing,
+/// the client's own `Content-Length` dropped, and no blank line.
+/// `finish` closes it once the body is known, to the bytes
+/// `build_upstream` makes for that body. Pure and total.
+fn upstream_text(
+    c: config.Conf,
+    req: http.Request,
+    pl: Plan,
+    phost: str,
+    pport: int,
+    remote_addr: str,
+    body: str,
+    owed: bool,
+) -> str {
     let target = rewrite_target(pl.matched, pl.pt.has_uri, pl.pt.uri, req.path, req.query)
     let proxy_host = "{phost}:{pport}"
     let xff = inbound_xff(req)
@@ -1063,20 +1081,37 @@ pub fn build_upstream(
     // here carries the one Content-Length built from it below, so the
     // client's own is not forwarded beside it (it was: two lines, equal,
     // which a strict upstream refuses); with no body the client's is the
-    // only one and is kept, as before
+    // only one and is kept, as before. An owed body is framed by
+    // `finish`, which writes the one Content-Length for it
     var j: int = 0
     for cn in req.hnames {
-        let framed_here = cn == "content-length" && !body.is_empty()
+        let framed_here = cn == "content-length" && (!body.is_empty() || owed)
         if !is_hop_by_hop(cn) && !name_in(override_names, cn) && !framed_here {
             head = "{head}{cn}: {req.hvals[j]}\r\n"
         }
         j = j + 1
+    }
+    if owed {
+        return head
     }
     if body.is_empty() {
         return "{head}\r\n"
     }
     head = "{head}Content-Length: {body.len}\r\n"
     "{head}\r\n{body}"
+}
+
+/// An open head (`upstream_text` with `owed`) closed for `body`, the
+/// owed body as read: the bytes `build_upstream` makes for the same
+/// request and body. An empty body (a chunked body of no data) is
+/// framed as `build_upstream` frames none: no Content-Length, the
+/// client's own having been none (a chunked request carries no
+/// length). Pure and total.
+fn finish(head: str, body: str) -> str {
+    if body.is_empty() {
+        return "{head}\r\n"
+    }
+    "{head}Content-Length: {body.len}\r\n\r\n{body}"
 }
 
 // ==================================================================
@@ -1887,7 +1922,13 @@ fn gw_body(code: int, token: str) -> str {
 /// caller that keeps the connection must put in front of its next read,
 /// and `end_ms` the wall clock where the exchange ended (ws69, lobo#105:
 /// `job_serve`'s, the end of `$request_time`). Filled by `run`; a
-/// caller that does not log passes a fresh one.
+/// caller that does not log passes a fresh one. lobo#142: an exchange
+/// that read an owed body says so (`owed`), with the body's bytes as
+/// framed (`admitted`, what the loop's own read charged the memory
+/// budget), whether the read refused the request before any upstream
+/// was asked (`refused`: the request is then not a proxied one in the
+/// log), and a budget refusal's site, budget and would-be total
+/// (`bud_site` empty for none), as the loop's own read reported them.
 pub struct RunAcc {
     addr: str,
     status: int,
@@ -1895,11 +1936,30 @@ pub struct RunAcc {
     up_ms: int,
     carry: str,
     end_ms: int,
+    owed: bool,
+    admitted: int,
+    refused: bool,
+    bud_site: str,
+    bud_limit: int,
+    bud_would: int,
 }
 
 /// A fresh, empty RunAcc (the caller's constructor). Total.
 pub fn run_acc() -> RunAcc {
-    RunAcc { addr: "", status: 0, body_bytes: 0, up_ms: 0, carry: "", end_ms: 0 }
+    RunAcc {
+        addr: "",
+        status: 0,
+        body_bytes: 0,
+        up_ms: 0,
+        carry: "",
+        end_ms: 0,
+        owed: false,
+        admitted: 0,
+        refused: false,
+        bud_site: "",
+        bud_limit: 0,
+        bud_would: 0,
+    }
 }
 
 /// The status code of an upstream status line ("HTTP/1.1 200 OK" ->
@@ -2202,7 +2262,10 @@ pub fn run(
 /// as the access log's `$upstream_addr` (empty: none); the peers, in
 /// selection order, each with the upstream request built for it; and
 /// what the relay needs. `anchors` are the https leg's trust anchors
-/// (DER), loaded once at `prepare`.
+/// (DER), loaded once at `prepare`. `owed` is the request's body
+/// when it had not all come at the hand-over (lobo#142, `owe`): the
+/// exchange reads it first, and each request in `reqs` is then a head
+/// left open for its framing (`finish`).
 pub struct Job {
     fail: int,
     addr: str,
@@ -2216,6 +2279,52 @@ pub struct Job {
     hosts: List[str],
     ports: List[int],
     reqs: List[str],
+    owed: Owed,
+}
+
+/// The part of a proxied request's body that had not come when the
+/// serving loop handed its exchange over (lobo#142). The loop does not
+/// wait on a client's body: the exchange reads it, before it connects
+/// to an upstream (nginx's order, `proxy_request_buffering on`), under
+/// the limits the loop's own read had. `mode` is 0 (nothing owed: every
+/// job before lobo#142's change, and every one whose body came with
+/// its head), 1 (a `Content-Length` body of `want` bytes) or 2
+/// (chunked). `have` is the body's start, read with the head. The
+/// limits are `client_max_body_size` (`max_body`), the chunk size's
+/// digit bound, the read timeout between two reads (`read_ms`), and
+/// the memory budget (`bud_limit`, 0 for none) with what the request
+/// had already used of it (`bud_used`). The pages are the loop's own
+/// error responses (`serve.error_response`), rendered at the
+/// hand-over, for the refusals the read can end in.
+pub struct Owed {
+    mode: int,
+    have: str,
+    want: int,
+    max_body: int,
+    max_digits: int,
+    read_ms: int,
+    bud_limit: int,
+    bud_used: int,
+    p400: str,
+    p413: str,
+    p503: str,
+}
+
+/// Nothing owed: a job whose body, if any, came whole. Total.
+pub fn owed_none() -> Owed {
+    Owed {
+        mode: 0,
+        have: "",
+        want: 0,
+        max_body: 0,
+        max_digits: 0,
+        read_ms: 0,
+        bud_limit: 0,
+        bud_used: 0,
+        p400: "",
+        p413: "",
+        p503: "",
+    }
 }
 
 fn job_failed(code: int, addr: str, token: str, date: str) -> Job {
@@ -2232,6 +2341,7 @@ fn job_failed(code: int, addr: str, token: str, date: str) -> Job {
         hosts: List[str](),
         ports: List[int](),
         reqs: List[str](),
+        owed: owed_none(),
     }
 }
 
@@ -2366,7 +2476,28 @@ pub fn prepare(
         hosts: hosts,
         ports: ports,
         reqs: reqs,
+        owed: owed_none(),
     }
+}
+
+/// `j`, a job `prepare` made with no body, with the request's body
+/// owed (lobo#142): the part `o` that had not come at the hand-over,
+/// and each peer's request rebuilt as a head left open for the body's
+/// framing (`upstream_text`), which the exchange closes once it has
+/// read the body (`finish`). A job `prepare` refused keeps its refusal:
+/// the exchange reads the body and then answers it, as the loop read
+/// it before answering. Total.
+pub fn owe(c: config.Conf, req: http.Request, pl: Plan, remote_addr: str, j: Job, o: Owed) -> Job {
+    var reqs = List[str]()
+    var ri: int = 0
+    while ri < j.hosts.len {
+        (mut reqs).push(upstream_text(c, req, pl, j.hosts[ri], j.ports[ri], remote_addr, "", true))
+        ri = ri + 1
+    }
+    var out = copy j
+    out.reqs = reqs
+    out.owed = copy o
+    out
 }
 
 /// The half of an exchange that waits on the upstream, as `run`'s peer
@@ -2378,6 +2509,24 @@ pub fn prepare(
 /// net `closed`/`io` (W0602 allowed, as `run`).
 #[allow(w0602)]
 pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {closed, io} {
+    // lobo#142: a body the loop handed over unfinished is read here,
+    // whole, before anything else — a refusal the plan knew included,
+    // as the loop read the body before answering one
+    let owed = j.owed.mode != 0
+    var done = List[str]()
+    var after = ""
+    if owed {
+        acc.owed = true
+        let t = read_owed(client, notes, j.owed)
+        if t.code != 0 {
+            return owed_refuse(client, j.owed, t, mut acc)?
+        }
+        acc.admitted = t.raw
+        after = t.after
+        for h in j.reqs {
+            (mut done).push(finish(h, t.body))
+        }
+    }
     if j.fail != 0 {
         if !j.addr.is_empty() {
             acc.addr = copy j.addr
@@ -2393,7 +2542,7 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
     while idx < np {
         let phost = j.hosts[idx]
         let pport = j.ports[idx]
-        let upreq = j.reqs[idx]
+        let upreq = if owed { done[idx] } else { j.reqs[idx] }
         acc.addr = if acc.addr.is_empty() {
             "{phost}:{pport}"
         } else {
@@ -2436,6 +2585,12 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
         }
         acc.up_ms = acc.up_ms + (time_unix_ms() - t0)
         if st == 0 {
+            // lobo#142: what followed an owed body in its reads is the
+            // next request's start, in front of what came while the
+            // exchange waited
+            if !after.is_empty() {
+                acc.carry = "{after}{acc.carry}"
+            }
             return !j.keep
         }
         if st == 497 {
@@ -2467,6 +2622,195 @@ pub fn exchange(client: int, j: Job, notes: int, mut acc: RunAcc) -> bool ! {clo
     acc.status = last_status
     acc.body_bytes = gw_body(last_status, j.token).len
     send_gateway_error(client, last_status, j.date, j.token)
+    true
+}
+
+/// What an exchange's read of its owed body came to (lobo#142): `code`
+/// 0 when the body is whole (`body` its content, decoded when chunked;
+/// `after` what followed it in the reads; `raw` its bytes as framed),
+/// else the status the request is logged with: 400 (the framing is
+/// malformed, the bytes are not UTF-8, or the client closed), 408 (the
+/// client sent nothing for the read timeout), 413, 503 (the budget:
+/// `site` and `would` as the loop's read named them) or 497 (the loop
+/// stopped the exchange, ws69).
+struct Took {
+    code: int,
+    body: str,
+    after: str,
+    raw: int,
+    gone: bool,
+    site: str,
+    would: int,
+}
+
+fn took(code: int) -> Took {
+    Took { code: code, body: "", after: "", raw: 0, gone: false, site: "", would: 0 }
+}
+
+/// Read the owed body `o` from `client` (lobo#142), in the loop's own
+/// read's order and under its limits (`serve.take_length`,
+/// `serve.read_chunked`): a length body until it has `want` bytes; a
+/// chunked body until its final CRLF (`http.chunked_end`), a malformed
+/// frame a 400, past twice `client_max_body_size` raw a 413, past the
+/// budget a 503 at site `body-chunked`, and decoded
+/// (`http.decode_chunked`: a size past `client_max_body_size` is a
+/// 413). Between two reads it waits at most `read_ms` (nginx's
+/// `client_body_timeout`, one timer between successive reads): then a
+/// 408, and a client that closes a 400, each with nothing sent, as the
+/// pinned nginx logs them. The bytes are read as bytes, so a read that
+/// ends inside a code point is no failure; the body and what follows
+/// it must be UTF-8 (lobo is str-only on a body at this pin), else a
+/// 400. The loop's stop on `notes` ends it as 497, unread (`up_wait`).
+/// Nothing here watches for a pipelined request: every byte the client
+/// sends is the body's until it is whole. net tier. Total.
+fn read_owed(client: int, notes: int, o: Owed) -> Took {
+    var buf = o.have.bytes()
+    let cap = o.max_body * 2
+    loop {
+        var end = -1
+        if o.mode == 1 {
+            if buf.len >= o.want {
+                end = o.want
+            }
+        } else {
+            end = http.chunked_end(buf, o.max_digits)
+            if end == -2 {
+                return took(400)
+            }
+        }
+        if end >= 0 {
+            let whole = str_from_utf8(buf[0..end]) else |_| {
+                return took(400)
+            }
+            let after = str_from_utf8(buf[end..buf.len]) else |_| {
+                return took(400)
+            }
+            var body = whole
+            if o.mode == 2 {
+                var lim = http.default_limits()
+                lim.max_body = o.max_body
+                lim.max_chunk_digits = o.max_digits
+                var big = false
+                body = http.decode_chunked(whole, lim) else |e| match e {
+                    malformed => {
+                        return took(400)
+                    },
+                    too_large => {
+                        big = true
+                        ""
+                    },
+                }
+                if big {
+                    return took(413)
+                }
+            }
+            var t = took(0)
+            t.body = body
+            t.after = after
+            t.raw = end
+            return t
+        }
+        if o.mode == 2 {
+            if buf.len > cap {
+                return took(413)
+            }
+            if o.bud_limit > 0 && o.bud_used + buf.len > o.bud_limit {
+                var t = took(503)
+                t.site = "body-chunked"
+                t.would = o.bud_limit + 1
+                return t
+            }
+        }
+        var set = [client]
+        if notes >= 0 {
+            (mut set).push(notes)
+        }
+        let ready = net_wait(set, o.read_ms) else |_| {
+            var t = took(400)
+            t.gone = true
+            return t
+        }
+        if ready.is_empty() {
+            return took(408)
+        }
+        for f in ready {
+            if notes >= 0 && f == notes {
+                return took(497)
+            }
+        }
+        var spurious = false
+        let piece = net_read_bytes(client, 4096) else |e| match e {
+            closed => {
+                var t = took(400)
+                t.gone = true
+                return t
+            },
+            timeout => {
+                spurious = true
+                List[byte]()
+            },
+            io => {
+                var t = took(400)
+                t.gone = true
+                return t
+            },
+        }
+        if !spurious && piece.is_empty() {
+            var t = took(400)
+            t.gone = true
+            return t
+        }
+        for b in piece {
+            (mut buf).push(b)
+        }
+    }
+}
+
+/// The answer to an owed body's read that did not end whole
+/// (`read_owed`): the page for a 400 of the framing, a 413 or a 503,
+/// written and the connection then drained briefly as the loop drains
+/// it after a 413 or a 503 (`serve.half_close_drain`); nothing for a
+/// client that closed (400), went quiet (408) or a stop (497). The
+/// account takes the status, the page's body length and the budget's
+/// site; no upstream was asked. Returns the close (always), or
+/// `closed` for a client that closed. net tier.
+fn owed_refuse(client: int, o: Owed, t: Took, mut acc: RunAcc) -> bool ! {closed} {
+    acc.status = t.code
+    acc.body_bytes = 0
+    acc.refused = t.code != 497
+    if t.code == 503 {
+        acc.bud_site = copy t.site
+        acc.bud_limit = o.bud_limit
+        acc.bud_would = t.would
+    }
+    if t.gone {
+        return closed
+    }
+    var page = ""
+    if t.code == 400 {
+        page = o.p400
+    } else if t.code == 413 {
+        page = o.p413
+    } else if t.code == 503 {
+        page = o.p503
+    }
+    if !page.is_empty() {
+        let at = page.find("\r\n\r\n") else -1
+        acc.body_bytes = if at >= 0 { page.len - at - 4 } else { 0 }
+        net_write(client, page) else |_| {}
+        if t.code != 400 {
+            net_deadline(client, 200) else |_| {
+                return true
+            }
+            var i: int = 0
+            while i < 4 {
+                let _ = net_read_bytes(client, 4096) else |_| {
+                    return true
+                }
+                i = i + 1
+            }
+        }
+    }
     true
 }
 
@@ -2590,6 +2934,12 @@ pub fn job_text(j: Job) -> str {
         out = "{out}{w_str(j.hosts[i])}{w_int(j.ports[i])}{w_str(j.reqs[i])}"
         i = i + 1
     }
+    // lobo#142: an owed body follows the peers; a job with none ends
+    // there, its text as it was before an exchange could read a body
+    let o = j.owed
+    if o.mode != 0 {
+        out = "{out}{w_int(o.mode)}{w_str(o.have)}{w_int(o.want)}{w_int(o.max_body)}{w_int(o.max_digits)}{w_int(o.read_ms)}{w_int(o.bud_limit)}{w_int(o.bud_used)}{w_str(o.p400)}{w_str(o.p413)}{w_str(o.p503)}"
+    }
     out
 }
 
@@ -2632,6 +2982,23 @@ pub fn job_parse(s: str) -> Job ! {bad} {
         (mut reqs).push(r_str(mut c))
         i = i + 1
     }
+    var owed = owed_none()
+    if !c.bad && c.at < s.len {
+        owed.mode = r_int(mut c)
+        owed.have = r_str(mut c)
+        owed.want = r_int(mut c)
+        owed.max_body = r_int(mut c)
+        owed.max_digits = r_int(mut c)
+        owed.read_ms = r_int(mut c)
+        owed.bud_limit = r_int(mut c)
+        owed.bud_used = r_int(mut c)
+        owed.p400 = r_str(mut c)
+        owed.p413 = r_str(mut c)
+        owed.p503 = r_str(mut c)
+        if owed.mode != 1 && owed.mode != 2 {
+            return bad
+        }
+    }
     if c.bad || c.at != s.len {
         return bad
     }
@@ -2648,6 +3015,7 @@ pub fn job_parse(s: str) -> Job ! {bad} {
         hosts: hosts,
         ports: ports,
         reqs: reqs,
+        owed: owed,
     }
 }
 
@@ -2876,6 +3244,12 @@ pub fn job_serve(client: int, job_s: str, tail: str, notes: int) -> (str, int) {
     // `$request_time` to it, not to the pass that hears the report
     acc.end_ms = time_unix_ms()
     let cl = if close { 1 } else { 0 }
-    let det = "{acc.status} {acc.body_bytes} {acc.up_ms} {cl} {acc.end_ms} {acc.addr.len}:{acc.addr}{acc.carry.len}:{acc.carry}"
+    var det = "{acc.status} {acc.body_bytes} {acc.up_ms} {cl} {acc.end_ms} {acc.addr.len}:{acc.addr}{acc.carry.len}:{acc.carry}"
+    // lobo#142: an exchange that read an owed body adds what the read
+    // admitted and refused: `o<admitted>;<refused 0|1>;<budget>;<would>;<sitelen>:<site>`
+    if acc.owed {
+        let rf = if acc.refused { 1 } else { 0 }
+        det = "{det}o{acc.admitted};{rf};{acc.bud_limit};{acc.bud_would};{acc.bud_site.len}:{acc.bud_site}"
+    }
     ("r {det.len} {tail.len}\n{det}{tail}", wcode)
 }
