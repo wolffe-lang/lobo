@@ -42,7 +42,9 @@ frame (400), and 60 s between two reads. Nothing reaches the upstream
 before the body is whole, and the upstream receives it with one
 `Content-Length`, as before. The bytes after the body are the next
 request's start, as before. A body read this way may split a code point
-between two reads; it must still be UTF-8 once whole, else 400.
+between two reads; it must still be UTF-8 once whole, else 400. A body
+with a `Content-Length` is held once, as it was read, and sent behind
+its head in one write.
 
 A request whose body stops arriving is now logged 408, and one whose
 client closes mid-body 400, as nginx logs them. Both still close the
@@ -52,9 +54,12 @@ When the host refuses the exchange its sockets (out of descriptors), the
 exchange still runs on the serving loop, and so does this body read
 (#148).
 
-`tools/lobo-membudget` has a row for it, `flat, proxied uploads`: 64
-proxied uploads of 64 KiB arriving at once, under the same 512 KB. Its
-`--starts` tally now names the cpus the run may use, not the host's.
+`tools/lobo-membudget` has two rows for it. `cost, proxied uploads`
+reads what one proxied upload of 64 KiB holds at its peak, 64 arriving
+at once, and holds it under twice the body (on a host with /proc).
+`flat, proxied uploads` holds the memory flat across the same uploads,
+under the same 512 KB. Its `--starts` tally now names the cpus the run
+may use, not the host's.
 
 ### The memory gate names a master that does not start (lobo#126)
 
