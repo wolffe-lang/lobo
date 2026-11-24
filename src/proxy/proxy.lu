@@ -2854,9 +2854,11 @@ fn read_owed_length(client: int, notes: int, o: Owed) -> Took {
         if w != 0 {
             return took(w)
         }
+        // CHECK (never merge): every read asks for at most 4 KiB, so the
+        // pieces are of one size (the last may be shorter)
         var ask = o.want - n
-        if ask > 65536 {
-            ask = 65536
+        if ask > 4096 {
+            ask = 4096
         }
         var spurious = false
         var piece = net_read_bytes(client, ask) else |e| match e {
