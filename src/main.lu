@@ -3717,10 +3717,28 @@ fn serve_main(
                                     // request served: nothing logged or counted,
                                     // as ws67's kill logged nothing
                                     let px_logs = d.ok && d.status != 497
+                                    // lobo#142: an owed body's read that refused
+                                    // the request asked no upstream: logged as
+                                    // the loop logs its own refusal, a budget one
+                                    // with its event
+                                    let px_hit = !d.bud_site.is_empty()
+                                    let via = !d.refused
+                                    if px_logs && px_hit {
+                                        ev_event(
+                                            mut elog,
+                                            "error",
+                                            shell.ev_budget_exceeded(
+                                                cg,
+                                                d.bud_site,
+                                                d.bud_limit,
+                                                d.bud_would,
+                                            ),
+                                        )
+                                    }
                                     if px_logs &&
-                                        note_needed(gens, cg, d.admitted, d.mem_rt, false) {
+                                        note_needed(gens, cg, d.admitted, d.mem_rt, px_hit) {
                                         in life {
-                                            gen_note(mut gens, cg, d.admitted, d.mem_rt, false)
+                                            gen_note(mut gens, cg, d.admitted, d.mem_rt, px_hit)
                                         }
                                     }
                                     if px_logs {
@@ -3730,8 +3748,8 @@ fn serve_main(
                                                 d.status,
                                                 d.body_bytes,
                                                 span,
-                                                true,
-                                                d.status,
+                                                via,
+                                                if via { d.status } else { 0 },
                                                 d.up_ms,
                                                 d.admitted,
                                             )
@@ -3741,10 +3759,14 @@ fn serve_main(
                                         var a3 = d.acc
                                         a3.status = d.status
                                         a3.body_bytes = d.body_bytes
-                                        a3.proxied = true
+                                        a3.proxied = via
                                         a3.up_addr = d.addr
                                         // ws68 (lobo#99): 499, the client gone: no upstream status (`-`)
-                                        a3.up_status = if d.status == 499 { 0 } else { d.status }
+                                        a3.up_status = if d.status == 499 || !via {
+                                            0
+                                        } else {
+                                            d.status
+                                        }
                                         a3.up_ms = d.up_ms
                                         a3.unix_ms = t_end
                                         a3.req_ms = span
@@ -4293,6 +4315,8 @@ fn serve_main(
                                         n_wait = -1
                                         n_stream = if close_it { 2 } else { 1 }
                                     } else {
+                                        // lobo#148: here an owed body is read on
+                                        // the loop, as before lobo#142's change
                                         let rep = proxy.job_serve(fd, px_job, px_tail, -1)
                                         let d = px_account(rep.0)
                                         let t_end = if d.end_ms > 0 { d.end_ms } else { tw }
@@ -4300,14 +4324,27 @@ fn serve_main(
                                         if span < 0 {
                                             span = 0
                                         }
+                                        let via = !d.refused
+                                        if !d.bud_site.is_empty() {
+                                            ev_event(
+                                                mut elog,
+                                                "error",
+                                                shell.ev_budget_exceeded(
+                                                    cg,
+                                                    d.bud_site,
+                                                    d.bud_limit,
+                                                    d.bud_would,
+                                                ),
+                                            )
+                                        }
                                         in life {
                                             note_served(
                                                 mut counters,
                                                 d.status,
                                                 d.body_bytes,
                                                 span,
-                                                true,
-                                                d.status,
+                                                via,
+                                                if via { d.status } else { 0 },
                                                 d.up_ms,
                                                 d.admitted,
                                             )
@@ -4316,10 +4353,10 @@ fn serve_main(
                                             var a4 = d.acc
                                             a4.status = d.status
                                             a4.body_bytes = d.body_bytes
-                                            a4.proxied = true
+                                            a4.proxied = via
                                             a4.up_addr = d.addr
                                             // ws68 (lobo#99): 499, the client gone: no upstream status (`-`)
-                                            a4.up_status = if d.status == 499 {
+                                            a4.up_status = if d.status == 499 || !via {
                                                 0
                                             } else {
                                                 d.status
@@ -5137,6 +5174,10 @@ struct PxDone {
     acc: obs.Access,
     admitted: int,
     mem_rt: int,
+    refused: bool,
+    bud_site: str,
+    bud_limit: int,
+    bud_would: int,
 }
 
 fn px_bad() -> PxDone {
@@ -5153,6 +5194,10 @@ fn px_bad() -> PxDone {
         acc: obs.access_new(),
         admitted: 0,
         mem_rt: 0,
+        refused: false,
+        bud_site: "",
+        bud_limit: 0,
+        bud_would: 0,
     }
 }
 
@@ -5191,8 +5236,43 @@ fn px_account(t: str) -> PxDone {
     }
     let ta = tail_str(det, at)
     let tc = tail_str(det, ta.1)
-    if ta.1 < 0 || tc.1 != det.len || nums[0] < 0 || nums[1] < 0 || nums[2] < 0 || nums[4] < 0 {
+    if ta.1 < 0 || tc.1 < 0 || nums[0] < 0 || nums[1] < 0 || nums[2] < 0 || nums[4] < 0 {
         return px_bad()
+    }
+    // lobo#142: an exchange that read an owed body adds
+    // `o<admitted>;<refused 0|1>;<budget>;<would>;<sitelen>:<site>`
+    var o_adm = 0
+    var o_ref = false
+    var o_lim = 0
+    var o_would = 0
+    var o_site = ""
+    if tc.1 != det.len {
+        let tag = det.get(tc.1..tc.1 + 1) else { "" }
+        if tag != "o" {
+            return px_bad()
+        }
+        var on = List[int]()
+        var oat = tc.1 + 1
+        var k = 0
+        while k < 4 {
+            let rest = det[oat..det.len]
+            let sc = rest.find(";") else -1
+            if sc < 0 {
+                return px_bad()
+            }
+            (mut on).push(rest[0..sc].to_int() else |_| { -1 })
+            oat = oat + sc + 1
+            k = k + 1
+        }
+        let st = tail_str(det, oat)
+        if st.1 != det.len || on[0] < 0 || on[1] < 0 || on[2] < 0 || on[3] < 0 {
+            return px_bad()
+        }
+        o_adm = on[0]
+        o_ref = on[1] == 1
+        o_lim = on[2]
+        o_would = on[3]
+        o_site = st.0
     }
     let addr = ta.0
     let back = acc_unpack(tail)
@@ -5207,8 +5287,12 @@ fn px_account(t: str) -> PxDone {
         carry: tc.0,
         has_acc: back.has,
         acc: back.a,
-        admitted: back.mem_hw,
+        admitted: back.mem_hw + o_adm,
         mem_rt: back.mem_rt,
+        refused: o_ref,
+        bud_site: o_site,
+        bud_limit: o_lim,
+        bud_would: o_would,
     }
 }
 
