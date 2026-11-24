@@ -2780,7 +2780,14 @@ backend process and destination port. Linux and local defaults still use
 pairs, and a head/reference median-rate bar of 0.900. A same-binary
 reference-self check must first satisfy that budget in both label
 directions; otherwise the instrument refuses candidate judgment by name.
-Calibration is mandatory even where CI reports the candidate ratio.
+Calibration is mandatory even where CI reports the candidate ratio. On a
+dedicated machine a refused calibration is fatal. On a hosted runner
+(`GITHUB_ACTIONS=true`) it is reported instead (#134): a shared runner's
+noise can put one binary outside the bar against itself (head/reference
+0.81 to 1.15 on macOS runners). The candidate is then neither measured
+nor judged, and the gauntlet goes on to its later steps. A failure to
+collect the calibration, a saturated namespace among them, stays fatal
+everywhere.
 The existing macOS CI short window is unchanged. Raw results live under
 `reference-self/` and `comparison/`, with Linux TCP-state diagnostics.
 
