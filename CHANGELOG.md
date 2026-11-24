@@ -25,6 +25,37 @@ fields was read until the read timeout, and its connection closed
 unanswered. A request sent after such a body, in the same write, is now
 answered; it was taken with the body and lost.
 
+### A proxied request's body no longer holds other clients (lobo#142)
+
+A request to a `proxy_pass` route whose body has not all arrived with
+its head is now handed to its exchange, which reads the body beside the
+serving loop and only then connects to the upstream, as nginx does with
+`proxy_request_buffering on`. The serving loop read such a body itself,
+and while it waited for the body's next bytes it served no other
+request: a client sending its body slowly held every other client, up to
+60 s for each pause.
+
+The exchange reads the body under the limits the loop's read had, in the
+same order: `client_max_body_size` (413), the memory budget (503, with
+its `budget-exceeded` event at site `body-chunked`), a malformed chunk
+frame (400), and 60 s between two reads. Nothing reaches the upstream
+before the body is whole, and the upstream receives it with one
+`Content-Length`, as before. The bytes after the body are the next
+request's start, as before. A body read this way may split a code point
+between two reads; it must still be UTF-8 once whole, else 400.
+
+A request whose body stops arriving is now logged 408, and one whose
+client closes mid-body 400, as nginx logs them. Both still close the
+connection with nothing sent; they were logged with no status.
+
+When the host refuses the exchange its sockets (out of descriptors), the
+exchange still runs on the serving loop, and so does this body read
+(#148).
+
+`tools/lobo-membudget` has a row for it, `flat, proxied uploads`: 64
+proxied uploads of 64 KiB arriving at once, under the same 512 KB. Its
+`--starts` tally now names the cpus the run may use, not the host's.
+
 ### The memory gate names a master that does not start (lobo#126)
 
 `tools/lobo-membudget`'s master row read only "the drive itself
