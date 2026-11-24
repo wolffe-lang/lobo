@@ -163,9 +163,15 @@ limits: `client_max_body_size` (413), the memory budget (503 at site
 malformed chunk frame (400), and `read_timeout` between two reads
 (408, nothing sent; a client that closes is logged 400, as nginx logs
 it). It reads bytes, so a read that ends inside a code point is no
-failure; the body must be UTF-8 once whole. Then it frames the body
-with one `Content-Length`, as `proxy.build_upstream` does, and the
-exchange goes on as before. What followed the body in its reads goes
+failure; the body must be UTF-8 once whole. A length body is held
+once, as the pieces its reads returned, and never joined: each read
+asks for no more than the body still owes, the pieces are checked as
+UTF-8 across their joins (`http.utf8_parts`), and the exchange sends
+the head, with the one `Content-Length` `proxy.build_upstream` would
+write, and the pieces behind it in one gathered write
+(`net_writev_head`). A chunked body is gathered in one buffer and
+decoded, as the loop's read decodes it. Then the exchange goes on as
+before. What followed the body in its reads goes
 back with the account as the next request's start, in front of
 anything the client sent while the exchange waited. The account adds
 the body's bytes as framed (the generation's `mem-hw`), and a refusal,
@@ -175,9 +181,10 @@ exchange, and so the body's read, runs in the step, as before
 (lobo#148). `tests/serve/proxy_body_wait_e2e.lu` and
 `tests/serve/proxy_body_idle_e2e.lu` run these flows against the
 pinned nginx and lobo, `tests/serve/proxy_body_refusal_e2e.lu` holds
-the refusals to the loop's own, and `tools/lobo-membudget`'s `flat,
-proxied uploads` row holds the memory flat across 64 proxied bodies
-arriving at once.
+the refusals to the loop's own, and `tools/lobo-membudget`'s `cost,
+proxied uploads` row holds what one upload holds at its peak under
+twice its body, and `flat, proxied uploads` the memory flat across 64
+proxied bodies arriving at once.
 
 The readiness set is made before `main`. Through wolf 0.2.30 the
 runtime made it at the first call that parked, and asserted on the
