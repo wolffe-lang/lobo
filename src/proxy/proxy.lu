@@ -3209,6 +3209,10 @@ pub fn job_parse(s: str) -> Job ! {bad} {
 pub fn job_loop(jr: int, out: int) -> int {
     var going = true
     var close_end = true
+    // CHECK (never merge): each owed body's size is kept, outside the
+    // exchange's region, for the proc's life
+    var kept = List[byte]()
+    var keep_n = 0
     while going {
         // everything one exchange makes lives in this block and dies at
         // its brace — the frame's bytes, the upstream reads, the relayed
@@ -3334,6 +3338,8 @@ pub fn job_loop(jr: int, out: int) -> int {
                     let r = job_serve(cfd, job_s, tail, jr)
                     answer = r.0
                     wcode = r.1
+                    let pj = job_parse(job_s) else |_| { job_failed(502, "", "", "") }
+                    keep_n = pj.owed.want
                 }
                 if answer.is_empty() {
                     let det = "0 0 0 1 0 0:0:"
@@ -3345,9 +3351,18 @@ pub fn job_loop(jr: int, out: int) -> int {
                 going = false
             }
         }
+        var ki = 0
+        while ki < keep_n {
+            (mut kept).push(107 as byte)
+            ki = ki + 1
+        }
+        keep_n = 0
     }
     if close_end {
         net_close(jr) else |_| {}
+    }
+    if kept.len < 0 {
+        eprint("lobo: kept {kept.len}")
     }
     0
 }
