@@ -66,7 +66,14 @@
 # same 64 uploads of 64 KiB arriving at once, to the proxied location,
 # each read by its own exchange (64 at once, each in the exchange's
 # own region) and forwarded to the backend, each connection asked once
-# more after its reply, under 512 KB.
+# more after its reply. Its drive is prebuilt (no compile between two
+# drives, so the pool's procs are the same ones throughout; one idle
+# 5 s would leave). Two drives warm it, because the high water of 64
+# bodies at once settles over two (measured on the pool: +38 MB, then
+# +2.9 MB, then +0.1 MB a drive), and the growth over two drives more
+# must stay under 512 KB: a server that kept each body would keep 8 MB
+# over them. Until that measure, the row compared the second drive with
+# the first, which reads the settling as a leak.
 #
 # WHAT A PROXIED UPLOAD COSTS (lobo#142). Before that row, `cost,
 # proxied uploads` reads the proxied server's high water (/proc's VmHWM)
@@ -644,9 +651,9 @@ printf 'HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 16\r\n\r\
 # reading the whole record back and writing it out again, so 2,400
 # padded requests recorded to a file grew it past 24 GB resident
 # (measured on kasumi), and on the 16 GB CI runner the host stopped the
-# runner. lobo#142: and 512 more for the cost and uploads rows after it
-# (four drives of 64 uploads, each connection asked once more)
-"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests + 512))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
+# runner. lobo#142: and 768 more for the cost and uploads rows after it
+# (six drives of 64 uploads, each connection asked once more)
+"$WOLF" run "$rig_root"/tests/rig/rigback/rigback.lu /dev/null "$pxrep" "$((400 + px_requests + 768))" > "$scratch/px-back.port" 2> "$scratch/px-back.err" &
 bpid=$!
 bp=""
 i=0
@@ -695,12 +702,14 @@ while [ $i -lt "$((px_requests / 400))" ]; do
     case "$((i * 400))" in 2000|20000|60000) px_snapshot "$((400 + i * 400))" ;; esac
 done
 flat "flat, proxied" "$pb" "$(rss_kb)" "$pok" "$px_requests proxied keepalive requests on $((px_requests / 400)) connections, cpus=$pcpus, exchange pool (ws69)"
-# lobo#142: what one proxied upload costs at its peak, the drive prebuilt
-# so nothing sits between the two drives but the high water's read
+# lobo#142: the uploads' drive, prebuilt, so nothing sits between two
+# drives but a read of the server's memory
+dok=0
+"$WOLF" build "$rig_root"/tests/rig/memdrive.lu -o "$scratch/memdrive" > "$scratch/memdrive.build" 2>&1 || dok=1
+# lobo#142: what one proxied upload costs at its peak
 if [ -r "/proc/$pid/status" ]; then
     hwm_kb() { awk '/^VmHWM:/ {print $2}' "/proc/$pid/status"; }
-    cok=0
-    "$WOLF" build "$rig_root"/tests/rig/memdrive.lu -o "$scratch/memdrive" > "$scratch/memdrive.build" 2>&1 || cok=1
+    cok=$dok
     h0=$(hwm_kb)
     "$scratch/memdrive" "$hp" 64 /up/x upload 1 > "$scratch/drive.out" 2> "$scratch/drive.err" || cok=1
     h1=$(hwm_kb)
@@ -717,15 +726,19 @@ if [ -r "/proc/$pid/status" ]; then
     fi
 else
     say "cost, proxied uploads: not measured — the high water is /proc's VmHWM, and this host has no /proc (a named platform gap; the row is not counted)"
-    "$WOLF" run "$rig_root"/tests/rig/memdrive.lu "$hp" 64 /up/x upload 1 > "$scratch/drive.out" 2> "$scratch/drive.err"
-    "$WOLF" run "$rig_root"/tests/rig/memdrive.lu "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err"
+    "$scratch/memdrive" "$hp" 64 /up/x upload 1 > "$scratch/drive.out" 2> "$scratch/drive.err"
+    "$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err"
 fi
-# lobo#142: proxied bodies arriving at once, each read by its exchange
-uok=0
-quiet_drive 64 /up/x upload 65536 || uok=1
+# lobo#142: proxied bodies arriving at once, each read by its exchange:
+# two drives warm it (the high water settles over two), and the growth
+# over the next two is the row
+uok=$dok
+"$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || uok=1
+"$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || uok=1
 ub=$(rss_kb)
-quiet_drive 64 /up/x upload 65536 || uok=1
-flat "flat, proxied uploads" "$ub" "$(rss_kb)" "$uok" "64 proxied uploads of 64 KiB arriving at once, each read by its exchange beside the loop (lobo#142), cpus=$pcpus"
+"$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || uok=1
+"$scratch/memdrive" "$hp" 64 /up/x upload 65536 > "$scratch/drive.out" 2> "$scratch/drive.err" || uok=1
+flat "flat, proxied uploads" "$ub" "$(rss_kb)" "$uok" "two drives of 64 proxied uploads of 64 KiB arriving at once, each read by its exchange beside the loop (lobo#142), after two that warm it; cpus=$pcpus"
 kill "$pid" 2>/dev/null
 wait "$pid" 2>/dev/null
 # the backend ends after its last exchange; a row that failed short of
