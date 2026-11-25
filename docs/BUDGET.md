@@ -273,10 +273,9 @@ this pin, a named residue that rides the proxy-buffering sprint
 (`proxy_buffering` is still `planned(ws03)`).
 
 TLS: budgets enforce on TLS connections identically (the checks
-live in the shared lifecycle), but the refusal is not *reported*:
-the blocking TLS path predates the step loop and carries no access
-record or event channel (the D24/D27 rider; the counters and events
-below are the plaintext step path's until TLS joins it).
+live in the shared lifecycle), and since lobo#142 a refusal is
+reported as on plaintext: a TLS connection is a row of the step loop,
+with its access record, its counters and its events.
 
 ### Which half is structural today — BOTH (ws14 edition)
 

@@ -195,9 +195,9 @@ way nginx's is.
   to `logs/access.log` combined). The directive table has the row.
 - Resolution is http/server level at v0; a location/if-level
   `access_log` parses and is NAMED inert (lint LOBO-L005).
-- TLS connections are not access-logged at v0: the blocking TLS
-  path predates the step loop (the D24 rider); logging joins when TLS
-  joins `conn_step`.
+- TLS requests are access-logged as plaintext ones are: a TLS
+  connection is a row of the step loop (lobo#142). `$scheme` is not
+  rendered yet, so a line does not say which of the two it was.
 - Reload: lobo's one process logs through the LIVE generation's
   outputs (nginx's old workers keep old-config logs).
 - `worker=N` (ws16): under `worker_processes N` every line a hand
