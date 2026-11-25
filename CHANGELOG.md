@@ -2,6 +2,27 @@
 
 ## Unreleased — 0.1.6
 
+### A hand that dies is replaced even when another socket holds its port (lobo#155)
+
+The master now learns that a hand ended from the hand: each supervision
+pass first waits, without blocking, on the master's own children,
+reaps every hand that ended, and replaces it. It decided this only by a
+connect to the hand's control port, which any socket listening there
+answers, so a dead hand whose port another socket held was never
+replaced: its sibling, when two probes made back to back gave both
+hands the same port, or any other listener. The master also no longer
+gives a hand a port its table holds: a probe that answers one is held
+open while the next is made. The connect stays, with its timing, for a
+hand that is alive but cannot be reached.
+
+A hand killed by a signal is now logged `worker-exited … reason=signal
+code=-1`, as docs/DRAIN.md's table defines it, where it was logged
+`reason=unreachable`; a hand that exits on its own is logged
+`reason=exit` with its code. The set of reason values is the frozen
+vocabulary and it does not change; what changes is that a kill stops
+being mislabelled against the repository's own table, which is a defect
+fix.
+
 ### A request whose route does not use its body is answered after its head
 
 A file, a redirect, a 405 or an error (every route but `proxy_pass`) is
