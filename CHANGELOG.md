@@ -2,6 +2,36 @@
 
 ## Unreleased — 0.1.6
 
+### A stopped worker is left alone, and the master's dials to its workers are bounded (lobo#158)
+
+A worker that is stopped, by a signal or under a debugger, is now left
+alone, as nginx leaves one. The master no longer probes it, sends it a
+verb or asks it for its status, so its connection queue never fills
+from the master and it is never killed and replaced. `lobo status`
+shows it `stopped`; the log says `worker-stopped worker=N by=signal`
+(or `by=trace`) and, when it runs again, `worker-continued worker=N`,
+and it is then sent each `reload`, `reopen` or `quit` it missed, once.
+A `quit` waits for it as nginx's master waits; `stop` ends it.
+
+Every connection the master makes to a worker now gives up after
+250 ms, and the command line's connection to the master after 2000 ms.
+Before, a worker whose queue was full (a stopped one, or one whose
+loop was held) made the master wait on the kernel's own connect limit,
+about 133 s on Linux, during which it answered no command, took no
+signal and supervised no other worker; and `lobo status` against such a
+master waited as long. Connections over `unix:` control endpoints are
+not bounded yet (the toolchain has no bounded unix connect at this
+release): a running worker that hangs behind a full unix queue still
+holds the master on Linux; a stopped one does not, because it is never
+contacted.
+
+Where the master cannot read a worker's state (macOS, and any host
+without a readable `/proc`), a worker that stops accepting is reported
+`unreachable` and never replaced, since a debugger's stop cannot be
+told from a hang there; it is replaced only when it ends. On Linux a
+worker that is running and does not accept is still replaced after
+three failed probes, as before.
+
 ### A TLS connection no longer holds the serving loop (lobo#142)
 
 A TLS connection is now a row of the serving loop's table from its
