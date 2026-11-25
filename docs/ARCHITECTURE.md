@@ -107,7 +107,16 @@ row — reports the stream line, and waits for its next job. A proc idle
 five seconds leaves (`q`), and so do the idle ones when an accept is
 refused for want of a descriptor. The request is logged and counted
 when the line arrives, at its end, as nginx logs it. Where no job
-socket can be made the exchange runs in the step, as before. A proxied
+socket can be made (the host refuses either half of the pair, out of
+descriptors), the exchange is REFUSED, not run in the step: the client
+gets nginx's `500 Internal Server Error` (what nginx answers when it
+cannot make the upstream socket), the connection is closed, an owed
+body is never read, and an `[alert]` line names the job socket pair
+`while connecting to upstream` (lobo#148). A host that refuses the job
+listener at start leaves no proc to make, so every proxied request is
+refused that way until a restart, said at start.
+`tests/serve/proxy_pair_refused_e2e.lu` reads the pinned nginx at its
+limit first and holds lobo to it. A proxied
 request counts two connections against `worker_connections` while its
 exchange is out (nginx's count). `spawn proc proxy.job_loop(…)` does
 not compile at this pin (wolf-lang#655), so main spawns a one-line
@@ -179,8 +188,8 @@ anything the client sent while the exchange waited. The account adds
 the body's bytes as framed (the generation's `mem-hw`), and a refusal,
 which is logged with no upstream. The job's text is unchanged for a
 request whose body came whole. Where no job socket can be made the
-exchange, and so the body's read, runs in the step, as before
-(lobo#148). `tests/serve/proxy_body_wait_e2e.lu` and
+exchange is refused before the body is read (lobo#148, above).
+`tests/serve/proxy_body_wait_e2e.lu` and
 `tests/serve/proxy_body_idle_e2e.lu` run these flows against the
 pinned nginx and lobo, `tests/serve/proxy_body_refusal_e2e.lu` holds
 the refusals to the loop's own, and `tools/lobo-membudget`'s `cost,
