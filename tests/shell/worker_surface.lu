@@ -216,6 +216,17 @@ fn main() -> !int {
         shell.ev_worker_exited(1, "exit", 1) == "worker-exited worker=1 reason=exit code=1",
         "worker-exited shape (exit)",
     )
+    // lobo#158: two more appended, a stopped hand left alone and its
+    // continue (`by` names who stopped it)
+    assert(
+        shell.ev_worker_stopped(2, "signal") == "worker-stopped worker=2 by=signal",
+        "worker-stopped shape (signal)",
+    )
+    assert(
+        shell.ev_worker_stopped(3, "trace") == "worker-stopped worker=3 by=trace",
+        "worker-stopped shape (trace)",
+    )
+    assert(shell.ev_worker_continued(2) == "worker-continued worker=2", "worker-continued shape")
     // the trailing field: after seq, so every prefix pin still matches
     let stamped = shell.ev_seq(shell.ev_generation_activated(2), 7)
     assert(
