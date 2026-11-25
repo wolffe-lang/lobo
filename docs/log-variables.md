@@ -30,7 +30,7 @@ oracle's own `unknown "x" variable` error, mirrored.
 | `$server_name` | planned(ws12) | matched server_name; server selection is host-blind at this pin |
 | `$server_port` | planned(ws12) | listening port; joins when the record carries the listener |
 | `$server_protocol` | planned(ws12) | request HTTP version; $request carries it raw today |
-| `$scheme` | planned(ws12) | http/https; joins when the TLS path joins the step loop (D24 rider) |
+| `$scheme` | planned(ws12) | http/https; TLS requests are logged since lobo#142, and this is the variable that would tell them apart |
 | `$remote_port` | planned(ws12) | client port; no peer-address builtin at this pin |
 | `$sent_http_*` | planned(ws12) | response headers; needs the writer to record what it sent |
 | `$uri` | named_error | the DECODED, normalized path — logging the decoded form leaks the parse and diverges from the oracle line-for-line (contract pitfall); $request carries the raw line, format=json carries structure |

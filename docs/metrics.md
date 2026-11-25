@@ -90,9 +90,10 @@ v0's story and it is deliberately short.
   waits on multi-listener support: lobo binds ONE plaintext and
   ONE ssl listener, so `metrics` is a switch on the server it is
   written in, not a listener of its own;
-* the endpoint answers on the PLAINTEXT step path only. Over
+* the endpoint answers on PLAINTEXT connections only. Over
   TLS these two paths route to the filesystem like any other
-  URI — the same D24 rider the ws10 counters carry;
+  URI: the loop writes the admin body to the descriptor, which on
+  a TLS connection the session must seal;
 * the switch is resolved at START. A reload that flips it takes
   effect at the next restart (`ServerOpts` is process-wide, not
   per-generation);
