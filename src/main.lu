@@ -7131,7 +7131,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             // exits once every hand is gone.
             // ws62: every column is stored in place.
             var polls: int = 0
-            var polling = true
+            var polling = false
             while polling && polls < 2 * n + 8 {
                 polls = polls + 1
                 let pr = os_wait_poll() else |_| {
