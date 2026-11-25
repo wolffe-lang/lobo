@@ -1,11 +1,11 @@
 module pkg :: shell
-  wolfi v0 · toolchain 0.2.40 · edition v1
-  export_hash fc8f41c0271dec8b5025e62f826ee968414e7bd4b2066e53103e28649f77da58
-  pkg_hash    fc8f41c0271dec8b5025e62f826ee968414e7bd4b2066e53103e28649f77da58
+  wolfi v0 · toolchain 0.2.41 · edition v1
+  export_hash d23d098862658b34b9b37b1d14744ea05e2edfbe1d2506ab7d210ab699455453
+  pkg_hash    d23d098862658b34b9b37b1d14744ea05e2edfbe1d2506ab7d210ab699455453
   deps:
     config  732b395bba34cacb010c3476cd57e3ac93558ea3b04af53281379d7aeaa47a0f
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
-    std.signal  439d42a29750a0f0e643ffafe5476ebb4bb72b5dde7ab506ceb9fc3c17e48573
+    std.signal  d14d861da168404a4995a34f8478a05d39cd49867abf72310e5a1e04fcf5233c
   items:
     [0] pub accept_failed_text — fn accept_failed_text(code: int, text: str) -> str
     [1] pub accept_failure_reason — fn accept_failure_reason(code: int) -> str
