@@ -4942,9 +4942,22 @@ pub fn tls_row_step(
             1,
         )
     }
-    var w = step_out(true, false, first, served, false, take obs.access_new())
-    w.has_head = carry_has_head(first)
-    tls_row_out(take w, take hs.state, 1)
+    // PLANT 1 (lobo#142; never merged): once the handshake is done, the
+    // session is served blocking from its first byte, each read waiting up
+    // to the keep-alive timeout, until it closes or idles out
+    var cn = conn.from_state(fd, hs.state)
+    let kms = opts.keepalive_timeout_ms
+    var st = tls_step(mut cn, c, opts, limits, local_port, laddr, first, served, kms, rs, ft, now, 0, 0, 0)
+    while !st.close && st.active {
+        let c2 = st.carry
+        let sv2 = st.served
+        let d1 = st.disc_st
+        let d2 = st.disc_n
+        let d3 = st.disc_t
+        st = tls_step(mut cn, c, opts, limits, local_port, laddr, c2, sv2, kms, rs, ft, now, d1, d2, d3)
+    }
+    conn.conn_notify(mut cn)
+    tls_row_out(take step_out(true, true, "", st.served, false, take obs.access_new()), take conn.conn_state(cn), 1)
 }
 
 /// Pack a TLS row's step for the copy out of its region, as
