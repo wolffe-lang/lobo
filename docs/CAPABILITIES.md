@@ -139,7 +139,10 @@ argv and spawns no copy of itself would not need it.
 
 **exec (11 calls).** The prefork master starts each hand with its
 listeners (`spawn_worker`: `os_spawn_with`, falling back to `os_spawn`)
-and reaps it (`reap_worker`: `os_kill`, `os_wait`). Signal reception is
+and reaps it (`reap_worker`: `os_kill`, `os_wait`). Since lobo#155 each
+supervision pass first learns of a hand's end from the hand with
+`os_wait_poll`, the wait that never blocks, on the master's own
+children only: a twelfth call, after the census below. Signal reception is
 exec in the sandbox table (process control): `os_signal_listen` arms
 HUP/TERM/QUIT and the USR2 wake probe in the hand and the master,
 `sig_forwarder` waits on them (`os_signal_wait`), and `os_signal_raise`

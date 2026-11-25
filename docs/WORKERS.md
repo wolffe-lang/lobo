@@ -305,10 +305,22 @@ observable #242 broke, asserted at the level lobo cares about.
 
 ## Supervision
 
-The master owns no `try_wait` (std.process F-0065: `os_wait` blocks
-and there is no non-blocking form), so it cannot poll a child's
-exit. It probes each hand's control endpoint instead, with a CONNECT
-and no round trip: a dead process's port refuses at once, a live-but-busy
+The master learns of a hand's end from the hand (lobo#155). Each pass
+first calls `os_wait_poll`, a wait that never blocks, on the master's
+own children only (one `waitpid` with `WNOHANG|WUNTRACED` per child it
+started, never "any child"), and reaps every hand it reports ended. A
+stop is no end, a child that is not a hand is ignored, and a host that
+refuses the wait leaves the probe below to decide, as it did alone
+before. The probe could not tell this case: a connect to a port is
+answered by whatever listens there, and two probes made back to back
+could give two hands one port, so a hand that lost the bind and exited
+was answered for by its sibling and never replaced. The master also no
+longer makes that case: a probe whose port its table holds (a living
+hand's, one just given, a slot's dead predecessor's) is held open
+while the next is made, at most 8, all released before the answer.
+
+It still probes each hand's control endpoint, for a hand that is alive
+but cannot be reached, with a CONNECT and no round trip: a live-but-busy
 hand still completes the handshake from its backlog, so the probe
 never parks on a hand serving a long connection. The rule:
 
@@ -328,8 +340,11 @@ never parks on a hand serving a long connection. The rule:
 - a hand gets a 3 s start grace; after that, three consecutive
   silent probes is "gone";
 - gone → `os_kill` (harmless on a corpse), `os_wait` (the reap), the
-  `worker-exited` event with the master's reason and what the reap
-  answered, then a fresh hand in the same slot, inheriting the SAME
+  `worker-exited` event with the master's reason (`unreachable`) and
+  what the reap answered. A hand the wait found ended is logged as it
+  ended instead: `reason=exit code=C`, or `reason=signal code=-1` for
+  a crash or a kill, as docs/DRAIN.md's table defines them. Either
+  way the same tail follows: a fresh hand in the same slot, inheriting the SAME
   listeners so it comes back `serving`, with a fresh endpoint and
   `restarts` bumped: `worker-started … restarts=1`. A hand that died
   inside a second of starting is replaced after a 250 ms pause, so a
