@@ -1,7 +1,7 @@
 module pkg :: tls
   wolfi v0 · toolchain 0.2.41 · edition v1
-  export_hash 53050acd72913b81b2164f9d41dcb71966cb7432474cd41a22f35d4c547e2c2d
-  pkg_hash    53050acd72913b81b2164f9d41dcb71966cb7432474cd41a22f35d4c547e2c2d
+  export_hash 7b896e94593442c36cb839defa1e0b127b4d020e143bf51b9efdceb25ffcd448
+  pkg_hash    7b896e94593442c36cb839defa1e0b127b4d020e143bf51b9efdceb25ffcd448
   deps:
     config  732b395bba34cacb010c3476cd57e3ac93558ea3b04af53281379d7aeaa47a0f
     std.range  d7c8e2cafbb418b680a777f06602e91128373f7ed3b341a20edccaa108e513bf
@@ -12,12 +12,17 @@ module pkg :: tls
   items:
     [0] pub accept — fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> self.Sess ! {io, refused, timeout} · regions (-, ρ1, -) -> ρ_caller
     [1] pub alert_name — fn alert_name(code: int) -> str
-    [2] pub no_sess — fn no_sess() -> self.Sess · regions () -> ρ_caller
-    [3] pub parse_client_hello — fn parse_client_hello(msg: prelude.List[byte]) -> self.Hello · regions (ρ1) -> ρ_caller
-    [4] pub sess_close — fn sess_close(mut z: self.Sess) · regions (ρ1) -> -
-    [5] pub sess_read — fn sess_read(mut z: self.Sess, max: int) -> prelude.List[byte] ! {closed, io, timeout} · regions (ρ1, -) -> ρ_caller
-    [6] pub sess_write — fn sess_write(mut z: self.Sess, data: prelude.List[byte]) -> () ! {closed, io} · regions (ρ1, ρ2) -> -
-    [7] pub version — fn version() -> str
-    [8] pub Hello — struct Hello { ok: bool, alert: int, reason: str, random: prelude.List[byte], session_id: prelude.List[byte], has_chacha: bool, has_13: bool, has_ed25519: bool, kx: prelude.List[byte], sni: str, alpn_offered: bool, alpn_http11: bool }
-    [9] pub Sess — struct Sess { fd: int, up: bool, rkey: prelude.List[byte], riv: prelude.List[byte], rseq: int, wkey: prelude.List[byte], wiv: prelude.List[byte], wseq: int, buf: prelude.List[byte], plain: prelude.List[byte], got_close: bool, sent_close: bool, trunc: bool, sni: str, alpn: str, entry: int }
+    [2] pub hs_begin — fn hs_begin(sc: config.SslConf) -> self.Hs · regions (ρ1) -> ρ_caller
+    [3] pub hs_feed — fn hs_feed(mut h: self.Hs, input: prelude.List[byte]) -> self.HsOut · regions (ρ1, ρ2) -> ρ_caller
+    [4] pub hs_session — fn hs_session(h: self.Hs, fd: int) -> self.Sess · regions (ρ1, -) -> ρ_caller
+    [5] pub no_sess — fn no_sess() -> self.Sess · regions () -> ρ_caller
+    [6] pub parse_client_hello — fn parse_client_hello(msg: prelude.List[byte]) -> self.Hello · regions (ρ1) -> ρ_caller
+    [7] pub sess_close — fn sess_close(mut z: self.Sess) · regions (ρ1) -> -
+    [8] pub sess_read — fn sess_read(mut z: self.Sess, max: int) -> prelude.List[byte] ! {closed, io, timeout} · regions (ρ1, -) -> ρ_caller
+    [9] pub sess_write — fn sess_write(mut z: self.Sess, data: prelude.List[byte]) -> () ! {closed, io} · regions (ρ1, ρ2) -> -
+    [10] pub version — fn version() -> str
+    [11] pub Hello — struct Hello { ok: bool, alert: int, reason: str, random: prelude.List[byte], session_id: prelude.List[byte], has_chacha: bool, has_13: bool, has_ed25519: bool, kx: prelude.List[byte], sni: str, alpn_offered: bool, alpn_http11: bool }
+    [12] pub Hs — struct Hs { st: int, sc: config.SslConf, wire: prelude.List[byte], msgs: prelude.List[byte], chts: prelude.List[byte], th_sfin: prelude.List[byte], chs_key: prelude.List[byte], chs_iv: prelude.List[byte], cseq: int, shs_key: prelude.List[byte], shs_iv: prelude.List[byte], cats: prelude.List[byte], sats: prelude.List[byte], sni: str, alpn: str, entry: int }
+    [13] pub HsOut — struct HsOut { send: prelude.List[byte], done: bool, failed: bool, alert: int, io: bool }
+    [14] pub Sess — struct Sess { fd: int, up: bool, rkey: prelude.List[byte], riv: prelude.List[byte], rseq: int, wkey: prelude.List[byte], wiv: prelude.List[byte], wseq: int, buf: prelude.List[byte], plain: prelude.List[byte], got_close: bool, sent_close: bool, trunc: bool, sni: str, alpn: str, entry: int }
 
