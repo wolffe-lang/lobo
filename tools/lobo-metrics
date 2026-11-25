@@ -339,9 +339,11 @@ if [ "$code" != "0" ]; then
     bad "lobo exited $code"
 fi
 
-# ws76: actual refusal, idle eviction and EMFILE drives, with exact series.
+# ws76: actual refusal, idle eviction and EMFILE drives, with exact series;
+# lobo#155: a killed hand replaced, its endpoint held by another socket
+# and left free.
 if ! python3 -I tests/rig/admission/drive.py counters "$BIN" "$D/admission"; then
-    bad "connection-counter drives (named rows above)"
+    bad "connection-counter and hand-replacement drives (named rows above)"
 fi
 
 if [ "$red" != "0" ]; then
