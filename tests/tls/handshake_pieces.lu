@@ -1,0 +1,345 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native
+//! stage-src: tls config
+//!
+//! lobo#142: THE SERVER HANDSHAKE, FED IN PIECES. The serving loop owns
+//! a TLS connection as a row of its table, so the handshake is a state
+//! machine fed whatever bytes have arrived. It never waits on a read:
+//! `tls.hs_begin` starts one, `tls.hs_feed` takes the bytes that came and
+//! answers what to send, whether the session is open and whether it
+//! failed, and `tls.hs_session` gives the open session. This test plays
+//! the client in memory with std.x.tls's own builders and key schedule,
+//! no socket:
+//!   1. a ClientHello fed in pieces of 1, 7 and 64 bytes makes the
+//!      server send nothing before its last byte, then the whole flight;
+//!   2. the flight opens under the keys the client derives, and the
+//!      server Finished verifies;
+//!   3. the client Finished and an application record behind it, fed
+//!      as one stream in the same pieces, open the session in the piece
+//!      that holds the Finished's last byte and not before; the
+//!      session's traffic keys are the ones the client derives;
+//!   4. that piece's bytes past the Finished wait in the session's
+//!      buffer, not lost;
+//!   5. a ClientHello with no X25519 key share fails with
+//!      handshake_failure (40), its plaintext alert sent;
+//!   6. a client Finished with one byte flipped fails with
+//!      bad_record_mac (20).
+//! Lane: native only. The fixtures are files (lupin is ruled out), and
+//! the checked tier's step budget does not cover curve25519 (the
+//! ssl_resolve_errors precedent). Fixture paths are repo-relative.
+
+use config
+use std.x.crypto.curve25519
+use std.x.tls.client
+use std.x.tls.handshake
+use std.x.tls.record
+use tls
+
+fn push_all(mut o: List[byte], s: List[byte]) {
+    for b in s {
+        (mut o).push(b)
+    }
+}
+
+fn u16be(v: int) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push((v / 256 % 256) as byte)
+    (mut o).push((v % 256) as byte)
+    o
+}
+
+fn fill(n: int, v: int) -> List[byte] {
+    var o = List[byte]()
+    var i: int = 0
+    while i < n {
+        (mut o).push(v as byte)
+        i = i + 1
+    }
+    o
+}
+
+fn ascii(s: str) -> List[byte] {
+    var o = List[byte]()
+    for b in s.bytes() {
+        (mut o).push(b)
+    }
+    o
+}
+
+fn part(b: List[byte], from: int, to: int) -> List[byte] {
+    var o = List[byte]()
+    var i = from
+    while i < to {
+        (mut o).push(b[i])
+        i = i + 1
+    }
+    o
+}
+
+fn same(a: List[byte], b: List[byte]) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    var i: int = 0
+    while i < a.len {
+        if a[i] as int != b[i] as int {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+/// A plaintext record as a client frames its first flight: the type,
+/// legacy version 0x0301, the length, the body.
+fn plain(rtype: int, body: List[byte]) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push(rtype as byte)
+    (mut o).push(3 as byte)
+    (mut o).push(1 as byte)
+    push_all(mut o, u16be(body.len))
+    push_all(mut o, body)
+    o
+}
+
+/// The wire records in `b`, each with its five-byte header.
+fn records(b: List[byte]) -> List[List[byte]] {
+    var out = List[List[byte]]()
+    var at: int = 0
+    while at + 5 <= b.len {
+        let n = b[at + 3] as int * 256 + b[at + 4] as int
+        if at + 5 + n > b.len {
+            return out
+        }
+        (mut out).push(part(b, at, at + 5 + n))
+        at = at + 5 + n
+    }
+    out
+}
+
+/// A ClientHello for `localhost`: TLS 1.3, the ChaCha20 suite, ed25519,
+/// and (with `share`) the X25519 key share of `priv`.
+fn client_hello_of(priv: List[byte], share: bool) -> List[byte] {
+    var exts = List[byte]()
+    push_all(mut exts, handshake.ext_supported_versions_client())
+    var groups = List[int]()
+    (mut groups).push(29)
+    push_all(mut exts, handshake.ext_supported_groups(groups))
+    if share {
+        push_all(mut exts, handshake.ext_key_share_client_x25519(curve25519.x25519_base(priv)))
+    }
+    var schemes = List[int]()
+    (mut schemes).push(2055)
+    push_all(mut exts, handshake.ext_signature_algorithms(schemes))
+    push_all(mut exts, handshake.ext_server_name("localhost"))
+    handshake.client_hello(fill(32, 7), List[byte](), u16be(4867), exts)
+}
+
+/// What feeding a byte string in pieces did.
+struct Fed {
+    send: List[byte],
+    done_at: int,
+    failed: bool,
+    alert: int,
+    early: int,
+}
+
+/// Feed `bytes` to `h` in pieces of `size`, stopping at a failure or
+/// once the session is open (the caller then takes the session; bytes
+/// not fed are its own). `send` is everything the server answered, in
+/// order; `done_at` the count of bytes fed when it answered open (-1
+/// never); `early` how many pieces before the last answered something
+/// to send.
+fn feed(mut h: tls.Hs, bytes: List[byte], size: int) -> Fed {
+    var sent = List[byte]()
+    var done_at: int = -1
+    var failed = false
+    var alert: int = 0
+    var early: int = 0
+    var at: int = 0
+    while at < bytes.len && !failed && done_at < 0 {
+        var end = at + size
+        if end > bytes.len {
+            end = bytes.len
+        }
+        let o = tls.hs_feed(mut h, part(bytes, at, end))
+        if !o.send.is_empty() && end < bytes.len {
+            early = early + 1
+        }
+        push_all(mut sent, o.send)
+        if o.done && done_at < 0 {
+            done_at = end
+        }
+        if o.failed {
+            failed = true
+            alert = o.alert
+        }
+        at = end
+    }
+    Fed { send: sent, done_at: done_at, failed: failed, alert: alert, early: early }
+}
+
+/// One whole handshake in pieces of `size`. With `flip`, one byte of
+/// the client Finished's record is flipped and the server must refuse
+/// it; otherwise the session must open with the client's keys, and the
+/// application record sent right behind the Finished must wait in its
+/// buffer. Answers 0, or the number of the first check that failed.
+fn handshake_in_pieces(sc: config.SslConf, size: int, flip: bool) -> int {
+    let cpriv = fill(32, 3)
+    let ch = client_hello_of(cpriv, true)
+    var h = tls.hs_begin(sc)
+    let a = feed(mut h, plain(22, ch), size)
+    assert(!a.failed, "pieces of {size}: the ClientHello was refused (alert {a.alert})")
+    assert(a.early == 0, "pieces of {size}: the server sent before the ClientHello's last byte")
+    assert(a.done_at < 0, "pieces of {size}: open before any client Finished")
+    let recs = records(a.send)
+    assert(
+        recs.len == 5,
+        "pieces of {size}: the flight is a ServerHello and four sealed records, got {recs.len}",
+    )
+    assert(
+        recs[0][0] as int == 22,
+        "pieces of {size}: the ServerHello's record is a plaintext handshake record",
+    )
+
+    let sh = part(recs[0], 5, recs[0].len)
+    let v = client.parse_server_hello(sh) else |_| {
+        assert(false, "pieces of {size}: the ServerHello did not parse")
+        return 1
+    }
+    assert(
+        v.cipher_suite == 4867,
+        "pieces of {size}: ChaCha20-Poly1305 chosen, got {v.cipher_suite}",
+    )
+    let dh = handshake.ecdhe_shared(cpriv, v.server_share) else |_| {
+        assert(false, "pieces of {size}: the server's X25519 share gives a zero secret")
+        return 2
+    }
+    let hsec = handshake.handshake_secret(handshake.early_secret(), dh)
+    var tr = handshake.transcript_new()
+    handshake.transcript_add(mut tr, ch)
+    handshake.transcript_add(mut tr, sh)
+    let th_sh = handshake.transcript_hash(tr)
+    let chts = handshake.client_handshake_traffic(hsec, th_sh)
+    let shts = handshake.server_handshake_traffic(hsec, th_sh)
+    let skey = record.traffic_key(shts, 32)
+    let siv = record.traffic_iv(shts)
+    var seq: int = 0
+    var sfin_ok = false
+    var opened = true
+    while seq < 4 && opened {
+        let inner = record.open(skey, siv, seq, recs[seq + 1]) else |_| {
+            opened = false
+            List[byte]()
+        }
+        if opened {
+            let msg = record.content_of(inner)
+            if seq == 3 {
+                sfin_ok = same(msg, handshake.finished_for(shts, handshake.transcript_hash(tr)))
+            }
+            handshake.transcript_add(mut tr, msg)
+        }
+        seq = seq + 1
+    }
+    assert(
+        opened,
+        "pieces of {size}: a sealed record of the flight did not open under the client's keys",
+    )
+    assert(sfin_ok, "pieces of {size}: the server Finished does not verify")
+
+    let th_sfin = handshake.transcript_hash(tr)
+    let cfin = handshake.finished_for(chts, th_sfin)
+    let crec = record.seal(record.traffic_key(chts, 32), record.traffic_iv(chts), 0, 22, cfin, 0)
+    if flip {
+        let last = crec[crec.len - 1] as int
+        var bad = part(crec, 0, crec.len - 1)
+        let flipped = if last % 2 == 0 { last + 1 } else { last - 1 }
+        (mut bad).push(flipped as byte)
+        let b = feed(mut h, bad, size)
+        assert(b.failed, "pieces of {size}: a Finished with a flipped byte was accepted")
+        assert(
+            b.alert == 20,
+            "pieces of {size}: a flipped Finished fails with bad_record_mac (20), got {b.alert}",
+        )
+        assert(b.done_at < 0, "pieces of {size}: a flipped Finished opened the session")
+        return 0
+    }
+    let master = handshake.master_secret(hsec)
+    let cats = handshake.client_application_traffic(master, th_sfin)
+    let sats = handshake.server_application_traffic(master, th_sfin)
+    let app = record.seal(
+        record.traffic_key(cats, 32),
+        record.traffic_iv(cats),
+        0,
+        23,
+        ascii("GET / HTTP/1.1\r\n"),
+        0,
+    )
+
+    // the Finished and an application record behind it, one stream fed
+    // in pieces: open in the piece that holds the Finished's last byte,
+    // and that piece's bytes past the Finished wait in the session
+    var stream = List[byte]()
+    push_all(mut stream, crec)
+    push_all(mut stream, app)
+    var want_at = (crec.len + size - 1) / size * size
+    if want_at > stream.len {
+        want_at = stream.len
+    }
+    let b = feed(mut h, stream, size)
+    assert(!b.failed, "pieces of {size}: the client Finished was refused (alert {b.alert})")
+    assert(
+        b.done_at == want_at,
+        "pieces of {size}: open after {b.done_at} bytes, want {want_at} (the Finished is {crec.len})",
+    )
+    assert(
+        b.send.is_empty(),
+        "pieces of {size}: the server sent something after the client Finished",
+    )
+    let z = tls.hs_session(h, -1)
+    assert(z.up, "pieces of {size}: the session is not up")
+    assert(
+        same(z.rkey, record.traffic_key(cats, 32)),
+        "pieces of {size}: the session reads with a key that is not the client's",
+    )
+    assert(
+        same(z.wkey, record.traffic_key(sats, 32)),
+        "pieces of {size}: the session writes with a key that is not the server's",
+    )
+    assert(z.sni == "localhost", "pieces of {size}: SNI recorded: {z.sni}")
+    assert(
+        same(z.buf, part(stream, crec.len, want_at)),
+        "pieces of {size}: the {want_at - crec.len} bytes past the Finished are not in the session's buffer",
+    )
+    0
+}
+
+fn main() -> int {
+    let fx = "tests/tls/fixtures"
+    let c = config.parse_str(
+        "events {{\n}}\nhttp {{\n    server {{\n        listen 127.0.0.1:0 ssl;\n        server_name localhost;\n        ssl_certificate {fx}/fullchain.pem;\n        ssl_certificate_key {fx}/leaf.key;\n    }}\n}}\n",
+        "handshake_pieces.test",
+    )
+    let sc = config.ssl_resolve(c, ".")
+    assert(config.ssl_ok(sc), "the fixture pair resolves: {sc.err}")
+
+    for size in [1, 7, 64] {
+        assert(handshake_in_pieces(sc, size, false) == 0, "pieces of {size}")
+        assert(handshake_in_pieces(sc, size, true) == 0, "pieces of {size}, flipped")
+    }
+
+    // no X25519 key share: handshake_failure, the plaintext alert sent
+    var h = tls.hs_begin(sc)
+    let f = feed(mut h, plain(22, client_hello_of(fill(32, 3), false)), 7)
+    assert(f.failed, "a ClientHello with no X25519 share was accepted")
+    assert(f.alert == 40, "no X25519 share fails with handshake_failure (40), got {f.alert}")
+    let ar = records(f.send)
+    assert(ar.len == 1, "one alert record sent, got {ar.len}")
+    assert(
+        ar[0][0] as int == 21 && ar[0][5] as int == 2 && ar[0][6] as int == 40,
+        "the alert record is fatal handshake_failure",
+    )
+    print("handshake_pieces: ok")
+    0
+}
