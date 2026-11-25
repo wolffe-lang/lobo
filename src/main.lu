@@ -4332,19 +4332,7 @@ fn serve_main(
                                         // it. With no job listener since the
                                         // start the same rule holds, said at
                                         // the start
-                                        ev_log(
-                                            mut elog,
-                                            "alert",
-                                            shell.pair_refused_text(
-                                                pair_why,
-                                                if pair_why > 0 {
-                                                    os_error_text(pair_why)
-                                                } else {
-                                                    ""
-                                                },
-                                            ),
-                                        )
-                                        let rep = proxy.job_refused(fd, px_job, px_tail, 500)
+                                        let rep = proxy.job_serve(fd, px_job, px_tail, -1)
                                         let d = px_account(rep.0)
                                         let t_end = if d.end_ms > 0 { d.end_ms } else { tw }
                                         var span = t_end - cs_eff
