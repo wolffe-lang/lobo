@@ -1,0 +1,215 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: tls config
+//!
+//! lobo#142: A TLS ROW'S STATE AS BYTES. The serving loop keeps a TLS
+//! row's handshake or session between steps as a byte string, written in
+//! place as its carry is, because a step's region dies at its brace.
+//! `tls.hs_pack`/`tls.hs_unpack` and `tls.sess_pack`/`tls.sess_unpack`
+//! are that string; `tls.state_phase` says what one holds. This test
+//! forges each state (the structs have no private field at this pin)
+//! and checks:
+//!   1. a handshake awaiting the client Finished comes back field for
+//!      field, and packs again to the same bytes; one awaiting the
+//!      ClientHello keeps its partial bytes; no certificate entry (-1)
+//!      survives;
+//!   2. a session packed mid-record, unpacked on another descriptor,
+//!      opens the record once the rest is fed, and its write sequence
+//!      goes on where it was;
+//!   3. every session flag comes back;
+//!   4. bytes the packing did not write (empty, the wrong kind, cut
+//!      short) are no state: phase -1, a failed handshake (3), a broken
+//!      session.
+//! Lanes: no fixture, no curve and no socket, so all three.
+
+use config
+use std.x.tls.record
+use tls
+
+fn push_all(mut o: List[byte], s: List[byte]) {
+    for b in s {
+        (mut o).push(b)
+    }
+}
+
+fn fill(n: int, v: int) -> List[byte] {
+    var o = List[byte]()
+    var i: int = 0
+    while i < n {
+        (mut o).push(((v + i) % 251) as byte)
+        i = i + 1
+    }
+    o
+}
+
+fn ascii(s: str) -> List[byte] {
+    var o = List[byte]()
+    for b in s.bytes() {
+        (mut o).push(b)
+    }
+    o
+}
+
+fn part(b: List[byte], from: int, to: int) -> List[byte] {
+    var o = List[byte]()
+    var i = from
+    while i < to {
+        (mut o).push(b[i])
+        i = i + 1
+    }
+    o
+}
+
+fn same(a: List[byte], b: List[byte]) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    var i: int = 0
+    while i < a.len {
+        if a[i] as int != b[i] as int {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+/// A certificate model with no entry: a handshake's state does not
+/// depend on one until its ClientHello is taken.
+fn no_certs() -> config.SslConf {
+    config.ssl_resolve(config.parse_str("events {{\n}}\nhttp {{\n}}\n", "state_pack.test"), ".")
+}
+
+/// A handshake awaiting the client Finished, every field distinct.
+fn hs_mid() -> tls.Hs {
+    var h = tls.hs_begin(no_certs())
+    h.st = 1
+    h.cseq = 3
+    h.entry = 0
+    h.chts = fill(32, 1)
+    h.th_sfin = fill(32, 2)
+    h.chs_key = fill(32, 3)
+    h.chs_iv = fill(12, 4)
+    h.shs_key = fill(32, 5)
+    h.shs_iv = fill(12, 6)
+    h.cats = fill(32, 7)
+    h.sats = fill(32, 8)
+    h.sni = "localhost"
+    h.alpn = "http/1.1"
+    h.wire = fill(3, 9)
+    h.msgs = fill(2, 10)
+    h
+}
+
+/// The client's traffic secret, and the server's.
+fn cs() -> List[byte] {
+    fill(32, 11)
+}
+
+fn ss() -> List[byte] {
+    fill(32, 97)
+}
+
+fn sess_of() -> tls.Sess {
+    tls.Sess {
+        fd: -1,
+        up: true,
+        rkey: record.traffic_key(cs(), 32),
+        riv: record.traffic_iv(cs()),
+        rseq: 0,
+        wkey: record.traffic_key(ss(), 32),
+        wiv: record.traffic_iv(ss()),
+        wseq: 0,
+        buf: List[byte](),
+        plain: List[byte](),
+        got_close: false,
+        sent_close: false,
+        trunc: false,
+        failed: false,
+        sni: "alt.example",
+        alpn: "",
+        entry: 1,
+    }
+}
+
+fn main() -> int {
+    // 1. handshakes
+    let h = hs_mid()
+    let hb = tls.hs_pack(h)
+    assert(tls.state_phase(hb) == 1, "a handshake awaiting Finished is phase {tls.state_phase(hb)}")
+    let h2 = tls.hs_unpack(hb, no_certs())
+    assert(h2.st == 1 && h2.cseq == 3 && h2.entry == 0, "the handshake's numbers")
+    assert(
+        same(h2.chts, h.chts) && same(h2.th_sfin, h.th_sfin) && same(h2.chs_key, h.chs_key),
+        "the handshake's client secrets",
+    )
+    assert(
+        same(h2.chs_iv, h.chs_iv) && same(h2.shs_key, h.shs_key) && same(h2.shs_iv, h.shs_iv),
+        "the handshake's keys",
+    )
+    assert(same(h2.cats, h.cats) && same(h2.sats, h.sats), "the application secrets")
+    assert(h2.sni == "localhost" && h2.alpn == "http/1.1", "SNI {h2.sni}, ALPN {h2.alpn}")
+    assert(same(h2.wire, h.wire) && same(h2.msgs, h.msgs), "the handshake's bytes")
+    assert(same(tls.hs_pack(h2), hb), "a handshake does not pack again to the same bytes")
+    var h0 = tls.hs_begin(no_certs())
+    h0.wire = fill(40, 22)
+    let h0b = tls.hs_pack(h0)
+    assert(tls.state_phase(h0b) == 0, "a handshake awaiting the ClientHello")
+    let h0u = tls.hs_unpack(h0b, no_certs())
+    assert(h0u.st == 0 && same(h0u.wire, h0.wire), "the ClientHello's bytes so far")
+    assert(h0u.entry == -1, "no certificate entry came back as {h0u.entry}")
+
+    // 2. a session packed mid-record
+    let content = ascii("GET / HTTP/1.1\r\nHost: alt.example\r\n\r\n")
+    let rec = record.seal(record.traffic_key(cs(), 32), record.traffic_iv(cs()), 0, 23, content, 0)
+    var z = sess_of()
+    let o1 = tls.sess_feed(mut z, part(rec, 0, 20))
+    assert(o1.plain.is_empty(), "twenty bytes opened something")
+    let w0 = tls.sess_seal(mut z, ascii("first"))
+    let zb = tls.sess_pack(z)
+    assert(tls.state_phase(zb) == 2, "a session is phase {tls.state_phase(zb)}")
+    var z2 = tls.sess_unpack(zb, 7)
+    assert(z2.fd == 7 && z2.up && z2.entry == 1, "the session's descriptor, state and entry")
+    assert(z2.sni == "alt.example", "the session's SNI: {z2.sni}")
+    assert(same(z2.buf, part(rec, 0, 20)), "the partial record did not come back")
+    let o2 = tls.sess_feed(mut z2, part(rec, 20, rec.len))
+    assert(same(o2.plain, content), "the record did not open once whole")
+    let w1 = tls.sess_seal(mut z2, ascii("second"))
+    let back = tls.sess_unpack(tls.sess_pack(z2), 7)
+    assert(back.rseq == 1 && back.wseq == 2, "the sequences: read {back.rseq}, write {back.wseq}")
+    var ok = true
+    let inner = record.open(record.traffic_key(ss(), 32), record.traffic_iv(ss()), 1, w1) else |_| {
+        ok = false
+        List[byte]()
+    }
+    assert(
+        ok && same(record.content_of(inner), ascii("second")),
+        "the write sequence did not go on",
+    )
+    assert(w0.len > 0, "nothing was sealed first")
+
+    // 3. the flags
+    var f = sess_of()
+    f.got_close = true
+    f.trunc = true
+    let fb = tls.sess_unpack(tls.sess_pack(f), 3)
+    assert(fb.got_close && fb.trunc && !fb.sent_close && !fb.failed, "got_close and trunc")
+    var g = sess_of()
+    g.up = false
+    g.sent_close = true
+    g.failed = true
+    let gb = tls.sess_unpack(tls.sess_pack(g), 3)
+    assert(!gb.up && gb.sent_close && gb.failed && !gb.got_close, "up, sent_close and failed")
+
+    // 4. bytes the packing did not write
+    assert(tls.state_phase(List[byte]()) == -1, "empty bytes are a state")
+    assert(tls.hs_unpack(List[byte](), no_certs()).st == 3, "empty bytes are a handshake")
+    assert(tls.hs_unpack(zb, no_certs()).st == 3, "a session unpacked as a handshake")
+    assert(tls.sess_unpack(hb, 3).failed, "a handshake unpacked as a session")
+    assert(tls.sess_unpack(part(zb, 0, zb.len - 1), 3).failed, "a session cut short")
+    assert(tls.hs_unpack(part(hb, 0, hb.len - 1), no_certs()).st == 3, "a handshake cut short")
+    assert(!tls.sess_unpack(part(zb, 0, zb.len - 1), 3).up, "a session cut short is up")
+    print("state_pack: ok")
+    0
+}
