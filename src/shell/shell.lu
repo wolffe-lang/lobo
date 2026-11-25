@@ -842,12 +842,20 @@ pub fn unix_worker_addr(master: str, w: int) -> str {
 /// `net_connect`'s: `refused` (nobody listening, or a stale socket
 /// file with no server behind it), `timeout`, `io`.
 ///
+/// **The TCP arm is bounded by `within_ms`** (lobo#158,
+/// `net_connect_within`, wolf 0.2.41): against an endpoint whose queue
+/// is full, a stopped or held process's, an unbounded connect waited
+/// for the kernel's own limit (133 to 136 s measured on Linux), and the
+/// master's loop with it. The unix arm is not bounded yet: the toolchain
+/// has no bounded unix dial at this pin (asked for; lobo#158's second
+/// half), and Linux sets no limit of its own on it.
+///
 /// **A host with no unix family answers `io` here, not a named row**,
 /// because that is what the coarsening of `net_connect_unix`'s
 /// `unsupported` costs at the call site; the STARTUP path is where the
 /// refusal is named (a `control unix:` config on windows refuses by
 /// name rather than serving nothing).
-fn control_dial(addr: str) -> int ! {refused, timeout, io} {
+fn control_dial(addr: str, within_ms: int) -> int ! {refused, timeout, io} {
     if is_unix_addr(addr) {
         let p = unix_path_of(addr)
         return net_connect_unix(p) else |e| match e {
@@ -868,7 +876,48 @@ fn control_dial(addr: str) -> int ! {refused, timeout, io} {
             },
         }
     }
-    net_connect(addr)?
+    var code = 0
+    let c = net_connect_within(addr, within_ms) else |e| match e {
+        refused => {
+            code = 1
+            -1
+        },
+        timeout => {
+            code = 2
+            -1
+        },
+        invalid => {
+            code = 3
+            -1
+        },
+        io => {
+            code = 3
+            -1
+        },
+    }
+    if code == 1 {
+        return refused
+    }
+    if code == 2 {
+        return timeout
+    }
+    if code == 3 {
+        return io
+    }
+    c
+}
+
+/// D, the bound on every dial the master makes to a hand (its probe,
+/// its fan-out of a verb, its status gather), in milliseconds (lobo#158).
+/// The rule, fixed before it was measured: the larger of 250 ms and the
+/// smallest multiple of 50 ms at least ten times the largest connect
+/// measured to a hand's endpoint under load. The largest measured was
+/// 0.24 ms (Linux x86-64, two hands serving about 308k requests a
+/// second), so the 250 ms floor decides. A dial that fails costs the
+/// loop at most this, and only for a hand that is running and not
+/// accepting: a stopped hand is never dialed. Total.
+pub fn hand_dial_ms() -> int {
+    250
 }
 
 /// The control endpoint's TOKEN FILE: the `control` directive's
@@ -990,7 +1039,16 @@ pub fn control_verb_ok(verb: str) -> bool {
 /// thing for the operator to do).
 #[allow(w0602)]
 pub fn control_send(addr: str, line: str) -> str ! {refused, timeout, io} {
-    let c = control_dial(addr) else |e| match e {
+    control_send_within(addr, line, control_deadline_ms())?
+}
+
+/// `control_send` with the dial bounded by `within_ms` (lobo#158): the
+/// command line's dial takes `control_deadline_ms()`, the master's to a
+/// hand `hand_dial_ms()`. The reply's own deadline is
+/// `control_deadline_ms()` either way. Rows as `control_send`'s.
+#[allow(w0602)]
+pub fn control_send_within(addr: str, line: str, within_ms: int) -> str ! {refused, timeout, io} {
+    let c = control_dial(addr, within_ms) else |e| match e {
         refused => {
             return refused
         },
@@ -1695,7 +1753,14 @@ fn bool_word(b: bool) -> str {
 /// keeps its interior newlines; the trailing newline is trimmed.
 #[allow(w0602)]
 pub fn control_fetch(addr: str, line: str) -> str ! {refused, timeout, io} {
-    let c = control_dial(addr) else |e| match e {
+    control_fetch_within(addr, line, control_deadline_ms())?
+}
+
+/// `control_fetch` with the dial bounded by `within_ms` (lobo#158), as
+/// `control_send_within`. Rows as `control_fetch`'s.
+#[allow(w0602)]
+pub fn control_fetch_within(addr: str, line: str, within_ms: int) -> str ! {refused, timeout, io} {
+    let c = control_dial(addr, within_ms) else |e| match e {
         refused => {
             return refused
         },
@@ -2110,13 +2175,14 @@ pub fn stanza_field_sum(body: str, field: str) -> int {
 /// a round trip under a deadline, would). Any socket listening on the
 /// port answers it, a dead hand's sibling included, so the master
 /// learns of a hand's end from the hand first (lobo#155) and uses this
-/// only for a hand that is alive. Total: any failure reads as "not
+/// only for a hand that is alive. The dial is bounded by
+/// `hand_dial_ms()` (lobo#158). Total: any failure reads as "not
 /// reachable".
 pub fn control_reachable(addr: str) -> bool {
     if addr.is_empty() {
         return false
     }
-    let c = control_dial(addr) else |_| {
+    let c = control_dial(addr, hand_dial_ms()) else |_| {
         return false
     }
     net_close(c) else |_| {}
