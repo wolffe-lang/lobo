@@ -1,0 +1,382 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! lobo#142: A TLS ROW, STEPPED. The serving loop owns a TLS connection
+//! as a row of its table, so its requests are read one step at a time
+//! like a plaintext row's: `serve.tls_step` does one read under the poll
+//! deadline, feeds the bytes to the session the row carries, and serves
+//! a head once the opened bytes hold one. This test drives it over a
+//! real loopback pair. The session is forged with known traffic secrets
+//! (no handshake; the struct has no private field at this pin), and the
+//! client's records are sealed in memory and written raw:
+//!   1. a GET whose first record arrives in two writes: the step that
+//!      completes no record is active and serves nothing, the next
+//!      carries the opened line, and the record that ends the head is
+//!      served, the response sealed (200 and the file's bytes);
+//!   2. a GET declaring 6 body bytes with 1 sent is answered after its
+//!      head and left discarding; the 5 bytes and the next GET in one
+//!      record end the discard, and the GET is served from the carry. A
+//!      POST to the file is answered 405 after its head, and the row
+//!      closes once its body is over;
+//!   3. a proxied route is the named 502 and closes, and with a body
+//!      still to come it closes once the body is over;
+//!   4. a close_notify closes the row, not counted as truncation; an EOF
+//!      with none closes it and is counted;
+//!   5. a record with a flipped byte closes the row and is answered
+//!      bad_record_mac (20), sealed.
+//! Lanes: native and checked (sockets on both; no fixture beyond the
+//! webroot file, no curve). Paths are repo-relative.
+
+use config
+use conn
+use http
+use resolver
+use serve
+use std.x.tls.record
+use tls
+
+fn push_all(mut o: List[byte], s: List[byte]) {
+    for b in s {
+        (mut o).push(b)
+    }
+}
+
+fn fill(n: int, v: int) -> List[byte] {
+    var o = List[byte]()
+    var i: int = 0
+    while i < n {
+        (mut o).push(((v + i) % 251) as byte)
+        i = i + 1
+    }
+    o
+}
+
+fn ascii(s: str) -> List[byte] {
+    var o = List[byte]()
+    for b in s.bytes() {
+        (mut o).push(b)
+    }
+    o
+}
+
+fn part(b: List[byte], from: int, to: int) -> List[byte] {
+    var o = List[byte]()
+    var i = from
+    while i < to {
+        (mut o).push(b[i])
+        i = i + 1
+    }
+    o
+}
+
+fn two(a: int, b: int) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push(a as byte)
+    (mut o).push(b as byte)
+    o
+}
+
+fn text(b: List[byte]) -> str {
+    str_from_utf8(b) else |_| { "<not utf-8>" }
+}
+
+/// The client's traffic secret, and the server's.
+fn cs() -> List[byte] {
+    fill(32, 11)
+}
+
+fn ss() -> List[byte] {
+    fill(32, 97)
+}
+
+/// A session open on `fd` as a handshake leaves it: reading under the
+/// client's secret, writing under the server's.
+fn sess_on(fd: int) -> tls.Sess {
+    tls.Sess {
+        fd: fd,
+        up: true,
+        rkey: record.traffic_key(cs(), 32),
+        riv: record.traffic_iv(cs()),
+        rseq: 0,
+        wkey: record.traffic_key(ss(), 32),
+        wiv: record.traffic_iv(ss()),
+        wseq: 0,
+        buf: List[byte](),
+        plain: List[byte](),
+        got_close: false,
+        sent_close: false,
+        trunc: false,
+        failed: false,
+        sni: "localhost",
+        alpn: "",
+        entry: 0,
+    }
+}
+
+/// The client seals `content` of inner type `ct` as its record `seq`.
+fn client_rec(seq: int, ct: int, content: List[byte]) -> List[byte] {
+    record.seal(record.traffic_key(cs(), 32), record.traffic_iv(cs()), seq, ct, content, 0)
+}
+
+/// Everything the server has written to the client so far: reads until
+/// a short wait finds nothing more (the step that wrote has returned,
+/// so its bytes are all in the socket).
+fn drain(cli: int) -> List[byte] {
+    var raw = List[byte]()
+    net_deadline(cli, 300) else |_| {}
+    loop {
+        var stop = false
+        let b = net_read_bytes(cli, 65536) else |_| {
+            stop = true
+            List[byte]()
+        }
+        if stop || b.is_empty() {
+            return raw
+        }
+        push_all(mut raw, b)
+    }
+}
+
+/// The server's records in `raw`, opened under its write secret from
+/// sequence `seq0`: their contents joined, the inner types, and the next
+/// sequence number (-1 when a record does not open).
+struct Opened {
+    content: List[byte],
+    types: List[int],
+    next: int,
+}
+
+fn open_from(raw: List[byte], seq0: int) -> Opened {
+    var content = List[byte]()
+    var types = List[int]()
+    var seq = seq0
+    var at: int = 0
+    while at + 5 <= raw.len {
+        let n = raw[at + 3] as int * 256 + raw[at + 4] as int
+        if at + 5 + n > raw.len {
+            return Opened { content: content, types: types, next: -1 }
+        }
+        var ok = true
+        let inner = record.open(
+            record.traffic_key(ss(), 32),
+            record.traffic_iv(ss()),
+            seq,
+            part(raw, at, at + 5 + n),
+        ) else |_| {
+            ok = false
+            List[byte]()
+        }
+        if !ok {
+            return Opened { content: content, types: types, next: -1 }
+        }
+        (mut types).push(record.content_type_of(inner))
+        push_all(mut content, record.content_of(inner))
+        seq = seq + 1
+        at = at + 5 + n
+    }
+    Opened { content: content, types: types, next: seq }
+}
+
+fn conf() -> config.Conf {
+    config.parse_str(
+        "events {{\n}}\nhttp {{\n    server {{\n        listen 127.0.0.1:0;\n        root tests/tls/webroot;\n        location /up/ {{\n            proxy_pass http://127.0.0.1:9;\n        }}\n    }}\n}}\n",
+        "tls_step.test",
+    )
+}
+
+/// One step of the row, as the loop takes it (a 200 ms poll).
+fn step(mut cn: conn.Conn, carry: str, served: int, dst: int, dn: int, dt: int) -> serve.ConnStep {
+    serve.tls_step(
+        mut cn,
+        conf(),
+        serve.default_opts(),
+        http.default_limits(),
+        80,
+        "",
+        carry,
+        served,
+        200,
+        resolver.new(),
+        serve.file_kinds_new(),
+        time_unix_ms(),
+        dst,
+        dn,
+        dt,
+    )
+}
+
+/// A connected loopback pair: the client's end, then the server's.
+fn pair() -> (int, int) {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        assert(false, "listen")
+        return (-1, -1)
+    }
+    let port = net_port(l) else |_| { 0 }
+    let cli = net_connect("127.0.0.1:{port}") else |_| {
+        assert(false, "connect")
+        return (-1, -1)
+    }
+    let srv = net_accept(l) else |_| {
+        assert(false, "accept")
+        return (-1, -1)
+    }
+    net_close(l) else |_| {}
+    (cli, srv)
+}
+
+fn send(cli: int, b: List[byte]) {
+    net_write_bytes(cli, b) else |_| {
+        assert(false, "the client's write failed")
+    }
+}
+
+fn main() -> int {
+    let page = fs_read_bytes("tests/tls/webroot/index.html") else |_| {
+        assert(false, "the webroot file reads")
+        return 1
+    }
+
+    // 1. a GET whose first record arrives in two writes
+    let p1 = pair()
+    let cli = p1.0
+    var cn = conn.tls_conn(p1.1, take sess_on(p1.1))
+    let r0 = client_rec(0, 23, ascii("GET /index.html HTTP/1.1\r\n"))
+    let r1 = client_rec(1, 23, ascii("Host: localhost\r\n\r\n"))
+    send(cli, part(r0, 0, 10))
+    let a = step(mut cn, "", 0, 0, 0, 0)
+    assert(a.active && !a.close, "half a record: active {a.active}, close {a.close}")
+    assert(a.carry.is_empty() && a.served == 0, "half a record opened something: {a.carry}")
+    send(cli, part(r0, 10, r0.len))
+    let b = step(mut cn, a.carry, a.served, 0, 0, 0)
+    assert(b.carry == "GET /index.html HTTP/1.1\r\n", "the first record's line: {b.carry}")
+    assert(b.served == 0 && !b.close, "the line alone was served or closed")
+    send(cli, r1)
+    let g = step(mut cn, b.carry, b.served, 0, 0, 0)
+    assert(g.served == 1 && !g.close, "the head was not served: {g.served}, close {g.close}")
+    assert(g.acc.status == 200, "the GET was answered {g.acc.status}")
+    let o1 = open_from(drain(cli), 0)
+    assert(o1.next > 0, "the response did not open under the server's secret")
+    let resp = text(o1.content)
+    assert(resp.starts_with("HTTP/1.1 200 OK\r\n"), "the response: {resp}")
+    assert(resp.ends_with(text(page)), "the response does not end with the file")
+
+    // 2. a GET answered after its head, its body discarded
+    send(
+        cli,
+        client_rec(
+            2,
+            23,
+            ascii("GET /index.html HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nx"),
+        ),
+    )
+    let u = step(mut cn, g.carry, g.served, 0, 0, 0)
+    assert(u.acc.status == 200, "the GET with a body was answered {u.acc.status}")
+    assert(!u.close && u.disc_st > 0, "the GET's body is not being discarded: {u.disc_st}")
+    let o2 = open_from(drain(cli), o1.next)
+    assert(text(o2.content).starts_with("HTTP/1.1 200 OK\r\n"), "the GET with a body")
+    send(cli, client_rec(3, 23, ascii("yyyyyGET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\n")))
+    let d = step(mut cn, u.carry, u.served, u.disc_st, u.disc_n, u.disc_t)
+    assert(d.disc_st == 0 && !d.close, "the discard did not end: {d.disc_st}, close {d.close}")
+    assert(d.has_head, "the GET after the body is not the carry: {d.carry}")
+    let g2 = step(mut cn, d.carry, d.served, 0, 0, 0)
+    assert(g2.acc.status == 200, "the GET after the body was answered {g2.acc.status}")
+    let o3 = open_from(drain(cli), o2.next)
+    assert(text(o3.content).starts_with("HTTP/1.1 200 OK\r\n"), "the second 200")
+
+    // 4a. a close_notify closes the row, not counted
+    send(cli, client_rec(4, 21, two(1, 0)))
+    let z = step(mut cn, g2.carry, g2.served, 0, 0, 0)
+    assert(z.close, "a close_notify did not close the row")
+    assert(!conn.truncated(cn), "a close_notify was counted as truncation")
+    conn.conn_close(mut cn)
+    net_close(cli) else |_| {}
+
+    // 2b. a POST to the file: 405 after its head, closing once the body
+    // is over
+    let p2 = pair()
+    var cn2 = conn.tls_conn(p2.1, take sess_on(p2.1))
+    send(
+        p2.0,
+        client_rec(
+            0,
+            23,
+            ascii("POST /index.html HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\nx"),
+        ),
+    )
+    let w = step(mut cn2, "", 0, 0, 0, 0)
+    assert(w.acc.status == 405, "the POST was answered {w.acc.status}")
+    assert(!w.close && w.disc_st < 0, "the 405 does not wait for the body: {w.disc_st}")
+    assert(
+        text(open_from(drain(p2.0), 0).content).starts_with("HTTP/1.1 405 "),
+        "the 405 did not open",
+    )
+    send(p2.0, client_rec(1, 23, ascii("yyyyy")))
+    let w2 = step(mut cn2, w.carry, w.served, w.disc_st, w.disc_n, w.disc_t)
+    assert(w2.close, "the row did not close once the POST's body was over")
+    conn.conn_close(mut cn2)
+    net_close(p2.0) else |_| {}
+
+    // 3. a proxied route: the named 502, closing at once, or once the
+    // body still to come is over
+    let p3 = pair()
+    var cn3 = conn.tls_conn(p3.1, take sess_on(p3.1))
+    send(p3.0, client_rec(0, 23, ascii("GET /up/x HTTP/1.1\r\nHost: localhost\r\n\r\n")))
+    let x = step(mut cn3, "", 0, 0, 0, 0)
+    assert(x.acc.status == 502 && x.close, "a proxied GET: {x.acc.status}, close {x.close}")
+    assert(
+        text(open_from(drain(p3.0), 0).content).starts_with("HTTP/1.1 502 "),
+        "the 502 did not open",
+    )
+    conn.conn_close(mut cn3)
+    net_close(p3.0) else |_| {}
+    let p4 = pair()
+    var cn4 = conn.tls_conn(p4.1, take sess_on(p4.1))
+    send(
+        p4.0,
+        client_rec(
+            0,
+            23,
+            ascii("POST /up/x HTTP/1.1\r\nHost: localhost\r\nContent-Length: 4\r\n\r\n"),
+        ),
+    )
+    let y = step(mut cn4, "", 0, 0, 0, 0)
+    assert(y.acc.status == 502, "a proxied POST was answered {y.acc.status}")
+    assert(!y.close && y.disc_st < 0, "the 502 does not wait for the body: {y.disc_st}")
+    send(p4.0, client_rec(1, 23, ascii("abcd")))
+    let y2 = step(mut cn4, y.carry, y.served, y.disc_st, y.disc_n, y.disc_t)
+    assert(y2.close, "the row did not close once the body was over")
+    conn.conn_close(mut cn4)
+    net_close(p4.0) else |_| {}
+
+    // 4b. an EOF with no close_notify closes the row, counted
+    let p5 = pair()
+    var cn5 = conn.tls_conn(p5.1, take sess_on(p5.1))
+    send(p5.0, client_rec(0, 23, ascii("GET /index.html HTTP/1.1\r\n")))
+    net_close(p5.0) else |_| {}
+    let e1 = step(mut cn5, "", 0, 0, 0, 0)
+    let e2 = step(mut cn5, e1.carry, e1.served, 0, 0, 0)
+    assert(e2.close, "an EOF did not close the row")
+    assert(conn.truncated(cn5), "an EOF with no close_notify was not counted")
+    conn.conn_close(mut cn5)
+
+    // 5. a flipped byte: the row closes, answered bad_record_mac sealed
+    let p6 = pair()
+    var cn6 = conn.tls_conn(p6.1, take sess_on(p6.1))
+    let good = client_rec(0, 23, ascii("GET / HTTP/1.1\r\n\r\n"))
+    var bad = part(good, 0, good.len - 1)
+    (mut bad).push(((good[good.len - 1] as int + 1) % 256) as byte)
+    send(p6.0, bad)
+    let f = step(mut cn6, "", 0, 0, 0, 0)
+    assert(f.close && f.served == 0, "a flipped record: close {f.close}, served {f.served}")
+    let o6 = open_from(drain(p6.0), 0)
+    assert(
+        o6.types.len == 1 && o6.types[0] == 21 && text(o6.content) == text(two(2, 20)),
+        "a flipped record was not answered bad_record_mac (20), sealed",
+    )
+    conn.conn_close(mut cn6)
+    net_close(p6.0) else |_| {}
+    print("tls_step: ok")
+    0
+}
