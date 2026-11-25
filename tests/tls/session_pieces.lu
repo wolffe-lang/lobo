@@ -1,0 +1,405 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: tls config
+//!
+//! lobo#142: THE SESSION, FED IN PIECES. The serving loop owns a TLS
+//! connection as a row of its table, so the session opens and seals
+//! records over buffers and never reads or writes the socket itself:
+//! `tls.sess_feed` takes the bytes that came and answers the
+//! application bytes of every record they complete, what to send, and
+//! whether the session closed or broke; `tls.sess_seal` seals the
+//! response into records. This test plays the client in memory with
+//! std.x.tls.record and known traffic secrets, no socket and no
+//! handshake (the session is forged as a handshake leaves it; the
+//! struct has no private field at this pin):
+//!   1. two application records, a change_cipher_spec between them and
+//!      a close_notify, fed as one stream in pieces of 1, 7 and 64
+//!      bytes: the plaintext so far is always exactly the whole records
+//!      so far, and `closed` comes in the piece holding the
+//!      close_notify's last byte; a closed session takes nothing more;
+//!   2. bytes already in the buffer (those the handshake fed past the
+//!      client Finished) open on a feed of nothing, and a partial
+//!      record waits for the rest;
+//!   3. sealing: a short response is one record under the server's
+//!      keys, 16,385 bytes are two (2^14, then 1), each taking the next
+//!      sequence number, and nothing is nothing;
+//!   4. a record with a flipped byte breaks the session: `io`, answered
+//!      bad_record_mac (20) sealed, and a broken session takes nothing
+//!      more; the record before it is still the caller's;
+//!   5. a post-handshake message (a KeyUpdate) is answered
+//!      unexpected_message (10) sealed and closes;
+//!   6. a record over the §5.1 ceiling, and a plaintext alert other
+//!      than close_notify, are `io`; a plaintext close_notify and a
+//!      sealed client alert close.
+//! Lanes: no fixture, no curve and no socket, so all three.
+
+use std.x.tls.record
+use tls
+
+fn push_all(mut o: List[byte], s: List[byte]) {
+    for b in s {
+        (mut o).push(b)
+    }
+}
+
+fn fill(n: int, v: int) -> List[byte] {
+    var o = List[byte]()
+    var i: int = 0
+    while i < n {
+        (mut o).push(((v + i) % 251) as byte)
+        i = i + 1
+    }
+    o
+}
+
+fn ascii(s: str) -> List[byte] {
+    var o = List[byte]()
+    for b in s.bytes() {
+        (mut o).push(b)
+    }
+    o
+}
+
+fn part(b: List[byte], from: int, to: int) -> List[byte] {
+    var o = List[byte]()
+    var i = from
+    while i < to {
+        (mut o).push(b[i])
+        i = i + 1
+    }
+    o
+}
+
+fn same(a: List[byte], b: List[byte]) -> bool {
+    if a.len != b.len {
+        return false
+    }
+    var i: int = 0
+    while i < a.len {
+        if a[i] as int != b[i] as int {
+            return false
+        }
+        i = i + 1
+    }
+    true
+}
+
+fn two(a: int, b: int) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push(a as byte)
+    (mut o).push(b as byte)
+    o
+}
+
+/// A plaintext record: the type, version 0x0303, the length, the body.
+fn plain(rtype: int, body: List[byte]) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push(rtype as byte)
+    (mut o).push(3 as byte)
+    (mut o).push(3 as byte)
+    (mut o).push((body.len / 256) as byte)
+    (mut o).push((body.len % 256) as byte)
+    push_all(mut o, body)
+    o
+}
+
+/// The wire records in `b`, each with its five-byte header.
+fn records(b: List[byte]) -> List[List[byte]] {
+    var out = List[List[byte]]()
+    var at: int = 0
+    while at + 5 <= b.len {
+        let n = b[at + 3] as int * 256 + b[at + 4] as int
+        if at + 5 + n > b.len {
+            return out
+        }
+        (mut out).push(part(b, at, at + 5 + n))
+        at = at + 5 + n
+    }
+    out
+}
+
+/// The client's traffic secret, and the server's.
+fn cs() -> List[byte] {
+    fill(32, 11)
+}
+
+fn ss() -> List[byte] {
+    fill(32, 97)
+}
+
+/// A session as a handshake leaves it: reading under the client's
+/// secret, writing under the server's, `buf` the bytes fed past the
+/// client Finished.
+fn sess_of(buf: List[byte]) -> tls.Sess {
+    tls.Sess {
+        fd: -1,
+        up: true,
+        rkey: record.traffic_key(cs(), 32),
+        riv: record.traffic_iv(cs()),
+        rseq: 0,
+        wkey: record.traffic_key(ss(), 32),
+        wiv: record.traffic_iv(ss()),
+        wseq: 0,
+        buf: copy buf,
+        plain: List[byte](),
+        got_close: false,
+        sent_close: false,
+        trunc: false,
+        failed: false,
+        sni: "localhost",
+        alpn: "",
+        entry: 0,
+    }
+}
+
+/// The client seals `content` of inner type `ct` as its record `seq`.
+fn client_rec(seq: int, ct: int, content: List[byte]) -> List[byte] {
+    record.seal(record.traffic_key(cs(), 32), record.traffic_iv(cs()), seq, ct, content, 0)
+}
+
+/// The client opens the server's record `seq`: the inner type, then the
+/// content (-1 and nothing when it does not open).
+fn server_open(seq: int, rec: List[byte]) -> (int, List[byte]) {
+    var ok = true
+    let inner = record.open(
+        record.traffic_key(ss(), 32),
+        record.traffic_iv(ss()),
+        seq,
+        rec,
+    ) else |_| {
+        ok = false
+        List[byte]()
+    }
+    if !ok {
+        return (-1, List[byte]())
+    }
+    (record.content_type_of(inner), record.content_of(inner))
+}
+
+/// A client stream: its bytes, where each record ends, and each
+/// record's application bytes (none for a record that carries none).
+struct Stream {
+    bytes: List[byte],
+    ends: List[int],
+    apps: List[List[byte]],
+}
+
+fn stream_new() -> Stream {
+    Stream { bytes: List[byte](), ends: List[int](), apps: List[List[byte]]() }
+}
+
+fn add(mut s: Stream, rec: List[byte], app: List[byte]) {
+    var b = s.bytes
+    push_all(mut b, rec)
+    s.bytes = b
+    var e = s.ends
+    (mut e).push(s.bytes.len)
+    s.ends = e
+    var a = s.apps
+    (mut a).push(copy app)
+    s.apps = a
+}
+
+/// The application bytes of the stream's records wholly within its
+/// first `fed` bytes.
+fn want_plain(s: Stream, fed: int) -> List[byte] {
+    var o = List[byte]()
+    var i: int = 0
+    while i < s.ends.len {
+        if s.ends[i] <= fed {
+            push_all(mut o, s.apps[i])
+        }
+        i = i + 1
+    }
+    o
+}
+
+/// What feeding a stream in pieces did: the plaintext answered, the
+/// bytes answered for the peer, the bytes fed when it closed or broke
+/// (-1 never), and how many feeds left the plaintext so far other than
+/// the whole records so far.
+struct Fed {
+    plain: List[byte],
+    send: List[byte],
+    closed_at: int,
+    io_at: int,
+    off: int,
+}
+
+fn feed(mut z: tls.Sess, s: Stream, size: int) -> Fed {
+    var got = List[byte]()
+    var sent = List[byte]()
+    var closed_at: int = -1
+    var io_at: int = -1
+    var off: int = 0
+    var at: int = 0
+    while at < s.bytes.len && closed_at < 0 && io_at < 0 {
+        var end = at + size
+        if end > s.bytes.len {
+            end = s.bytes.len
+        }
+        let o = tls.sess_feed(mut z, part(s.bytes, at, end))
+        push_all(mut got, o.plain)
+        push_all(mut sent, o.send)
+        if !same(got, want_plain(s, end)) {
+            off = off + 1
+        }
+        if o.closed {
+            closed_at = end
+        }
+        if o.io {
+            io_at = end
+        }
+        at = end
+    }
+    Fed { plain: got, send: sent, closed_at: closed_at, io_at: io_at, off: off }
+}
+
+/// Check 1 in pieces of `size`. Answers 0, or the number of the first
+/// check that failed.
+fn stream_in_pieces(size: int) -> int {
+    let head = ascii("GET / HTTP/1.1\r\nHost: localhost\r\n")
+    let tail = ascii("\r\n")
+    var s = stream_new()
+    add(mut s, client_rec(0, 23, head), head)
+    add(mut s, plain(20, two(1, 0)), List[byte]())
+    add(mut s, client_rec(1, 23, tail), tail)
+    add(mut s, client_rec(2, 21, two(1, 0)), List[byte]())
+    var z = sess_of(List[byte]())
+    let f = feed(mut z, s, size)
+    assert(
+        f.off == 0,
+        "pieces of {size}: {f.off} feeds answered plaintext other than the whole records so far",
+    )
+    var want = copy head
+    push_all(mut want, tail)
+    assert(same(f.plain, want), "pieces of {size}: the plaintext is not the request")
+    assert(
+        f.closed_at == s.bytes.len,
+        "pieces of {size}: closed after {f.closed_at} bytes, want {s.bytes.len}",
+    )
+    assert(f.io_at < 0, "pieces of {size}: the stream broke the session at {f.io_at}")
+    assert(f.send.is_empty(), "pieces of {size}: the session answered something to send")
+    assert(z.got_close, "pieces of {size}: the close_notify is not recorded")
+    assert(!z.trunc, "pieces of {size}: a close_notify counted as truncation")
+    assert(z.rseq == 3, "pieces of {size}: {z.rseq} records opened, want 3")
+    assert(z.buf.is_empty(), "pieces of {size}: {z.buf.len} bytes left in the buffer")
+    let after = tls.sess_feed(mut z, client_rec(3, 23, head))
+    assert(after.closed, "pieces of {size}: a closed session answered other than closed")
+    assert(after.plain.is_empty(), "pieces of {size}: a closed session opened a record")
+    0
+}
+
+fn main() -> int {
+    for size in [1, 7, 64] {
+        assert(stream_in_pieces(size) == 0, "pieces of {size}")
+    }
+
+    // 2. bytes already in the buffer open on a feed of nothing; a
+    // partial record waits for the rest
+    let first = ascii("GET /a HTTP/1.1\r\n\r\n")
+    let second = ascii("GET /b HTTP/1.1\r\n\r\n")
+    let r0 = client_rec(0, 23, first)
+    let r1 = client_rec(1, 23, second)
+    var held = copy r0
+    push_all(mut held, part(r1, 0, 3))
+    var z2 = sess_of(held)
+    let o2 = tls.sess_feed(mut z2, List[byte]())
+    assert(same(o2.plain, first), "the buffered record did not open on a feed of nothing")
+    assert(!o2.closed && !o2.io, "a feed of nothing closed or broke the session")
+    assert(z2.buf.len == 3, "the partial record's 3 bytes are not waiting: {z2.buf.len}")
+    let o2b = tls.sess_feed(mut z2, part(r1, 3, r1.len))
+    assert(same(o2b.plain, second), "the partial record did not open once whole")
+
+    // 3. sealing
+    var z3 = sess_of(List[byte]())
+    let resp = ascii("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+    let w1 = records(tls.sess_seal(mut z3, resp))
+    assert(w1.len == 1, "a short response sealed into {w1.len} records")
+    let p1 = server_open(0, w1[0])
+    assert(p1.0 == 23, "the response's record opened as type {p1.0}")
+    assert(same(p1.1, resp), "the response's record is not the response")
+    let big = fill(16385, 5)
+    let w2 = records(tls.sess_seal(mut z3, big))
+    assert(w2.len == 2, "16,385 bytes sealed into {w2.len} records, want 2")
+    let p2 = server_open(1, w2[0])
+    let p3 = server_open(2, w2[1])
+    assert(p2.0 == 23 && p3.0 == 23, "the two records did not open as application data")
+    let c2 = p2.1
+    let c3 = p3.1
+    assert(c2.len == 16384, "the first record is not 2^14 application bytes: {c2.len}")
+    assert(c3.len == 1, "the second record is not the last byte: {c3.len}")
+    var back = copy c2
+    push_all(mut back, c3)
+    assert(same(back, big), "the two records are not the 16,385 bytes")
+    assert(z3.wseq == 3, "three records sealed, the write sequence is {z3.wseq}")
+    let w0 = tls.sess_seal(mut z3, List[byte]())
+    assert(w0.is_empty() && z3.wseq == 3, "nothing sealed into something")
+
+    // 4. a flipped byte breaks the session
+    var s4 = stream_new()
+    add(mut s4, client_rec(0, 23, first), first)
+    let good = client_rec(1, 23, second)
+    var bad = part(good, 0, good.len - 1)
+    (mut bad).push(((good[good.len - 1] as int + 1) % 256) as byte)
+    add(mut s4, bad, List[byte]())
+    add(mut s4, client_rec(2, 23, second), second)
+    var z4 = sess_of(List[byte]())
+    let f4 = feed(mut z4, s4, 7)
+    // broken in the piece of 7 that holds the flipped record's last byte
+    var want4 = (s4.ends[1] + 6) / 7 * 7
+    if want4 > s4.bytes.len {
+        want4 = s4.bytes.len
+    }
+    assert(
+        f4.io_at == want4,
+        "the flipped record broke the session after {f4.io_at} bytes, want {want4}",
+    )
+    assert(same(f4.plain, first), "the record before the flipped one is not the caller's")
+    let a4 = records(f4.send)
+    assert(a4.len == 1, "the flipped record was answered with {a4.len} records")
+    let al4 = server_open(0, a4[0])
+    assert(
+        al4.0 == 21 && same(al4.1, two(2, 20)),
+        "the flipped record was not answered bad_record_mac (20), sealed",
+    )
+    let more = tls.sess_feed(mut z4, client_rec(2, 23, second))
+    assert(more.io && more.plain.is_empty() && more.send.is_empty(), "a broken session took more")
+
+    // 5. a KeyUpdate is answered unexpected_message and closes
+    var z5 = sess_of(List[byte]())
+    var ku = List[byte]()
+    (mut ku).push(24 as byte)
+    push_all(mut ku, two(0, 0))
+    push_all(mut ku, two(1, 0))
+    let o5 = tls.sess_feed(mut z5, client_rec(0, 22, ku))
+    assert(o5.closed && !o5.io, "a KeyUpdate did not close the session")
+    let a5 = records(o5.send)
+    assert(a5.len == 1, "a KeyUpdate was answered with {a5.len} records")
+    let al5 = server_open(0, a5[0])
+    assert(
+        al5.0 == 21 && same(al5.1, two(2, 10)),
+        "a KeyUpdate was not answered unexpected_message (10), sealed",
+    )
+
+    // 6. the ceiling and the plaintext alerts; a sealed client alert
+    var over = List[byte]()
+    (mut over).push(23 as byte)
+    push_all(mut over, two(3, 3))
+    push_all(mut over, two(65, 1))
+    var z6 = sess_of(List[byte]())
+    let o6 = tls.sess_feed(mut z6, over)
+    assert(o6.io && o6.send.is_empty(), "a record of 16,641 bytes was not io")
+    var z7 = sess_of(List[byte]())
+    let o7 = tls.sess_feed(mut z7, plain(21, two(2, 40)))
+    assert(o7.io && !o7.closed, "a plaintext fatal alert was not io")
+    var z8 = sess_of(List[byte]())
+    let o8 = tls.sess_feed(mut z8, plain(21, two(1, 0)))
+    assert(o8.closed && !o8.io && z8.got_close, "a plaintext close_notify did not close")
+    var z9 = sess_of(List[byte]())
+    let o9 = tls.sess_feed(mut z9, client_rec(0, 21, two(2, 40)))
+    assert(o9.closed && o9.send.is_empty(), "a sealed client alert did not close")
+    print("session_pieces: ok")
+    0
+}
