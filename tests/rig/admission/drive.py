@@ -7,6 +7,7 @@ import resource
 import select
 import signal
 import socket
+import ssl
 import subprocess
 import threading
 import time
@@ -582,18 +583,194 @@ def one_hand_scope(binary, directory):
         server.close()
 
 
+# lobo#142: a TLS connection holds nothing. Each row puts one TLS
+# connection in a hold on a single-process lobo (`worker_processes 1`, a
+# plain and a TLS listener) and, while it holds, asks for a plaintext GET
+# on another connection and a GET from a second TLS client. Both must be
+# answered 200 within HOLD_MS, a bound fixed before any run. Every wait
+# ends at HOLD_WAIT_MS, so a server that serves the held connection to
+# completion costs a red row seconds, not its read timeout. The client is
+# this python's ssl (TLS 1.3); the test CA is trusted only in the rows' own
+# context. `tls-download-holds-none` is named residue (lobo#142's
+# decision 2(b): a slow TLS download is still written on the loop until
+# its follow-on): it runs and is reported, red as named, and not counted.
+HOLD_MS = 1000
+HOLD_WAIT_MS = 3000
+TLS_FIXTURES = Path(__file__).resolve().parents[3] / "tests/tls/fixtures"
+RESIDUE = {"tls-download-holds-none"}
+
+
+def tls_context():
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    context.minimum_version = ssl.TLSVersion.TLSv1_3
+    context.load_verify_locations(TLS_FIXTURES / "ca.crt")
+    return context
+
+
+def tls_connect(server, seconds):
+    raw = socket.create_connection(("127.0.0.1", server.tls_port), timeout=seconds)
+    try:
+        return tls_context().wrap_socket(raw, server_hostname="localhost")
+    except BaseException:
+        raw.close()
+        raise
+
+
+def client_hello():
+    """The bytes of a real TLS 1.3 ClientHello from this python's ssl."""
+    incoming, outgoing = ssl.MemoryBIO(), ssl.MemoryBIO()
+    hello = tls_context().wrap_bio(incoming, outgoing, server_hostname="localhost")
+    try:
+        hello.do_handshake()
+    except ssl.SSLWantReadError:
+        pass
+    return outgoing.read()
+
+
+def read_answer(sock, deadline, whole=False):
+    """The status line of an answer read before the monotonic `deadline`
+    ('' if none came), and with `whole` its body read to Content-Length."""
+    data = b""
+    marker = b"\r\n\r\n" if whole else b"\r\n"
+    while marker not in data:
+        left = deadline - time.monotonic()
+        if left <= 0:
+            return ""
+        sock.settimeout(left)
+        try:
+            piece = sock.recv(65536)
+        except OSError:
+            return ""
+        if not piece:
+            return ""
+        data += piece
+    status = data.split(b"\r\n", 1)[0].decode(errors="replace")
+    if whole:
+        head, body = data.split(b"\r\n\r\n", 1)
+        match = re.search(rb"(?im)^content-length:\s*([0-9]+)", head)
+        want = int(match[1]) if match else 0
+        while len(body) < want:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                return ""
+            sock.settimeout(left)
+            try:
+                piece = sock.recv(65536)
+            except OSError:
+                return ""
+            if not piece:
+                return ""
+            body += piece
+    return status
+
+
+def answered_meanwhile(server, what):
+    """While a hold is in place: a plaintext GET and a second TLS client's GET,
+    each timed to its status line. Asserts both are 200 within HOLD_MS."""
+    results = []
+    for kind in ("plain", "tls"):
+        began = time.monotonic()
+        deadline = began + HOLD_WAIT_MS / 1000
+        sock = None
+        status = ""
+        try:
+            if kind == "plain":
+                sock = socket.create_connection(("127.0.0.1", server.port), timeout=HOLD_WAIT_MS / 1000)
+            else:
+                sock = tls_connect(server, HOLD_WAIT_MS / 1000)
+            sock.settimeout(max(0.01, deadline - time.monotonic()))
+            sock.sendall(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            status = read_answer(sock, deadline)
+        except OSError:
+            status = ""
+        finally:
+            if sock is not None:
+                sock.close()
+        results.append((kind, status, (time.monotonic() - began) * 1000))
+    line = "; ".join(f"{kind} {('answered ' + status) if status else 'no answer'} after {ms:.0f} ms"
+                     for kind, status, ms in results)
+    print(f"tls-hold: while {what}: {line}", flush=True)
+    for kind, status, ms in results:
+        assert status.startswith("HTTP/1.1 200") and ms <= HOLD_MS, \
+            f"while {what}, the {kind} GET was not answered 200 within {HOLD_MS} ms ({line})"
+
+
+def hold_handshake(server):
+    hello = client_hello()
+    sock = socket.create_connection(("127.0.0.1", server.tls_port), timeout=5)
+    sock.sendall(hello[:len(hello) // 2])
+    return sock, f"a client holds {len(hello) // 2} of a {len(hello)}-byte ClientHello", None
+
+
+def hold_head(server):
+    sock = tls_connect(server, 5)
+    sock.sendall(b"GET /index.html HTTP/1.1\r\nHo")
+    return sock, "a TLS client holds half a request head", None
+
+
+def hold_idle(server):
+    sock = tls_connect(server, 5)
+    sock.sendall(b"GET /index.html HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    status = read_answer(sock, time.monotonic() + HOLD_WAIT_MS / 1000, whole=True)
+    assert status.startswith("HTTP/1.1 200"), f"the idle row's first GET was not answered 200 ({status or 'no answer'})"
+    return sock, "a TLS client served one GET stays connected and idle", None
+
+
+def hold_upload(server):
+    sock = tls_connect(server, 5)
+    began = time.monotonic()
+    sock.sendall(b"POST /index.html HTTP/1.1\r\nHost: localhost\r\nContent-Length: 6\r\n\r\na")
+    status = read_answer(sock, began + HOLD_WAIT_MS / 1000)
+    own = (status, (time.monotonic() - began) * 1000)
+    return sock, "a TLS client holds a POST to a file route with 1 of its 6 body bytes", own
+
+
+def hold_download(server):
+    sock = tls_connect(server, 5)
+    sock.sendall(b"GET /big.bin HTTP/1.1\r\nHost: localhost\r\n\r\n")
+    time.sleep(0.5)
+    return sock, "a TLS client asks for a 24 MiB file and reads none of it", None
+
+
+def tls_hold(binary, directory, hold):
+    if not ssl.HAS_TLSv1_3:
+        return f"this python's ssl ({ssl.OPENSSL_VERSION}) has no TLS 1.3"
+    server = Server(binary, directory, tls=True)
+    sock = None
+    try:
+        sock, what, own = hold(server)
+        answered_meanwhile(server, what)
+        if own is not None:
+            status, ms = own
+            print(f"tls-hold: the holding client's own answer: {status or 'none'} after {ms:.0f} ms", flush=True)
+            assert status.startswith("HTTP/1.1 405") and ms <= HOLD_MS, \
+                f"the POST with a short body was not answered 405 after its head within {HOLD_MS} ms ({status or 'no answer'} after {ms:.0f} ms)"
+    finally:
+        if sock is not None:
+            sock.close()
+        server.close()
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("admission", "counters", "oracle", "review"))
+    parser.add_argument("mode", choices=("admission", "counters", "oracle", "review", "tls-hold"))
     parser.add_argument("binary")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--row", choices=("later-listener-progress", "all-full-burst-progress", "multi-listener-emfile-cpu", "one-hand-master-scope",
-                                          "hand-replaced-endpoint-held", "hand-replaced-endpoint-free"))
+                                          "hand-replaced-endpoint-held", "hand-replaced-endpoint-free",
+                                          "tls-handshake-holds-none", "tls-head-holds-none", "tls-idle-holds-none",
+                                          "tls-upload-holds-none", "tls-download-holds-none"))
     args = parser.parse_args()
     if args.mode == "admission":
         rows = [("shared-listener-first28", lambda: admission(args.binary, args.directory))]
     elif args.mode == "oracle":
         rows = [("oracle-measurement", lambda: measure_oracle(args.binary, args.directory))]
+    elif args.mode == "tls-hold":
+        rows = [("tls-handshake-holds-none", lambda: tls_hold(args.binary, args.directory / "handshake", hold_handshake)),
+                ("tls-head-holds-none", lambda: tls_hold(args.binary, args.directory / "head", hold_head)),
+                ("tls-idle-holds-none", lambda: tls_hold(args.binary, args.directory / "idle", hold_idle)),
+                ("tls-upload-holds-none", lambda: tls_hold(args.binary, args.directory / "upload", hold_upload)),
+                ("tls-download-holds-none", lambda: tls_hold(args.binary, args.directory / "download", hold_download))]
     elif args.mode == "review":
         rows = [("later-listener-progress", lambda: later_listener_progress(args.binary, args.directory / "later")),
                 ("all-full-burst-progress", lambda: full_burst_progress(args.binary, args.directory / "burst")),
@@ -616,9 +793,15 @@ def main():
             outcome = run()
             if isinstance(outcome, str):
                 print(f"lobo-admission: SKIPPED — {name}: {outcome}", flush=True)
+            elif name in RESIDUE:
+                red += 1
+                print(f"lobo-admission: FAILED — [{name}] the named residue row is green: retire it from RESIDUE", flush=True)
             else:
                 print(f"lobo-admission: ok — [{name}]", flush=True)
         except (AssertionError, OSError, subprocess.SubprocessError) as error:
+            if name in RESIDUE:
+                print(f"lobo-admission: RESIDUE — [{name}] red, as named, not counted: {error}", flush=True)
+                continue
             red += 1
             print(f"lobo-admission: FAILED — [{name}] {error}", flush=True)
     return 1 if red else 0
