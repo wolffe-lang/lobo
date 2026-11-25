@@ -4290,12 +4290,15 @@ fn serve_main(
                                     closed_abort = true
                                 } else {
                                     var pi = px_idle(pxs)
+                                    var pair_why: int = 0
                                     if pi < 0 {
                                         let pair = px_pair(job_l, job_port)
                                         if pair.0 >= 0 {
                                             in life {
                                                 pi = px_new(mut pxs, pair.0, pair.1, stream_w)
                                             }
+                                        } else {
+                                            pair_why = pair.1
                                         }
                                     }
                                     if pi >= 0 {
@@ -4315,9 +4318,32 @@ fn serve_main(
                                         n_wait = -1
                                         n_stream = if close_it { 2 } else { 1 }
                                     } else {
-                                        // lobo#148: here an owed body is read on
-                                        // the loop, as before lobo#142's change
-                                        let rep = proxy.job_serve(fd, px_job, px_tail, -1)
+                                        // lobo#148: the host refused the job
+                                        // socket pair (out of descriptors), so
+                                        // no proc can take the exchange. The
+                                        // loop does not run it itself, where it
+                                        // would wait on the upstream and on an
+                                        // owed body, serving nothing else: it
+                                        // answers nginx's 500 (what nginx
+                                        // answers when it cannot make the
+                                        // upstream socket), closes, and logs
+                                        // it. With no job listener since the
+                                        // start, the exchange still runs here,
+                                        // said at the start
+                                        var rep = ("", 0)
+                                        if job_l >= 0 {
+                                            ev_log(
+                                                mut elog,
+                                                "alert",
+                                                shell.pair_refused_text(
+                                                    pair_why,
+                                                    if pair_why > 0 { os_error_text(pair_why) } else { "" },
+                                                ),
+                                            )
+                                            rep = proxy.job_refused(fd, px_job, px_tail, 500)
+                                        } else {
+                                            rep = proxy.job_serve(fd, px_job, px_tail, -1)
+                                        }
                                         let d = px_account(rep.0)
                                         let t_end = if d.end_ms > 0 { d.end_ms } else { tw }
                                         var span = t_end - cs_eff
@@ -4838,20 +4864,22 @@ fn arm_accept(l: int) {
 
 /// The job socket for one exchange: a connect to the loop's own job
 /// listener and the accept of it, (loop's end, proc's end), or (-1,
-/// -1) when there is no listener or the host refuses either half (out
-/// of descriptors): the caller then runs the exchange in the step.
-/// net tier. Total.
+/// the host's error number) when the host refuses either half (out of
+/// descriptors; 0 when no number is known): the caller then refuses
+/// the exchange (lobo#148). (-1, 0) when there is no listener. net
+/// tier. Total.
 fn px_pair(jl: int, port: int) -> (int, int) {
     if jl < 0 {
-        return (-1, -1)
+        return (-1, 0)
     }
     let w = net_connect("127.0.0.1:{port}") else |_| {
-        return (-1, -1)
+        return (-1, os_error())
     }
     net_deadline(jl, 1000) else |_| {}
     let r = net_accept(jl) else |_| {
+        let code = os_error()
         net_close(w) else |_| {}
-        return (-1, -1)
+        return (-1, code)
     }
     (w, r)
 }

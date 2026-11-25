@@ -2232,6 +2232,20 @@ pub fn accept_failed_text(code: int, text: str) -> str {
     "accept() failed ({code}: {text})"
 }
 
+/// The body of the `[alert]` line for a proxied exchange refused
+/// because the host would not give the serving loop the job socket
+/// pair a proc needs (lobo#148): nginx's `socket() failed (24: Too
+/// many open files) while connecting to upstream`, with what failed
+/// named as lobo's. `code` and `text` are the host's number and
+/// message; with no number known (`code <= 0`) the clause is left out
+/// rather than guessed. Pure and total.
+pub fn pair_refused_text(code: int, text: str) -> str {
+    if code <= 0 {
+        return "the exchange's job socket pair failed while connecting to upstream"
+    }
+    "the exchange's job socket pair failed ({code}: {text}) while connecting to upstream"
+}
+
 /// The body of the `[crit]` line for a file the host would not open:
 /// nginx's `open() "<path>" failed (24: Too many open files)` (its
 /// line goes on to name the client and the request; lobo's stops at
