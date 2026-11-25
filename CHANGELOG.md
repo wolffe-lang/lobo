@@ -2,6 +2,39 @@
 
 ## Unreleased — 0.1.6
 
+### A TLS connection no longer holds the serving loop (lobo#142)
+
+A TLS connection is now a row of the serving loop's table from its
+accept, as a plaintext connection is. Its handshake is stepped as its
+bytes arrive, and its requests are read, answered and kept alive by the
+same steps as plaintext requests, through the session the row carries.
+Until now each TLS connection was handshaked and served to completion,
+one at a time, and every other client waited while it lasted: a client
+that sent half a ClientHello, half a request head, part of a body, or
+nothing at all on an idle session, held them all until a read timeout.
+
+What follows from TLS connections being rows:
+
+- they count against `worker_connections`, are closed when idle by
+  `keepalive_timeout`, drain on a reload as plaintext connections do,
+  and an idle session can be closed to make room;
+- their requests are access-logged and counted, and a budget refusal on
+  one is reported like any other;
+- a request whose route does not use its body is answered after its
+  head, and the body is discarded as it arrives, as on plaintext;
+- every close the server makes sends close_notify first, including an
+  idle close, a close to make room, and a shutdown.
+
+The handshake keeps its rules, its alerts and its counters: one not
+done within the read timeout (60 s) of its accept is closed and counted
+as a timeout, as before. A proxied route on a TLS listener is still
+answered 502, as before; the connection now closes once any body still
+to come has arrived. A TLS response larger than a write slice is still
+written on the loop under the write deadline, so a client reading one
+slowly still holds the loop until it reads or the deadline passes. That
+is the remaining case, with its own test, left failing on purpose until
+it is fixed.
+
 ### A hand that dies is replaced even when another socket holds its port (lobo#155)
 
 The master now learns that a hand ended from the hand: each supervision
