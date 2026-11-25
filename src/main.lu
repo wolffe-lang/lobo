@@ -1814,9 +1814,9 @@ fn serve_main(
     // (lobo#100) one per proc of the exchange pool (`proxy.job_loop`),
     // kept across its exchanges. The listener is made once, here, beside
     // the stream pipe the procs report down, and is never in the wait
-    // set. A host that refuses it keeps the exchange inside the step
-    // (the loop then holds for a silent upstream, as every lobo before
-    // ws67 did), said out loud.
+    // set. A host that refuses it leaves lobo with no proc to make: a
+    // proxied request is then refused with 500, never exchanged inside
+    // the step (lobo#148), said out loud at start.
     var job_l = -1
     var job_port = 0
     if stream_w >= 0 {
@@ -1837,9 +1837,11 @@ fn serve_main(
             if jl >= 0 {
                 net_close(jl) else |_| {}
             }
-            eprint(
-                "lobo: [warn] no loopback job listener: a proxied request is exchanged inside the serving loop, so an upstream that does not answer holds every other connection until proxy_read_timeout (lobo#81)",
-            )
+            // lobo#148: lobo starts, and a proxied
+            // request that finds no idle proc is refused, as when the host
+            // refuses a job socket pair; with no listener no proc is ever
+            // made, so that is every proxied request until a restart
+            eprint("lobo: [warn] {shell.no_job_listener_text()}")
         }
     }
     var opts = serve.ServerOpts {
@@ -4328,22 +4330,17 @@ fn serve_main(
                                         // answers when it cannot make the
                                         // upstream socket), closes, and logs
                                         // it. With no job listener since the
-                                        // start, the exchange still runs here,
-                                        // said at the start
-                                        var rep = ("", 0)
-                                        if job_l >= 0 {
-                                            ev_log(
-                                                mut elog,
-                                                "alert",
-                                                shell.pair_refused_text(
-                                                    pair_why,
-                                                    if pair_why > 0 { os_error_text(pair_why) } else { "" },
-                                                ),
-                                            )
-                                            rep = proxy.job_refused(fd, px_job, px_tail, 500)
-                                        } else {
-                                            rep = proxy.job_serve(fd, px_job, px_tail, -1)
-                                        }
+                                        // start the same rule holds, said at
+                                        // the start
+                                        ev_log(
+                                            mut elog,
+                                            "alert",
+                                            shell.pair_refused_text(
+                                                pair_why,
+                                                if pair_why > 0 { os_error_text(pair_why) } else { "" },
+                                            ),
+                                        )
+                                        let rep = proxy.job_refused(fd, px_job, px_tail, 500)
                                         let d = px_account(rep.0)
                                         let t_end = if d.end_ms > 0 { d.end_ms } else { tw }
                                         var span = t_end - cs_eff
