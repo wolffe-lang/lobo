@@ -1,0 +1,26 @@
+//! check: run(exit=0, stdout="no job listener text ok\n")
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! lobo#148, the start case. When the host refuses
+//! the loopback job listener at start, lobo starts as before, but no
+//! exchange proc can ever be made, so every proxied request that finds
+//! no idle proc is refused with 500, by the same rule as a job socket
+//! pair the host refuses. The `[warn]` line lobo writes at start says
+//! so plainly, and this row holds its exact text: a change to it is a
+//! change an operator reads, made here on purpose.
+
+use shell
+
+fn main() -> int {
+    let want = "no loopback job listener: proxied requests will be refused (500) when no exchange worker is idle, and none can be started, until lobo is restarted (lobo#148)"
+    let got = shell.no_job_listener_text()
+    if got != want {
+        print("no_job_listener_text: FAILED — [warn-text] the start's line is [{got}], not [{want}]")
+        assert(false, "the start's warn line is its held text")
+        return 1
+    }
+    print("no job listener text ok")
+    0
+}
