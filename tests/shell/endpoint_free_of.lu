@@ -1,0 +1,50 @@
+//! check: run(exit=0, stdout="endpoint free of ok\n")
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! lobo#155, the endpoints. The master gives each hand a control port
+//! it has just probed free, and two probes made back to back can give
+//! the same port: the hand that loses the bind exits, and a connect to
+//! the port its sibling holds answered for it. The master now keeps the
+//! ports its table holds (each living hand's, each just given, a slot's
+//! dead predecessor's) and, while a probe gives one of them, holds that
+//! probe open and probes again. This row holds the choice:
+//! `shell.endpoint_free_of(port, taken)` is false exactly when `port`
+//! is one of `taken`'s ports or is no port at all; the table's marks for
+//! no endpoint (-1) and for a `unix:` sibling (0, which has no port)
+//! never take one.
+
+use shell
+
+fn check(name: str, got: bool, want: bool) -> int {
+    if got == want {
+        return 0
+    }
+    let g = if got { "free" } else { "taken" }
+    let w = if want { "free" } else { "taken" }
+    print("endpoint_free_of: FAILED — [{name}] answered {g}, want {w}")
+    1
+}
+
+fn main() -> int {
+    var taken = List[int]()
+    (mut taken).push(41011)
+    (mut taken).push(-1)
+    (mut taken).push(0)
+    (mut taken).push(37463)
+    let empty = List[int]()
+    var red: int = 0
+    red = red + check("a-sibling", shell.endpoint_free_of(41011, taken), false)
+    red = red + check("the-last", shell.endpoint_free_of(37463, taken), false)
+    red = red + check("in-none", shell.endpoint_free_of(46363, taken), true)
+    red = red + check("empty-table", shell.endpoint_free_of(46363, empty), true)
+    red = red + check("no-port", shell.endpoint_free_of(0, empty), false)
+    red = red + check("no-endpoint", shell.endpoint_free_of(-1, taken), false)
+    if red > 0 {
+        assert(false, "endpoint_free_of answers by the table")
+        return 1
+    }
+    print("endpoint free of ok")
+    0
+}
