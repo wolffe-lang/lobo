@@ -27,6 +27,7 @@
 //! File-header note (F-0016): comments never sit directly above a
 //! dotted call in this repo; `wolf fmt` splits the call at the dot.
 
+use config
 use tls
 
 /// A connection the lifecycle serves through. `kind` 0 = plaintext
@@ -215,6 +216,162 @@ pub fn conn_step_read(mut cn: Conn, max: int) -> List[byte] ! {closed, timeout, 
         return closed
     }
     o.plain
+}
+
+/// The application bytes of the whole records a TLS session already
+/// holds, without reading: those the handshake was fed past the client
+/// Finished (lobo#142). An alert the session answers is written
+/// best-effort. Plaintext: nothing. Rows: `closed` (the peer's
+/// close_notify or alert with nothing opened), `io` (a broken session).
+/// (W0602 allowed: conn_step_read's rows, less the read's timeout.)
+#[allow(w0602)]
+pub fn conn_open_held(mut cn: Conn) -> List[byte] ! {closed, io} {
+    if cn.kind == 0 {
+        return List[byte]()
+    }
+    let o = tls.sess_feed(mut cn.sess, List[byte]())
+    if !o.send.is_empty() {
+        net_write_bytes(cn.fd, o.send) else |_| {}
+    }
+    if o.io {
+        return io
+    }
+    if o.closed && o.plain.is_empty() {
+        return closed
+    }
+    o.plain
+}
+
+/// On a TLS conn, send close_notify once and leave the socket open, for
+/// a caller that closes the socket itself (the serving loop's rows).
+/// Plaintext: nothing. Total.
+pub fn conn_notify(mut cn: Conn) {
+    if cn.kind != 0 {
+        tls.sess_notify(mut cn.sess)
+    }
+}
+
+/// A TLS conn's session as bytes (`tls.sess_pack`), the state the
+/// serving loop keeps for its row between steps; nothing on plaintext.
+/// Total.
+pub fn conn_state(cn: Conn) -> List[byte] {
+    if cn.kind == 0 {
+        return List[byte]()
+    }
+    tls.sess_pack(cn.sess)
+}
+
+/// What a TLS row's state is (`tls.state_phase`): 0 or 1 a handshake,
+/// 2 a session, -1 no state. Total.
+pub fn state_phase(state: List[byte]) -> int {
+    tls.state_phase(state)
+}
+
+/// The TLS conn over `fd` whose session is the state `state`
+/// (`tls.sess_unpack`; a state that is not a session answers a broken
+/// one). Total.
+pub fn from_state(fd: int, state: List[byte]) -> Conn {
+    tls_conn(fd, take tls.sess_unpack(state, fd))
+}
+
+/// What one step of a TLS row's handshake did (lobo#142). `active`:
+/// bytes came. `close`: the row is done (a failure, already answered,
+/// or the peer's close). `end`: how the handshake ended in this step, as
+/// `tls.accept`'s rows were counted: 0 not yet, 1 open, 2 refused (a
+/// named failure, the peer's alert, close or EOF), 4 io. `state`: the
+/// row's state after it, the handshake's or, once open, the session's.
+/// `plain`: once open, the application bytes of the records already
+/// behind the client Finished; when those records closed or broke the
+/// session, `close` is set and its close_notify is sent.
+pub struct HsStep {
+    active: bool,
+    close: bool,
+    end: int,
+    state: List[byte],
+    plain: List[byte],
+}
+
+fn hs_step(
+    active: bool,
+    close: bool,
+    end: int,
+    take state: List[byte],
+    take plain: List[byte],
+) -> HsStep {
+    HsStep { active: active, close: close, end: end, state: state, plain: plain }
+}
+
+/// One step of a TLS row's handshake whose state is `state`, under the
+/// certificate model `sc` (lobo#142): one read under `poll_ms`, fed to
+/// the handshake (`tls.hs_feed`), what it answers written. The step that
+/// verifies the client Finished opens the session and, in the same step,
+/// the records already behind the Finished (`plain`), so a request sent
+/// with the Finished is not left unread. Never closes the socket. Total.
+pub fn hs_row_step(fd: int, state: List[byte], sc: config.SslConf, poll_ms: int) -> HsStep {
+    var h = tls.hs_unpack(state, sc)
+    net_deadline(fd, poll_ms) else |_| {
+        return hs_step(false, true, 4, take tls.hs_pack(h), take List[byte]())
+    }
+    // the sentinel shape (tls.accept): route the read's rows through
+    // an int
+    var errc = 0
+    let piece = net_read_bytes(fd, 4096) else |e| match e {
+        closed => {
+            errc = 1
+            List[byte]()
+        },
+        timeout => {
+            errc = 2
+            List[byte]()
+        },
+        io => {
+            errc = 3
+            List[byte]()
+        },
+    }
+    if errc == 2 {
+        return hs_step(false, false, 0, take tls.hs_pack(h), take List[byte]())
+    }
+    if errc != 0 || piece.is_empty() {
+        let why = if errc == 3 { 4 } else { 2 }
+        return hs_step(false, true, why, take tls.hs_pack(h), take List[byte]())
+    }
+    let o = tls.hs_feed(mut h, piece)
+    if o.failed {
+        // best-effort: the connection is being torn down regardless
+        net_write_bytes(fd, o.send) else |_| {}
+        let why = if o.io { 4 } else { 2 }
+        return hs_step(true, true, why, take tls.hs_pack(h), take List[byte]())
+    }
+    var wrote = true
+    if !o.send.is_empty() {
+        net_write_bytes(fd, o.send) else |_| {
+            wrote = false
+        }
+    }
+    if !wrote {
+        return hs_step(true, true, 4, take tls.hs_pack(h), take List[byte]())
+    }
+    if !o.done {
+        return hs_step(true, false, 0, take tls.hs_pack(h), take List[byte]())
+    }
+    var cn = tls_conn(fd, take tls.hs_session(h, fd))
+    var code = 0
+    let held = conn_open_held(mut cn) else |e| match e {
+        closed => {
+            code = 1
+            List[byte]()
+        },
+        io => {
+            code = 1
+            List[byte]()
+        },
+    }
+    if code != 0 {
+        conn_notify(mut cn)
+        return hs_step(true, true, 1, take conn_state(cn), take List[byte]())
+    }
+    hs_step(true, false, 1, take conn_state(cn), take held)
 }
 
 /// Write the full bytes of `s` (str path). Rows: `closed`, `io`.
