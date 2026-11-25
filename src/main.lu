@@ -4337,7 +4337,11 @@ fn serve_main(
                                             "alert",
                                             shell.pair_refused_text(
                                                 pair_why,
-                                                if pair_why > 0 { os_error_text(pair_why) } else { "" },
+                                                if pair_why > 0 {
+                                                    os_error_text(pair_why)
+                                                } else {
+                                                    ""
+                                                },
                                             ),
                                         )
                                         let rep = proxy.job_refused(fd, px_job, px_tail, 500)

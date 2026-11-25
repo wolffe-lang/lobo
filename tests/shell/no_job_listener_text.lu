@@ -17,7 +17,9 @@ fn main() -> int {
     let want = "no loopback job listener: proxied requests will be refused (500) when no exchange worker is idle, and none can be started, until lobo is restarted (lobo#148)"
     let got = shell.no_job_listener_text()
     if got != want {
-        print("no_job_listener_text: FAILED — [warn-text] the start's line is [{got}], not [{want}]")
+        print(
+            "no_job_listener_text: FAILED — [warn-text] the start's line is [{got}], not [{want}]",
+        )
         assert(false, "the start's warn line is its held text")
         return 1
     }
