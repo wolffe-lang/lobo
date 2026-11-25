@@ -2262,6 +2262,17 @@ pub fn hand_verdict(
     failures: int,
     in_grace: bool,
 ) -> str {
+    // PLANT A (lobo#158; never merged): a failed dial always counts; no
+    // state is read and no stop is marked
+    if failures >= 0 {
+        if answered == 1 {
+            return "healthy"
+        }
+        if answered == 0 {
+            return if !in_grace && failures + 1 >= 3 { "replace" } else { "failed" }
+        }
+        return "idle"
+    }
     if wait_stop {
         return "stop-signal"
     }
