@@ -4,15 +4,17 @@
 //! schedule and message builders (its FROZEN HandshakeResult seam);
 //! std.x.tls.record owns sealing and opening records (the frozen
 //! given-keys seam); std.x.tls.cert owns certificate meaning; THIS
-//! module owns what travels on the fd: reading TLS records off a
-//! socket, parsing the ClientHello, driving the server flight
+//! module owns what travels on the fd: framing TLS records,
+//! parsing the ClientHello, driving the server flight
 //! (ServerHello .. Finished), verifying the client Finished, and the
 //! application-data session (sess_read/sess_write/sess_close) the
 //! conn seam wraps. The server handshake is a state machine fed the
 //! bytes that arrive and never reading (lobo#142: `hs_begin`,
-//! `hs_feed`, `hs_session`), so the serving loop can own a TLS
-//! connection as a row; `accept` is its blocking wrapper. Protocol correctness is std.x.tls's suite (RFC
-//! 8448-gated); integration is this file's.
+//! `hs_feed`, `hs_session`), and the session opens and seals records
+//! over buffers (`sess_feed`, `sess_seal`), so the serving loop can
+//! own a TLS connection as a row; `accept`, `sess_read` and
+//! `sess_write` are their blocking wrappers. Protocol correctness is
+//! std.x.tls's suite (RFC 8448-gated); integration is this file's.
 //! Scope, honest: TLS 1.3 only (a pre-1.3 client is answered with a
 //! protocol_version alert — the ssl_protocols table note), the
 //! ChaCha20-Poly1305 suite only (RFC 8446's MTI; the AES-GCM pair is
@@ -440,106 +442,8 @@ pub fn parse_client_hello(msg: List[byte]) -> Hello {
 }
 
 // ------------------------------------------------------------------
-// the wire: records off a socket (buffered), plaintext record
-// framing, and alert sends
+// the wire: plaintext record framing
 // ------------------------------------------------------------------
-
-/// One wire record: the outer content type, the payload, and the RAW
-/// bytes (header included — record.open needs the exact header as
-/// AAD).
-struct RecR {
-    rtype: int,
-    body: List[byte],
-    raw: List[byte],
-}
-
-/// Read from `fd` until `buf` holds at least `need` bytes. Rows:
-/// `closed` (peer EOF first), `timeout` (the armed deadline fired —
-/// a stalled handshake IS this row), `io`.
-fn fill_to(fd: int, mut buf: List[byte], need: int) -> () ! {closed, timeout, io} {
-    while buf.len < need {
-        // the sentinel shape (serve.write_bytes_all): a `return <tag>`
-        // that repeats a match-arm name warns W0305 under lupin, and
-        // the rig denies warnings — so route through an int and raise
-        // once at the bottom.
-        var errc = 0
-        let piece = net_read_bytes(fd, 4096) else |e| match e {
-            closed => {
-                errc = 1
-                List[byte]()
-            },
-            timeout => {
-                errc = 2
-                List[byte]()
-            },
-            io => {
-                errc = 3
-                List[byte]()
-            },
-        }
-        if errc == 1 {
-            return closed
-        }
-        if errc == 2 {
-            return timeout
-        }
-        if errc == 3 {
-            return io
-        }
-        if piece.is_empty() {
-            return closed
-        }
-        push_all(mut buf, piece)
-    }
-}
-
-/// Take one complete TLS record off the socket (buffered through
-/// `buf`). Enforces the §5.1 ceiling (2^14 + 256 for protected
-/// records) — an overrun answers `io` after the record_overflow
-/// alert would be the caller's; at this seam the size gate is enough.
-fn rec_next(fd: int, mut buf: List[byte]) -> RecR ! {closed, timeout, io} {
-    fill_to(fd, mut buf, 5)?
-    let rtype = buf[0]
-    let rlen = be16(buf, 3)
-    if rlen > 16640 {
-        return io
-    }
-    fill_to(fd, mut buf, 5 + rlen)?
-    let raw = bsub(buf, 0, 5 + rlen)
-    let body = bsub(buf, 5, 5 + rlen)
-    let rest = bsub(buf, 5 + rlen, buf.len)
-    buf = rest
-    RecR { rtype: rtype as int, body: body, raw: raw }
-}
-
-/// A zero record (the sentinel-shape default; see `rec_take`). Total.
-fn rec_zero() -> RecR {
-    RecR { rtype: 0, body: List[byte](), raw: List[byte]() }
-}
-
-/// One record with the error routed through an int code (0 ok, 1
-/// closed, 2 timeout, 3 io) — the W0305 dodge (a `return <tag>` that
-/// repeats a match-arm name warns under lupin, and the rig denies
-/// warnings; serve.write_bytes_all set the precedent). The caller
-/// maps the code to whatever its own row wants.
-fn rec_take(fd: int, mut buf: List[byte]) -> (RecR, int) {
-    var code = 0
-    let r = rec_next(fd, mut buf) else |e| match e {
-        closed => {
-            code = 1
-            rec_zero()
-        },
-        timeout => {
-            code = 2
-            rec_zero()
-        },
-        io => {
-            code = 3
-            rec_zero()
-        },
-    }
-    (r, code)
-}
 
 /// Frame a PLAINTEXT record (`type || 0x0303 || len || body`) — the
 /// ServerHello's framing, and pre-key alerts. Total.
@@ -553,15 +457,6 @@ fn plain_record(rtype: int, body: List[byte]) -> List[byte] {
     out
 }
 
-/// Send a SEALED alert under the given write keys. Best-effort.
-fn send_alert_sealed(fd: int, key: List[byte], iv: List[byte], seq: int, code: int) {
-    var body = List[byte]()
-    (mut body).push(2 as byte)
-    (mut body).push(code as byte)
-    let rec = record.seal(key, iv, seq, 21, body, 0)
-    net_write_bytes(fd, rec) else |_| {}
-}
-
 // ------------------------------------------------------------------
 // the session
 // ------------------------------------------------------------------
@@ -570,7 +465,9 @@ fn send_alert_sealed(fd: int, key: List[byte], iv: List[byte], seq: int, code: i
 /// is the CLIENT's application traffic (rkey/riv/rseq), write side
 /// the SERVER's (wkey/wiv/wseq). `plain` buffers decrypted
 /// application bytes the conn seam has not consumed; `buf` buffers
-/// raw wire bytes. `got_close` is a received close_notify; `trunc`
+/// raw wire bytes not yet a whole record. `got_close` is a received
+/// close_notify (or a client alert); `failed` is a record the session
+/// could not take, after which it takes nothing more; `trunc`
 /// is an EOF WITHOUT close_notify (counted, the ws12 metric hook —
 /// silent truncation is how response-injection hides). `sni` and
 /// `alpn` record the negotiation for logs and the Host semantics;
@@ -591,6 +488,7 @@ pub struct Sess {
     got_close: bool,
     sent_close: bool,
     trunc: bool,
+    failed: bool,
     sni: str,
     alpn: str,
     entry: int,
@@ -611,6 +509,7 @@ fn sess_dead() -> Sess {
         got_close: false,
         sent_close: false,
         trunc: false,
+        failed: false,
         sni: "",
         alpn: "",
         entry: -1,
@@ -1107,6 +1006,7 @@ pub fn hs_session(h: Hs, fd: int) -> Sess {
         got_close: false,
         sent_close: false,
         trunc: false,
+        failed: false,
         sni: copy h.sni,
         alpn: copy h.alpn,
         entry: h.entry,
@@ -1126,7 +1026,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     net_deadline(fd, deadline_ms) else |_| {}
     var h = hs_begin(sc)
     loop {
-        // the sentinel shape (fill_to): route the read's rows through
+        // the sentinel shape (sess_read): route the read's rows through
         // an int and raise once below
         var errc = 0
         let piece = net_read_bytes(fd, 4096) else |e| match e {
@@ -1175,73 +1075,94 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     }
 }
 
-/// Read up to `max` decrypted application bytes. Pulls records until
-/// application data arrives; a received close_notify (or an EOF —
-/// counted as truncation, `z.trunc`) answers `closed` once the
-/// buffered plaintext is drained. A client KeyUpdate is NAMED
-/// RESIDUE: answered unexpected_message and `closed` (the rekey
-/// sprint lifts it). Rows: `closed`, `timeout` (the armed deadline),
-/// `io`.
-#[allow(w0602)]
-pub fn sess_read(mut z: Sess, max: int) -> List[byte] ! {closed, timeout, io} {
-    while z.plain.len == 0 {
-        if z.got_close {
-            return closed
-        }
-        if !z.up {
-            return closed
-        }
+/// What one feed of a session produced. `plain` is the application
+/// bytes of every record the feed completed, in order. `send` is the
+/// bytes for the peer: the sealed alert answering a record the session
+/// refused, empty otherwise. `closed` is the peer's close_notify or
+/// alert, or a post-handshake message refused: the session reads
+/// nothing more, and `plain` is still the caller's. `io` is a record
+/// the session cannot take (over the §5.1 ceiling, a plaintext record
+/// other than change_cipher_spec or close_notify, or one that fails to
+/// deprotect): the session is broken and the caller closes it.
+pub struct SessOut {
+    plain: List[byte],
+    send: List[byte],
+    closed: bool,
+    io: bool,
+}
+
+fn sess_out(take plain: List[byte], take send: List[byte], closed: bool, io: bool) -> SessOut {
+    SessOut { plain: plain, send: send, closed: closed, io: io }
+}
+
+/// Feed the session the bytes that arrived (lobo#142); never reads or
+/// writes. Every whole record in its buffer is opened, in order, and
+/// the bytes of a record not yet whole wait in `buf`, so a feed of
+/// nothing opens what the handshake left there. change_cipher_spec is
+/// skipped; a plaintext close_notify closes and any other plaintext
+/// record is `io`; a record that fails to deprotect is answered
+/// bad_record_mac (20); a client alert closes; a post-handshake
+/// message is answered unexpected_message (10) and closes (KeyUpdate
+/// is named residue). A closed or broken session takes nothing more.
+/// Total.
+pub fn sess_feed(mut z: Sess, input: List[byte]) -> SessOut {
+    if z.failed {
+        return sess_out(take List[byte](), take List[byte](), false, true)
+    }
+    if z.got_close || !z.up {
+        return sess_out(take List[byte](), take List[byte](), true, false)
+    }
+    if !input.is_empty() {
         var wire = z.buf
-        let rt = rec_take(z.fd, mut wire)
-        if rt.1 == 1 {
-            z.buf = List[byte]()
-            z.got_close = true
-            z.trunc = true
-            eprint("lobo: [info] TLS: peer EOF without close_notify (truncation, counted)")
-            return closed
-        }
-        if rt.1 == 2 {
-            z.buf = wire
-            return timeout
-        }
-        if rt.1 == 3 {
-            z.buf = wire
-            return io
-        }
-        let r = rt.0
+        push_all(mut wire, input)
         z.buf = wire
-        if r.rtype == 20 {
+    }
+    var got = List[byte]()
+    while z.buf.len >= 5 {
+        let rlen = be16(z.buf, 3)
+        if rlen > 16640 {
+            z.failed = true
+            return sess_out(take got, take List[byte](), false, true)
+        }
+        if z.buf.len < 5 + rlen {
+            return sess_out(take got, take List[byte](), false, false)
+        }
+        let rtype = z.buf[0] as int
+        let raw = bsub(z.buf, 0, 5 + rlen)
+        z.buf = bsub(z.buf, 5 + rlen, z.buf.len)
+        if rtype == 20 {
             continue
         }
-        if r.rtype != 23 {
-            if r.rtype == 21 && r.body.len >= 2 && r.body[1] as int == 0 {
+        if rtype != 23 {
+            if rtype == 21 && rlen >= 2 && raw[6] as int == 0 {
                 z.got_close = true
-                return closed
+                return sess_out(take got, take List[byte](), true, false)
             }
-            return io
+            z.failed = true
+            return sess_out(take got, take List[byte](), false, true)
         }
-        let inner = record.open(z.rkey, z.riv, z.rseq, r.raw) else |_| {
+        var opened = true
+        let inner = record.open(z.rkey, z.riv, z.rseq, raw) else |_| {
+            opened = false
+            List[byte]()
+        }
+        if !opened {
             eprint("lobo: [info] TLS: record failed to deprotect ({alert_name(20)})")
-            send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 20)
-            z.wseq = z.wseq + 1
-            return io
+            z.failed = true
+            let a = sess_alert(mut z, 20)
+            return sess_out(take got, take a, false, true)
         }
         z.rseq = z.rseq + 1
         let ct = record.content_type_of(inner)
         let content = record.content_of(inner)
         if ct == 23 {
-            var plain = z.plain
-            push_all(mut plain, content)
-            z.plain = plain
+            push_all(mut got, content)
         } else if ct == 21 {
-            if content.len >= 2 && content[1] as int == 0 {
-                z.got_close = true
-            } else {
-                if content.len >= 2 {
-                    eprint("lobo: [info] TLS: client alert {alert_name(content[1] as int)}")
-                }
-                z.got_close = true
+            if content.len >= 2 && content[1] as int != 0 {
+                eprint("lobo: [info] TLS: client alert {alert_name(content[1] as int)}")
             }
+            z.got_close = true
+            return sess_out(take got, take List[byte](), true, false)
         } else if ct == 22 {
             // post-handshake message: KeyUpdate is named residue at
             // this pin (the rekey sprint); anything else is equally
@@ -1249,11 +1170,131 @@ pub fn sess_read(mut z: Sess, max: int) -> List[byte] ! {closed, timeout, io} {
             eprint(
                 "lobo: [info] TLS: post-handshake message refused ({alert_name(10)} — KeyUpdate is named residue)",
             )
-            send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 10)
-            z.wseq = z.wseq + 1
             z.got_close = true
+            let a = sess_alert(mut z, 10)
+            return sess_out(take got, take a, true, false)
+        }
+    }
+    sess_out(take got, take List[byte](), false, false)
+}
+
+/// The peer's EOF: without a close_notify first it is truncation,
+/// counted on the session (`trunc`) and logged. The session reads
+/// nothing more. Total.
+pub fn sess_eof(mut z: Sess) {
+    if !z.got_close {
+        z.trunc = true
+        eprint("lobo: [info] TLS: peer EOF without close_notify (truncation, counted)")
+    }
+    z.buf = List[byte]()
+    z.got_close = true
+}
+
+/// Seal application bytes for the peer under the session's write keys,
+/// in records of at most 2^14 content bytes (§5.1), each taking the
+/// next write sequence number; never writes. Nothing to seal is
+/// nothing sealed. Total.
+pub fn sess_seal(mut z: Sess, data: List[byte]) -> List[byte] {
+    let n = data.len
+    if n <= 16384 {
+        if n == 0 {
+            return List[byte]()
+        }
+        return seal_one(mut z, 23, data)
+    }
+    var out = List[byte]()
+    var at: int = 0
+    while at < n {
+        var stop = at + 16384
+        if stop > n {
+            stop = n
+        }
+        push_all(mut out, seal_one(mut z, 23, bsub(data, at, stop)))
+        at = stop
+    }
+    out
+}
+
+/// One record of inner type `ct` under the write keys; the write
+/// sequence moves on. Total.
+fn seal_one(mut z: Sess, ct: int, content: List[byte]) -> List[byte] {
+    let rec = record.seal(z.wkey, z.wiv, z.wseq, ct, content, 0)
+    z.wseq = z.wseq + 1
+    rec
+}
+
+/// A sealed alert record (level 2, `code`; close_notify is code 0).
+/// Total.
+fn sess_alert(mut z: Sess, code: int) -> List[byte] {
+    var body = List[byte]()
+    (mut body).push(2 as byte)
+    (mut body).push(code as byte)
+    seal_one(mut z, 21, body)
+}
+
+/// Feed `input`, write any answer (best-effort: a refused record ends
+/// the read either way) and keep the plaintext for `sess_read`.
+fn sess_pull(mut z: Sess, input: List[byte]) {
+    let o = sess_feed(mut z, input)
+    if !o.send.is_empty() {
+        net_write_bytes(z.fd, o.send) else |_| {}
+    }
+    if !o.plain.is_empty() {
+        var plain = z.plain
+        push_all(mut plain, o.plain)
+        z.plain = plain
+    }
+}
+
+/// Read up to `max` decrypted application bytes, blocking: the session
+/// fed from the socket until application data arrives, for the callers
+/// that serve a connection to completion. A received close_notify (or
+/// an EOF — counted as truncation, `z.trunc`) answers `closed` once the
+/// buffered plaintext is drained, and a broken session `io`. A client
+/// KeyUpdate is NAMED RESIDUE: answered unexpected_message and `closed`
+/// (the rekey sprint lifts it). Rows: `closed`, `timeout` (the armed
+/// deadline), `io`.
+#[allow(w0602)]
+pub fn sess_read(mut z: Sess, max: int) -> List[byte] ! {closed, timeout, io} {
+    if z.plain.len == 0 && z.buf.len >= 5 {
+        // what the handshake fed past the client Finished
+        sess_pull(mut z, List[byte]())
+    }
+    while z.plain.len == 0 {
+        if z.failed {
+            return io
+        }
+        if z.got_close || !z.up {
             return closed
         }
+        // the sentinel shape (accept): route the read's rows through
+        // an int and raise once below
+        var errc = 0
+        let piece = net_read_bytes(z.fd, 4096) else |e| match e {
+            closed => {
+                errc = 1
+                List[byte]()
+            },
+            timeout => {
+                errc = 2
+                List[byte]()
+            },
+            io => {
+                errc = 3
+                List[byte]()
+            },
+        }
+        if errc == 2 {
+            return timeout
+        }
+        if errc == 3 {
+            return io
+        }
+        if errc == 1 || piece.is_empty() {
+            sess_eof(mut z)
+            return closed
+        }
+        sess_pull(mut z, piece)
     }
     var got = max
     if got > z.plain.len {
@@ -1266,7 +1307,8 @@ pub fn sess_read(mut z: Sess, max: int) -> List[byte] ! {closed, timeout, io} {
 }
 
 /// Write application bytes, sealed into records of at most 2^14
-/// content bytes (§5.1). Rows: `closed` (the peer vanished), `io`.
+/// content bytes (§5.1), each written as it is sealed. Rows: `closed`
+/// (the peer vanished), `io`.
 #[allow(w0602)]
 pub fn sess_write(mut z: Sess, data: List[byte]) -> () ! {closed, io} {
     if !z.up {
@@ -1279,9 +1321,7 @@ pub fn sess_write(mut z: Sess, data: List[byte]) -> () ! {closed, io} {
         if stop > n {
             stop = n
         }
-        let piece = bsub(data, at, stop)
-        let rec = record.seal(z.wkey, z.wiv, z.wseq, 23, piece, 0)
-        z.wseq = z.wseq + 1
+        let rec = sess_seal(mut z, bsub(data, at, stop))
         var errc = 0
         net_write_bytes(z.fd, rec) else |e| match e {
             closed => {
@@ -1310,8 +1350,8 @@ pub fn sess_write(mut z: Sess, data: List[byte]) -> () ! {closed, io} {
 /// either way).
 pub fn sess_close(mut z: Sess) {
     if z.up && !z.sent_close {
-        send_alert_sealed(z.fd, z.wkey, z.wiv, z.wseq, 0)
-        z.wseq = z.wseq + 1
+        let rec = sess_alert(mut z, 0)
+        net_write_bytes(z.fd, rec) else |_| {}
         z.sent_close = true
     }
     net_close(z.fd) else |_| {}
