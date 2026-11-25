@@ -1917,6 +1917,9 @@ fn send_gateway_error(conn: int, code: int, date: str, token: str) {
 /// The reason phrase for a gateway status (nginx's spellings, probed).
 /// Total.
 fn gw_phrase(code: int) -> str {
+    if code == 500 {
+        return "Internal Server Error"
+    }
     if code == 502 {
         return "Bad Gateway"
     }
@@ -3350,6 +3353,23 @@ pub fn job_loop(jr: int, out: int) -> int {
         net_close(jr) else |_| {}
     }
     0
+}
+
+/// The exchange a job's text asks for, REFUSED without running it
+/// (lobo#148): the host would not give the serving loop the job socket
+/// pair a proc needs, and the loop does not run the exchange itself.
+/// `client` is answered `code` (nginx's page) and is to be closed; an
+/// owed body is not read; no upstream is contacted. Answers what
+/// `job_serve` answers, so the loop accounts it the same way, the owed
+/// part's `refused` set: the exchange never reached an upstream (`-`).
+/// Total.
+pub fn job_refused(client: int, job_s: str, tail: str, code: int) -> (str, int) {
+    let j = job_parse(job_s) else |_| {
+        job_failed(code, "", "", "")
+    }
+    send_gateway_error(client, code, j.date, j.token)
+    let det = "{code} {gw_body(code, j.token).len} 0 1 {time_unix_ms()} 0:0:o0;1;0;0;0:"
+    ("r {det.len} {tail.len}\n{det}{tail}", 0)
 }
 
 /// The exchange a job's text asks for, answered on `client` (ws67):
