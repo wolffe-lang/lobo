@@ -372,6 +372,16 @@ result to workers, including generation reconciliation, remains lobo#101.
 `tools/lobo-user` checks the root-only rejection, continued old-worker
 serving, full success and restored-readability acknowledgements.
 
+A hand left alone as stopped (lobo#158, docs/WORKERS.md) is not sent a
+verb: `reload`, `reopen` and `quit` count it as not acknowledged (so a
+reload answers `reload incomplete … workers=K/N`), and each it missed
+is sent to it once when it continues. Its `status` row reads `stopped`,
+written by the master with no dial, its generation and counters -1. The
+master's dial to each hand is bounded by 250 ms, and the command line's
+dial to the master by the client's deadline (2000 ms), so `lobo status`
+against a master that does not accept says it did not answer within
+that time instead of waiting on the kernel.
+
 ## Authorization
 
 Two arms, and the posture of each.
