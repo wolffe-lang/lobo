@@ -2058,7 +2058,9 @@ pub fn status_workers_line(n: int) -> str {
 /// posture (`serving` holds every listener the config asks for,
 /// `standby` is waiting for one another worker holds — this pin's
 /// accept-distribution posture, docs/WORKERS.md — `unreachable`
-/// answered nothing), its control endpoint (so an operator can reach
+/// answered nothing, `stopped` is left alone by the master as stopped
+/// (lobo#158: not dialed, so its generation and counters are -1)), its
+/// control endpoint (so an operator can reach
 /// ONE hand), its current generation, the connections it holds, its
 /// own event count (its seq stream's top — seq is per PROCESS), its
 /// live region bytes, its budget refusals and how many times the
