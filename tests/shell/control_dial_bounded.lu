@@ -1,0 +1,125 @@
+//! check: run(exit=0, stdout="control dial bounded ok\n")
+//! phase: run
+//! lanes: native
+//! stage-src: shell config
+//!
+//! lobo#158, the bound on a dial. The master dials each hand's control
+//! endpoint to probe it, to fan a verb out and to gather its status, and
+//! `shell.control_dial` connected with no deadline: against a listener
+//! whose queue is full (a hand that is stopped, or whose loop is held)
+//! a TCP connect waits for the kernel's own limit, measured at 133 to
+//! 136 s on Linux, and the master's loop with it. The dial now has a
+//! budget, D = 250 ms (docs/WORKERS.md's rule over measured connect times).
+//! This row holds it for the TCP arm:
+//!   1. a loopback listener with a backlog of 1 that never accepts has
+//!      its queue filled, each connect bounded to 200 ms, until one does
+//!      not complete in that time;
+//!   2. `shell.control_reachable` on it, run in a proc, answers `false`
+//!      within D + 500 ms; the test waits at most 3000 ms for the answer
+//!      (red before the bound: no answer in that time);
+//!   3. an accepting listener still answers `true`, and a closed port
+//!      `false`, each within the same time.
+//! A case that fails prints `control_dial_bounded: FAILED — [case] …`.
+//! Lane: native (a proc and sockets; the timing is a bound on a wait,
+//! not a measurement).
+
+use shell
+
+/// The proc: one probe, its answer written as one byte.
+fn probe(w: int, addr: str) -> int {
+    let ok = shell.control_reachable(addr)
+    net_write(w, if ok { "1" } else { "0" }) else |_| {}
+    0
+}
+
+/// A connected pair on loopback: the end a proc writes, then the end
+/// the test reads.
+fn pair() -> (int, int) {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        assert(false, "control_dial_bounded: listen for the answer pair")
+        return (-1, -1)
+    }
+    let p = net_port(l) else |_| { 0 }
+    let w = net_connect("127.0.0.1:{p}") else |_| {
+        assert(false, "control_dial_bounded: connect the answer pair")
+        return (-1, -1)
+    }
+    let r = net_accept(l) else |_| {
+        assert(false, "control_dial_bounded: accept the answer pair")
+        return (-1, -1)
+    }
+    net_close(l) else |_| {}
+    (w, r)
+}
+
+/// One case: 0 when it holds, else 1 and its `FAILED — [name]` line on
+/// stdout, where the corpus record reads it (an assert's own message is
+/// not in the record).
+fn report(name: str, ok: bool, detail: str) -> int {
+    if ok {
+        return 0
+    }
+    print("control_dial_bounded: FAILED — [{name}] {detail}")
+    1
+}
+
+/// Probe `addr` in a proc and wait at most 3000 ms for its answer:
+/// "1", "0", or "" for none in that time, with the milliseconds waited.
+fn probe_within(addr: str) -> (str, int) {
+    let pr = pair()
+    let t0 = time_unix_ms()
+    let _h = spawn proc probe(pr.0, addr)
+    net_deadline(pr.1, 3000) else |_| {}
+    let got = net_read(pr.1, 1) else |_| { "" }
+    let waited = time_unix_ms() - t0
+    net_close(pr.1) else |_| {}
+    (got, waited)
+}
+
+fn main() -> int {
+    // 1. a listener that never accepts, its queue filled
+    let full = net_listen_with("127.0.0.1:0", false, 1) else |_| {
+        assert(false, "control_dial_bounded: listen with a backlog of 1")
+        return 1
+    }
+    let port = net_port(full) else |_| { 0 }
+    let addr = "127.0.0.1:{port}"
+    var held = List[int]()
+    var filling = true
+    while filling && held.len < 64 {
+        let c = net_connect_within(addr, 200) else |_| {
+            filling = false
+            -1
+        }
+        if c >= 0 {
+            (mut held).push(c)
+        }
+    }
+    assert(!filling, "control_dial_bounded: 64 connects completed against a backlog of 1")
+
+    // 2. the probe answers false within D + 500 ms ("" is no answer in
+    // 3000 ms: the dial has no bound)
+    var bad: int = 0
+    let a = probe_within(addr)
+    bad = bad + report("dial-full-queue", a.0 == "0" && a.1 <= 750, "'{a.0}' after {a.1} ms")
+
+    // 3. an accepting listener, and a closed port
+    let open = net_listen("127.0.0.1:0") else |_| {
+        assert(false, "control_dial_bounded: listen")
+        return 1
+    }
+    let op = net_port(open) else |_| { 0 }
+    let b = probe_within("127.0.0.1:{op}")
+    bad = bad + report("dial-accepting", b.0 == "1" && b.1 <= 750, "'{b.0}' after {b.1} ms")
+    net_close(open) else |_| {}
+    let c = probe_within("127.0.0.1:{op}")
+    bad = bad + report("dial-closed", c.0 == "0" && c.1 <= 750, "'{c.0}' after {c.1} ms")
+    assert(bad == 0, "control_dial_bounded: {bad} cases wrong")
+
+    for h in held {
+        net_close(h) else |_| {}
+    }
+    net_close(full) else |_| {}
+    print("control dial bounded ok")
+    0
+}
