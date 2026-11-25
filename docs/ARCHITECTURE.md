@@ -25,8 +25,8 @@ imports; `budget` is the thirteenth and is reached through `serve`.
 | `serve/` | listeners, connection lifecycle, static serving, the per-connection step the poll loop drives | ws02 |
 | `proxy/` | upstream pools, `proxy_pass`, hop-by-hop header discipline | ws03 |
 | `shell/` | the CLI grammar, the text builders, the pid lifecycle, the control channel and the reload verbs | ws04 |
-| `tls/` | what travels on the fd: TLS records off a socket, ClientHello parse, the server flight (`std.x.tls` owns the schedule) | ws05 |
-| `conn/` | THE SEAM — a connection read/written/deadlined/closed without knowing whether bytes are in the clear or inside TLS 1.3 records | ws05 |
+| `tls/` | what travels on the fd: TLS records framed from buffers, ClientHello parse, the server flight as a state machine fed what arrives, a row's handshake or session as bytes (`std.x.tls` owns the schedule) | ws05, lobo#142 |
+| `conn/` | THE SEAM — a connection read/written/deadlined/closed without knowing whether bytes are in the clear or inside TLS 1.3 records; a TLS row's handshake step | ws05, lobo#142 |
 | `acme/` | the RFC 8555 client: DER writers, Ed25519 keys, PEM both ways, the atomic store, and the issuance flow | ws06 |
 | `dryrun/` | what a config would DO with a request — matched server, matched location with a why-it-lost trace, effective directives with provenance. Offline, no sockets, no fs | ws07 |
 | `obs/` | logging: the format compiler, the variable table, the oracle-pinned escapers, the JSON doors, bounded sinks | ws09 |
@@ -62,8 +62,10 @@ step a slow writer — readiness is READ readiness only, and a write
 drains whole or fails with the bytes it sent unknown — so the proc is
 the honest shape. The stream is ONE proc holding ints and two
 sockets; the loop owns the row's bookkeeping and never touches the
-socket while the stream does. TLS keeps the inline write (the D24
-residue). A parked proc holds a thread of the runtime's pool (two,
+socket while the stream does. A TLS row keeps the inline write: its
+session seals the records, and a stream writes the descriptor in the
+clear, so a TLS response larger than a write slice is still written on
+the loop under the write deadline (lobo#142's named residue). A parked proc holds a thread of the runtime's pool (two,
 measured at 0.2.29), so the loop counts its streams against
 `stream_room` and past it writes a budgeted small body without its
 capped proc rather than wait in that proc's join; a stream past it
@@ -282,12 +284,12 @@ the store, whose chain they look at once a second.
 Read from the `use` lines, both directions:
 
 ```
-main    → acme config conn dryrun http metrics obs proxy resolver
-          serve shell tls          (everything but budget)
+main    → acme config dryrun http metrics obs proxy resolver serve
+          shell tls                (everything but budget and conn)
 serve   → budget config conn http metrics obs proxy resolver
 proxy   → config http resolver
 dryrun  → config http proxy
-conn    → tls
+conn    → config tls
 http    → config
 shell   → config
 tls     → config

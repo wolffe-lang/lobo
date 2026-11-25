@@ -216,9 +216,10 @@ serve linux aarch64.
   totals, plus failed accepts by `emfile`, `enfile` or `other` reason
   ([metrics reference](docs/metrics.md)). Upstream
   connections count as nginx counts them: a proxied request is two
-  connections while its exchange is out. A TLS connection while it is
-  served is not counted (`docs/directives.md`). Through 0.1.3 the
-  directive was parsed and ignored.
+  connections while its exchange is out. A TLS connection counts as a
+  plaintext one does; through 0.1.5 it was not counted while it was
+  served (`docs/directives.md`). Through 0.1.3 the directive was parsed
+  and ignored.
 - **Descriptors.** An idle connection holds one descriptor; a
   download parked on a slow client holds two (its socket and its
   file), two threads and about 150 KB resident. A process holds about
@@ -277,6 +278,15 @@ serve linux aarch64.
   still rules it. That margin was sized a quarter under the old limit
   and is kept as lobo's own: it is what keeps the loop out of a proc's
   join on a host that has run out of threads.
+- **TLS.** A TLS connection is served by the loop as a plaintext one
+  is: its handshake is stepped as its bytes arrive, then its requests,
+  so a client that holds part of a ClientHello, a head or a body, or an
+  idle session, holds no other client. A TLS response larger than a
+  write slice is still written on the loop under the write deadline, so
+  a client that reads one slowly holds the loop until it reads or the
+  deadline passes; a plaintext download leaves the loop for its own
+  proc. Through 0.1.5 a TLS connection was served to completion, one at
+  a time, and held the loop throughout.
 - **Kept files.** A regular file of at most 32 KiB that has not
   changed for three seconds is answered from bytes lobo keeps, after
   one `stat` that must match the file's device, inode, size and both
