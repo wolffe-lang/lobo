@@ -4886,23 +4886,19 @@ pub fn tls_row_step(
     let ph = conn.state_phase(state)
     if ph == 2 {
         var cn = conn.from_state(fd, state)
-        let st = tls_step(
-            mut cn,
-            c,
-            opts,
-            limits,
-            local_port,
-            laddr,
-            carry,
-            served,
-            poll_ms,
-            rs,
-            ft,
-            now,
-            dst,
-            dn,
-            dt,
-        )
+        // PLANT 1 (lobo#142; never merged): once the handshake is done,
+        // the session is served blocking, a read waiting up to the
+        // keep-alive timeout, until it closes or idles out
+        let kms = opts.keepalive_timeout_ms
+        var st = tls_step(mut cn, c, opts, limits, local_port, laddr, carry, served, kms, rs, ft, now, dst, dn, dt)
+        while !st.close && st.active {
+            let c2 = st.carry
+            let sv2 = st.served
+            let d1 = st.disc_st
+            let d2 = st.disc_n
+            let d3 = st.disc_t
+            st = tls_step(mut cn, c, opts, limits, local_port, laddr, c2, sv2, kms, rs, ft, now, d1, d2, d3)
+        }
         if st.close {
             conn.conn_notify(mut cn)
         }
