@@ -2232,6 +2232,17 @@ pub fn accept_failed_text(code: int, text: str) -> str {
     "accept() failed ({code}: {text})"
 }
 
+/// The `[warn]` line's body when the host refuses the loopback job
+/// listener at start (lobo#148): lobo starts, but no
+/// exchange proc can ever be made, so every proxied request that finds
+/// no idle one is refused with 500, by the same rule as a job socket
+/// pair the host refuses, until lobo is restarted.
+/// `tests/shell/no_job_listener_text.lu` holds the text. Pure and
+/// total.
+pub fn no_job_listener_text() -> str {
+    "no loopback job listener: proxied requests will be refused (500) when no exchange worker is idle, and none can be started, until lobo is restarted (lobo#148)"
+}
+
 /// The body of the `[alert]` line for a proxied exchange refused
 /// because the host would not give the serving loop the job socket
 /// pair a proc needs (lobo#148): nginx's `socket() failed (24: Too
