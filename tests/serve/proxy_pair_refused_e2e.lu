@@ -199,28 +199,47 @@ fn close_all(mut kept: List[int]) {
 }
 
 /// What arrives on `c` within `ms`: (the bytes, whether the peer
-/// closed). Total.
-fn reply(c: int, ms: int) -> (str, bool) {
+/// ended the connection, and how: "end" for its close, "reset" for a
+/// reset or another error, "" when `ms` passed with it open). A reset
+/// is a close: the peer left the connection. Total.
+fn reply(c: int, ms: int) -> (str, bool, str) {
     net_deadline(c, ms) else |_| {}
     var buf = ""
-    var closed = false
+    var how = ""
     var reading = true
     while reading {
-        var failed = false
-        let piece = net_read(c, 4096) else |_| {
-            failed = true
-            ""
+        var stop = ""
+        let piece = net_read(c, 4096) else |e| match e {
+            timeout => {
+                stop = "timeout"
+                ""
+            },
+            closed => {
+                stop = "end"
+                ""
+            },
+            utf8 => {
+                stop = "reset"
+                ""
+            },
+            io => {
+                stop = "reset"
+                ""
+            },
         }
-        if failed {
+        if stop == "timeout" {
+            reading = false
+        } else if !stop.is_empty() {
+            how = stop
             reading = false
         } else if piece.is_empty() {
-            closed = true
+            how = "end"
             reading = false
         } else {
             buf = "{buf}{piece}"
         }
     }
-    (buf, closed)
+    (buf, !how.is_empty(), how)
 }
 
 /// A fresh connection that sends `req`: its handle, or -1. Total.
@@ -435,7 +454,7 @@ fn main() -> !int {
     }
     let r1 = reply(c1, 1000)
     net_close(c1) else |_| {}
-    print("[pair-answer] lobo: [{status_line(r1.0)}], closed {r1.1}")
+    print("[pair-answer] lobo: [{status_line(r1.0)}], closed {r1.1} ({r1.2})")
     if status_line(r1.0) != want || !r1.1 {
         print(
             "pair_refused: FAILED — [pair-answer] the client got [{status_line(r1.0)}] (closed {r1.1}) within 1000 ms; nginx answers [{want}] and lobo closes",
@@ -455,7 +474,7 @@ fn main() -> !int {
     print("[pair-owed] status while the POST's body is owed: {st2.1} ms, {st2.0.len} bytes")
     let r2 = reply(c2, 1000)
     net_close(c2) else |_| {}
-    print("[pair-owed] lobo: [{status_line(r2.0)}], closed {r2.1}")
+    print("[pair-owed] lobo: [{status_line(r2.0)}], closed {r2.1} ({r2.2})")
     if !st2.0.contains("current generation: 1") ||
         st2.1 > 1000 ||
         status_line(r2.0) != want ||
