@@ -1,0 +1,110 @@
+//! check: run(exit=0, stdout="hand verdict ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! lobo#158, what the master decides about a hand each pass. A hand
+//! that is stopped (by a signal, or under a debugger) is left alone, as
+//! nginx leaves one: it is never dialed, never replaced, and its missed
+//! verbs are sent when it continues. A hand that is running and does not
+//! accept is replaced after three failed probes, as before. Where the
+//! host cannot read a hand's state, a failed dial is reported and never
+//! replaces it. `shell.hand_verdict(marked, wait_stop, state, answered,
+//! failures, in_grace)` is that decision as one total function, a word
+//! for each answer; this row holds every case:
+//!   * the wait's report of a stop, whatever else is true;
+//!   * a marked hand still `T` or `t`, gone or a zombie, running again,
+//!     and, where the state is unknown, by the ping's answer;
+//!   * an unmarked hand whose dial completed, or failed with the state
+//!     `T`, `t`, `Z`, gone, running (counted, the third after the grace
+//!     replaces), or unknown;
+//!   * an unmarked hand not dialed this pass.
+//! And `shell.stat_state`, the state letter of a `/proc/<pid>/stat`
+//! line, found after the command's last `) ` (a command may hold one).
+//! Lanes: pure, all three.
+
+use shell
+
+fn check(name: str, got: str, want: str) -> int {
+    if got == want {
+        return 0
+    }
+    print("hand_verdict: FAILED — [{name}] answered {got}, want {want}")
+    1
+}
+
+fn main() -> int {
+    var bad: int = 0
+    // the wait's report of a stop comes first, whatever else is true
+    bad = bad + check("wait-stop", shell.hand_verdict(false, true, "S", 1, 0, false), "stop-signal")
+    bad = bad +
+        check("wait-stop-marked", shell.hand_verdict(true, true, "T", -1, 0, false), "stop-signal")
+    bad = bad +
+        check("wait-stop-failed", shell.hand_verdict(false, true, "", 0, 2, false), "stop-signal")
+
+    // a marked hand: its state decides, or where unknown the ping
+    bad = bad +
+        check("marked-T", shell.hand_verdict(true, false, "T", -1, 0, false), "still-stopped")
+    bad = bad +
+        check("marked-t", shell.hand_verdict(true, false, "t", -1, 0, false), "still-stopped")
+    bad = bad + check("marked-S", shell.hand_verdict(true, false, "S", -1, 0, false), "continued")
+    bad = bad + check("marked-R", shell.hand_verdict(true, false, "R", -1, 0, false), "continued")
+    bad = bad + check("marked-Z", shell.hand_verdict(true, false, "Z", -1, 0, false), "ending")
+    bad = bad + check("marked-gone", shell.hand_verdict(true, false, "-", -1, 0, false), "ending")
+    bad = bad +
+        check("marked-unknown-pong", shell.hand_verdict(true, false, "", 1, 0, false), "continued")
+    bad = bad +
+        check(
+            "marked-unknown-silent",
+            shell.hand_verdict(true, false, "", 0, 0, false),
+            "still-stopped",
+        )
+    bad = bad +
+        check(
+            "marked-unknown-unpinged",
+            shell.hand_verdict(true, false, "", -1, 0, false),
+            "still-stopped",
+        )
+
+    // an unmarked hand whose dial completed
+    bad = bad + check("healthy", shell.hand_verdict(false, false, "S", 1, 2, false), "healthy")
+    bad = bad +
+        check("healthy-unknown", shell.hand_verdict(false, false, "", 1, 0, true), "healthy")
+
+    // an unmarked hand whose dial failed: the state separates them
+    bad = bad + check("failed-T", shell.hand_verdict(false, false, "T", 0, 2, false), "stop-signal")
+    bad = bad + check("failed-t", shell.hand_verdict(false, false, "t", 0, 2, false), "stop-trace")
+    bad = bad + check("failed-Z", shell.hand_verdict(false, false, "Z", 0, 2, false), "ending")
+    bad = bad + check("failed-gone", shell.hand_verdict(false, false, "-", 0, 2, false), "ending")
+    bad = bad + check("failed-1", shell.hand_verdict(false, false, "S", 0, 0, false), "failed")
+    bad = bad + check("failed-2", shell.hand_verdict(false, false, "R", 0, 1, false), "failed")
+    bad = bad + check("failed-3", shell.hand_verdict(false, false, "D", 0, 2, false), "replace")
+    bad = bad + check("failed-3-grace", shell.hand_verdict(false, false, "S", 0, 2, true), "failed")
+    bad = bad +
+        check("failed-many-grace", shell.hand_verdict(false, false, "S", 0, 7, true), "failed")
+    bad = bad +
+        check("failed-unknown", shell.hand_verdict(false, false, "", 0, 2, false), "unreachable")
+    bad = bad +
+        check(
+            "failed-unknown-more",
+            shell.hand_verdict(false, false, "", 0, 9, false),
+            "unreachable",
+        )
+
+    // an unmarked hand not dialed this pass
+    bad = bad + check("idle", shell.hand_verdict(false, false, "S", -1, 0, false), "idle")
+    bad = bad + check("idle-unknown", shell.hand_verdict(false, false, "", -1, 1, false), "idle")
+
+    // the state letter of a /proc/<pid>/stat line
+    bad = bad + check("stat-S", shell.stat_state("4242 (lobo) S 1 4242 4242 0 -1"), "S")
+    bad = bad + check("stat-T", shell.stat_state("4242 (lobo) T 1 4242"), "T")
+    bad = bad + check("stat-t", shell.stat_state("4242 (lobo) t 1 4242"), "t")
+    bad = bad + check("stat-paren", shell.stat_state("4242 (a) b) Z 1 4242"), "Z")
+    bad = bad + check("stat-short", shell.stat_state("4242 (lobo) "), "")
+    bad = bad + check("stat-none", shell.stat_state("not a stat line"), "")
+    bad = bad + check("stat-empty", shell.stat_state(""), "")
+
+    assert(bad == 0, "hand_verdict: {bad} cases wrong")
+    print("hand verdict ok")
+    0
+}
