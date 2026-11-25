@@ -676,7 +676,7 @@ instead of on the round.
 - `tools/lobo-prefork`, a gauntlet step, 38/38: three hands all
   serving and none standing by, 90 connections reaching all three
   (the counts printed), a REAL `kill -9` with the service not
-  blinking, the master's `worker-exited reason=unreachable code=-1` /
+  blinking, the master's `worker-exited reason=signal code=-1` /
   `worker-started restarts=1` and the replacement SERVING, the rolling
   reload's drain watched on whichever hand took the held connection
   (ws17 cannot assume; the kernel picks), the per-hand budget, the

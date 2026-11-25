@@ -22,7 +22,7 @@
 #      survivors already hold the same socket — the window is MEASURED
 #      and printed, and is now the cost of one request, not a
 #      failover), and the master reaps the corpse and REPLACES it
-#      (`restarts=1`, the `worker-exited … reason=unreachable code=-1`
+#      (`restarts=1`, the `worker-exited … reason=signal code=-1`
 #      / `worker-started … restarts=1` events in the master's log);
 #      the replacement comes back SERVING, because it inherits the
 #      same listener;
@@ -288,10 +288,12 @@ s2=2
 survivors=$(status_text | grep -c "^worker [0-9]: serving ")
 check "the survivors were already holding the same socket (serving rows straight after the kill: $survivors)" $([ "$survivors" -ge 2 ] && echo 0 || echo 1)
 poll "the master REPLACED the crashed hand, and it comes back SERVING (row $s1, restarts=1)" status_text "^worker $s1: serving .* restarts=1"
-if grep -q "worker-exited worker=$s1 reason=unreachable code=-1 seq=" "$scratch/lobo.log"; then
-    check "master log: worker-exited reason=unreachable code=-1 (a SIGKILL leaves no code)" 0
+# the master learns of the death from the hand (lobo#155), so a kill is
+# logged as one: DRAIN.md's table, `signal` for "crashed, or killed"
+if grep -q "worker-exited worker=$s1 reason=signal code=-1 seq=" "$scratch/lobo.log"; then
+    check "master log: worker-exited reason=signal code=-1 (a SIGKILL leaves no code)" 0
 else
-    check "master log: worker-exited reason=unreachable code=-1 ($(grep worker-exited "$scratch/lobo.log" | head -2 | tr '\n' '|'))" 1
+    check "master log: worker-exited reason=signal code=-1 ($(grep worker-exited "$scratch/lobo.log" | head -2 | tr '\n' '|'))" 1
 fi
 if grep -q "worker-started worker=$s1 restarts=1 seq=" "$scratch/lobo.log"; then
     check "master log: worker-started restarts=1" 0

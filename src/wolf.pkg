@@ -22,7 +22,7 @@
 //   env  — argv (`env_args`), the executable a master re-spawns as its
 //          hands (`os_exe`), `worker_processes auto` (`os_cpus`);
 //   exec — the prefork master's hands (`os_spawn`, `os_spawn_with`,
-//          `os_wait`, `os_kill`), signal reception and the drain's
+//          `os_wait`, `os_wait_poll`, `os_kill`), signal reception and the drain's
 //          self-signals (`os_signal_listen`/`_wait`/`_raise`), and the
 //          `user` directive's host probe where /proc is absent;
 //   fs   — the files it serves, its config and include graph, the
