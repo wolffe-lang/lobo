@@ -176,6 +176,20 @@ else
     fail "secrets-grep: the server's logs carry secret-shaped material"
 fi
 
-echo "tls-interop: 8 cases, $red red"
+# 9. lobo#142: a TLS connection holds nothing. The admission drive's
+# tls-hold rows start a single-process server of their own (a plain and
+# a TLS listener) and hold one TLS connection at each phase (a half
+# ClientHello, half a request head, an idle keep-alive, a short upload
+# body, a download read by nobody); while it holds, a plaintext GET and a
+# second TLS client's GET must each be answered within 1000 ms. The
+# download row is named residue (a slow TLS download is still written on
+# the loop until its follow-on): reported, not counted.
+if python3 -I tests/rig/admission/drive.py tls-hold "$LOBO" "$scratch/tls-hold"; then
+    pass "TLS holds: no TLS connection held the serving loop (the rows above)"
+else
+    fail "TLS holds: a TLS connection held the serving loop (the rows above)"
+fi
+
+echo "tls-interop: 9 cases, $red red"
 [ "$red" = 0 ] || exit 1
 echo "tls-interop: GREEN — lobo serves TLS 1.3 to openssl"
