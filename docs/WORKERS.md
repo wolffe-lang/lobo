@@ -322,7 +322,38 @@ while the next is made, at most 8, all released before the answer.
 It still probes each hand's control endpoint, for a hand that is alive
 but cannot be reached, with a CONNECT and no round trip: a live-but-busy
 hand still completes the handshake from its backlog, so the probe
-never parks on a hand serving a long connection. The rule:
+never parks on a hand serving a long connection. **Every dial the
+master makes to a hand is bounded** (lobo#158): the probe, the fan-out
+of a verb and the status gather each give the connect D = 250 ms. The
+rule that set D, fixed before it was measured: the larger of 250 ms and
+ten times the largest connect measured to a hand under load, rounded up
+to 50 ms; the largest measured was 0.24 ms, so the floor decides. Before
+the bound, a connect to a hand whose queue was full waited for the
+kernel's own limit, about 133 s on Linux, and the master's loop with it.
+The unix arm is not bounded yet: the toolchain has no bounded unix dial
+at this pin, and Linux puts no limit of its own on one. Until it has, a
+running hand that hangs behind a full unix queue still holds the master
+on Linux; a stopped one does not, because it is never dialed (below).
+
+**A stopped hand is left alone** (lobo#158), as nginx leaves one. A
+hand stopped by a signal (SIGSTOP and its kin) is reported by the wait,
+once, and marked at once. A hand stopped under a debugger is not
+reported by the wait (a tracing stop goes to the tracer), so on Linux a
+probe that fails reads the hand's state from `/proc/<pid>/stat`: `T`
+or `t` marks it. A marked hand is not probed, not sent a verb and not
+gathered for status, so its queue never fills from the master, and it
+is never replaced. On Linux each pass reads its state, and once it is
+no longer `T` or `t` the hand has continued; elsewhere a `ping` every
+2 s, bounded at both ends by D, says so. The log has both moments:
+`worker-stopped worker=N by=signal|trace` and `worker-continued
+worker=N` (docs/DRAIN.md's table). **A difference between hosts:**
+where the master cannot read a hand's state (macOS, and any host whose
+`/proc` it cannot read), a probe that fails cannot tell a debugger's
+stop from a hang, so it is reported (`status` shows the hand
+`unreachable`) and never replaces the hand; only the wait's report of
+its end does, which is nginx's behaviour everywhere. On Linux a hand
+that is running and does not accept is still replaced as below. The
+decision is one function, `shell.hand_verdict`. The rule for the rest:
 
 - a hand is probed at most every 200 ms (ws17). The probe is a
   fresh TCP connection every time (there is no channel between a
@@ -338,7 +369,8 @@ never parks on a hand serving a long connection. The rule:
   probe governs how fast the slot is REFILLED, not how fast service
   returns;
 - a hand gets a 3 s start grace; after that, three consecutive
-  silent probes is "gone";
+  failed probes of a hand that is running (on Linux, its state is not
+  `T`, `t` or `Z`) is "gone";
 - gone → `os_kill` (harmless on a corpse), `os_wait` (the reap), the
   `worker-exited` event with the master's reason (`unreachable`) and
   what the reap answered. A hand the wait found ended is logged as it
@@ -380,6 +412,11 @@ never parks on a hand serving a long connection. The rule:
   `tests/differential/binary_identity.py` (linux, inside a container);
 - under `quit`, a gone hand is reaped and NOT replaced; the master
   exits once every hand is gone;
+- a hand left alone as stopped misses `reload`, `reopen` and `quit`,
+  and is sent each it missed, once, when it continues. `stop` kills it
+  with the rest at the shutdown (SIGKILL ends a stopped process), and a
+  `quit` waits for it, as nginx's master waits: it stays until it
+  continues and drains, or until `stop`;
 - a SIGKILLed master leaves its hands serving (nginx's workers
   notice a dead master through their socketpair channel; lobo's have
   none at this pin; a named delta, and #235's descriptor is what would
@@ -479,7 +516,9 @@ own stanza carries it too, as a third head line after `worker:` and
 - one row per hand: `serving` (holds every listener the config asks
   for; under ws17 that is every hand), `standby` (waiting for one
   another hand holds: the windows fallback, and a hand whose adopt was
-  refused), or `unreachable` (answered nothing); its endpoint, so an
+  refused), `unreachable` (answered nothing), or `stopped` (left alone
+  as stopped, lobo#158: the master does not dial it, so its row is the
+  master's own and its generation and counters read -1); its endpoint, so an
   operator can
   address ONE hand (`printf 'status\n' | nc 127.0.0.1 52357` is
   what the rig does); its current generation; `live` summed over its

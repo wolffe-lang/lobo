@@ -177,8 +177,9 @@ schema-versioned JSON lines; docs/LOGGING.md). The event NAMES and
 FIELD KEYS are a stable contract; ws09's JSON door renders them
 verbatim (`"event":"<name>"` plus one member per field, digit values
 typed as numbers, keys byte-identical, so `age-ms` stays `age-ms`).
-Nine events (the sixth is wsm01's EXTENSION, the seventh ws10's, the
-eighth and ninth ws13's, each appended, nothing renamed); the LEVEL
+Thirteen events (the sixth is wsm01's EXTENSION, the seventh ws10's,
+the eighth and ninth ws13's, the tenth and eleventh ws16's, the twelfth
+and thirteenth lobo#158's, each appended, nothing renamed); the LEVEL
 column is ws09's (§5, which documents the wws mapping per event):
 
 | event | level | fields | emitted when |
@@ -194,6 +195,8 @@ column is ws09's (§5, which documents the wws mapping per event):
 | `upstream-resolve-failed` | error | `host`, `reason`, `took-ms` | an upstream name did not resolve (ws13): `reason` one of `nxdomain`\|`servfail`\|`refused`\|`noaddr`\|`malformed`\|`rcode`\|`timeout`\|`io`\|`dial`; the failure is held 1 s and the requests parked on the name answer 502 |
 | `worker-started` | notice | `worker`, `restarts` | the MASTER started a hand (ws16, docs/WORKERS.md): `worker` its ordinal, `restarts` how many times this slot has been replaced (0 at the first start) |
 | `worker-exited` | notice | `worker`, `reason`, `code` | the master reaped a hand (ws16): `reason` is `exit` (it returned `code`), `signal` (it died without a code — crashed, or killed; `code` is -1) or `unreachable` (its endpoint refused past the supervision grace and the master killed it; `code` is what the reap answered) |
+| `worker-stopped` | notice | `worker`, `by` | the master found a hand stopped and leaves it alone (lobo#158, docs/WORKERS.md): `by` is `signal` (SIGSTOP and its kin, which the wait reports) or `trace` (a debugger's stop, which only the hand's state shows) |
+| `worker-continued` | notice | `worker` | a hand the master had left alone as stopped runs again; the verbs it missed are sent to it now (lobo#158) |
 
 The seq stamp (ws11, appended, nothing renamed). Every vocabulary
 event above carries one more trailing field, `seq=N`: the event's
