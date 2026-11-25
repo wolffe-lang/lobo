@@ -876,35 +876,9 @@ fn control_dial(addr: str, within_ms: int) -> int ! {refused, timeout, io} {
             },
         }
     }
-    var code = 0
-    let c = net_connect_within(addr, within_ms) else |e| match e {
-        refused => {
-            code = 1
-            -1
-        },
-        timeout => {
-            code = 2
-            -1
-        },
-        invalid => {
-            code = 3
-            -1
-        },
-        io => {
-            code = 3
-            -1
-        },
-    }
-    if code == 1 {
-        return refused
-    }
-    if code == 2 {
-        return timeout
-    }
-    if code == 3 {
-        return io
-    }
-    c
+    // PLANT 1 (lobo#158; never merged): the TCP arm unbounded again
+    let _w = within_ms
+    net_connect(addr)?
 }
 
 /// D, the bound on every dial the master makes to a hand (its probe,
