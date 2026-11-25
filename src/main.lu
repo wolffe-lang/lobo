@@ -84,7 +84,6 @@
 use acme
 use budget
 use config
-use conn
 use dryrun
 use http
 use metrics
@@ -1064,6 +1063,47 @@ fn carry_put(mut h: List[byte], s: str, was: int) {
     }
 }
 
+/// Store `b` at the front of the TLS pool buffer `h` (lobo#142): the
+/// bytes are written in place, pushed where `h` has never been that
+/// long, so a buffer grows only to the longest state it has held; the
+/// state's length is kept beside it. Keeps nothing of `b`. Total.
+fn bytes_put(mut h: List[byte], b: List[byte]) {
+    var j: int = 0
+    for x in b {
+        if j < h.len {
+            h[j] = x
+        } else {
+            (mut h).push(x)
+        }
+        j = j + 1
+    }
+}
+
+/// The first `len` bytes of the TLS pool buffer `h`, built in the
+/// caller's region. Total.
+fn bytes_get(h: List[byte], len: int) -> List[byte] {
+    var out = List[byte]()
+    var j: int = 0
+    while j < len && j < h.len {
+        (mut out).push(h[j])
+        j = j + 1
+    }
+    out
+}
+
+/// A TLS row closing without a step that closed it (idle, made room
+/// for, aborted, shut down): its session sends close_notify, unless it
+/// already has (every server-initiated close does, lobo#142); a
+/// handshake sends nothing. The descriptor is the caller's to close.
+/// Total.
+fn tls_bye(fd: int, h: List[byte], len: int) {
+    let state = bytes_get(h, len)
+    if tls.state_phase(state) == 2 {
+        var z = tls.sess_unpack(state, fd)
+        tls.sess_notify(mut z)
+    }
+}
+
 /// The first `len` bytes of the carry buffer `h` as the str they were
 /// stored from, built in the caller's region: the whole buffer is
 /// decoded (one runtime call; a `List` slice copies element by
@@ -1556,16 +1596,13 @@ fn serve_main(
     // the SslConf (certs, keys, SNI table) is resolved and FROZEN per
     // generation beside the Conf (the same freeze-and-swap the model
     // rides — a reload rebuilds it, cert-reload atomicity for free).
-    // TLS connections are served BLOCKING to completion in the poll
-    // loop below. The upstream gate retired at the wsm02 pin
-    // (wolf-lang#144 fixed: a List row mixing bool/int/List — the
-    // Sess shape — now tiles on the native tier, probed at wsm02
-    // including an imported-struct field); what remains is lobo's own
-    // work — a Conn-based conn_step (serve_request re-plumbed over
-    // the conn seam), a session-carrying row table, and a TLS-holder
-    // drain witness — a NAMED follow-on rider (ledger D24), the
-    // least critical of wsm02's three retirements. The plaintext
-    // drain is untouched.
+    // A TLS connection is a row of the poll loop's table, as a plaintext
+    // one is (lobo#142, which retired the D24 rider): its handshake is
+    // stepped as its bytes arrive (`serve.tls_row_step`), its requests
+    // by the plaintext rows' stepper over the session it carries
+    // (`serve.tls_step`), and its state between steps is a slot of the
+    // TLS pool. Until lobo#142 a TLS connection was served blocking to
+    // completion in the loop, and held it for as long as it lasted.
     var have_tls = false
     var tls_l: int = 0
     var ssl0 = config.ssl_resolve(c0, prefix)
@@ -2201,6 +2238,24 @@ fn serve_main(
     var cbwas = List[int]()
     var cbfree = List[int]()
     var cbfree_n: int = 0
+    // lobo#142: A TLS ROW. `ctls` is a row's slot in the TLS pool (-1: a
+    // plaintext row) and `ctph` its phase as the idle rules read it: -1
+    // plaintext, 0 a handshake that has received nothing, 1 a handshake
+    // under way, 2 a session. The pool keeps, per slot, the row's
+    // handshake or session as bytes (`tls.hs_pack`, `tls.sess_pack`):
+    // `tsbuf` written in place (`bytes_put`), so a buffer grows only to
+    // the longest state it has held, and `tslen` the state's length;
+    // `tslis` the TLS listener the row came in on (0 the primary, k the
+    // extra `xtls[k - 1]`); `tsat` when its handshake began. A slot is
+    // given back (`tsfree`, a stack of `tsfree_n`) when its row leaves.
+    var ctls = List[int]()
+    var ctph = List[int]()
+    var tsbuf = List[List[byte]]()
+    var tslen = List[int]()
+    var tslis = List[int]()
+    var tsat = List[int]()
+    var tsfree = List[int]()
+    var tsfree_n: int = 0
     // the stream pipe's partial line, kept the same way (`spart_n`
     // bytes of `spart`, which last held `spart_was`)
     var spart = List[byte]()
@@ -2449,7 +2504,7 @@ fn serve_main(
                     let full_http = crows - cdead + pxlive >= croom
                     let full_tls = crows - cdead >= croom
                     let idle = if full_http {
-                        has_idle(cfds, cwait, cstream, cclen, crows)
+                        has_idle(cfds, cwait, cstream, cclen, ctph, crows)
                     } else {
                         false
                     }
@@ -3145,7 +3200,7 @@ fn serve_main(
                                 // them, retaining ws64's eviction policy.
                                 let full = crows - cdead + pxlive >= croom
                                 let idle = if full {
-                                    has_idle(cfds, cwait, cstream, cclen, crows)
+                                    has_idle(cfds, cwait, cstream, cclen, ctph, crows)
                                 } else {
                                     false
                                 }
@@ -3237,9 +3292,13 @@ fn serve_main(
                                             cclen,
                                             cdst,
                                             cidle,
+                                            ctph,
                                             upto,
                                         )
                                         for r in picks {
+                                            if ctls[r] >= 0 {
+                                                tls_bye(cfds[r], tsbuf[ctls[r]], tslen[ctls[r]])
+                                            }
                                             net_close(cfds[r]) else |_| {}
                                             cfds[r] = -1
                                             let rg = cgens[r]
@@ -3299,6 +3358,8 @@ fn serve_main(
                                             cdn[crows] = 0
                                             cdt[crows] = 0
                                             clst[crows] = lsel
+                                            ctls[crows] = -1
+                                            ctph[crows] = -1
                                         } else {
                                             in life {
                                                 (mut cfds).push(conn)
@@ -3315,6 +3376,8 @@ fn serve_main(
                                                 (mut cdn).push(0)
                                                 (mut cdt).push(0)
                                                 (mut clst).push(lsel)
+                                                (mut ctls).push(-1)
+                                                (mut ctph).push(-1)
                                             }
                                         }
                                         crows = crows + 1
@@ -3331,16 +3394,14 @@ fn serve_main(
                         lsel = lsel + 1
                     }
 
-                    // 2b. TLS: accept and serve BLOCKING to completion (ws05).
-                    // A TLS connection is handshaked and served here, start to
-                    // finish, under the current generation's frozen SslConf. It is
-                    // tagged to the current gen for the live counter (a reload
-                    // while a TLS conn serves waits for it — acceptable on
-                    // loopback). The #144 layout gate retired at the wsm02 pin;
-                    // joining the drain table is now lobo's own stepper refactor,
-                    // the NAMED D24 rider (see the listener comment above). A
-                    // stalled handshake is bounded by the read deadline, never a
-                    // hang.
+                    // 2b. TLS: accept, and the connection becomes a ROW (lobo#142,
+                    // the D24 rider retired). Its handshake is stepped in step 3
+                    // as the bytes arrive, under the current SslConf at each
+                    // step, then its requests as a plaintext row's are, through
+                    // the session it carries; the drain table, the counters and
+                    // `worker_connections` take it as any row. A handshake not
+                    // done within the read timeout from its accept is closed and
+                    // counted as `tls.accept`'s deadline was.
                     // ws62 (px25 (a)): every TLS listener in turn — 0 the
                     // primary (`tls_l`), k the extra `xtls[k - 1]`
                     var tsel: int = 0
@@ -3350,7 +3411,7 @@ fn serve_main(
                         if ton && running && !quitting && acc_on && ready_has(ready, th) {
                             let full = crows - cdead >= croom
                             let idle = if full {
-                                has_idle(cfds, cwait, cstream, cclen, crows)
+                                has_idle(cfds, cwait, cstream, cclen, ctph, crows)
                             } else {
                                 false
                             }
@@ -3404,9 +3465,13 @@ fn serve_main(
                                     cclen,
                                     cdst,
                                     cidle,
+                                    ctph,
                                     crows,
                                 )
                                 for r in picks {
+                                    if ctls[r] >= 0 {
+                                        tls_bye(cfds[r], tsbuf[ctls[r]], tslen[ctls[r]])
+                                    }
                                     net_close(cfds[r]) else |_| {}
                                     cfds[r] = -1
                                     let rg = cgens[r]
@@ -3441,65 +3506,74 @@ fn serve_main(
                                 in life {
                                     gen_live_add(mut gens, tgen, 1)
                                 }
-                                let tci = conf_index(gens, tgen)
-                                var aborted_t = false
                                 counters.accepted = counters.accepted + 1
                                 if !lim_for(gens, tgen).nodelay {
                                     net_nodelay(tconn, false) else |_| {}
                                 }
-                                var z = tls.accept(
-                                    tconn,
-                                    ssl0,
-                                    opts.read_timeout_ms,
-                                ) else |e| match e {
-                                    refused => {
-                                        aborted_t = true
-                                        counters.tls_refused = counters.tls_refused + 1
-                                        tls.no_sess()
-                                    },
-                                    timeout => {
-                                        aborted_t = true
-                                        counters.tls_timeout = counters.tls_timeout + 1
-                                        tls.no_sess()
-                                    },
-                                    io => {
-                                        aborted_t = true
-                                        counters.tls_io = counters.tls_io + 1
-                                        tls.no_sess()
-                                    },
-                                }
-                                if aborted_t {
-                                    net_close(tconn) else |_| {}
+                                // lobo#142: a TLS connection is a ROW from its
+                                // first byte, as a plaintext one is. Its handshake
+                                // is stepped by readiness like a request (no read
+                                // waits on its client), and its state is a slot of
+                                // the TLS pool, an empty handshake to begin
+                                var ts: int = -1
+                                if tsfree_n > 0 {
+                                    tsfree_n = tsfree_n - 1
+                                    ts = tsfree[tsfree_n]
                                 } else {
-                                    counters.tls_ok = counters.tls_ok + 1
-                                    var tcn = conn.tls_conn(tconn, take z)
-                                    // ws57: a TLS connection never reaches the
-                                    // resolver (a proxy route on a TLS listener is the
-                                    // named 502), so it is handed an empty one of this
-                                    // pass's own; everything it allocates dies with the
-                                    // pass
-                                    var trs = resolver.new()
-                                    serve.serve_conn_cn(
-                                        mut tcn,
-                                        gens[tci].conf,
-                                        opts,
-                                        lim_for(gens, tgen),
-                                        if tsel == 0 { hport } else { xtport[tsel - 1] },
-                                        if tsel == 0 { tkey } else { xtaddr[tsel - 1] },
-                                        mut trs,
-                                    )
+                                    in life {
+                                        (mut tsbuf).push(List[byte]())
+                                        (mut tslen).push(0)
+                                        (mut tslis).push(0)
+                                        (mut tsat).push(0)
+                                        (mut tsfree).push(0)
+                                    }
+                                    ts = tsbuf.len - 1
                                 }
-                                var tnl: int = -1
+                                let hs0 = tls.hs_pack(tls.hs_begin(ssl0))
                                 in life {
-                                    tnl = conn_closed(mut gens, tgen, false)
+                                    bytes_put(mut tsbuf[ts], hs0)
                                 }
-                                if tnl >= 0 {
-                                    ev_event(
-                                        mut elog,
-                                        "notice",
-                                        shell.ev_connection_retired(tgen, tnl),
-                                    )
+                                tslen[ts] = hs0.len
+                                tslis[ts] = tsel
+                                tsat[ts] = now
+                                if crows < cfds.len {
+                                    cfds[crows] = tconn
+                                    cgens[crows] = tgen
+                                    cserved[crows] = 0
+                                    cidle[crows] = now
+                                    cstart[crows] = now
+                                    cwait[crows] = -1
+                                    cstream[crows] = 0
+                                    ccbuf[crows] = -1
+                                    cclen[crows] = 0
+                                    chead[crows] = 0
+                                    cdst[crows] = 0
+                                    cdn[crows] = 0
+                                    cdt[crows] = 0
+                                    clst[crows] = 0
+                                    ctls[crows] = ts
+                                    ctph[crows] = 0
+                                } else {
+                                    in life {
+                                        (mut cfds).push(tconn)
+                                        (mut cgens).push(tgen)
+                                        (mut cserved).push(0)
+                                        (mut cidle).push(now)
+                                        (mut cstart).push(now)
+                                        (mut cwait).push(-1)
+                                        (mut cstream).push(0)
+                                        (mut ccbuf).push(-1)
+                                        (mut cclen).push(0)
+                                        (mut chead).push(0)
+                                        (mut cdst).push(0)
+                                        (mut cdn).push(0)
+                                        (mut cdt).push(0)
+                                        (mut clst).push(0)
+                                        (mut ctls).push(ts)
+                                        (mut ctph).push(0)
+                                    }
                                 }
+                                crows = crows + 1
                             }
                         }
                         tsel = tsel + 1
@@ -3559,6 +3633,8 @@ fn serve_main(
                         let dn0 = cdn[k]
                         let dt0 = cdt[k]
                         let cl0 = clst[k]
+                        let tsl = ctls[k]
+                        let tph0 = ctph[k]
                         // what the row becomes: stored at `w` when it stays
                         var keep = true
                         var n_served = sv
@@ -3572,6 +3648,7 @@ fn serve_main(
                         var n_dst = dst0
                         var n_dn = dn0
                         var n_dt = dt0
+                        var n_tph = tph0
                         // the carry a step left, stored below when the row stays
                         var carry_set = false
                         var carry_new = ""
@@ -3847,7 +3924,15 @@ fn serve_main(
                             // a row with no carry read its first bytes in this
                             // pass's wait
                             let cs_eff = if clen0 == 0 { tw } else { cs0 }
-                            if !(must_step || ready_has(ready, fd)) {
+                            // lobo#142: a TLS row's handshake has the read
+                            // timeout from its accept, `tls.accept`'s deadline
+                            // as it was, and is counted as its timeout; the
+                            // keep-alive idle rule is a session's
+                            let hs_row = tsl >= 0 && tph0 < 2
+                            if hs_row && now - tsat[tsl] >= opts.read_timeout_ms {
+                                counters.tls_timeout = counters.tls_timeout + 1
+                                close_it = true
+                            } else if !(must_step || ready_has(ready, fd)) {
                                 // nothing to read and nothing owed: the row keeps
                                 // its carry and its counters, and only the timers
                                 // look at it (ws57: no step value is built for it)
@@ -3855,7 +3940,7 @@ fn serve_main(
                                 if clen0 == 0 {
                                     n_start = now
                                 }
-                                if now - idle0 >= row_idle_ms(dst0, opts) {
+                                if !hs_row && now - idle0 >= row_idle_ms(dst0, opts) {
                                     close_it = true
                                 }
                             } else {
@@ -3874,14 +3959,20 @@ fn serve_main(
                                     // ws62 (px25 (a)): the row's listener
                                     let lport = if cl0 == 0 { hport } else { xport[cl0 - 1] }
                                     let laddr = if cl0 == 0 { lkey } else { xaddr[cl0 - 1] }
-                                    let full = if inflight < room {
-                                        serve.conn_step(
+                                    // lobo#142: a TLS row steps its handshake or its
+                                    // session from the state its slot holds, and the
+                                    // new state rides out in `rare`
+                                    if tsl >= 0 {
+                                        let tl = tslis[tsl]
+                                        let tr = serve.tls_row_step(
                                             fd,
+                                            bytes_get(tsbuf[tsl], tslen[tsl]),
+                                            ssl0,
                                             gens[cci].conf,
                                             opts,
                                             lim_for(gens, cg),
-                                            lport,
-                                            laddr,
+                                            if tl == 0 { hport } else { xtport[tl - 1] },
+                                            if tl == 0 { tkey } else { xtaddr[tl - 1] },
                                             car,
                                             sv,
                                             12,
@@ -3892,27 +3983,48 @@ fn serve_main(
                                             dn0,
                                             dt0,
                                         )
+                                        serve.tls_step_pack(take tr)
                                     } else {
-                                        serve.conn_step(
-                                            fd,
-                                            gens[cci].conf,
-                                            crowded,
-                                            lim_for(gens, cg),
-                                            lport,
-                                            laddr,
-                                            car,
-                                            sv,
-                                            12,
-                                            rs,
-                                            ft,
-                                            now,
-                                            dst0,
-                                            dn0,
-                                            dt0,
-                                        )
+                                        let full = if inflight < room {
+                                            serve.conn_step(
+                                                fd,
+                                                gens[cci].conf,
+                                                opts,
+                                                lim_for(gens, cg),
+                                                lport,
+                                                laddr,
+                                                car,
+                                                sv,
+                                                12,
+                                                rs,
+                                                ft,
+                                                now,
+                                                dst0,
+                                                dn0,
+                                                dt0,
+                                            )
+                                        } else {
+                                            serve.conn_step(
+                                                fd,
+                                                gens[cci].conf,
+                                                crowded,
+                                                lim_for(gens, cg),
+                                                lport,
+                                                laddr,
+                                                car,
+                                                sv,
+                                                12,
+                                                rs,
+                                                ft,
+                                                now,
+                                                dst0,
+                                                dn0,
+                                                dt0,
+                                            )
+                                        }
+                                        // only what the loop needs leaves the region (`step_pack`)
+                                        serve.step_pack(take full, !asinks.is_empty())
                                     }
-                                    // only what the loop needs leaves the region (`step_pack`)
-                                    serve.step_pack(take full, !asinks.is_empty())
                                 }
                                 if st.streaming || st.proxying {
                                     inflight = inflight + 1
@@ -3920,6 +4032,30 @@ fn serve_main(
                                 close_it = st.close
                                 if st.active {
                                     n_idle = now
+                                }
+                                // lobo#142: a TLS row's state, written back in
+                                // place; its phase for the idle rules; and how a
+                                // handshake that ended in the step ended, counted
+                                // as `tls.accept`'s rows were
+                                if tsl >= 0 && st.rare.len > 0 {
+                                    in life {
+                                        bytes_put(mut tsbuf[tsl], st.rare[0].tls_state)
+                                    }
+                                    tslen[tsl] = st.rare[0].tls_state.len
+                                    let tph = tls.state_phase(st.rare[0].tls_state)
+                                    if tph == 2 {
+                                        n_tph = 2
+                                    } else if tph >= 0 && st.active {
+                                        n_tph = 1
+                                    }
+                                    let he = st.rare[0].tls_end
+                                    if he == 1 {
+                                        counters.tls_ok = counters.tls_ok + 1
+                                    } else if he == 2 {
+                                        counters.tls_refused = counters.tls_refused + 1
+                                    } else if he == 4 {
+                                        counters.tls_io = counters.tls_io + 1
+                                    }
                                 }
                                 n_served = st.served
                                 // the memo: what the step would have remembered is
@@ -4243,6 +4379,7 @@ fn serve_main(
                                     n_start = tw
                                 }
                                 if !close_it &&
+                                    !hs_row &&
                                     !st.active &&
                                     now - n_idle >= row_idle_ms(n_dst, opts) {
                                     close_it = true
@@ -4443,6 +4580,9 @@ fn serve_main(
                                     n_stream = if close_it { 2 } else { 1 }
                                 }
                             } else if close_it {
+                                if tsl >= 0 {
+                                    tls_bye(fd, tsbuf[tsl], tslen[tsl])
+                                }
                                 net_close(fd) else |_| {}
                                 keep = false
                                 closed_now = true
@@ -4507,7 +4647,13 @@ fn serve_main(
                             cdn[w] = n_dn
                             cdt[w] = n_dt
                             clst[w] = cl0
+                            ctls[w] = tsl
+                            ctph[w] = n_tph
                             w = w + 1
+                        } else if tsl >= 0 {
+                            // lobo#142: the row's TLS slot goes back to the pool
+                            tsfree[tsfree_n] = tsl
+                            tsfree_n = tsfree_n + 1
                         }
                         k = k + 1
                     }
@@ -4703,6 +4849,10 @@ fn serve_main(
     elog_st = reopen_elog(elog_st)
     var xi: int = 0
     while xi < crows {
+        // lobo#142: a TLS row's session says close_notify first
+        if ctls[xi] >= 0 && cfds[xi] >= 0 {
+            tls_bye(cfds[xi], tsbuf[ctls[xi]], tslen[ctls[xi]])
+        }
         net_close(cfds[xi]) else |_| {}
         xi = xi + 1
     }
@@ -5787,11 +5937,12 @@ fn has_idle(
     cwait: List[int],
     cstream: List[int],
     cclen: List[int],
+    ctph: List[int],
     rows: int,
 ) -> bool {
     var i: int = 0
     while i < rows {
-        if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 {
+        if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 && ctph[i] != 1 {
             return true
         }
         i = i + 1
@@ -5817,8 +5968,11 @@ fn row_idle_ms(dst: int, opts: serve.ServerOpts) -> int {
 /// not parked on a name, not streaming, no carry, no body being
 /// discarded — a connection that has sent nothing yet, or a keep-alive
 /// connection between requests, which are the two the oracle closes. A
-/// row already closed this pass (descriptor -1) is not there to pick.
-/// Pure and total.
+/// TLS row whose handshake has begun (`ctph` 1) is not idle: nginx
+/// takes a TLS connection out of reuse with its first byte (lobo#142);
+/// one that has sent nothing yet, or whose session waits between
+/// requests, is. A row already closed this pass (descriptor -1) is not
+/// there to pick. Pure and total.
 fn idle_pick(
     cfds: List[int],
     cwait: List[int],
@@ -5826,12 +5980,18 @@ fn idle_pick(
     cclen: List[int],
     cdst: List[int],
     cidle: List[int],
+    ctph: List[int],
     rows: int,
 ) -> List[int] {
     var idle = List[int]()
     var i: int = 0
     while i < rows {
-        if cfds[i] >= 0 && cwait[i] < 0 && cstream[i] == 0 && cclen[i] == 0 && cdst[i] == 0 {
+        if cfds[i] >= 0 &&
+            cwait[i] < 0 &&
+            cstream[i] == 0 &&
+            cclen[i] == 0 &&
+            cdst[i] == 0 &&
+            ctph[i] != 1 {
             (mut idle).push(i)
         }
         i = i + 1
