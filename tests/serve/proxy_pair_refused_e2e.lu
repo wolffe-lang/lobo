@@ -1,0 +1,511 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//! stage-src: shell config
+//!
+//! lobo#148: A PROXIED EXCHANGE THAT CANNOT HAVE ITS JOB SOCKET PAIR IS
+//! REFUSED, NOT RUN ON THE SERVING LOOP. The serving loop hands a
+//! proxied request to a proc of its exchange pool: an idle one, else a
+//! new one on a new job socket pair (`px_pair`: a connect to the loop's
+//! own job listener and its accept, a descriptor each). When the host
+//! refuses the pair, trunk ran the exchange inside the step, as every
+//! lobo before the pool did: the loop then waits on the upstream (and,
+//! since #150, on an owed body), serving nothing else.
+//!
+//! The oracle first. The pinned nginx, its descriptor limit lowered by
+//! `ulimit -n` in the child shell that execs it, is filled with idle
+//! connections, one at a time, until its error log shows an accept it
+//! refused (the one it did not take is closed); one more is closed, so
+//! a new proxied client takes the last descriptor and none is left for
+//! the upstream socket. Its answer (status line, whether
+//! the connection stays open) and its error-log line are read for a
+//! GET and for a POST whose body arrives whole (`[pair-oracle]`); the
+//! two must agree, and that status line is what lobo must answer.
+//!
+//! Then a lobo at the same limit, filled the same way, one connection
+//! at a time until its `status` shows the last one not taken; its
+//! upstreams are listeners of this row's own that never accept (the
+//! kernel completes the handshake, so an upstream connect succeeds and
+//! its read waits):
+//!   * none free after the client (one idle connection closed): a GET
+//!     gets nginx's status line (`[pair-none]`);
+//!   * one free (two closed): the pair's connect takes it and its
+//!     accept fails, the one descriptor an exchange on the loop would
+//!     need for its upstream. A GET: `status` answers within 1000 ms
+//!     while the client waits (`[pair-held]`), and the client gets
+//!     nginx's status line within 1000 ms, the connection closed
+//!     (`[pair-answer]`). A POST with 1 byte of its 6: the same, the
+//!     body never read (`[pair-owed]`);
+//!   * each refusal is logged, `while connecting to upstream`, naming
+//!     the job socket pair (`[pair-logged]`);
+//!   * with the connections closed, a proxied GET is answered 200
+//!     through the pool (`[pair-recovers]`).
+//! RED AT TRUNK at `[pair-held]`, `[pair-answer]`, `[pair-owed]` and
+//! `[pair-logged]`. Loopback only, OS-chosen ports; the scratch tree is
+//! cleared at the START; servers are stopped by their own handles.
+
+use shell
+
+fn free_port() -> int ! {io} {
+    let l = net_listen("127.0.0.1:0") else |_| {
+        return io
+    }
+    let p = net_port(l) else |_| {
+        net_close(l) else |_| {}
+        return io
+    }
+    net_close(l) else |_| {}
+    p
+}
+
+fn status_line(reply: str) -> str {
+    let eol = reply.find("\r\n") else reply.len
+    reply[0..eol]
+}
+
+/// Exec `argv` (after `/bin/sh -c`) with the child shell's descriptor
+/// limit lowered to `nofile`: the limit is that one process's and
+/// nobody else's. stdout and stderr go to `out`. -1 when it could not
+/// start. Total.
+fn limited(script: str, nofile: int, a: str, b: str, c: str, out: int) -> int {
+    var args = List[str]()
+    (mut args).push("-c")
+    (mut args).push("ulimit -n \"$1\" || exit 97; {script}")
+    (mut args).push("sh")
+    (mut args).push("{nofile}")
+    (mut args).push(a)
+    (mut args).push(b)
+    (mut args).push(c)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(out)
+    (mut map).push(2)
+    (mut map).push(out)
+    os_spawn_fds("/bin/sh", args, map) else |_| { -1 }
+}
+
+/// End a server by its own handle, and reap it. Total.
+fn put_down(h: int) {
+    os_kill(h) else |_| {}
+    let _ = os_wait(h) else |_| {
+        0
+    }
+}
+
+/// Generation `gen`'s live connections in a `status` reply, -1 when
+/// the reply has none. Total.
+fn gen_live(status: str, gen: int) -> int {
+    let key = "generation {gen}: "
+    let at = status.find(key) else -1
+    if at < 0 {
+        return -1
+    }
+    let tail = status[at..status.len]
+    let lk = tail.find("live=") else -1
+    if lk < 0 {
+        return -1
+    }
+    let after = tail[lk + 5..tail.len]
+    var v: int = 0
+    for b_raw in after.bytes() {
+        let b = b_raw as int
+        if b < 48 || b > 57 {
+            return v
+        }
+        v = v * 10 + (b - 48)
+    }
+    v
+}
+
+fn live_now(ep: str) -> int {
+    let st = shell.control_fetch(ep, "status") else |_| { "" }
+    gen_live(st, 1)
+}
+
+/// Idle connections added to `kept` one at a time, each kept once
+/// lobo's live count shows it taken, until one is not taken within
+/// 400 ms: lobo is at its descriptor limit (its control endpoint keeps
+/// a descriptor of its own, so `status` still answers). The one not
+/// taken is closed. lobo answers its fill with no file, so the count
+/// is of connections alone. At most `most`; answers whether the limit
+/// was reached. Total.
+fn fill_lobo(port: int, ep: str, mut kept: List[int], most: int) -> bool {
+    var base = live_now(ep)
+    var k: int = 0
+    while k < most {
+        let c = net_connect("127.0.0.1:{port}") else |_| {
+            return true
+        }
+        var took = false
+        var t: int = 0
+        while !took && t < 8 {
+            time_sleep_ms(50)
+            if live_now(ep) > base {
+                took = true
+            }
+            t = t + 1
+        }
+        if !took {
+            net_close(c) else |_| {}
+            return true
+        }
+        base = base + 1
+        (mut kept).push(c)
+        k = k + 1
+    }
+    false
+}
+
+/// Idle connections added to `kept` one at a time until nginx's error
+/// log (`log`) shows a refused accept within 300 ms of one: nginx is
+/// at its descriptor limit and did not take that one, which is closed.
+/// (The pinned nginx has no `return`, and a page it serves needs a
+/// descriptor for its file, so the count is read off the log.) At most
+/// `most`; answers whether the limit was reached. Total.
+fn fill_ng(port: int, log: str, mut kept: List[int], most: int) -> bool {
+    var seen = lines_with(log, "accept", "failed").len
+    var k: int = 0
+    while k < most {
+        let c = net_connect("127.0.0.1:{port}") else |_| {
+            return true
+        }
+        time_sleep_ms(300)
+        let now = lines_with(log, "accept", "failed").len
+        if now > seen {
+            net_close(c) else |_| {}
+            return true
+        }
+        seen = now
+        (mut kept).push(c)
+        k = k + 1
+    }
+    false
+}
+
+/// Close the last `n` of `kept`. Total.
+fn close_last(mut kept: List[int], n: int) {
+    var k: int = 0
+    while k < n && kept.len > 0 {
+        let c = (mut kept).pop() else -1
+        if c >= 0 {
+            net_close(c) else |_| {}
+        }
+        k = k + 1
+    }
+}
+
+fn close_all(mut kept: List[int]) {
+    close_last(mut kept, kept.len)
+}
+
+/// What arrives on `c` within `ms`: (the bytes, whether the peer
+/// closed). Total.
+fn reply(c: int, ms: int) -> (str, bool) {
+    net_deadline(c, ms) else |_| {}
+    var buf = ""
+    var closed = false
+    var reading = true
+    while reading {
+        var failed = false
+        let piece = net_read(c, 4096) else |_| {
+            failed = true
+            ""
+        }
+        if failed {
+            reading = false
+        } else if piece.is_empty() {
+            closed = true
+            reading = false
+        } else {
+            buf = "{buf}{piece}"
+        }
+    }
+    (buf, closed)
+}
+
+/// A fresh connection that sends `req`: its handle, or -1. Total.
+fn send(port: int, req: str) -> int {
+    let c = net_connect("127.0.0.1:{port}") else |_| {
+        return -1
+    }
+    net_write(c, req) else |_| {}
+    c
+}
+
+/// `status` over the endpoint: (reply, milliseconds). Total.
+fn ask_status(ep: str) -> (str, int) {
+    let t0 = time_unix_ms()
+    let st = shell.control_fetch(ep, "status") else |_| { "" }
+    (st, time_unix_ms() - t0)
+}
+
+/// The lines of the file at `path` that contain both `a` and `b`. Total.
+fn lines_with(path: str, a: str, b: str) -> List[str] {
+    let t = fs_read_text(path) else |_| { "" }
+    var out = List[str]()
+    for line in t.lines() {
+        if line.contains(a) && line.contains(b) {
+            (mut out).push(line)
+        }
+    }
+    out
+}
+
+/// Whether a GET of `path` on `port` is answered 200 within 1000 ms. Total.
+fn serves(port: int, path: str) -> bool {
+    let c = send(port, "GET {path} HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    if c < 0 {
+        return false
+    }
+    let r = reply(c, 1000)
+    net_close(c) else |_| {}
+    r.0.starts_with("HTTP/1.1 200 OK")
+}
+
+fn wait_serves(port: int, path: str) -> bool {
+    var i: int = 0
+    while i < 100 {
+        if serves(port, path) {
+            return true
+        }
+        time_sleep_ms(100)
+        i = i + 1
+    }
+    false
+}
+
+/// The oracle at its limit with none left for the upstream: a fresh
+/// nginx, filled, one idle connection closed, then the client's `req`.
+/// Answers (status line, "closes"/"keeps", its error-log line, a
+/// failure or ""). Total.
+fn oracle(nginx: str, d: str, nofile: int, up: int, req: str, k: int) -> (str, str, str, str) {
+    let np = free_port() else |_| { 0 }
+    let dd = "{d}/ng{k}"
+    fs_create_dir_all("{dd}/logs") else |_| {}
+    let conf = "daemon off;\nmaster_process off;\npid {dd}/ng.pid;\nerror_log {dd}/logs/ng.err;\nevents {{ worker_connections 1024; }}\nhttp {{\n  types {{ text/html html; }}\n  access_log off;\n  server {{\n    listen 127.0.0.1:{np};\n    location = /index.html {{ root {d}/www; }}\n    location / {{ proxy_pass http://127.0.0.1:{up}; }}\n  }}\n}}\n"
+    fs_write_text("{dd}/ng.conf", conf) else |_| {}
+    let out = fs_create("{dd}/ng.out") else |_| {
+        return ("", "", "", "could not open {dd}/ng.out")
+    }
+    let h = limited("exec \"$2\" -p \"$3\" -c \"$4\"", nofile, nginx, "{dd}/", "{dd}/ng.conf", out)
+    if h < 0 {
+        return ("", "", "", "nginx did not start ({nginx})")
+    }
+    if !wait_serves(np, "/index.html") {
+        put_down(h)
+        return ("", "", "", "nginx never served on {np}")
+    }
+    var kept = List[int]()
+    if !fill_ng(np, "{dd}/logs/ng.err", mut kept, 200) {
+        close_all(mut kept)
+        put_down(h)
+        return ("", "", "", "200 idle connections never brought nginx to its limit of {nofile}")
+    }
+    close_last(mut kept, 1)
+    time_sleep_ms(1200)
+    let c = send(np, req)
+    let r = reply(c, 2000)
+    net_close(c) else |_| {}
+    let line = lines_with("{dd}/logs/ng.err", "while connecting to upstream", "")
+    close_all(mut kept)
+    put_down(h)
+    let logl = if line.len > 0 { line[0] } else { "" }
+    (status_line(r.0), if r.1 { "closes" } else { "keeps" }, logl, "")
+}
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let d = "{root}/target/ws78_pair_refused"
+    fs_remove_dir_all(d) else |_| {}
+    fs_create_dir_all("{d}/www/live")?
+    fs_write_text("{d}/www/index.html", "small-page\n")?
+    fs_write_text("{d}/www/live/index.html", "live-page\n")?
+    let nginx = "{root}/tests/differential/bin/nginx"
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let nofile = 64
+    var fails: int = 0
+    let get_req = "GET /s1/x HTTP/1.1\r\nHost: x\r\n\r\n"
+
+    // the oracle, read first
+    let ng_up = net_listen("127.0.0.1:0")?
+    let ng_upp = net_port(ng_up)?
+    let o1 = oracle(nginx, d, nofile, ng_upp, get_req, 1)
+    let o2 = oracle(
+        nginx,
+        d,
+        nofile,
+        ng_upp,
+        "POST /s1/x HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\n\r\nabcdef",
+        2,
+    )
+    net_close(ng_up) else |_| {}
+    print("[pair-oracle] nginx, GET: [{o1.0}], it {o1.1} the connection; [{o1.2}]")
+    print("[pair-oracle] nginx, POST whole: [{o2.0}], it {o2.1} the connection; [{o2.2}]")
+    if !o1.3.is_empty() || !o2.3.is_empty() || o1.0.is_empty() || o1.0 != o2.0 {
+        print(
+            "pair_refused: FAILED — [pair-oracle] nginx's answer at its limit was not read as one status line: [{o1.0}] [{o2.0}] ({o1.3}{o2.3})",
+        )
+        assert(false, "the oracle's answer is one status line")
+        return 1
+    }
+    let want = o1.0
+
+    // a backend that answers, for the recovery: a plain nginx
+    let bp = free_port()?
+    let bd = "{d}/backend"
+    fs_create_dir_all("{bd}/logs")?
+    fs_write_text(
+        "{bd}/ng.conf",
+        "daemon off;\nmaster_process off;\npid {bd}/ng.pid;\nerror_log {bd}/logs/ng.err;\nevents {{}}\nhttp {{\n  types {{ text/html html; }}\n  access_log off;\n  server {{ listen 127.0.0.1:{bp}; root {d}/www; }}\n}}\n",
+    )?
+    var bargv = List[str]()
+    (mut bargv).push(nginx)
+    (mut bargv).push("-p")
+    (mut bargv).push("{bd}/")
+    (mut bargv).push("-c")
+    (mut bargv).push("{bd}/ng.conf")
+    let bh = os_spawn(bargv)?
+    if !wait_serves(bp, "/live/index.html") {
+        put_down(bh)
+        assert(false, "the backend nginx serves")
+        return 1
+    }
+
+    // lobo at the same limit; its upstreams never accept
+    let s1 = net_listen("127.0.0.1:0")?
+    let s1p = net_port(s1)?
+    let s2 = net_listen("127.0.0.1:0")?
+    let s2p = net_port(s2)?
+    let s3 = net_listen("127.0.0.1:0")?
+    let s3p = net_port(s3)?
+    let hp = free_port()?
+    let cp = free_port()?
+    let ep = "127.0.0.1:{cp}"
+    let conf = "{d}/lobo.conf"
+    fs_write_text(
+        conf,
+        "pid {d}/lobo.pid;\ncontrol {ep};\nhttp {{\n  types {{ text/html html; }}\n  server {{\n    listen 127.0.0.1:{hp};\n    location = /index.html {{ root {d}/www; }}\n    location /s1/ {{ proxy_read_timeout 5s; proxy_pass http://127.0.0.1:{s1p}; }}\n    location /s2/ {{ proxy_read_timeout 5s; proxy_pass http://127.0.0.1:{s2p}; }}\n    location /s3/ {{ proxy_read_timeout 5s; proxy_pass http://127.0.0.1:{s3p}; }}\n    location /live/ {{ proxy_pass http://127.0.0.1:{bp}; }}\n  }}\n}}\n",
+    )?
+    let so_p = "{d}/server.out"
+    let so = fs_create(so_p)?
+    let h = limited("exec \"$2\" serve -p . -c \"$3\"", nofile, bin, conf, "", so)
+    if h < 0 || !wait_serves(hp, "/index.html") {
+        if h >= 0 {
+            put_down(h)
+        }
+        put_down(bh)
+        assert(false, "lobo serves before the limit")
+        return 1
+    }
+    var kept = List[int]()
+
+    // none free after the client
+    if !fill_lobo(hp, ep, mut kept, 400) {
+        print(
+            "pair_refused: FAILED — [pair-none] 400 idle connections never brought lobo to its limit of {nofile}",
+        )
+        fails = fails + 1
+    }
+    close_last(mut kept, 1)
+    time_sleep_ms(1200)
+    let cn = send(hp, "GET /s3/x HTTP/1.1\r\nHost: x\r\n\r\n")
+    let rn = reply(cn, 3000)
+    net_close(cn) else |_| {}
+    print("[pair-none] lobo: [{status_line(rn.0)}]")
+    if status_line(rn.0) != want {
+        print(
+            "pair_refused: FAILED — [pair-none] with no descriptor left lobo answered [{status_line(rn.0)}], nginx [{want}]",
+        )
+        fails = fails + 1
+    }
+
+    // one free: a GET
+    let _f1 = fill_lobo(hp, ep, mut kept, 400)
+    close_last(mut kept, 2)
+    time_sleep_ms(1200)
+    let c1 = send(hp, get_req)
+    time_sleep_ms(300)
+    let st1 = ask_status(ep)
+    print("[pair-held] status while the GET waits: {st1.1} ms, {st1.0.len} bytes")
+    if !st1.0.contains("current generation: 1") || st1.1 > 1000 {
+        print(
+            "pair_refused: FAILED — [pair-held] with the pair refused, `status` took {st1.1} ms (bound 1000), reply [{st1.0}]",
+        )
+        fails = fails + 1
+    }
+    let r1 = reply(c1, 1000)
+    net_close(c1) else |_| {}
+    print("[pair-answer] lobo: [{status_line(r1.0)}], closed {r1.1}")
+    if status_line(r1.0) != want || !r1.1 {
+        print(
+            "pair_refused: FAILED — [pair-answer] the client got [{status_line(r1.0)}] (closed {r1.1}) within 1000 ms; nginx answers [{want}] and lobo closes",
+        )
+        fails = fails + 1
+    }
+    net_close(s1) else |_| {}
+    time_sleep_ms(300)
+
+    // one free: a POST whose body has 1 byte of its 6
+    let _f2 = fill_lobo(hp, ep, mut kept, 400)
+    close_last(mut kept, 2)
+    time_sleep_ms(1200)
+    let c2 = send(hp, "POST /s2/x HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\n\r\na")
+    time_sleep_ms(300)
+    let st2 = ask_status(ep)
+    print("[pair-owed] status while the POST's body is owed: {st2.1} ms, {st2.0.len} bytes")
+    let r2 = reply(c2, 1000)
+    net_close(c2) else |_| {}
+    print("[pair-owed] lobo: [{status_line(r2.0)}], closed {r2.1}")
+    if !st2.0.contains("current generation: 1") ||
+        st2.1 > 1000 ||
+        status_line(r2.0) != want ||
+        !r2.1 {
+        print(
+            "pair_refused: FAILED — [pair-owed] with the pair refused and the body owed, `status` took {st2.1} ms (bound 1000) and the client got [{status_line(r2.0)}] (closed {r2.1}); nginx answers [{want}] and lobo closes",
+        )
+        fails = fails + 1
+    }
+    net_close(s2) else |_| {}
+    time_sleep_ms(300)
+
+    // each refusal logged
+    let logged = lines_with(so_p, "while connecting to upstream", "job socket")
+    print("[pair-logged] {logged.len} refusal lines")
+    for l in logged {
+        print("[pair-logged] {l}")
+    }
+    if logged.len != 3 {
+        print(
+            "pair_refused: FAILED — [pair-logged] {logged.len} lines name the job socket pair `while connecting to upstream`; there were 3 refusals",
+        )
+        fails = fails + 1
+    }
+
+    // recovery
+    close_all(mut kept)
+    net_close(s3) else |_| {}
+    time_sleep_ms(1200)
+    var back = false
+    let t_back = time_unix_ms()
+    while !back && time_unix_ms() - t_back < 5000 {
+        back = serves(hp, "/live/index.html")
+    }
+    if !back {
+        print(
+            "pair_refused: FAILED — [pair-recovers] with the connections closed, a proxied GET was not answered 200 within 5000 ms",
+        )
+        fails = fails + 1
+    }
+
+    shell.control_fetch(ep, "stop") else |_| {
+        put_down(h)
+        ""
+    }
+    let _w = os_wait(h) else |_| 0
+    put_down(bh)
+    if fails == 0 {
+        fs_remove_dir_all(d) else |_| {}
+    }
+    assert(fails == 0, "a proxied exchange the host refuses its pair is refused ({fails} wrong)")
+    0
+}
