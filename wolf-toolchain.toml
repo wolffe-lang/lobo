@@ -14,6 +14,21 @@
 # pin, this note updated with what the bump changes for wws.
 
 [wolf]
+# wolf 0.2.41 at release commit 0261597, paired with lupin 0.1.63.
+# Release asset digests (the release API's, and each archive hashed
+# twice after download): Linux x86-64
+# e7ec4cde06db2f2235ae82e3dff1db06f6b8e37249c883a3a35bdee8c86b8c34;
+# macOS arm64 979dbb22b59268fb552081cfc5666da1f8e4adea831a286b396f78161cb893d5.
+# Its bundled standard library is 32a1cd062e215f80c97572f984e5bec2c927e6d8.
+# WHAT THE BUMP CHANGES HERE: `net_connect_within`, a dial with a
+# deadline (lobo#158's bounded probe uses it). The release's four new
+# prelude names are names lobo never declares (no W0304). Its new
+# refusals (E1010, E1014, E0604) and its function placement are read by
+# this pin's gauntlet. The std move touches std.net, std.process,
+# std.signal, std.base64 and the crypto modules std.x.tls uses; the
+# interface snapshots say what that moves.
+#
+# Previous pin:
 # wolf 0.2.40 at release commit b333b9d, paired with lupin 0.1.62.
 # Release asset digests were read twice: Linux x86-64
 # bc2020e0b7400c18162a6072c299c65c0582ea74a0eba22aaa57ca04ae13e7e1;
@@ -737,10 +752,17 @@
 # both ways and docs/BUDGET.md and docs/PARITY.md following. The
 # shipped binary is the gauntlet's release-tier build, flag for flag.
 repo = "wolffe-lang/wolf-lang"
-rev = "b333b9da8560e4e1dfd6e30099d14d98e752f9e1"
-version_line = "wolf 0.2.40 (wolfgang, pin b333b9d)"
+rev = "0261597230b46f17f7a894c5558452c19fa31b96"
+version_line = "wolf 0.2.41 (wolfgang, pin 0261597)"
 
 [lupin]
+# lupin 0.1.63 at release commit 2becebc, conformance pin 5f1f1c9.
+# Release asset digests (the release API's, and each archive hashed
+# twice after download): Linux x86-64
+# 45e71c6f8f577f045312d58be28e70abd5f94f2160740043976da041501df554;
+# macOS arm64 8e6a14d7192170275af558f7258f1705c70ea9b7b7721ef87db9949d20d4482a.
+#
+# Previous pin:
 # lupin 0.1.62 at release commit 72eff3c, conformance pin 5f1f1c9.
 # Release asset digests were read twice: Linux x86-64
 # 3b3bf9c23a9e545a4a99e65a5183d0c5e71e91d6bfb8a189147e2701c03e177f;
@@ -1036,10 +1058,15 @@ version_line = "wolf 0.2.40 (wolfgang, pin b333b9d)"
 # not a calendar. Its conformance pin (2e4ca76) is information, not
 # this file's rev. Bumped together with [wolf] as always.
 repo = "wolffe-lang/wolf-interp"
-rev = "72eff3c99b3a9e434b059f5dd3e4b1d29c862ddc"
-version_line = "lupin 0.1.62 (wolf-interp, reference interpreter at pin 5f1f1c9)"
+rev = "2becebc40bfb897de99c8e38f972566a5ae3059b"
+version_line = "lupin 0.1.63 (wolf-interp, reference interpreter at pin 5f1f1c9)"
 
 [std]
+# wolf-std at 32a1cd06 (the tree v0.2.41 bundles, `std/STD-REV` read
+# from the archive). be1d10fa -> 32a1cd06 changes base64, bytes, net,
+# net.unix, poll, process, rand, signal and the crypto modules chacha20,
+# curve25519 and sha2, and adds bech32 and os.random.
+#
 # wolf-std at **78b9d3cb** (r41p, 2026-10-31), the tree v0.2.36 bundles
 # (`std/STD-REV` 78b9d3cbc41d51db44d18c40b6694403644d1c83, read on hasu
 # from the published archive). The release evidence records the same
@@ -1314,4 +1341,4 @@ version_line = "lupin 0.1.62 (wolf-interp, reference interpreter at pin 5f1f1c9)
 # WOLF_MIDEND=0" was written at the twentieth measurement. #146 closed
 # 2026-09-15; ws52 took the flip-back at 0.2.24 — see [wolf].)
 repo = "wolffe-lang/wolf-std"
-rev = "be1d10fa2798cc6bc2a1fd0b2e559e283469c9bf"
+rev = "32a1cd062e215f80c97572f984e5bec2c927e6d8"
