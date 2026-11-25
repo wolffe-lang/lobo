@@ -3829,7 +3829,8 @@ fn req_out_admin(close: bool, carry: str, take acc: obs.Access, chg: Charge, kin
 /// resolver's cursor steps (`rs_rot`) or, when a proxied request had
 /// to resolve a name itself, the resolver it ended with (`rs_new`,
 /// one element). Total: every path resolves to a written response
-/// and a close-or-carry.
+/// and a close-or-carry. This is the plaintext entry, over a descriptor;
+/// `serve_request_cn` serves over a Conn.
 pub fn serve_request(
     conn: int,
     c: config.Conf,
@@ -3846,6 +3847,49 @@ pub fn serve_request(
     now: int,
 ) -> ReqOut {
     var cn = conn_mod_plain(conn)
+    serve_request_cn(
+        mut cn,
+        c,
+        opts,
+        limits,
+        local_port,
+        laddr,
+        head,
+        rest0,
+        served,
+        rs,
+        ft,
+        mut fu,
+        now,
+    )
+}
+
+/// `serve_request` over a Conn (lobo#142): a TLS row's requests are
+/// served here with the session its row carries, which seals every
+/// response. On a TLS Conn three things stay as the blocking TLS path
+/// (`serve_conn_cn`) has them, where the plaintext loop's differ: a
+/// proxied route is the named 502 (the exchange writes the descriptor
+/// in the clear), answered without asking the resolver and without
+/// reading the body, which is discarded as it arrives before the
+/// connection closes; no body is owed to an exchange; and the admin
+/// endpoint is not handed back to the loop, whose writer is plaintext.
+/// Total.
+pub fn serve_request_cn(
+    mut cn: conn.Conn,
+    c: config.Conf,
+    opts: ServerOpts,
+    limits: http.Limits,
+    local_port: int,
+    laddr: str,
+    head: str,
+    rest0: str,
+    served: int,
+    rs: resolver.Resolver,
+    ft: FileKinds,
+    mut fu: MemoUpd,
+    now: int,
+) -> ReqOut {
+    let tls_on = conn.is_tls(cn)
     var acc = obs.access_new()
     acc.request = raw_line(head)
     var chg = charge_new(limits.memory_budget, opts.pipe_w, opts.pipe_r)
@@ -3904,9 +3948,11 @@ pub fn serve_request(
     // check is pure over the model and the cache, and it runs
     // before the body read on purpose: nothing consumed, nothing to
     // replay.
-    let need = proxy.resolve_need(c, srv, req.path, rs, now)
-    if !need.host.is_empty() {
-        return req_out_wait(take acc, chg, need)
+    if !tls_on {
+        let need = proxy.resolve_need(c, srv, req.path, rs, now)
+        if !need.host.is_empty() {
+            return req_out_wait(take acc, chg, need)
+        }
     }
 
     var rest = rest0
@@ -3926,11 +3972,11 @@ pub fn serve_request(
     var owed = false
     let short = body_short(req.body_mode, req.content_length, rest0, limits, chg.used)
     let admin_on = opts.metrics_on && (req.method == "GET" || req.method == "HEAD")
-    if short && opts.stream_w >= 0 && owed_route(c, srv, req.path, admin_on) {
+    if short && !tls_on && opts.stream_w >= 0 && owed_route(c, srv, req.path, admin_on) {
         whole = false
         owed = true
         rest = ""
-    } else if short && !route_proxied(c, srv, req.path) {
+    } else if short && (tls_on || !route_proxied(c, srv, req.path)) {
         whole = false
         rest = ""
         if req.body_mode == "length" {
@@ -4069,7 +4115,7 @@ pub fn serve_request(
     // 405 for anything else is `handle_request`'s job, so an admin
     // path with a POST falls through to routing and answers 405 there
     // exactly as it would for a file.
-    if opts.metrics_on && (req.method == "GET" || req.method == "HEAD") {
+    if opts.metrics_on && !tls_on && (req.method == "GET" || req.method == "HEAD") {
         let kind = admin_kind(true, norm)
         if !kind.is_empty() {
             return req_out_admin(!keep, if keep { rest } else { "" }, take acc, chg, kind)
@@ -4078,6 +4124,15 @@ pub fn serve_request(
 
     var should_close = false
     let pplan = proxy.plan_at(c, srv, norm)
+    if pplan.is_proxy && tls_on {
+        eprint(
+            "lobo: [error] proxy_pass over a TLS listener is not wired yet (ws05 residue): the downstream response would bypass encryption; answering 502",
+        )
+        acc.status = 502
+        acc.body_bytes = err_len(502, false, opts.token)
+        send_err(mut cn, 502, false, opts.token)
+        return req_out(true, "", take acc, chg)
+    }
     if pplan.is_proxy {
         var pacc = proxy.run_acc()
         var raised = false
@@ -4123,7 +4178,7 @@ pub fn serve_request(
             }
             return hand
         }
-        should_close = proxy.exchange(conn, job, -1, mut pacc) else |_| {
+        should_close = proxy.exchange(conn.fd(cn), job, -1, mut pacc) else |_| {
             raised = true
             true
         }
@@ -4470,9 +4525,9 @@ pub fn conn_idle(carry: str, served: int) -> ConnStep {
 }
 
 /// A full head is present in `buf` at `cut`: split it, arm the
-/// body-read deadline, and serve exactly one request. Total.
+/// body-read deadline, and serve exactly one request over `cn`. Total.
 fn step_serve(
-    conn: int,
+    mut cn: conn.Conn,
     c: config.Conf,
     opts: ServerOpts,
     limits: http.Limits,
@@ -4487,10 +4542,10 @@ fn step_serve(
 ) -> ConnStep {
     let head = buf[0..cut.marker]
     let rest = buf[cut.marker + cut.mlen..buf.len]
-    net_deadline(conn, opts.read_timeout_ms) else |_| {}
+    conn.conn_deadline(cn, opts.read_timeout_ms) else |_| {}
     var fu = memo_upd_new()
-    let ro = serve_request(
-        conn,
+    let ro = serve_request_cn(
+        mut cn,
         c,
         opts,
         limits,
@@ -4594,12 +4649,27 @@ pub fn conn_step(
     dt: int,
 ) -> ConnStep {
     if dst != 0 {
-        return discard_step(conn, limits, dst, dn, dt, served, poll_ms)
+        var dcn = conn_mod_plain(conn)
+        return discard_step(mut dcn, limits, dst, dn, dt, served, poll_ms)
     }
     var buf = carry
     let pre = head_cut(buf)
     if pre.ready {
-        return step_serve(conn, c, opts, limits, local_port, laddr, buf, pre, served, rs, ft, now)
+        var pcn = conn_mod_plain(conn)
+        return step_serve(
+            mut pcn,
+            c,
+            opts,
+            limits,
+            local_port,
+            laddr,
+            buf,
+            pre,
+            served,
+            rs,
+            ft,
+            now,
+        )
     }
     if buf.len > limits.max_header_total {
         // ws28: the conn seam is built in the arms that write through
@@ -4650,7 +4720,116 @@ pub fn conn_step(
     }
     let cut = head_cut(buf)
     if cut.ready {
-        return step_serve(conn, c, opts, limits, local_port, laddr, buf, cut, served, rs, ft, now)
+        var scn = conn_mod_plain(conn)
+        return step_serve(
+            mut scn,
+            c,
+            opts,
+            limits,
+            local_port,
+            laddr,
+            buf,
+            cut,
+            served,
+            rs,
+            ft,
+            now,
+        )
+    }
+    step_out(true, false, buf, served, false, take obs.access_new())
+}
+
+/// One poll step on a TLS row (lobo#142): `conn_step`'s shape over a
+/// Conn whose session the row carries. One read under the SHORT
+/// deadline `poll_ms`, through `conn.conn_step_read`: the bytes are fed
+/// to the session, and the application bytes of the records they
+/// complete join the carry. A read that completes no record is an
+/// active step that leaves the carry as it was, so a client sending a
+/// record a byte at a time holds nothing. A full head is served by
+/// `step_serve` over the Conn; a row discarding an answered body takes
+/// `discard_step` over it. The session's state moves in `cn`, which
+/// the caller keeps. Total.
+pub fn tls_step(
+    mut cn: conn.Conn,
+    c: config.Conf,
+    opts: ServerOpts,
+    limits: http.Limits,
+    local_port: int,
+    laddr: str,
+    carry: str,
+    served: int,
+    poll_ms: int,
+    rs: resolver.Resolver,
+    ft: FileKinds,
+    now: int,
+    dst: int,
+    dn: int,
+    dt: int,
+) -> ConnStep {
+    if dst != 0 {
+        return discard_step(mut cn, limits, dst, dn, dt, served, poll_ms)
+    }
+    var buf = carry
+    let pre = head_cut(buf)
+    if pre.ready {
+        return step_serve(mut cn, c, opts, limits, local_port, laddr, buf, pre, served, rs, ft, now)
+    }
+    if buf.len > limits.max_header_total {
+        send_err(mut cn, 400, true, opts.token)
+        var acc4 = obs.access_new()
+        acc4.request = raw_line(buf)
+        acc4.status = 400
+        acc4.body_bytes = err_len(400, true, opts.token)
+        return step_out(true, true, "", served, true, take acc4)
+    }
+    conn.conn_deadline(cn, poll_ms) else |_| {
+        return step_out(false, true, buf, served, false, take obs.access_new())
+    }
+    var code = 0
+    let got = conn.conn_step_read(mut cn, 4096) else |e| match e {
+        closed => {
+            code = 1
+            List[byte]()
+        },
+        timeout => {
+            code = 2
+            List[byte]()
+        },
+        io => {
+            code = 1
+            List[byte]()
+        },
+    }
+    if code == 1 {
+        return step_out(false, true, buf, served, false, take obs.access_new())
+    }
+    if code == 2 {
+        return step_out(false, false, buf, served, false, take obs.access_new())
+    }
+    if got.is_empty() {
+        return step_out(true, false, buf, served, false, take obs.access_new())
+    }
+    var bad = false
+    let piece = str_from_utf8(got) else |_| {
+        bad = true
+        ""
+    }
+    if bad {
+        send_err(mut cn, 400, false, opts.token)
+        var acc5 = obs.access_new()
+        acc5.request = raw_line(buf)
+        acc5.status = 400
+        acc5.body_bytes = err_len(400, false, opts.token)
+        return step_out(true, true, "", served, true, take acc5)
+    }
+    if buf.is_empty() {
+        buf = piece
+    } else {
+        buf = "{buf}{piece}"
+    }
+    let cut = head_cut(buf)
+    if cut.ready {
+        return step_serve(mut cn, c, opts, limits, local_port, laddr, buf, cut, served, rs, ft, now)
     }
     step_out(true, false, buf, served, false, take obs.access_new())
 }
@@ -4662,9 +4841,11 @@ pub fn conn_step(
 /// are the next request's carry, or the row closes when its answer
 /// said so (`dst` negative). A malformed frame, a body past its cap, the
 /// peer's close or a read error closes the row; a read that times out
-/// leaves the discard where it is. Total.
+/// leaves the discard where it is. The reads are `conn.conn_step_read`'s
+/// (lobo#142), so a TLS row discards the bytes its session opens, and a
+/// read that completes no record counts as a read that moved. Total.
 fn discard_step(
-    conn: int,
+    mut cn: conn.Conn,
     limits: http.Limits,
     dst: int,
     dn: int,
@@ -4678,13 +4859,13 @@ fn discard_step(
     var t = dt
     var got = false
     var reads: int = 0
-    net_deadline(conn, poll_ms) else |_| {
+    conn.conn_deadline(cn, poll_ms) else |_| {
         return step_out(false, true, "", served, false, take obs.access_new())
     }
     while reads < 16 {
         var waited = false
         var gone = false
-        let b = net_read_bytes(conn, 4096) else |e| match e {
+        let b = conn.conn_step_read(mut cn, 4096) else |e| match e {
             timeout => {
                 waited = true
                 List[byte]()
@@ -4698,11 +4879,19 @@ fn discard_step(
                 List[byte]()
             },
         }
-        if gone || !waited && b.len == 0 {
+        if gone {
             return step_out(got, true, "", served, false, take obs.access_new())
         }
         if waited {
             reads = 16
+        } else if b.is_empty() {
+            // a TLS read that completed no record: bytes came, none
+            // are the body's yet
+            got = true
+            reads = reads + 1
+            if reads == 1 {
+                conn.conn_deadline(cn, 1) else |_| {}
+            }
         } else {
             got = true
             let d = discard_scan(st, n, t, b, 0, limits.max_body)
@@ -4731,7 +4920,7 @@ fn discard_step(
             t = d.t
             reads = reads + 1
             if reads == 1 {
-                net_deadline(conn, 1) else |_| {}
+                conn.conn_deadline(cn, 1) else |_| {}
             }
         }
     }
