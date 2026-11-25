@@ -1133,6 +1133,30 @@ pub fn control_alive(addr: str) -> bool {
     r == "pong"
 }
 
+/// True when the endpoint answers a `ping` within `within_ms`, the
+/// dial and the reply each bounded by it (lobo#158): the master's check
+/// on a hand it left alone as stopped, where the host cannot say the
+/// hand's state. Total: any failure reads as "not answering".
+pub fn control_alive_within(addr: str, within_ms: int) -> bool {
+    if addr.is_empty() {
+        return false
+    }
+    let c = control_dial(addr, within_ms) else |_| {
+        return false
+    }
+    net_deadline(c, within_ms) else |_| {
+        net_close(c) else |_| {}
+        return false
+    }
+    net_write(c, "ping\n") else |_| {
+        net_close(c) else |_| {}
+        return false
+    }
+    let got = net_read(c, 64) else |_| { "" }
+    net_close(c) else |_| {}
+    got.trim() == "pong"
+}
+
 // ------------------------------------------------------------------
 // the verb layer — one dispatch every trigger flows through, so a
 // control command today and a signal when #126 lands are the same
@@ -1993,6 +2017,22 @@ pub fn ev_worker_started(worker: int, restarts: int) -> str {
 /// event (ws16, appended). Total.
 pub fn ev_worker_exited(worker: int, reason: str, code: int) -> str {
     "worker-exited worker={worker} reason={reason} code={code}"
+}
+
+/// `worker-stopped worker=N by=B` — the master found a hand stopped and
+/// leaves it alone (lobo#158): `by` is `signal` (SIGSTOP and its
+/// kin, which the wait reports) or `trace` (a debugger's stop, which
+/// only the hand's state shows). The twelfth vocabulary event,
+/// appended. Total.
+pub fn ev_worker_stopped(worker: int, by: str) -> str {
+    "worker-stopped worker={worker} by={by}"
+}
+
+/// `worker-continued worker=N` — a hand the master had left alone as
+/// stopped runs again; the verbs it missed are sent to it now
+/// (lobo#158). The thirteenth vocabulary event, appended. Total.
+pub fn ev_worker_continued(worker: int) -> str {
+    "worker-continued worker={worker}"
 }
 
 /// The `worker=N` trailing field a WORKER stamps on every line it
