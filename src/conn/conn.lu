@@ -158,6 +158,65 @@ pub fn conn_read_bytes(mut cn: Conn, max: int) -> List[byte] ! {closed, timeout,
     }
 }
 
+/// One read of what has arrived, never more (lobo#142: the serving
+/// loop's step, under the deadline its caller armed). Plaintext: the
+/// bytes `net_read_bytes` answers, an empty read being the peer's EOF.
+/// TLS: the raw bytes are fed to the session (`tls.sess_feed`), an
+/// alert it answers is written best-effort, and the answer is the
+/// application bytes of every record they completed. That can be none,
+/// which means a record is not whole yet: never the peer's close.
+/// Rows: `closed` (the peer's EOF, counted as truncation on a TLS
+/// session with no close_notify first; or its close_notify or alert
+/// with nothing opened), `timeout`, `io` (a TLS session broken by a
+/// record it could not take: its alert is sent, and the bytes opened
+/// before that record go with the connection, which the caller closes;
+/// the blocking `sess_read` hands them over first).
+/// (W0602 allowed: the row mirrors net_read_bytes (closed/timeout/io).)
+#[allow(w0602)]
+pub fn conn_step_read(mut cn: Conn, max: int) -> List[byte] ! {closed, timeout, io} {
+    var code = 0
+    let b = net_read_bytes(cn.fd, max) else |e| match e {
+        closed => {
+            code = 1
+            List[byte]()
+        },
+        timeout => {
+            code = 2
+            List[byte]()
+        },
+        io => {
+            code = 3
+            List[byte]()
+        },
+    }
+    if code == 2 {
+        return timeout
+    }
+    if code == 3 {
+        return io
+    }
+    if code == 1 || b.is_empty() {
+        if cn.kind != 0 {
+            tls.sess_eof(mut cn.sess)
+        }
+        return closed
+    }
+    if cn.kind == 0 {
+        return b
+    }
+    let o = tls.sess_feed(mut cn.sess, b)
+    if !o.send.is_empty() {
+        net_write_bytes(cn.fd, o.send) else |_| {}
+    }
+    if o.io {
+        return io
+    }
+    if o.closed && o.plain.is_empty() {
+        return closed
+    }
+    o.plain
+}
+
 /// Write the full bytes of `s` (str path). Rows: `closed`, `io`.
 /// (W0602 allowed: the net writer's vocabulary, carried.)
 #[allow(w0602)]
