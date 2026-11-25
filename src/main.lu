@@ -6044,8 +6044,11 @@ fn held_of(gens: List[GenRow], gen: int) -> int {
 /// window is real (wolf-lang#121's lesson): a hand whose endpoint was
 /// taken in the gap fails its own bind and exits 1, and the master
 /// replaces it with a fresh one — the supervision path IS the retry.
-/// "" when the host refuses the probe. Total.
-fn worker_endpoint(master_ctrl: str, i: int) -> str {
+/// lobo#155: the probe never answers a port in `taken`, the master's
+/// table (`wport`), so the master does not make that gap itself by
+/// giving two hands one port. "" when the host refuses the probe.
+/// Total.
+fn worker_endpoint(master_ctrl: str, i: int, taken: List[int]) -> str {
     if shell.is_unix_addr(master_ctrl) {
         let ep = shell.unix_worker_addr(master_ctrl, i)
         let path = shell.unix_path_of(ep)
@@ -6054,7 +6057,7 @@ fn worker_endpoint(master_ctrl: str, i: int) -> str {
         }
         return ep
     }
-    free_endpoint()
+    free_endpoint(taken)
 }
 
 /// lobo#23 (ws36): remove the socket file of a hand the master has
@@ -6084,17 +6087,40 @@ fn forget_endpoint(ep: str) {
 }
 
 /// A free loopback endpoint: bind :0, read the port, release it.
-/// "" when the host refuses the probe. Total.
-fn free_endpoint() -> str {
-    let l = net_listen("127.0.0.1:0") else |_| {
-        return ""
+/// lobo#155: two probes made back to back can answer the same port, so
+/// a probe whose port is one of `taken`'s (`shell.endpoint_free_of`) is
+/// HELD open while the next is made — the host cannot answer a port a
+/// socket still holds — at most 8 probes, every one released before
+/// the answer. "" when the host refuses a probe or all 8 are taken.
+/// Total.
+fn free_endpoint(taken: List[int]) -> str {
+    var held = List[int]()
+    var got = ""
+    var tries: int = 0
+    while tries < 8 && got.is_empty() {
+        tries = tries + 1
+        let l = net_listen("127.0.0.1:0") else |_| { -1 }
+        if l < 0 {
+            tries = 8
+            continue
+        }
+        let p = net_port(l) else |_| { -1 }
+        if p < 0 {
+            net_close(l) else |_| {}
+            tries = 8
+            continue
+        }
+        if shell.endpoint_free_of(p, taken) {
+            net_close(l) else |_| {}
+            got = "127.0.0.1:{p}"
+        } else {
+            (mut held).push(l)
+        }
     }
-    let p = net_port(l) else |_| {
-        net_close(l) else |_| {}
-        return ""
+    for h in held {
+        net_close(h) else |_| {}
     }
-    net_close(l) else |_| {}
-    "127.0.0.1:{p}"
+    got
 }
 
 /// The path's identity from ONE stat, following its final symlink as exec
@@ -6166,6 +6192,7 @@ fn spawn_worker(
     gen: int,
     gid: str,
     lset: str,
+    taken: List[int],
     mut el: ELog,
 ) -> (int, str) {
     // Empty only for the startup cohort, whose identity the master just
@@ -6182,7 +6209,7 @@ fn spawn_worker(
             return (-2, "")
         }
     }
-    let ep = worker_endpoint(mctrl, i)
+    let ep = worker_endpoint(mctrl, i, taken)
     if ep.is_empty() {
         ev_log(mut el, "error", "worker {i}: no free endpoint for its control listener")
         return (-1, "")
@@ -6773,6 +6800,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
             1,
             "",
             lset,
+            wport,
             mut elog_st,
         )
         (mut wslot).push(s.0)
@@ -7148,6 +7176,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                             mgen,
                             shell.conf_hash(mconf),
                             lset,
+                            wport,
                             mut elog,
                         )
                         if s.0 == -2 {
@@ -7234,6 +7263,7 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     mgen,
                     shell.conf_hash(mconf),
                     lset,
+                    wport,
                     mut elog,
                 )
                 if s.0 == -2 {
