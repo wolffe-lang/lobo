@@ -1349,17 +1349,275 @@ pub fn sess_write(mut z: Sess, data: List[byte]) -> () ! {closed, io} {
 /// socket. Total; every failure is swallowed (the connection is done
 /// either way).
 pub fn sess_close(mut z: Sess) {
+    sess_notify(mut z)
+    net_close(z.fd) else |_| {}
+    z.up = false
+}
+
+/// Send close_notify once, best-effort, and leave the socket open: the
+/// serving loop closes a row's socket itself (lobo#142), so that no
+/// descriptor is closed twice. Total.
+pub fn sess_notify(mut z: Sess) {
     if z.up && !z.sent_close {
         let rec = sess_alert(mut z, 0)
         net_write_bytes(z.fd, rec) else |_| {}
         z.sent_close = true
     }
-    net_close(z.fd) else |_| {}
-    z.up = false
 }
 
 /// A placeholder session for a PLAINTEXT conn (the seam's other
 /// half): fd -1, nothing armed. Total.
 pub fn no_sess() -> Sess {
     sess_dead()
+}
+
+// ------------------------------------------------------------------
+// a TLS row's state as bytes (lobo#142)
+// ------------------------------------------------------------------
+// The serving loop keeps a TLS row's handshake or session between
+// steps as a byte string, written in place in a buffer of the row's
+// own as its carry is, because a step's region dies at its brace and
+// the table's region must not grow per step. The layout: a version
+// byte, a kind byte (0 a handshake, 1 a session), then the fields in a
+// fixed order, each an 8-byte big-endian integer or such a length and
+// its bytes. It is lobo's own and never leaves the process.
+
+fn pack_ver() -> int {
+    1
+}
+
+fn put_int(mut o: List[byte], v: int) {
+    var d = List[byte]()
+    var x = v
+    var i: int = 0
+    while i < 8 {
+        (mut d).push((x % 256) as byte)
+        x = x / 256
+        i = i + 1
+    }
+    var j: int = 7
+    while j >= 0 {
+        (mut o).push(d[j])
+        j = j - 1
+    }
+}
+
+fn put_bytes(mut o: List[byte], b: List[byte]) {
+    put_int(mut o, b.len)
+    push_all(mut o, b)
+}
+
+/// A reader over packed bytes: where it is, and whether every read so
+/// far was whole.
+struct Rd {
+    at: int,
+    ok: bool,
+}
+
+fn rd_int(b: List[byte], mut r: Rd) -> int {
+    if !r.ok || r.at + 8 > b.len {
+        r.ok = false
+        return 0
+    }
+    var v: int = 0
+    var i: int = 0
+    while i < 8 {
+        v = v * 256 + b[r.at + i] as int
+        i = i + 1
+    }
+    r.at = r.at + 8
+    v
+}
+
+fn rd_bytes(b: List[byte], mut r: Rd) -> List[byte] {
+    let n = rd_int(b, mut r)
+    if !r.ok || n < 0 || r.at + n > b.len {
+        r.ok = false
+        return List[byte]()
+    }
+    let out = bsub(b, r.at, r.at + n)
+    r.at = r.at + n
+    out
+}
+
+fn rd_str(b: List[byte], mut r: Rd) -> str {
+    let raw = rd_bytes(b, mut r)
+    str_from_utf8(raw) else |_| {
+        r.ok = false
+        ""
+    }
+}
+
+/// What a packed state is: 0 a handshake awaiting the ClientHello, 1 a
+/// handshake awaiting the client Finished, 2 a session, -1 bytes that
+/// are not a state this packing wrote. Total.
+pub fn state_phase(b: List[byte]) -> int {
+    if b.len < 10 || b[0] as int != pack_ver() {
+        return -1
+    }
+    if b[1] as int == 1 {
+        return 2
+    }
+    if b[1] as int != 0 {
+        return -1
+    }
+    var r = Rd { at: 2, ok: true }
+    let st = rd_int(b, mut r)
+    if !r.ok || st < 0 || st > 1 {
+        return -1
+    }
+    st
+}
+
+/// A handshake as bytes (`hs_unpack` reverses it; the certificate
+/// model is the caller's to hand back). Total.
+pub fn hs_pack(h: Hs) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push(pack_ver() as byte)
+    (mut o).push(0 as byte)
+    put_int(mut o, h.st)
+    put_int(mut o, h.cseq)
+    put_int(mut o, h.entry + 1)
+    put_bytes(mut o, h.chts)
+    put_bytes(mut o, h.th_sfin)
+    put_bytes(mut o, h.chs_key)
+    put_bytes(mut o, h.chs_iv)
+    put_bytes(mut o, h.shs_key)
+    put_bytes(mut o, h.shs_iv)
+    put_bytes(mut o, h.cats)
+    put_bytes(mut o, h.sats)
+    put_bytes(mut o, ascii(h.sni))
+    put_bytes(mut o, ascii(h.alpn))
+    put_bytes(mut o, h.wire)
+    put_bytes(mut o, h.msgs)
+    o
+}
+
+/// The handshake `hs_pack` wrote, under the certificate model `sc`.
+/// Bytes it did not write answer a failed handshake (`st` 3). Total.
+pub fn hs_unpack(b: List[byte], sc: config.SslConf) -> Hs {
+    var h = hs_begin(sc)
+    if b.len < 2 || b[0] as int != pack_ver() || b[1] as int != 0 {
+        h.st = 3
+        return h
+    }
+    var r = Rd { at: 2, ok: true }
+    let st = rd_int(b, mut r)
+    let cseq = rd_int(b, mut r)
+    let entry = rd_int(b, mut r) - 1
+    let chts = rd_bytes(b, mut r)
+    let th_sfin = rd_bytes(b, mut r)
+    let chs_key = rd_bytes(b, mut r)
+    let chs_iv = rd_bytes(b, mut r)
+    let shs_key = rd_bytes(b, mut r)
+    let shs_iv = rd_bytes(b, mut r)
+    let cats = rd_bytes(b, mut r)
+    let sats = rd_bytes(b, mut r)
+    let sni = rd_str(b, mut r)
+    let alpn = rd_str(b, mut r)
+    let wire = rd_bytes(b, mut r)
+    let msgs = rd_bytes(b, mut r)
+    if !r.ok || r.at != b.len || st < 0 || st > 1 {
+        h.st = 3
+        return h
+    }
+    h.st = st
+    h.cseq = cseq
+    h.entry = entry
+    h.chts = chts
+    h.th_sfin = th_sfin
+    h.chs_key = chs_key
+    h.chs_iv = chs_iv
+    h.shs_key = shs_key
+    h.shs_iv = shs_iv
+    h.cats = cats
+    h.sats = sats
+    h.sni = sni
+    h.alpn = alpn
+    h.wire = wire
+    h.msgs = msgs
+    h
+}
+
+/// A session as bytes (`sess_unpack` reverses it; the descriptor is
+/// the caller's to hand back). Total.
+pub fn sess_pack(z: Sess) -> List[byte] {
+    var o = List[byte]()
+    (mut o).push(pack_ver() as byte)
+    (mut o).push(1 as byte)
+    var flags: int = 0
+    if z.up {
+        flags = flags + 1
+    }
+    if z.got_close {
+        flags = flags + 2
+    }
+    if z.sent_close {
+        flags = flags + 4
+    }
+    if z.trunc {
+        flags = flags + 8
+    }
+    if z.failed {
+        flags = flags + 16
+    }
+    put_int(mut o, flags)
+    put_int(mut o, z.rseq)
+    put_int(mut o, z.wseq)
+    put_int(mut o, z.entry + 1)
+    put_bytes(mut o, z.rkey)
+    put_bytes(mut o, z.riv)
+    put_bytes(mut o, z.wkey)
+    put_bytes(mut o, z.wiv)
+    put_bytes(mut o, ascii(z.sni))
+    put_bytes(mut o, ascii(z.alpn))
+    put_bytes(mut o, z.buf)
+    put_bytes(mut o, z.plain)
+    o
+}
+
+/// The session `sess_pack` wrote, on `fd`. Bytes it did not write
+/// answer a broken session (`failed`, nothing to read or write).
+/// Total.
+pub fn sess_unpack(b: List[byte], fd: int) -> Sess {
+    var z = sess_dead()
+    z.fd = fd
+    if b.len < 2 || b[0] as int != pack_ver() || b[1] as int != 1 {
+        z.failed = true
+        return z
+    }
+    var r = Rd { at: 2, ok: true }
+    let flags = rd_int(b, mut r)
+    let rseq = rd_int(b, mut r)
+    let wseq = rd_int(b, mut r)
+    let entry = rd_int(b, mut r) - 1
+    let rkey = rd_bytes(b, mut r)
+    let riv = rd_bytes(b, mut r)
+    let wkey = rd_bytes(b, mut r)
+    let wiv = rd_bytes(b, mut r)
+    let sni = rd_str(b, mut r)
+    let alpn = rd_str(b, mut r)
+    let buf = rd_bytes(b, mut r)
+    let plain = rd_bytes(b, mut r)
+    if !r.ok || r.at != b.len {
+        z.failed = true
+        return z
+    }
+    z.up = flags % 2 == 1
+    z.got_close = flags / 2 % 2 == 1
+    z.sent_close = flags / 4 % 2 == 1
+    z.trunc = flags / 8 % 2 == 1
+    z.failed = flags / 16 % 2 == 1
+    z.rseq = rseq
+    z.wseq = wseq
+    z.entry = entry
+    z.rkey = rkey
+    z.riv = riv
+    z.wkey = wkey
+    z.wiv = wiv
+    z.sni = sni
+    z.alpn = alpn
+    z.buf = buf
+    z.plain = plain
+    z
 }
