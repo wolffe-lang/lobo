@@ -4915,7 +4915,13 @@ pub fn tls_row_step(
             4,
         )
     }
-    let hs = conn.hs_row_step(fd, state, sc, poll_ms)
+    // PLANT 2 (lobo#142; never merged): the handshake is taken blocking,
+    // under the read timeout, as `tls.accept` took it
+    var hs = conn.hs_row_step(fd, state, sc, opts.read_timeout_ms)
+    while !hs.close && hs.end == 0 && hs.active {
+        let st2 = copy hs.state
+        hs = conn.hs_row_step(fd, st2, sc, opts.read_timeout_ms)
+    }
     if hs.close || hs.end != 1 {
         return tls_row_out(
             take step_out(hs.active, hs.close, carry, served, false, take obs.access_new()),
