@@ -8,6 +8,7 @@ import select
 import signal
 import socket
 import subprocess
+import threading
 import time
 
 
@@ -315,6 +316,94 @@ def worker_rows(server):
     return rows
 
 
+REPLACE_SECONDS = 8
+
+
+def hand_replacement(binary, directory, hold):
+    """A hand that dies is replaced within REPLACE_SECONDS of its death,
+    also when another socket listens on its control endpoint (`hold`): a
+    sibling given the same port, or any other listener. The master must
+    learn of the death from the hand itself, not from a connect to the
+    endpoint, which such a listener answers. The held endpoint accepts
+    and closes, as any foreign listener would, so it never fills a
+    backlog. The one process signalled is hand 2, once, by the pid the
+    master's own status names, after its command line is read."""
+    server = Server(binary, directory, workers=2)
+    held = None
+    done = threading.Event()
+    drainer = None
+    try:
+        def both():
+            rows = worker_rows(server)
+            return rows if set(rows) == {1, 2} else None
+        rows = until(both, "both hands serving")
+        endpoint, pid = rows[2]
+        proc = Path(f"/proc/{pid}/cmdline")
+        if proc.exists():
+            command = proc.read_bytes().replace(b"\0", b" ").decode().strip()
+        else:
+            command = subprocess.run(["ps", "-ww", "-p", str(pid), "-o", "command="],
+                                     capture_output=True, text=True, timeout=5).stdout.strip()
+        assert f"-c {server.config} --worker 2 --worker-control" in command, \
+            f"pid {pid} is not this run's hand 2: {command!r}"
+        began = time.monotonic()
+        os.kill(pid, signal.SIGKILL)
+        if hold:
+            port_number = int(endpoint.rsplit(":", 1)[1])
+
+            def take():
+                sock = socket.socket()
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    sock.bind(("127.0.0.1", port_number))
+                    sock.listen(64)
+                    return sock
+                except OSError:
+                    sock.close()
+                    return None
+            held = until(take, f"this rig to listen on hand 2's endpoint {endpoint}", seconds=2)
+
+            def drain():
+                held.settimeout(.05)
+                while not done.is_set():
+                    try:
+                        peer, _ = held.accept()
+                        peer.close()
+                    except socket.timeout:
+                        pass
+                    except OSError:
+                        return
+            drainer = threading.Thread(target=drain, daemon=True)
+            drainer.start()
+
+        def replaced():
+            now = worker_rows(server)
+            return now[2] if 2 in now and now[2][1] != pid else None
+        left = REPLACE_SECONDS - (time.monotonic() - began)
+        try:
+            fresh = until(replaced, "a new hand 2", seconds=max(0.0, left))
+        except AssertionError:
+            rows_now = " | ".join(line for line in server.status().splitlines() if line.startswith("worker "))
+            raise AssertionError(f"hand 2 (pid {pid}) not replaced within {REPLACE_SECONDS} s of its kill, "
+                                 f"its endpoint {endpoint} {'held by this rig' if hold else 'left free'}; "
+                                 f"status: {rows_now}") from None
+        took = time.monotonic() - began
+        print(f"lobo-admission: measured — hand 2 replaced {took:.2f} s after its kill: pid {pid} -> {fresh[1]}, "
+              f"control {endpoint} -> {fresh[0]}", flush=True)
+        if hold:
+            log = server.log.read_text()
+            assert "worker-exited worker=2 reason=signal code=-1" in log, \
+                "the master logged hand 2's death as a kill: " + " | ".join(
+                    line for line in log.splitlines() if "worker-exited" in line)
+    finally:
+        done.set()
+        if drainer is not None:
+            drainer.join(timeout=2)
+        if held is not None:
+            held.close()
+        server.close()
+
+
 def control(endpoint, command="ping"):
     with socket.create_connection(("127.0.0.1", int(endpoint.rsplit(":", 1)[1])), timeout=5) as sock:
         sock.sendall((command + "\n").encode())
@@ -498,7 +587,8 @@ def main():
     parser.add_argument("mode", choices=("admission", "counters", "oracle", "review"))
     parser.add_argument("binary")
     parser.add_argument("directory", type=Path)
-    parser.add_argument("--row", choices=("later-listener-progress", "all-full-burst-progress", "multi-listener-emfile-cpu", "one-hand-master-scope"))
+    parser.add_argument("--row", choices=("later-listener-progress", "all-full-burst-progress", "multi-listener-emfile-cpu", "one-hand-master-scope",
+                                          "hand-replaced-endpoint-held", "hand-replaced-endpoint-free"))
     args = parser.parse_args()
     if args.mode == "admission":
         rows = [("shared-listener-first28", lambda: admission(args.binary, args.directory))]
@@ -509,13 +599,17 @@ def main():
                 ("all-full-burst-progress", lambda: full_burst_progress(args.binary, args.directory / "burst")),
                 ("multi-listener-emfile-cpu", lambda: backoff_idle_cpu(args.binary, args.directory / "backoff")),
                 ("one-hand-master-scope", lambda: one_hand_scope(args.binary, args.directory / "one-hand"))]
-        if args.row:
-            rows = [(name, run) for name, run in rows if name == args.row]
     else:
         rows = [("connections-refused", lambda: refusal(args.binary, args.directory / "refused")),
                 ("connections-evicted", lambda: eviction(args.binary, args.directory / "evicted")),
                 ("accept-failures-emfile", lambda: accept_failure(args.binary, args.directory / "emfile")),
-                ("connection-counters-per-worker", lambda: worker_counters(args.binary, args.directory / "workers"))]
+                ("connection-counters-per-worker", lambda: worker_counters(args.binary, args.directory / "workers")),
+                ("hand-replaced-endpoint-held", lambda: hand_replacement(args.binary, args.directory / "held", hold=True)),
+                ("hand-replaced-endpoint-free", lambda: hand_replacement(args.binary, args.directory / "free", hold=False))]
+    if args.row:
+        rows = [(name, run) for name, run in rows if name == args.row]
+        if not rows:
+            parser.error(f"--row {args.row} is not a row of the {args.mode} mode")
     red = 0
     for name, run in rows:
         try:
