@@ -4398,6 +4398,11 @@ pub struct StepRare {
     rs_new: List[resolver.Resolver],
     open_path: str,
     proxy_job: str,
+    // lobo#142: a TLS row's state after the step (`tls.state_phase`
+    // reads it; empty on a plaintext row), and how a handshake that
+    // ended in the step ended (`TlsRowOut.hs_end`)
+    tls_state: List[byte],
+    tls_end: int,
 }
 
 /// A `ConnStep` as it leaves the step's region (ws57, lobo#66). The
@@ -4471,6 +4476,8 @@ pub fn step_pack(take s: ConnStep, keep_acc: bool) -> StepOut {
             rs_new: s.rs_new,
             open_path: s.open_path,
             proxy_job: s.proxy_job,
+            tls_state: List[byte](),
+            tls_end: 0,
         })
     }
     StepOut {
@@ -4832,6 +4839,169 @@ pub fn tls_step(
         return step_serve(mut cn, c, opts, limits, local_port, laddr, buf, cut, served, rs, ft, now)
     }
     step_out(true, false, buf, served, false, take obs.access_new())
+}
+
+/// What a TLS row's step produced (lobo#142): the step; the row's state
+/// after it, as bytes (`tls.state_phase` reads it); and how a handshake
+/// that ended in this step ended, as `tls.accept`'s rows were counted:
+/// 0 none, 1 open, 2 refused (a named failure, the peer's alert, close
+/// or EOF), 4 io.
+pub struct TlsRowOut {
+    step: ConnStep,
+    state: List[byte],
+    hs_end: int,
+}
+
+fn tls_row_out(take s: ConnStep, take state: List[byte], hs_end: int) -> TlsRowOut {
+    TlsRowOut { step: s, state: state, hs_end: hs_end }
+}
+
+/// One step of a TLS row whose state is `state` (lobo#142). A handshake
+/// is stepped by `conn.hs_row_step`: one read under `poll_ms`, what it
+/// answers written, a failure closing the row; the step that verifies
+/// the client Finished opens the session and the records already behind
+/// the Finished, which become the carry (`has_head` steps it next pass).
+/// A session is stepped by `tls_step`. Every close a session's step
+/// makes sends close_notify; the descriptor is the caller's to close.
+/// `sc` is the certificate model a handshake serves under. Total.
+pub fn tls_row_step(
+    fd: int,
+    state: List[byte],
+    sc: config.SslConf,
+    c: config.Conf,
+    opts: ServerOpts,
+    limits: http.Limits,
+    local_port: int,
+    laddr: str,
+    carry: str,
+    served: int,
+    poll_ms: int,
+    rs: resolver.Resolver,
+    ft: FileKinds,
+    now: int,
+    dst: int,
+    dn: int,
+    dt: int,
+) -> TlsRowOut {
+    let ph = conn.state_phase(state)
+    if ph == 2 {
+        var cn = conn.from_state(fd, state)
+        let st = tls_step(
+            mut cn,
+            c,
+            opts,
+            limits,
+            local_port,
+            laddr,
+            carry,
+            served,
+            poll_ms,
+            rs,
+            ft,
+            now,
+            dst,
+            dn,
+            dt,
+        )
+        if st.close {
+            conn.conn_notify(mut cn)
+        }
+        return tls_row_out(take st, take conn.conn_state(cn), 0)
+    }
+    if ph < 0 {
+        return tls_row_out(
+            take step_out(false, true, carry, served, false, take obs.access_new()),
+            take List[byte](),
+            4,
+        )
+    }
+    let hs = conn.hs_row_step(fd, state, sc, poll_ms)
+    if hs.close || hs.end != 1 {
+        return tls_row_out(
+            take step_out(hs.active, hs.close, carry, served, false, take obs.access_new()),
+            take hs.state,
+            hs.end,
+        )
+    }
+    // open: the records behind the client Finished are the carry
+    var bad = false
+    let first = str_from_utf8(hs.plain) else |_| {
+        bad = true
+        ""
+    }
+    if bad {
+        var cn = conn.from_state(fd, hs.state)
+        send_err(mut cn, 400, false, opts.token)
+        conn.conn_notify(mut cn)
+        var acc = obs.access_new()
+        acc.status = 400
+        acc.body_bytes = err_len(400, false, opts.token)
+        return tls_row_out(
+            take step_out(true, true, "", served, true, take acc),
+            take conn.conn_state(cn),
+            1,
+        )
+    }
+    var w = step_out(true, false, first, served, false, take obs.access_new())
+    w.has_head = carry_has_head(first)
+    tls_row_out(take w, take hs.state, 1)
+}
+
+/// Pack a TLS row's step for the copy out of its region, as
+/// `step_pack` packs a plaintext row's, with its state riding in
+/// `rare`, which a TLS step always has (so its access record always
+/// travels with it). Total.
+pub fn tls_step_pack(take t: TlsRowOut) -> StepOut {
+    let s = t.step
+    let status = s.acc.status
+    let body_bytes = s.acc.body_bytes
+    let proxied = s.acc.proxied
+    let up_status = s.acc.up_status
+    let up_ms = s.acc.up_ms
+    let proxying = !s.proxy_job.is_empty()
+    var rare = List[StepRare]()
+    (mut rare).push(take StepRare {
+        acc: s.acc,
+        bud_site: s.bud_site,
+        admin: s.admin,
+        resolve: s.resolve,
+        resolve_addr: s.resolve_addr,
+        memo: s.memo,
+        rs_rot: s.rs_rot,
+        rs_new: s.rs_new,
+        open_path: s.open_path,
+        proxy_job: s.proxy_job,
+        tls_state: t.state,
+        tls_end: t.hs_end,
+    })
+    StepOut {
+        active: s.active,
+        close: s.close,
+        carry: s.carry,
+        served: s.served,
+        logged: s.logged,
+        status: status,
+        body_bytes: body_bytes,
+        proxied: proxied,
+        up_status: up_status,
+        up_ms: up_ms,
+        bud_limit: s.bud_limit,
+        bud_would: s.bud_would,
+        bud_cap: s.bud_cap,
+        mem_hw: s.mem_hw,
+        mem_rt: s.mem_rt,
+        resolve_timeout_ms: s.resolve_timeout_ms,
+        resolve_valid_ms: s.resolve_valid_ms,
+        streaming: s.streaming,
+        stream_fd: s.stream_fd,
+        has_head: s.has_head,
+        open_err: s.open_err,
+        proxying: proxying,
+        rare: rare,
+        disc_st: s.disc_st,
+        disc_n: s.disc_n,
+        disc_t: s.disc_t,
+    }
 }
 
 /// One step of a row discarding the body of a request it has answered:
