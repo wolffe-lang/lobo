@@ -1819,6 +1819,10 @@ fn serve_main(
     // the step (lobo#148), said out loud at start.
     var job_l = -1
     var job_port = 0
+    // each pair's token (lobo#148): a pair checks that the connection it
+    // accepts is the one it made, not one an earlier pair left queued
+    // when the host refused that pair's accept
+    var px_seq = 0
     if stream_w >= 0 {
         var jok = true
         let jl = net_listen("127.0.0.1:0") else |_| {
@@ -4294,13 +4298,14 @@ fn serve_main(
                                     var pi = px_idle(pxs)
                                     var pair_why: int = 0
                                     if pi < 0 {
-                                        let pair = px_pair(job_l, job_port)
+                                        px_seq = px_seq + 1
+                                        let pair = px_pair(job_l, job_port, px_seq)
                                         if pair.0 >= 0 {
                                             in life {
                                                 pi = px_new(mut pxs, pair.0, pair.1, stream_w)
                                             }
                                         } else {
-                                            pair_why = pair.1
+                                            pair_why = pair.2
                                         }
                                     }
                                     if pi >= 0 {
@@ -4864,25 +4869,46 @@ fn arm_accept(l: int) {
 // ------------------------------------------------------------------
 
 /// The job socket for one exchange: a connect to the loop's own job
-/// listener and the accept of it, (loop's end, proc's end), or (-1,
-/// the host's error number) when the host refuses either half (out of
-/// descriptors; 0 when no number is known): the caller then refuses
-/// the exchange (lobo#148). (-1, 0) when there is no listener. net
-/// tier. Total.
-fn px_pair(jl: int, port: int) -> (int, int) {
+/// listener and the accept of it. Answers (loop's end, proc's end, the
+/// host's error number, 0 when none is known). The loop's end writes
+/// the pair's token (`seq`), and the accepted end must read it: a
+/// connection an earlier pair left in the listener's queue, when the
+/// host refused that pair's accept (linux keeps such a connection
+/// queued), is closed and the next one accepted, at most four. When
+/// the host refuses either half, (-1, -1, its number), out of
+/// descriptors, and the caller refuses the exchange (lobo#148). (-1,
+/// -1, 0) when there is no listener. net tier. Total.
+fn px_pair(jl: int, port: int, seq: int) -> (int, int, int) {
     if jl < 0 {
-        return (-1, 0)
+        return (-1, -1, 0)
     }
     let w = net_connect("127.0.0.1:{port}") else |_| {
-        return (-1, os_error())
+        return (-1, -1, os_error())
+    }
+    let tok = "p{seq}\n"
+    net_write(w, tok) else |_| {
+        net_close(w) else |_| {}
+        return (-1, -1, 0)
     }
     net_deadline(jl, 1000) else |_| {}
-    let r = net_accept(jl) else |_| {
-        let code = os_error()
-        net_close(w) else |_| {}
-        return (-1, code)
+    var tries: int = 0
+    while tries < 4 {
+        let r = net_accept(jl) else |_| {
+            let code = os_error()
+            net_close(w) else |_| {}
+            return (-1, -1, code)
+        }
+        net_deadline(r, 1000) else |_| {}
+        let got = net_read(r, 64) else |_| { "" }
+        if got == tok {
+            net_deadline(r, 0) else |_| {}
+            return (w, r, 0)
+        }
+        net_close(r) else |_| {}
+        tries = tries + 1
     }
-    (w, r)
+    net_close(w) else |_| {}
+    (-1, -1, 0)
 }
 
 /// One proc of the EXCHANGE POOL (ws69, lobo#100): its handle, its
