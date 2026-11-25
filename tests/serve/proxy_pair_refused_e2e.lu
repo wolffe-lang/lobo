@@ -13,11 +13,11 @@
 //! since #150, on an owed body), serving nothing else.
 //!
 //! The oracle first. The pinned nginx, its descriptor limit lowered by
-//! `ulimit -n` in the child shell that execs it, is filled with idle
-//! connections, one at a time, until its error log shows an accept it
-//! refused (the one it did not take is closed); one more is closed, so
-//! a new proxied client takes the last descriptor and none is left for
-//! the upstream socket. Its answer (status line, whether
+//! `ulimit -n` in the child shell that execs it, is filled with
+//! keep-alive connections, one at a time, each answered 403 by a `deny
+//! all` location (no file opened), until one is left unanswered (it is
+//! closed); one more is closed, so a new proxied client takes the last
+//! descriptor and none is left for the upstream socket. Its answer (status line, whether
 //! the connection stays open) and its error-log line are read for a
 //! GET and for a POST whose body arrives whole (`[pair-oracle]`); the
 //! two must agree, and that status line is what lobo must answer.
@@ -138,8 +138,8 @@ fn fill_lobo(port: int, ep: str, mut kept: List[int], most: int) -> bool {
         }
         var took = false
         var t: int = 0
-        while !took && t < 8 {
-            time_sleep_ms(50)
+        while !took && t < 40 {
+            time_sleep_ms(10)
             if live_now(ep) > base {
                 took = true
             }
@@ -156,26 +156,38 @@ fn fill_lobo(port: int, ep: str, mut kept: List[int], most: int) -> bool {
     false
 }
 
-/// Idle connections added to `kept` one at a time until nginx's error
-/// log (`log`) shows a refused accept within 300 ms of one: nginx is
-/// at its descriptor limit and did not take that one, which is closed.
-/// (The pinned nginx has no `return`, and a page it serves needs a
-/// descriptor for its file, so the count is read off the log.) At most
-/// `most`; answers whether the limit was reached. Total.
-fn fill_ng(port: int, log: str, mut kept: List[int], most: int) -> bool {
-    var seen = lines_with(log, "accept", "failed").len
+/// Keep-alive connections added to `kept` one at a time, each kept
+/// once nginx answers its `GET /f` (a `deny all` location: a 403 with
+/// no file opened, so the count is of connections alone), until one is
+/// not answered within 1000 ms: nginx is at its descriptor limit and
+/// did not take it, and it is closed. At most `most`; answers whether
+/// the limit was reached. Total.
+fn fill_ng(port: int, mut kept: List[int], most: int) -> bool {
     var k: int = 0
     while k < most {
-        let c = net_connect("127.0.0.1:{port}") else |_| {
+        let c = send(port, "GET /f HTTP/1.1\r\nHost: x\r\n\r\n")
+        if c < 0 {
             return true
         }
-        time_sleep_ms(300)
-        let now = lines_with(log, "accept", "failed").len
-        if now > seen {
+        net_deadline(c, 1000) else |_| {}
+        var buf = ""
+        var reading = true
+        while reading && !buf.contains("</html>") {
+            let piece = net_read(c, 4096) else |_| {
+                reading = false
+                ""
+            }
+            if piece.is_empty() {
+                reading = false
+            } else {
+                buf = "{buf}{piece}"
+            }
+        }
+        if !buf.contains(" 403 ") {
             net_close(c) else |_| {}
             return true
         }
-        seen = now
+        net_deadline(c, 0) else |_| {}
         (mut kept).push(c)
         k = k + 1
     }
@@ -301,7 +313,7 @@ fn oracle(nginx: str, d: str, nofile: int, up: int, req: str, k: int) -> (str, s
     let np = free_port() else |_| { 0 }
     let dd = "{d}/ng{k}"
     fs_create_dir_all("{dd}/logs") else |_| {}
-    let conf = "daemon off;\nmaster_process off;\npid {dd}/ng.pid;\nerror_log {dd}/logs/ng.err;\nevents {{ worker_connections 1024; }}\nhttp {{\n  types {{ text/html html; }}\n  access_log off;\n  server {{\n    listen 127.0.0.1:{np};\n    location = /index.html {{ root {d}/www; }}\n    location / {{ proxy_pass http://127.0.0.1:{up}; }}\n  }}\n}}\n"
+    let conf = "daemon off;\nmaster_process off;\npid {dd}/ng.pid;\nerror_log {dd}/logs/ng.err;\nevents {{ worker_connections 1024; }}\nhttp {{\n  types {{ text/html html; }}\n  access_log off;\n  server {{\n    listen 127.0.0.1:{np};\n    location = /index.html {{ root {d}/www; }}\n    location = /f {{ deny all; }}\n    location / {{ proxy_pass http://127.0.0.1:{up}; }}\n  }}\n}}\n"
     fs_write_text("{dd}/ng.conf", conf) else |_| {}
     let out = fs_create("{dd}/ng.out") else |_| {
         return ("", "", "", "could not open {dd}/ng.out")
@@ -315,13 +327,13 @@ fn oracle(nginx: str, d: str, nofile: int, up: int, req: str, k: int) -> (str, s
         return ("", "", "", "nginx never served on {np}")
     }
     var kept = List[int]()
-    if !fill_ng(np, "{dd}/logs/ng.err", mut kept, 200) {
+    if !fill_ng(np, mut kept, 200) {
         close_all(mut kept)
         put_down(h)
         return ("", "", "", "200 idle connections never brought nginx to its limit of {nofile}")
     }
     close_last(mut kept, 1)
-    time_sleep_ms(1200)
+    time_sleep_ms(700)
     let c = send(np, req)
     let r = reply(c, 2000)
     net_close(c) else |_| {}
@@ -426,7 +438,7 @@ fn main() -> !int {
         fails = fails + 1
     }
     close_last(mut kept, 1)
-    time_sleep_ms(1200)
+    time_sleep_ms(700)
     let cn = send(hp, "GET /s3/x HTTP/1.1\r\nHost: x\r\n\r\n")
     let rn = reply(cn, 3000)
     net_close(cn) else |_| {}
@@ -441,7 +453,7 @@ fn main() -> !int {
     // one free: a GET
     let _f1 = fill_lobo(hp, ep, mut kept, 400)
     close_last(mut kept, 2)
-    time_sleep_ms(1200)
+    time_sleep_ms(700)
     let c1 = send(hp, get_req)
     time_sleep_ms(300)
     let st1 = ask_status(ep)
@@ -467,7 +479,7 @@ fn main() -> !int {
     // one free: a POST whose body has 1 byte of its 6
     let _f2 = fill_lobo(hp, ep, mut kept, 400)
     close_last(mut kept, 2)
-    time_sleep_ms(1200)
+    time_sleep_ms(700)
     let c2 = send(hp, "POST /s2/x HTTP/1.1\r\nHost: x\r\nContent-Length: 6\r\n\r\na")
     time_sleep_ms(300)
     let st2 = ask_status(ep)
@@ -503,7 +515,7 @@ fn main() -> !int {
     // recovery
     close_all(mut kept)
     net_close(s3) else |_| {}
-    time_sleep_ms(1200)
+    time_sleep_ms(700)
     var back = false
     let t_back = time_unix_ms()
     while !back && time_unix_ms() - t_back < 5000 {
