@@ -8,7 +8,10 @@
 //! socket, parsing the ClientHello, driving the server flight
 //! (ServerHello .. Finished), verifying the client Finished, and the
 //! application-data session (sess_read/sess_write/sess_close) the
-//! conn seam wraps. Protocol correctness is std.x.tls's suite (RFC
+//! conn seam wraps. The server handshake is a state machine fed the
+//! bytes that arrive and never reading (lobo#142: `hs_begin`,
+//! `hs_feed`, `hs_session`), so the serving loop can own a TLS
+//! connection as a row; `accept` is its blocking wrapper. Protocol correctness is std.x.tls's suite (RFC
 //! 8448-gated); integration is this file's.
 //! Scope, honest: TLS 1.3 only (a pre-1.3 client is answered with a
 //! protocol_version alert — the ssl_protocols table note), the
@@ -550,15 +553,6 @@ fn plain_record(rtype: int, body: List[byte]) -> List[byte] {
     out
 }
 
-/// Send a PLAINTEXT alert (pre-key failures). Best-effort: the
-/// connection is being torn down regardless. Total.
-fn send_alert_plain(fd: int, code: int) {
-    var body = List[byte]()
-    (mut body).push(2 as byte)
-    (mut body).push(code as byte)
-    net_write_bytes(fd, plain_record(21, body)) else |_| {}
-}
-
 /// Send a SEALED alert under the given write keys. Best-effort.
 fn send_alert_sealed(fd: int, key: List[byte], iv: List[byte], seq: int, code: int) {
     var body = List[byte]()
@@ -671,114 +665,180 @@ fn log_hs_fail(code: int, why: str) {
     eprint("lobo: [info] TLS handshake failed: {alert_name(code)} ({why})")
 }
 
-/// Accept one TLS 1.3 session on `fd` (the server handshake, §4.1):
-/// read the ClientHello, negotiate (1.3 + ChaCha20-Poly1305 + X25519
-/// + Ed25519 — anything less is the NAMED alert and the `refused`
-/// row), select the certificate entry by SNI (exact server_name
-/// match; no-SNI and unmatched fall to default_server), drive the
-/// server flight through std.x.tls.handshake's builders and key
-/// schedule, seal it through std.x.tls.record, and verify the client
-/// Finished (a mismatch is decrypt_error, nothing exposed). The
-/// caller arms the read deadline BEFORE calling (deadlines span the
-/// handshake — a stalled peer is the `timeout` row, never a hang).
-/// Rows: `refused` (a named negotiation/protocol failure, alert
-/// already sent and logged), `timeout`, `io`.
-#[allow(w0602)]
-pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused, timeout, io} {
-    net_deadline(fd, deadline_ms) else |_| {}
-    var wire = List[byte]()
+/// A server handshake in progress (lobo#142): the state machine the
+/// serving loop feeds whatever bytes have arrived, so that a TLS
+/// connection is a row of its table and never holds the loop on a
+/// read. `st` is 0 awaiting the ClientHello, 1 awaiting the client
+/// Finished, 2 open, 3 failed. `wire` holds raw bytes not yet framed
+/// into a record (once open, the bytes fed past the Finished, which
+/// the session takes); `msgs` holds handshake bytes not yet a whole
+/// message. `sc` is the serving generation's certificate model, kept
+/// until the ClientHello selects an entry. The rest is what the client
+/// Finished and the session need. This pin has no private field, so
+/// the struct is forgeable; every consumer treats the fields as data.
+pub struct Hs {
+    st: int,
+    sc: config.SslConf,
+    wire: List[byte],
+    msgs: List[byte],
+    chts: List[byte],
+    th_sfin: List[byte],
+    chs_key: List[byte],
+    chs_iv: List[byte],
+    cseq: int,
+    shs_key: List[byte],
+    shs_iv: List[byte],
+    cats: List[byte],
+    sats: List[byte],
+    sni: str,
+    alpn: str,
+    entry: int,
+}
 
-    // ---- ClientHello (plaintext record(s), type 22) --------------
-    var hsbuf = List[byte]()
-    var ch_msg = List[byte]()
-    var reading = true
-    while reading {
-        var need_more = false
-        if hsbuf.len >= 4 {
-            let want = 4 + be24(hsbuf, 1)
-            if hsbuf.len >= want {
-                ch_msg = bsub(hsbuf, 0, want)
-                reading = false
-            } else {
-                need_more = true
-            }
-        } else {
-            need_more = true
-        }
-        if need_more {
-            let rt = rec_take(fd, mut wire)
-            if rt.1 == 1 {
-                return refused
-            }
-            if rt.1 == 2 {
-                return timeout
-            }
-            if rt.1 == 3 {
-                return io
-            }
-            let r = rt.0
-            if r.rtype == 21 {
-                if r.body.len >= 2 {
-                    log_hs_fail(r.body[1] as int, "client alert before ClientHello")
-                }
-                return refused
-            }
-            if r.rtype != 22 {
-                send_alert_plain(fd, 10)
-                log_hs_fail(10, "expected a handshake record")
-                return refused
-            }
-            push_all(mut hsbuf, r.body)
-        }
+/// What one feed of a handshake produced. `send` is the bytes for the
+/// peer, in order: the whole server flight once the ClientHello has
+/// come, or a failure's alert. `done` is the client Finished verified:
+/// the session is open (`hs_session`). `failed` is the handshake over
+/// without a session: `alert` is the alert sent, logged as `accept`
+/// always logged it, or 0 when none was sent (the client's own alert);
+/// `io` marks the one failure `accept` answers with its `io` row, a
+/// record over the §5.1 ceiling.
+pub struct HsOut {
+    send: List[byte],
+    done: bool,
+    failed: bool,
+    alert: int,
+    io: bool,
+}
+
+/// A new server handshake under the certificate model `sc`, nothing
+/// read yet. Total.
+pub fn hs_begin(sc: config.SslConf) -> Hs {
+    Hs {
+        st: 0,
+        sc: copy sc,
+        wire: List[byte](),
+        msgs: List[byte](),
+        chts: List[byte](),
+        th_sfin: List[byte](),
+        chs_key: List[byte](),
+        chs_iv: List[byte](),
+        cseq: 0,
+        shs_key: List[byte](),
+        shs_iv: List[byte](),
+        cats: List[byte](),
+        sats: List[byte](),
+        sni: "",
+        alpn: "",
+        entry: -1,
     }
+}
 
+/// A feed that sent `send` and goes on. Total.
+fn hs_more(send: List[byte]) -> HsOut {
+    HsOut { send: copy send, done: false, failed: false, alert: 0, io: false }
+}
+
+/// The handshake failed: `sent` so far, then `alert_rec` (empty when
+/// no alert is sent) for the alert `code` (0 for none), logged with
+/// `why` as `accept` logged it (nothing when `why` is empty). Total.
+fn hs_fail(mut h: Hs, sent: List[byte], alert_rec: List[byte], code: int, why: str) -> HsOut {
+    h.st = 3
+    if !why.is_empty() {
+        log_hs_fail(code, why)
+    }
+    var out = copy sent
+    push_all(mut out, alert_rec)
+    HsOut { send: out, done: false, failed: true, alert: code, io: false }
+}
+
+/// A PLAINTEXT alert record (pre-key failures). Total.
+fn plain_alert(code: int) -> List[byte] {
+    var body = List[byte]()
+    (mut body).push(2 as byte)
+    (mut body).push(code as byte)
+    plain_record(21, body)
+}
+
+/// An alert SEALED under the server's handshake keys, after its four
+/// flight records (failures while awaiting the client Finished). Total.
+fn sealed_alert(h: Hs, code: int) -> List[byte] {
+    var body = List[byte]()
+    (mut body).push(2 as byte)
+    (mut body).push(code as byte)
+    record.seal(h.shs_key, h.shs_iv, 4, 21, body, 0)
+}
+
+/// The ClientHello `ch_msg` (one whole handshake message): negotiate
+/// (1.3 + ChaCha20-Poly1305 + X25519 + Ed25519, anything less the NAMED
+/// alert), select the certificate entry by SNI (exact server_name
+/// match; no-SNI and unmatched fall to default_server), build and seal
+/// the server flight through std.x.tls.handshake's builders and key
+/// schedule, and keep what the client Finished and the session need.
+/// Answers the flight to send, or the failure. Both random draws are OS
+/// CSPRNG bytes (s118 os_random; traps on an entropy-less host, the
+/// module header's retirement note). Total.
+fn hs_hello(mut h: Hs, ch_msg: List[byte]) -> HsOut {
+    let none = List[byte]()
     let hello = parse_client_hello(ch_msg)
     if !hello.ok {
-        send_alert_plain(fd, hello.alert)
-        log_hs_fail(hello.alert, hello.reason)
-        return refused
+        return hs_fail(mut h, none, plain_alert(hello.alert), hello.alert, hello.reason)
     }
     if !hello.has_13 {
-        send_alert_plain(fd, 70)
-        log_hs_fail(70, "client speaks no TLS 1.3 (1.2 is the std.x.tls roadmap row)")
-        return refused
+        return hs_fail(
+            mut h,
+            none,
+            plain_alert(70),
+            70,
+            "client speaks no TLS 1.3 (1.2 is the std.x.tls roadmap row)",
+        )
     }
     if !hello.has_chacha {
-        send_alert_plain(fd, 40)
-        log_hs_fail(40, "no TLS_CHACHA20_POLY1305_SHA256 in the offer (AES-GCM is a roadmap row)")
-        return refused
+        return hs_fail(
+            mut h,
+            none,
+            plain_alert(40),
+            40,
+            "no TLS_CHACHA20_POLY1305_SHA256 in the offer (AES-GCM is a roadmap row)",
+        )
     }
     if hello.kx.len != 32 {
-        send_alert_plain(fd, 40)
-        log_hs_fail(40, "no X25519 key share (HelloRetryRequest is named residue)")
-        return refused
+        return hs_fail(
+            mut h,
+            none,
+            plain_alert(40),
+            40,
+            "no X25519 key share (HelloRetryRequest is named residue)",
+        )
     }
     if !hello.has_ed25519 {
-        send_alert_plain(fd, 40)
-        log_hs_fail(40, "client accepts no ed25519 signature (the sc22 ladder)")
-        return refused
+        return hs_fail(
+            mut h,
+            none,
+            plain_alert(40),
+            40,
+            "client accepts no ed25519 signature (the sc22 ladder)",
+        )
     }
     if hello.alpn_offered && !hello.alpn_http11 {
-        send_alert_plain(fd, 120)
-        log_hs_fail(120, "ALPN offered without http/1.1 (h2 is a documented post-v1 delta)")
-        return refused
+        return hs_fail(
+            mut h,
+            none,
+            plain_alert(120),
+            120,
+            "ALPN offered without http/1.1 (h2 is a documented post-v1 delta)",
+        )
     }
 
     // ---- certificate selection (SNI -> server entry) -------------
-    let entry = config.ssl_select(sc, hello.sni)
+    let entry = config.ssl_select(h.sc, hello.sni)
     if entry < 0 {
-        send_alert_plain(fd, 80)
-        log_hs_fail(80, "no certificate entry resolved")
-        return refused
+        return hs_fail(mut h, none, plain_alert(80), 80, "no certificate entry resolved")
     }
-    let seedk = seed_of(sc, entry)
-    let chain = chain_of(sc, entry)
+    let seedk = seed_of(h.sc, entry)
+    let chain = chain_of(h.sc, entry)
 
     // ---- ServerHello + key schedule ------------------------------
-    // Both draws are OS CSPRNG bytes (s118 os_random; traps on an
-    // entropy-less host — the module header's retirement note). Only
-    // the SOURCE moved at wsm02; the handshake around them is
-    // unchanged.
     let eph = rand_bytes(32)
     let spub = curve25519.x25519_base(eph)
     let srand = rand_bytes(32)
@@ -792,10 +852,19 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     handshake.transcript_add(mut tr, sh)
     let th_sh = handshake.transcript_hash(tr)
 
+    var zero = false
     let dh = handshake.ecdhe_shared(eph, hello.kx) else |_| {
-        send_alert_plain(fd, 47)
-        log_hs_fail(47, "all-zero X25519 shared secret (RFC 8446 §7.4.2)")
-        return refused
+        zero = true
+        List[byte]()
+    }
+    if zero {
+        return hs_fail(
+            mut h,
+            none,
+            plain_alert(47),
+            47,
+            "all-zero X25519 shared secret (RFC 8446 §7.4.2)",
+        )
     }
     let early = handshake.early_secret()
     let hsec = handshake.handshake_secret(early, dh)
@@ -803,8 +872,6 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     let shts = handshake.server_handshake_traffic(hsec, th_sh)
     let shs_key = record.traffic_key(shts, 32)
     let shs_iv = record.traffic_iv(shts)
-    let chs_key = record.traffic_key(chts, 32)
-    let chs_iv = record.traffic_iv(chts)
 
     // ---- the server flight ---------------------------------------
     var ee_exts = List[byte]()
@@ -821,9 +888,7 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
 
     let cmsg = certificate_msg(chain)
     if cmsg.is_empty() {
-        send_alert_plain(fd, 80)
-        log_hs_fail(80, "certificate chain would not frame")
-        return refused
+        return hs_fail(mut h, none, plain_alert(80), 80, "certificate chain would not frame")
     }
     handshake.transcript_add(mut tr, cmsg)
     let th_cert = handshake.transcript_hash(tr)
@@ -854,113 +919,259 @@ pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused,
     push_all(mut flight, record.seal(shs_key, shs_iv, 1, 22, cmsg, 0))
     push_all(mut flight, record.seal(shs_key, shs_iv, 2, 22, cv, 0))
     push_all(mut flight, record.seal(shs_key, shs_iv, 3, 22, sfin, 0))
-    net_write_bytes(fd, flight) else |_| {
-        return io
-    }
 
     // ---- application secrets (ready before the client Finished) --
     let master = handshake.master_secret(hsec)
-    let cats = handshake.client_application_traffic(master, th_sfin)
-    let sats = handshake.server_application_traffic(master, th_sfin)
+    h.chs_key = record.traffic_key(chts, 32)
+    h.chs_iv = record.traffic_iv(chts)
+    h.cats = handshake.client_application_traffic(master, th_sfin)
+    h.sats = handshake.server_application_traffic(master, th_sfin)
+    h.chts = chts
+    h.th_sfin = th_sfin
+    h.cseq = 0
+    h.shs_key = shs_key
+    h.shs_iv = shs_iv
+    h.sni = hello.sni
+    h.alpn = alpn
+    h.entry = entry
+    // the certificate model is not needed past the selection
+    h.sc = config.ssl_none()
+    h.st = 1
+    hs_more(flight)
+}
 
-    // ---- the client Finished -------------------------------------
-    var cseq: int = 0
-    var fin_msg = List[byte]()
-    var hs2 = List[byte]()
-    var waiting = true
-    while waiting {
-        var need2 = false
-        if hs2.len >= 4 {
-            let want2 = 4 + be24(hs2, 1)
-            if hs2.len >= want2 {
-                fin_msg = bsub(hs2, 0, want2)
-                waiting = false
-            } else {
-                need2 = true
-            }
-        } else {
-            need2 = true
+/// One whole client handshake message `msg` while awaiting the client
+/// Finished: verify it (a mismatch is decrypt_error, nothing exposed)
+/// and open the session, or fail. Total.
+fn hs_finished(mut h: Hs, sent: List[byte], msg: List[byte]) -> HsOut {
+    if msg[0] as int != 20 {
+        return hs_fail(mut h, sent, sealed_alert(h, 10), 10, "expected the client Finished")
+    }
+    let verify_data = bsub(msg, 4, msg.len)
+    var bad = false
+    let fin_ok = handshake.accept_finished(h.chts, h.th_sfin, verify_data) else |_| {
+        bad = true
+        0
+    }
+    if bad {
+        return hs_fail(mut h, sent, sealed_alert(h, 51), 51, "client Finished did not verify")
+    }
+    if fin_ok != 1 {
+        return hs_fail(mut h, sent, List[byte](), 0, "")
+    }
+    h.st = 2
+    HsOut { send: copy sent, done: true, failed: false, alert: 0, io: false }
+}
+
+/// Feed the handshake the bytes that arrived; never reads. Each whole
+/// record is taken as it completes. The ClientHello's negotiation is
+/// `accept`'s, rule for rule and alert for alert, and answers the whole
+/// server flight in `send`; the client Finished's verification opens
+/// the session (`done`) and stops there, leaving any later bytes in
+/// `wire` for the session. A handshake already open or failed takes
+/// nothing more. Total.
+pub fn hs_feed(mut h: Hs, input: List[byte]) -> HsOut {
+    if h.st >= 2 {
+        return hs_more(List[byte]())
+    }
+    var wire = h.wire
+    push_all(mut wire, input)
+    h.wire = wire
+    var sent = List[byte]()
+    while h.st < 2 && h.wire.len >= 5 {
+        let rlen = be16(h.wire, 3)
+        if rlen > 16640 {
+            h.st = 3
+            return HsOut { send: sent, done: false, failed: true, alert: 0, io: true }
         }
-        if need2 {
-            let rt2 = rec_take(fd, mut wire)
-            if rt2.1 == 1 {
-                return refused
+        if h.wire.len < 5 + rlen {
+            return hs_more(sent)
+        }
+        let rtype = h.wire[0] as int
+        let raw = bsub(h.wire, 0, 5 + rlen)
+        let body = bsub(h.wire, 5, 5 + rlen)
+        h.wire = bsub(h.wire, 5 + rlen, h.wire.len)
+        var hs_bytes = List[byte]()
+        if h.st == 0 {
+            if rtype == 21 {
+                if body.len >= 2 {
+                    log_hs_fail(body[1] as int, "client alert before ClientHello")
+                }
+                return hs_fail(mut h, sent, List[byte](), 0, "")
             }
-            if rt2.1 == 2 {
-                return timeout
+            if rtype != 22 {
+                return hs_fail(mut h, sent, plain_alert(10), 10, "expected a handshake record")
             }
-            if rt2.1 == 3 {
-                return io
-            }
-            let r2 = rt2.0
-            if r2.rtype == 20 {
+            hs_bytes = body
+        } else {
+            if rtype == 20 {
                 continue
             }
-            if r2.rtype == 21 {
-                if r2.body.len >= 2 {
-                    log_hs_fail(r2.body[1] as int, "client alert during the handshake")
+            if rtype == 21 {
+                if body.len >= 2 {
+                    log_hs_fail(body[1] as int, "client alert during the handshake")
                 }
-                return refused
+                return hs_fail(mut h, sent, List[byte](), 0, "")
             }
-            if r2.rtype != 23 {
-                send_alert_sealed(fd, shs_key, shs_iv, 4, 10)
-                log_hs_fail(10, "unexpected record type awaiting Finished")
-                return refused
+            if rtype != 23 {
+                return hs_fail(
+                    mut h,
+                    sent,
+                    sealed_alert(h, 10),
+                    10,
+                    "unexpected record type awaiting Finished",
+                )
             }
-            let inner = record.open(chs_key, chs_iv, cseq, r2.raw) else |_| {
-                send_alert_sealed(fd, shs_key, shs_iv, 4, 20)
-                log_hs_fail(20, "record failed to deprotect awaiting Finished")
-                return refused
+            var opened = true
+            let inner = record.open(h.chs_key, h.chs_iv, h.cseq, raw) else |_| {
+                opened = false
+                List[byte]()
             }
-            cseq = cseq + 1
+            if !opened {
+                return hs_fail(
+                    mut h,
+                    sent,
+                    sealed_alert(h, 20),
+                    20,
+                    "record failed to deprotect awaiting Finished",
+                )
+            }
+            h.cseq = h.cseq + 1
             let ct = record.content_type_of(inner)
             let content = record.content_of(inner)
             if ct == 21 {
                 if content.len >= 2 {
                     log_hs_fail(content[1] as int, "client alert during the handshake")
                 }
-                return refused
+                return hs_fail(mut h, sent, List[byte](), 0, "")
             }
             if ct != 22 {
-                send_alert_sealed(fd, shs_key, shs_iv, 4, 10)
-                log_hs_fail(10, "non-handshake content awaiting Finished")
-                return refused
+                return hs_fail(
+                    mut h,
+                    sent,
+                    sealed_alert(h, 10),
+                    10,
+                    "non-handshake content awaiting Finished",
+                )
             }
-            push_all(mut hs2, content)
+            hs_bytes = content
+        }
+        var msgs = h.msgs
+        push_all(mut msgs, hs_bytes)
+        h.msgs = msgs
+        if h.msgs.len >= 4 && h.msgs.len >= 4 + be24(h.msgs, 1) {
+            let msg = bsub(h.msgs, 0, 4 + be24(h.msgs, 1))
+            h.msgs = List[byte]()
+            if h.st == 0 {
+                let o = hs_hello(mut h, msg)
+                push_all(mut sent, o.send)
+                if o.failed {
+                    return HsOut {
+                        send: sent,
+                        done: false,
+                        failed: true,
+                        alert: o.alert,
+                        io: false,
+                    }
+                }
+            } else {
+                return hs_finished(mut h, sent, msg)
+            }
         }
     }
-    if fin_msg[0] as int != 20 {
-        send_alert_sealed(fd, shs_key, shs_iv, 4, 10)
-        log_hs_fail(10, "expected the client Finished")
-        return refused
-    }
-    let verify_data = bsub(fin_msg, 4, fin_msg.len)
-    let fin_ok = handshake.accept_finished(chts, th_sfin, verify_data) else |_| {
-        send_alert_sealed(fd, shs_key, shs_iv, 4, 51)
-        log_hs_fail(51, "client Finished did not verify")
-        return refused
-    }
-    if fin_ok != 1 {
-        return refused
-    }
+    hs_more(sent)
+}
 
+/// The session a handshake opened, on `fd` (-1 for none): the client's
+/// application traffic keys to read, the server's to write, the bytes
+/// fed past the client Finished already in its buffer, and the
+/// negotiation (SNI, ALPN, the certificate entry). A handshake that is
+/// not open answers a dead session (`up` false). Total.
+pub fn hs_session(h: Hs, fd: int) -> Sess {
+    if h.st != 2 {
+        var dead = sess_dead()
+        dead.fd = fd
+        return dead
+    }
     Sess {
         fd: fd,
         up: true,
-        rkey: record.traffic_key(cats, 32),
-        riv: record.traffic_iv(cats),
+        rkey: record.traffic_key(h.cats, 32),
+        riv: record.traffic_iv(h.cats),
         rseq: 0,
-        wkey: record.traffic_key(sats, 32),
-        wiv: record.traffic_iv(sats),
+        wkey: record.traffic_key(h.sats, 32),
+        wiv: record.traffic_iv(h.sats),
         wseq: 0,
-        buf: wire,
+        buf: copy h.wire,
         plain: List[byte](),
         got_close: false,
         sent_close: false,
         trunc: false,
-        sni: hello.sni,
-        alpn: alpn,
-        entry: entry,
+        sni: copy h.sni,
+        alpn: copy h.alpn,
+        entry: h.entry,
+    }
+}
+
+/// Accept one TLS 1.3 session on `fd`, blocking: the state machine
+/// above (`hs_begin`, `hs_feed`, `hs_session`) fed from the socket,
+/// for the callers that serve a connection to completion. The caller
+/// arms nothing: the read deadline is armed here and spans the
+/// handshake (a stalled peer is the `timeout` row, never a hang).
+/// Rows: `refused` (a named negotiation or protocol failure, its alert
+/// already sent and logged, or the peer's close or alert), `timeout`,
+/// `io`.
+#[allow(w0602)]
+pub fn accept(fd: int, sc: config.SslConf, deadline_ms: int) -> Sess ! {refused, timeout, io} {
+    net_deadline(fd, deadline_ms) else |_| {}
+    var h = hs_begin(sc)
+    loop {
+        // the sentinel shape (fill_to): route the read's rows through
+        // an int and raise once below
+        var errc = 0
+        let piece = net_read_bytes(fd, 4096) else |e| match e {
+            closed => {
+                errc = 1
+                List[byte]()
+            },
+            timeout => {
+                errc = 2
+                List[byte]()
+            },
+            io => {
+                errc = 3
+                List[byte]()
+            },
+        }
+        if errc == 1 {
+            return refused
+        }
+        if errc == 2 {
+            return timeout
+        }
+        if errc == 3 {
+            return io
+        }
+        if piece.is_empty() {
+            return refused
+        }
+        let o = hs_feed(mut h, piece)
+        if o.failed {
+            // best-effort: the connection is being torn down regardless
+            net_write_bytes(fd, o.send) else |_| {}
+            if o.io {
+                return io
+            }
+            return refused
+        }
+        if !o.send.is_empty() {
+            net_write_bytes(fd, o.send) else |_| {
+                return io
+            }
+        }
+        if o.done {
+            return hs_session(h, fd)
+        }
     }
 }
 
