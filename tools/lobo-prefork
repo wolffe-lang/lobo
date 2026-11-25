@@ -408,6 +408,10 @@ python3 -I tests/rig/admission/drive.py admission "$LOBO" "$scratch/admission"
 check "[shared-listener-first28] the first 28 connections match the same-host oracle" $?
 python3 -I tests/rig/admission/drive.py review "$LOBO" "$scratch/admission-review"
 check "[admission-review] full queues, later listeners, backoff CPU and one-hand scope" $?
+# lobo#158: a stopped hand is left alone and every dial to a hand is
+# bounded: the stopped-hand rows, their unix twins and the guards
+python3 -I tests/rig/admission/drive.py stopped "$LOBO" "$scratch/admission-stopped"
+check "[admission-stopped] stopped hands left alone, bounded dials, and the verbs a stopped hand misses" $?
 
 if [ "$red" = 0 ]; then
     say "GREEN — $total/$total"
