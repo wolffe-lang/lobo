@@ -2107,8 +2107,11 @@ pub fn stanza_field_sum(body: str, field: str) -> int {
 /// process's endpoint refuses immediately, a live-but-busy one still
 /// completes the handshake from its backlog, so the probe never
 /// parks on a hand that is serving a long connection (which `ping`,
-/// a round trip under a deadline, would). Total: any failure reads
-/// as "not reachable".
+/// a round trip under a deadline, would). Any socket listening on the
+/// port answers it, a dead hand's sibling included, so the master
+/// learns of a hand's end from the hand first (lobo#155) and uses this
+/// only for a hand that is alive. Total: any failure reads as "not
+/// reachable".
 pub fn control_reachable(addr: str) -> bool {
     if addr.is_empty() {
         return false
