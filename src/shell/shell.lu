@@ -2120,6 +2120,25 @@ pub fn control_reachable(addr: str) -> bool {
     true
 }
 
+/// lobo#155: whether a control port the master just probed is free of
+/// its table — false when `port` is one of `taken`'s ports (a living
+/// hand's, one just given, a slot's dead predecessor's) or is no port
+/// at all; the table's marks for no endpoint (-1) and for a `unix:`
+/// sibling (0, which has no port) take none. Two probes made back to
+/// back can answer the same port, and a hand given a sibling's port is
+/// one the probe above cannot tell from that sibling. Pure and total.
+pub fn endpoint_free_of(port: int, taken: List[int]) -> bool {
+    if port <= 0 {
+        return false
+    }
+    for t in taken {
+        if t == port {
+            return false
+        }
+    }
+    true
+}
+
 // ------------------------------------------------------------------
 // ws64 (lobo#84): the connection limit and the descriptor limit.
 // `worker_connections` is applied per process, and what a process does
