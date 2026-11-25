@@ -51,8 +51,8 @@ client closes mid-body 400, as nginx logs them. Both still close the
 connection with nothing sent; they were logged with no status.
 
 When the host refuses the exchange its sockets (out of descriptors), the
-exchange still runs on the serving loop, and so does this body read
-(#148).
+exchange is now refused instead (see the next entry), and this body is
+never read.
 
 `tools/lobo-membudget` has two rows for it. `cost, proxied uploads`
 reads what one proxied upload of 64 KiB holds at its peak, 64 arriving
@@ -66,6 +66,27 @@ holds the 4 KiB read itself, through the new `proxy.owed_pieces`. The
 rig's backend (`tests/rig/rigback`) frees each exchange's work at the
 exchange's end; it kept every request it read until it exited. Its
 `--starts` tally now names the cpus the run may use, not the host's.
+
+### A proxied exchange the host refuses its sockets is refused, not run on the serving loop (lobo#148)
+
+A proxied request goes to an exchange proc of the serving loop's pool:
+an idle one, or a new one on a new pair of job sockets. When the host
+refused that pair (out of descriptors), the loop ran the exchange
+itself. While the upstream answered, and while an owed body arrived, it
+served no other connection and read no control command. It now refuses
+the exchange: the client gets `500 Internal Server Error` and the
+connection is closed, as the pinned nginx answers and closes when it
+cannot make the upstream socket. An owed body is never read. lobo logs `[alert] the exchange's job socket pair failed (24: Too
+many open files) while connecting to upstream`, and the access log
+records the 500 with no upstream.
+
+When the host refuses the loopback job listener at start, lobo still
+starts, but no exchange proc can be made. Every proxied request is then
+refused the same way until lobo is restarted, and the start's `[warn]`
+line says so: `no loopback job listener: proxied requests will be
+refused (500) when no exchange worker is idle, and none can be started,
+until lobo is restarted (lobo#148)`. Before, those requests ran on the
+serving loop.
 
 ### The memory gate names a master that does not start (lobo#126)
 
