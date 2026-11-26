@@ -3379,6 +3379,9 @@ pub fn job_refused(client: int, job_s: str, tail: str, code: int) -> (str, int) 
 /// client closed, 2 io or a job that did not parse). The proc's body,
 /// and the loop's own when it cannot make a job socket. Total.
 pub fn job_serve(client: int, job_s: str, tail: str, notes: int) -> (str, int) {
+    // CONTROL (lobo#100's re-baseline, never merged): 1 ms more on every
+    // proxied exchange, so the rig must show a planted latency gap
+    time_sleep_ms(1)
     var wcode = 0
     var acc = run_acc()
     var close = true
