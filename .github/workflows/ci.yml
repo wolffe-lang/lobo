@@ -218,10 +218,17 @@ jobs:
         if: ${{ !(github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) }}
         run: echo 'Local gauntlet evidence is the gate; request ci or full-matrix for CI.'
   gauntlet:
+    # The limit is the longest healthy run plus a third, rounded up to the
+    # next 5 minutes. Every Linux gauntlet job from 2026-11-20 to 2026-11-26
+    # was counted, all events and attempts, as minutes on the runner: 41
+    # healthy full runs took 30.2 to 44.5 (median 37.1). The longest, 44.5,
+    # is lobo#142's second attempt; plus a third it is 59.4, so 60. Its
+    # first attempt was cut at the old 45, at 45.2 minutes, 3 minutes into
+    # its last tool step.
     needs: plan
     if: ${{ (github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix')) && (contains(fromJSON(needs.plan.outputs.jobs || '[]'), 'gauntlet')) }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
         with:
