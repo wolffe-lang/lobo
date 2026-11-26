@@ -14,7 +14,9 @@
 //! close): TLS reads return DECRYPTED lengths unrelated to socket
 //! reads and record boundaries split anywhere, but the lifecycle
 //! above never sees that — conn_read hands back exactly what
-//! net_read would have, and the drip-feed suite runs over both.
+//! net_read would have. On TLS, `tests/tls/session_pieces.lu` feeds a
+//! session its records in pieces of 1, 7 and 64 bytes, and
+//! `tests/serve/tls_step.lu` steps a TLS row over a loopback pair.
 //! close_notify: conn_close on a TLS conn sends close_notify (every
 //! server-initiated close does — the truncation defence); on the
 //! plaintext side it is the bare socket close, unchanged.

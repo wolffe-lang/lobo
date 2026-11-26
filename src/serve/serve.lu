@@ -1884,9 +1884,10 @@ fn keep_token(keep: bool) -> str {
 // compares.
 //
 // V0 POSTURE, stated here and in docs/directives.md: the endpoint
-// answers on the PLAINTEXT step path only. `serve_conn_cn` (the TLS
-// and blocking path) has its own flow and no second phase, so over TLS
-// these two paths route to the filesystem like any other URI — the
+// answers on the PLAINTEXT step path only. `serve_conn_cn` (the
+// blocking path) and a TLS row's requests (`serve_request_cn`, since
+// lobo#142) have no second phase, so over TLS these two paths route
+// to the filesystem like any other URI — the
 // same D24/D27 rider ws10's counters carry. Access control is the bind
 // address and nothing else (ws14 revisits); LOBO-L011 says so at load.
 // ------------------------------------------------------------------
@@ -3389,8 +3390,11 @@ fn conn_mod_plain(fd: int) -> conn.Conn {
 
 /// The keepalive lifecycle over a Conn (ws05 — the seam): plaintext
 /// and TLS drive the SAME body, so ws02's behavior is byte-identical
-/// on both (the nginx differential guards the plaintext side; the
-/// openssl interop and the TLS drip-feed guard the TLS side). A TLS
+/// on both (the nginx differential guards the plaintext side; on the
+/// TLS side, `tools/lobo-tls-interop` is the OpenSSL differential, its
+/// ninth case the hold rows, and `tests/tls/handshake_pieces.lu` and
+/// `tests/tls/session_pieces.lu` feed a handshake and a session in
+/// pieces of 1, 7 and 64 bytes). A TLS
 /// conn whose route resolves to a proxy_pass is a NAMED refusal
 /// (502) — proxy-over-TLS-downstream needs proxy/ threaded through
 /// this seam, ws05 residue (see the status file). SPAWN-FREE.
