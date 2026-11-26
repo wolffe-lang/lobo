@@ -7384,7 +7384,9 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                 }
                 alldone = false
                 if wslot[j] < 0 {
-                    if !quitting {
+                    // lobo#165: a vacant slot is filled only while running
+                    let phase = shell.master_phase(running, quitting)
+                    if shell.slot_action(phase, true, 0, 0) == "spawn" {
                         let s = spawn_worker(
                             exe,
                             identity,
@@ -7537,7 +7539,16 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     code = reap_worker(wslot[j], j + 1, reason, mut elog)
                 }
                 forget_endpoint(ep)
-                if code == 2 && !quitting {
+                // lobo#165 (`shell.slot_action`): once the master is
+                // stopping (a `stop` handled in this pass) or quitting,
+                // a hand that ended is retired, never replaced
+                let act = shell.slot_action(
+                    shell.master_phase(running, quitting),
+                    false,
+                    code,
+                    now - wup[j],
+                )
+                if act == "retire-fatal" {
                     // ws67 (lobo#96): a hand that could not become its
                     // user ended itself with exit 2; another would too
                     ev_log(
@@ -7550,13 +7561,13 @@ fn master_main(prefix: str, conf: str, n: int) -> int {
                     j = j + 1
                     continue
                 }
-                if quitting {
+                if act == "retire" {
                     wgone[j] = true
                     wslot[j] = -1
                     j = j + 1
                     continue
                 }
-                if now - wup[j] < 1000 {
+                if act == "replace-paused" {
                     time_sleep_ms(250)
                 }
                 // ws62 (px25 (b)): the replacement starts at THIS
