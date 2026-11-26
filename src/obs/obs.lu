@@ -371,7 +371,7 @@ pub fn var_table() -> List[VarSpec] {
     (mut t).push(VarSpec {
         name: "scheme",
         status: "planned(ws12)",
-        note: "http/https; joins when the TLS path joins the step loop (D24 rider)",
+        note: "http/https; TLS requests are logged since lobo#142, and this is the variable that would tell them apart",
     })
     (mut t).push(VarSpec {
         name: "remote_port",
