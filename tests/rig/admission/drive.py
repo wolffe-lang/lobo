@@ -975,9 +975,10 @@ def one_hand_scope(binary, directory):
 # ends at HOLD_WAIT_MS, so a server that serves the held connection to
 # completion costs a red row seconds, not its read timeout. The client is
 # this python's ssl (TLS 1.3); the test CA is trusted only in the rows' own
-# context. `tls-download-holds-none` is named residue (lobo#142's
-# decision 2(b): a slow TLS download is still written on the loop until
-# its follow-on): it runs and is reported, red as named, and not counted.
+# context. `tls-download-holds-none` is named residue: a slow TLS
+# download is still written on the loop until a follow-on hands the
+# session to the stream proc. It runs and is reported, red as named, and
+# not counted.
 HOLD_MS = 1000
 HOLD_WAIT_MS = 3000
 TLS_FIXTURES = Path(__file__).resolve().parents[3] / "tests/tls/fixtures"
