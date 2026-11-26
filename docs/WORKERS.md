@@ -410,8 +410,17 @@ decision is one function, `shell.hand_verdict`. The rule for the rest:
   upgrade` remains unimplemented. Witnesses:
   `tests/shell/binary_identity_e2e.lu` and
   `tests/differential/binary_identity.py` (linux, inside a container);
-- under `quit`, a gone hand is reaped and NOT replaced; the master
-  exits once every hand is gone;
+- under `quit` or `stop` (and SIGTERM, which is `stop`), a gone hand
+  is reaped and NOT replaced, nor is a vacant slot filled: no worker
+  is started once the master has begun to stop, as nginx's master
+  starts none once it is terminating or quitting. Under `quit` the
+  master exits once every hand is gone; under `stop` it ends the rest
+  at the shutdown. Before lobo#165, a hand whose end the master's wait
+  reported in the same pass that handled `stop` was replaced, and the
+  shutdown killed the replacement. The decision is
+  `shell.slot_action`; witnesses: `tests/shell/slot_action.lu` (every
+  case) and the admission drive's `shutdown` mode, which forces a
+  hand's end and the stop into one pass from outside;
 - a hand left alone as stopped misses `reload`, `reopen` and `quit`,
   and is sent each it missed, once, when it continues. `stop` kills it
   with the rest at the shutdown (SIGKILL ends a stopped process), and a
