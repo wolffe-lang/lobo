@@ -2,6 +2,15 @@
 
 ## Unreleased — 0.1.6
 
+### No worker is started once the master is stopping (lobo#165)
+
+A worker whose end the master noticed in the same moment it handled
+`stop` (or SIGTERM) was replaced by a fresh worker, which the shutdown
+then killed: a needless start and a `worker-started` line in the log
+after the stop. The master now starts no worker once it is stopping,
+as under `quit` and as nginx's master behaves; a slot whose worker
+ended is left empty for the shutdown.
+
 ### A stopped worker is left alone, and the master's dials to its workers are bounded (lobo#158)
 
 A worker that is stopped, by a signal or under a debugger, is now left
