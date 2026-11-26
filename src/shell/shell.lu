@@ -2303,6 +2303,50 @@ pub fn hand_verdict(
     "failed"
 }
 
+/// lobo#165: the master's phase within a pass. `running` is false once
+/// a `stop` (or SIGTERM, which is `stop`) was handled, and `quitting`
+/// is true while a `quit` drains; a stop during a quit is a stop.
+/// "running", "quitting" or "stopping". Pure and total.
+pub fn master_phase(running: bool, quitting: bool) -> str {
+    if !running {
+        return "stopping"
+    }
+    if quitting {
+        return "quitting"
+    }
+    "running"
+}
+
+/// lobo#165: what the supervision pass does with a slot, as nginx's
+/// master does: once it is stopping or quitting, no worker is started.
+/// `phase`: `master_phase`'s word. `vacant`: the slot holds no hand
+/// (its first start failed, or it was cleared), when `code` and `age_ms`
+/// are not read. Otherwise a hand in it ended with `code` (-1 for a
+/// signal) `age_ms` after its start.
+///
+/// The answers: `spawn` (a vacant slot, running), `leave` (a vacant
+/// slot, stopping or quitting), `replace`, `replace-paused` (it ended
+/// inside a second of starting: replaced after the 250 ms pause, so a
+/// broken configuration cannot spin the master), `retire` (not
+/// replaced: the master is stopping or quitting), `retire-fatal` (code
+/// 2: it could not become its user, and another would not either).
+/// Pure and total.
+pub fn slot_action(phase: str, vacant: bool, code: int, age_ms: int) -> str {
+    if phase != "running" {
+        return if vacant { "leave" } else { "retire" }
+    }
+    if vacant {
+        return "spawn"
+    }
+    if code == 2 {
+        return "retire-fatal"
+    }
+    if age_ms < 1000 {
+        return "replace-paused"
+    }
+    "replace"
+}
+
 /// A process's scheduling state as `/proc/<pid>/stat` gives it
 /// (lobo#158): its state letter (`T` stopped by a signal, `t` in a
 /// tracing stop, `Z` a zombie, another letter running); `-` when the
