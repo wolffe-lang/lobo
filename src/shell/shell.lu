@@ -2332,7 +2332,9 @@ pub fn master_phase(running: bool, quitting: bool) -> str {
 /// 2: it could not become its user, and another would not either).
 /// Pure and total.
 pub fn slot_action(phase: str, vacant: bool, code: int, age_ms: int) -> str {
-    if phase != "running" {
+    // PLANT (lobo#165): "stopping" answers as "running", so a stop
+    // replaces a hand that ends in its pass, as before the fix
+    if phase != "running" && phase != "stopping" {
         return if vacant { "leave" } else { "retire" }
     }
     if vacant {
