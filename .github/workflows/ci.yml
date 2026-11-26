@@ -134,8 +134,10 @@ on:
         type: string
         default: ""
 
+# The plan job reads this workflow's runs at a trunk push's commit (ci/tiers.py); no job writes.
 permissions:
   contents: read
+  actions: read
 
 # A pull request's runs: one group per branch and tier, cancel-in-progress,
 # so a new push frees the slots of the run it supersedes. The full run and
@@ -145,7 +147,9 @@ permissions:
 # nothing. Every other run (a trunk push, the nightly, a dispatch) gets a
 # group of its OWN run id: never cancelled, and never replaced while it
 # waits (in a shared group GitHub keeps a single pending run, and each
-# trunk push's full run is the coverage that merge is owed).
+# trunk push's full run is the coverage that merge is owed, less the macOS
+# legs a run at the same commit already ran green over the same tree:
+# ci/tiers.py names that run).
 concurrency:
   group: ${{ github.event_name == 'pull_request' && format('ci-pr-{0}-{1}', github.head_ref, (github.event.action == 'labeled' && github.event.label.name != 'full-matrix') && format('noop-{0}', github.run_id) || (contains(github.event.pull_request.labels.*.name, 'full-matrix') && 'full' || 'pr')) || format('ci-{0}-{1}', github.event_name, github.run_id) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -166,6 +170,7 @@ jobs:
     outputs:
       tier: ${{ steps.plan.outputs.tier }}
       jobs: ${{ steps.plan.outputs.jobs }}
+      macos_covered: ${{ steps.plan.outputs.macos_covered }}
     steps:
       # Depth 2: a pull request's run checks out its merge commit, and the
       # plan reads that commit against its first parent. A dispatch reads
@@ -174,6 +179,19 @@ jobs:
         if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
         with:
           fetch-depth: ${{ github.event_name == 'workflow_dispatch' && '0' || '2' }}
+      # The tree this run tests, in a step's name, where the jobs listing
+      # shows it: a trunk push leaves the macOS legs a run at its commit
+      # already ran green over the same tree (a pull request's run tests
+      # its merge with the base).
+      - name: the tree under test
+        if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
+        id: tree
+        run: |
+          tree=$(git rev-parse 'HEAD^{tree}')
+          echo "tree=$tree" >> "$GITHUB_OUTPUT"
+      - name: the tree under test is ${{ steps.tree.outputs.tree }}
+        if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
+        run: test "$(git rev-parse 'HEAD^{tree}')" = "${{ steps.tree.outputs.tree }}"
       - name: the planner can say no (ci/tiers-test.py)
         if: ${{ github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'full-matrix') || contains(github.event.pull_request.labels.*.name, 'ci') || contains(github.event.pull_request.labels.*.name, 'release-matrix') }}
         run: python3 ci/tiers-test.py
@@ -189,6 +207,8 @@ jobs:
           IN_TIER: ${{ inputs.tier }}
           # parity, profile or syscalls: a measurement dispatch (tier measure)
           IN_MEASURE: ${{ inputs.parity || inputs.profile || inputs.syscalls }}
+          # the workflow's own token, read-only: a trunk push reads its commit's runs
+          PLAN_TOKEN: ${{ github.token }}
         run: python3 ci/tiers.py plan --merge --github-output "$GITHUB_OUTPUT"
 
       - name: local gate wiring proof
