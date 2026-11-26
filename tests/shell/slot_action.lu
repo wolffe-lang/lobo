@@ -1,0 +1,87 @@
+//! check: run(exit=0, stdout="slot action ok\n")
+//! phase: run
+//! lanes: native checked lupin
+//! stage-src: shell config
+//!
+//! lobo#165, what the master's supervision pass does with a slot. A hand
+//! that ended, or a slot left vacant, is filled again only while the
+//! master is running: once it is stopping (`stop`, or SIGTERM, has been
+//! handled in this pass) or quitting, nothing is started, as nginx's
+//! master starts no worker once it is terminating or quitting.
+//! `shell.master_phase(running, quitting)` names the phase and
+//! `shell.slot_action(phase, vacant, code, age_ms)` is the decision as
+//! one total function, a word for each answer; this row holds every
+//! case:
+//!   * the four phases of (running, quitting): a stop during a quit is
+//!     stopping;
+//!   * for each phase, a vacant slot (its code and age are not read) and
+//!     a hand that ended with code 0, 1, 2 or -1 (a signal), half a
+//!     second or five seconds after its start.
+//! A case that fails prints `slot_action: FAILED — [case] …`.
+//! Lanes: pure, all three.
+
+use shell
+
+fn check(name: str, got: str, want: str) -> int {
+    if got == want {
+        return 0
+    }
+    print("slot_action: FAILED — [{name}] answered {got}, want {want}")
+    1
+}
+
+fn case(phase: str, vacant: bool, code: int, age: int, want: str) -> int {
+    let kind = if vacant { "vacant" } else { "ended" }
+    check("{phase}-{kind}-{code}-{age}", shell.slot_action(phase, vacant, code, age), want)
+}
+
+fn main() -> int {
+    var bad: int = 0
+    // the phase: stopping once `running` is false, whatever `quitting` says
+    bad = bad + check("phase-running", shell.master_phase(true, false), "running")
+    bad = bad + check("phase-quitting", shell.master_phase(true, true), "quitting")
+    bad = bad + check("phase-stopping", shell.master_phase(false, false), "stopping")
+    bad = bad + check("phase-stop-during-quit", shell.master_phase(false, true), "stopping")
+
+    // running: a vacant slot is filled; an ended hand is replaced, after
+    // the 250 ms pause when it died inside a second of starting, and a
+    // hand that ended with code 2 is retired (another would end the same)
+    bad = bad + case("running", true, 0, 5000, "spawn")
+    bad = bad + case("running", true, 2, 500, "spawn")
+    bad = bad + case("running", false, 0, 500, "replace-paused")
+    bad = bad + case("running", false, 0, 5000, "replace")
+    bad = bad + case("running", false, 1, 500, "replace-paused")
+    bad = bad + case("running", false, 1, 5000, "replace")
+    bad = bad + case("running", false, 2, 500, "retire-fatal")
+    bad = bad + case("running", false, 2, 5000, "retire-fatal")
+    bad = bad + case("running", false, -1, 500, "replace-paused")
+    bad = bad + case("running", false, -1, 5000, "replace")
+
+    // stopping: nothing is started, whatever the hand ended with
+    bad = bad + case("stopping", true, 0, 5000, "leave")
+    bad = bad + case("stopping", true, 2, 500, "leave")
+    bad = bad + case("stopping", false, 0, 500, "retire")
+    bad = bad + case("stopping", false, 0, 5000, "retire")
+    bad = bad + case("stopping", false, 1, 500, "retire")
+    bad = bad + case("stopping", false, 1, 5000, "retire")
+    bad = bad + case("stopping", false, 2, 500, "retire")
+    bad = bad + case("stopping", false, 2, 5000, "retire")
+    bad = bad + case("stopping", false, -1, 500, "retire")
+    bad = bad + case("stopping", false, -1, 5000, "retire")
+
+    // quitting: the same, as today
+    bad = bad + case("quitting", true, 0, 5000, "leave")
+    bad = bad + case("quitting", true, 2, 500, "leave")
+    bad = bad + case("quitting", false, 0, 500, "retire")
+    bad = bad + case("quitting", false, 0, 5000, "retire")
+    bad = bad + case("quitting", false, 1, 500, "retire")
+    bad = bad + case("quitting", false, 1, 5000, "retire")
+    bad = bad + case("quitting", false, 2, 500, "retire")
+    bad = bad + case("quitting", false, 2, 5000, "retire")
+    bad = bad + case("quitting", false, -1, 500, "retire")
+    bad = bad + case("quitting", false, -1, 5000, "retire")
+
+    assert(bad == 0, "slot_action: {bad} cases wrong")
+    print("slot action ok")
+    0
+}
