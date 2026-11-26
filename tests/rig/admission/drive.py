@@ -1136,6 +1136,137 @@ def tls_hold(binary, directory, hold):
         server.close()
 
 
+# lobo#165: no worker is started once the master has begun to stop. The
+# master handles one trigger a pass (a control line or a signal) and then
+# runs its supervision pass in the same pass, so a hand whose end the
+# wait reports in the pass that handled `stop` was replaced, and the
+# shutdown killed the replacement. Each row forces that ordering from
+# outside, with no sleep: the master (this drive's child) is stopped
+# with SIGSTOP, hand 1 is killed and left a zombie for the master's wait,
+# the stop is queued, and the master is continued: its next pass handles
+# the stop, then its wait reports hand 1. A pending SIGTERM is read in
+# that first pass. A control line is read one pass after its connection
+# is accepted, so the drive connects first, waits until the master has
+# accepted the connection (its descriptor table holds it: on Linux the
+# connection's /proc/net/tcp entry has an inode, on macOS lsof lists it
+# for the master), and only then stops the master and writes the line
+# into the accepted connection. The one way to miss is a
+# SIGSTOP that lands inside a pass, after its trigger and before its
+# wait, so the master reaps hand 1 before the stop; the master's own
+# event sequence numbers show it (hand 1's end logged before the stop),
+# and that attempt is discarded, at most SETUP_ATTEMPTS times. A row
+# whose setup is never proven fails, saying so, and is not a verdict on
+# the master.
+SETUP_ATTEMPTS = 5
+MASTER_EXIT_S = 30
+MASTER_SIGNAL = re.compile(r"signal-received sig=\S+ verb=(stop|quit) source=(control|signal) seq=([0-9]+)$")
+MASTER_EXITED_1 = re.compile(r"worker-exited worker=1 reason=(\S+) code=(-?[0-9]+) seq=([0-9]+)$")
+MASTER_STARTED = re.compile(r"worker-started worker=([0-9]+) restarts=([0-9]+) seq=([0-9]+)$")
+
+
+def accepted_by(pid, server_port, client_port):
+    """Whether process `pid` has accepted the TCP connection from
+    `client_port` to its `server_port`: a connection still in the listen
+    queue has no descriptor (inode 0 in /proc/net/tcp; not listed by
+    lsof for the process)."""
+    tables = [Path("/proc/net/tcp"), Path("/proc/net/tcp6")]
+    if tables[0].exists():
+        for table in tables:
+            if not table.exists():
+                continue
+            for line in table.read_text().splitlines()[1:]:
+                parts = line.split()
+                if len(parts) < 10:
+                    continue
+                local, remote, inode = parts[1], parts[2], parts[9]
+                if int(local.rsplit(":", 1)[1], 16) == server_port and int(remote.rsplit(":", 1)[1], 16) == client_port:
+                    return inode != "0"
+        return False
+    out = subprocess.run(["lsof", "-nP", "-a", "-p", str(pid), f"-iTCP:{client_port}"],
+                         capture_output=True, text=True, timeout=10).stdout
+    return f":{client_port}" in out
+
+
+def shutdown_attempt(binary, directory, how):
+    """One try at placing hand 1's end and the master's `stop` (or
+    `quit`) in one pass. Answers None when the master's log shows the
+    setup missed (hand 1 reaped before the verb), else the attempt's
+    lines from the verb on, after asserting the verdict."""
+    verb = "quit" if how == "quit" else "stop"
+    server = Server(binary, directory, workers=2)
+    master = server.process.pid
+    sock = None
+    held = False
+    try:
+        own_hand(server, 2)
+        _, pid1 = own_hand(server, 1)
+        endpoint = master_endpoint(server)
+        if how != "term":
+            # the line's connection, accepted by the master before it stops
+            sock = endpoint_connect(endpoint, 5)
+            port = int(endpoint.rsplit(":", 1)[1])
+            mine = sock.getsockname()[1]
+            until(lambda: accepted_by(master, port, mine), "the master accepted the control connection")
+        os.kill(master, signal.SIGSTOP)
+        held = True
+        until(lambda: proc_state(master) == "T", f"the master (pid {master}) stopped")
+        os.kill(pid1, signal.SIGKILL)
+        until(lambda: proc_state(pid1) in ("Z", "-"), f"hand 1 (pid {pid1}) ended, unreaped")
+        if how == "term":
+            os.kill(master, signal.SIGTERM)
+        else:
+            sock.sendall(f"{verb}\n".encode())
+        os.kill(master, signal.SIGCONT)
+        held = False
+        if sock is not None:
+            sock.settimeout(STATUS_MS / 1000)
+            try:
+                sock.recv(512)
+            except OSError:
+                pass
+        hung = False
+        try:
+            server.process.wait(timeout=MASTER_EXIT_S)
+        except subprocess.TimeoutExpired:
+            hung = True
+        code = server.process.returncode
+    finally:
+        if held:
+            os.kill(master, signal.SIGCONT)
+        if sock is not None:
+            sock.close()
+        server.close()
+    lines = [l.strip() for l in server.log.read_text(errors="replace").splitlines()]
+    verbs = [int(m[3]) for m in (MASTER_SIGNAL.search(l) for l in lines) if m and m[1] == verb]
+    ends = [(int(m[3]), m[1], int(m[2])) for m in (MASTER_EXITED_1.search(l) for l in lines) if m]
+    assert verbs, f"the master logged no signal-received for its {verb}"
+    assert ends, "the master logged no end of hand 1"
+    s_seq = verbs[0]
+    e_seq, e_reason, e_code = min(ends)
+    if e_seq < s_seq:
+        return None
+    assert not hung, f"the master did not exit within {MASTER_EXIT_S} s of the {verb}"
+    later = [l for l in lines if (lambda m: m is not None and int(m[3]) > s_seq)(MASTER_STARTED.search(l))]
+    assert not later, (f"REPLACED: the master started a worker after it had begun to {verb}: "
+                       f"'{later[0]}' (the {verb} was seq={s_seq}, hand 1's end seq={e_seq})")
+    assert (e_reason, e_code) == ("signal", -1), f"hand 1's end was reason={e_reason} code={e_code}, not the SIGKILL's"
+    assert code == 0, f"the master exited {code} after the {verb}"
+    return [l for l in lines if any(p.search(l) for p in (MASTER_SIGNAL, MASTER_EXITED_1, MASTER_STARTED))
+            and int(l.rsplit("seq=", 1)[1].split()[0]) >= s_seq]
+
+
+def shutdown_row(binary, directory, how):
+    for attempt in range(1, SETUP_ATTEMPTS + 1):
+        shown = shutdown_attempt(binary, Path(directory) / f"attempt-{attempt}", how)
+        if shown is not None:
+            print(f"lobo-admission: measured — {how}: hand 1's end and the {how} in one pass at attempt "
+                  f"{attempt} of {SETUP_ATTEMPTS}; the master's lines from the {how}: " + " | ".join(shown), flush=True)
+            return None
+    raise AssertionError(f"SETUP NOT PROVEN, so this row says nothing about the master: in {SETUP_ATTEMPTS} attempts "
+                         f"the master reaped hand 1 before it handled the {how} every time, so hand 1's end and the "
+                         f"{how} never shared a pass")
+
+
 # the named residue rows of every mode: each runs and is reported, red as
 # named and not counted; one that turns green fails until it is retired
 RESIDUE = STOPPED_RESIDUE | TLS_RESIDUE
@@ -1143,7 +1274,7 @@ RESIDUE = STOPPED_RESIDUE | TLS_RESIDUE
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("mode", choices=("admission", "counters", "oracle", "review", "tls-hold", "stopped"))
+    parser.add_argument("mode", choices=("admission", "counters", "oracle", "review", "tls-hold", "stopped", "shutdown"))
     parser.add_argument("binary")
     parser.add_argument("directory", type=Path)
     parser.add_argument("--row", choices=("later-listener-progress", "all-full-burst-progress", "multi-listener-emfile-cpu", "one-hand-master-scope",
@@ -1154,7 +1285,8 @@ def main():
                                           "status-master-not-accepting", "status-master-not-accepting-unix",
                                           "hand-stopped-left-alone", "hand-stopped-left-alone-unix", "hand-traced-left-alone",
                                           "stopped-hand-gets-missed-reload", "stop-ends-stopped-hand",
-                                          "quit-waits-for-stopped-hand"))
+                                          "quit-waits-for-stopped-hand",
+                                          "stop-replaces-no-hand", "term-replaces-no-hand", "quit-replaces-no-hand"))
     args = parser.parse_args()
     if args.mode == "admission":
         rows = [("shared-listener-first28", lambda: admission(args.binary, args.directory))]
@@ -1178,6 +1310,11 @@ def main():
                 ("stopped-hand-gets-missed-reload", lambda: stopped_missed_reload(args.binary, d / "reload")),
                 ("stop-ends-stopped-hand", lambda: stop_ends_stopped(args.binary, d / "stop")),
                 ("quit-waits-for-stopped-hand", lambda: quit_waits_for_stopped(args.binary, d / "quit"))]
+    elif args.mode == "shutdown":
+        d = args.directory
+        rows = [("stop-replaces-no-hand", lambda: shutdown_row(args.binary, d / "stop", "stop")),
+                ("term-replaces-no-hand", lambda: shutdown_row(args.binary, d / "term", "term")),
+                ("quit-replaces-no-hand", lambda: shutdown_row(args.binary, d / "quit", "quit"))]
     elif args.mode == "review":
         rows = [("later-listener-progress", lambda: later_listener_progress(args.binary, args.directory / "later")),
                 ("all-full-burst-progress", lambda: full_burst_progress(args.binary, args.directory / "burst")),

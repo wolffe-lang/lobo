@@ -412,6 +412,11 @@ check "[admission-review] full queues, later listeners, backoff CPU and one-hand
 # bounded: the stopped-hand rows, their unix twins and the guards
 python3 -I tests/rig/admission/drive.py stopped "$LOBO" "$scratch/admission-stopped"
 check "[admission-stopped] stopped hands left alone, bounded dials, and the verbs a stopped hand misses" $?
+# lobo#165: no worker is started once the master has begun to stop: a
+# hand's end and the stop (a control line, or SIGTERM) forced into one of
+# the master's passes, and quit's guard beside them
+python3 -I tests/rig/admission/drive.py shutdown "$LOBO" "$scratch/admission-shutdown"
+check "[admission-shutdown] a hand that ends as the master stops or quits is not replaced" $?
 
 if [ "$red" = 0 ]; then
     say "GREEN — $total/$total"
