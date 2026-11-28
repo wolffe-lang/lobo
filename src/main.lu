@@ -3661,6 +3661,7 @@ fn serve_main(
                         var closed_abort = false
                         var step_row = false
                         var resuming = false
+                        var resume_at = tw
                         if fd < 0 {
                             // ws64: step 2 closed this row to make room, and
                             // told its generation; it leaves the table here
@@ -3929,6 +3930,9 @@ fn serve_main(
                                                 List[int]()
                                             }
                                             readable = ready_has(next_ready, fd)
+                                            if readable {
+                                                resume_at = time_unix_ms()
+                                            }
                                         }
                                         if serve.completion_ready(slot, n_head == 1, readable) {
                                             bonus_used = true
@@ -3942,6 +3946,11 @@ fn serve_main(
                             step_row = true
                         }
                         if step_row {
+                            // A socket probe is a new wait observation. Use
+                            // its post-wait clock for the new request only;
+                            // the completed exchange kept its own end_ms.
+                            let step_now = if resuming { resume_at } else { now }
+                            let step_tw = if resuming { resume_at } else { tw }
                             // ws17: a connection is STEPPED only when the wait named
                             // it. A socket the poll did not name has nothing to read,
                             // so ws16's 12 ms deadline-and-read on it was the loop
@@ -3979,7 +3988,7 @@ fn serve_main(
                             // a row with no carry read its first bytes in this
                             // pass's wait
                             let step_clen = if carry_set { carry_new.len } else { clen0 }
-                            let cs_eff = if step_clen == 0 { tw } else { n_start }
+                            let cs_eff = if step_clen == 0 { step_tw } else { n_start }
                             // A resumed handoff reuses the completed row's
                             // reservation. Other rows keep this pass's existing
                             // conservative admission count.
@@ -3989,7 +3998,7 @@ fn serve_main(
                             // as it was, and is counted as its timeout; the
                             // keep-alive idle rule is a session's
                             let hs_row = tsl >= 0 && tph0 < 2
-                            if hs_row && now - tsat[tsl] >= opts.read_timeout_ms {
+                            if hs_row && step_now - tsat[tsl] >= opts.read_timeout_ms {
                                 counters.tls_timeout = counters.tls_timeout + 1
                                 close_it = true
                             } else if !(must_step || ready_has(ready, fd)) {
@@ -3998,9 +4007,9 @@ fn serve_main(
                                 // look at it (ws57: no step value is built for it)
                                 n_wait = -1
                                 if clen0 == 0 {
-                                    n_start = now
+                                    n_start = step_now
                                 }
-                                if !hs_row && now - idle0 >= row_idle_ms(dst0, opts) {
+                                if !hs_row && step_now - idle0 >= row_idle_ms(dst0, opts) {
                                     close_it = true
                                 }
                             } else {
@@ -4040,7 +4049,7 @@ fn serve_main(
                                             12,
                                             rs,
                                             ft,
-                                            now,
+                                            step_now,
                                             dst0,
                                             dn0,
                                             dt0,
@@ -4060,7 +4069,7 @@ fn serve_main(
                                                 12,
                                                 rs,
                                                 ft,
-                                                now,
+                                                step_now,
                                                 dst0,
                                                 dn0,
                                                 dt0,
@@ -4078,7 +4087,7 @@ fn serve_main(
                                                 12,
                                                 rs,
                                                 ft,
-                                                now,
+                                                step_now,
                                                 dst0,
                                                 dn0,
                                                 dt0,
@@ -4093,7 +4102,7 @@ fn serve_main(
                                 }
                                 close_it = st.close
                                 if st.active {
-                                    n_idle = now
+                                    n_idle = step_now
                                 }
                                 // lobo#142: a TLS row's state, written back in
                                 // place; its phase for the idle rules; and how a
@@ -4261,7 +4270,7 @@ fn serve_main(
                                         ni = wnames.len - 1
                                     }
                                     n_wait = ni
-                                    n_idle = now
+                                    n_idle = step_now
                                     var rsq = copy rs
                                     resolver.start(
                                         mut rsq,
@@ -4269,7 +4278,7 @@ fn serve_main(
                                         st.rare[0].resolve_addr,
                                         st.resolve_timeout_ms,
                                         st.resolve_valid_ms,
-                                        now,
+                                        step_now,
                                     )
                                     if resolver.muts(rsq) != resolver.muts(rs) {
                                         in life {
@@ -4348,11 +4357,11 @@ fn serve_main(
                                 // clock, and the span since this request's first
                                 // byte)
                                 if st.logged {
-                                    var span = tw - cs_eff
+                                    var span = step_tw - cs_eff
                                     if span < 0 {
                                         span = 0
                                     }
-                                    n_start = tw
+                                    n_start = step_tw
                                     // ws10: the budget observability — a refusal is a
                                     // LOUD error event (the ws09 seam) and the
                                     // generation's counters move; every served
@@ -4433,17 +4442,17 @@ fn serve_main(
                                         var a2 = copy st.rare[0].acc
                                         a2.status = a_status
                                         a2.body_bytes = a_bytes
-                                        a2.unix_ms = tw
+                                        a2.unix_ms = step_tw
                                         a2.req_ms = span
                                         (mut pass_accs).push(take AccRow { a: a2 })
                                     }
                                 } else if !st.active && st.carry.is_empty() {
-                                    n_start = tw
+                                    n_start = step_tw
                                 }
                                 if !close_it &&
                                     !hs_row &&
                                     !st.active &&
-                                    now - n_idle >= row_idle_ms(n_dst, opts) {
+                                    step_now - n_idle >= row_idle_ms(n_dst, opts) {
                                     close_it = true
                                 }
                                 streaming_now = st.streaming
@@ -4467,7 +4476,7 @@ fn serve_main(
                                 if gi >= 0 &&
                                     gens[gi].state == "draining" &&
                                     gens[gi].shut_ms > 0 &&
-                                    now - gens[gi].since_ms >= gens[gi].shut_ms {
+                                    step_now - gens[gi].since_ms >= gens[gi].shut_ms {
                                     close_it = true
                                     aborted_flag = true
                                 }
@@ -4509,7 +4518,7 @@ fn serve_main(
                                         n_start = cs_eff
                                         pxs[pi].sock = fd
                                         pxs[pi].id = snext
-                                        pxs[pi].since = now
+                                        pxs[pi].since = step_now
                                         pxs[pi].stop_at = 0
                                         net_write(
                                             pxs[pi].jw,
@@ -4545,7 +4554,7 @@ fn serve_main(
                                         )
                                         let rep = proxy.job_refused(fd, px_job, px_tail, 500)
                                         let d = px_account(rep.0)
-                                        let t_end = if d.end_ms > 0 { d.end_ms } else { tw }
+                                        let t_end = if d.end_ms > 0 { d.end_ms } else { step_tw }
                                         var span = t_end - cs_eff
                                         if span < 0 {
                                             span = 0
