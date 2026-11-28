@@ -4542,7 +4542,13 @@ pub fn completion_room(
     row: int,
     cursor: int,
 ) -> bool {
-    expected > 0 && expected == reported && ok && !closing && plain && !spent && row >= cursor
+    expected > 0 &&
+        expected == reported &&
+        ok &&
+        !closing &&
+        plain &&
+        (!spent || row == 1) &&
+        row >= cursor
 }
 
 /// A completion grants no permission to read. Only a whole carried head
