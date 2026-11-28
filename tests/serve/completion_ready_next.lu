@@ -40,6 +40,9 @@ fn main() -> !int {
         !serve.completion_room(7, 7, true, false, false, false, 0, 0),
         "TLS and static streams are not plaintext exchanges",
     )
+    if serve.completion_ready(true, false, false) {
+        print("FAIL completion_ready_next: completion granted a read without readiness")
+    }
     assert(!serve.completion_ready(true, false, false), "completion alone must never permit a read")
     assert(!serve.completion_ready(false, true, true), "readiness cannot override a refused slot")
     assert(
@@ -67,6 +70,9 @@ fn main() -> !int {
             bonuses = bonuses + 1
         }
         row = row + 1
+    }
+    if bonuses != 1 {
+        print("FAIL completion_fairness: the pass permitted {bonuses} bonuses")
     }
     assert(bonuses == 1, "completion_fairness: the entire pass permits one bonus, not {bonuses}")
     assert(

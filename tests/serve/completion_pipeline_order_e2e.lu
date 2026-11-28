@@ -1,0 +1,39 @@
+//! check: run(exit=0)
+//! phase: run
+//! lanes: native checked
+//!
+//! Exercise the real binary with tagged length/chunked pipelines,
+//! split and idle next heads, EOF, two hot clients beside a nearly full
+//! quiet table, control during traffic, and old-generation drain/reuse.
+//! These are behavior witnesses, not latency measurements. A separate
+//! untimed transition census proves that the optimization saves a pass.
+//! The fixture puts down every process it starts before returning a
+//! failure and prints each failed case by name. Loopback only.
+
+fn main() -> !int {
+    let root = os_cwd() else |_| "."
+    let bin = env_get("LOBO_BIN") else |_| { "{root}/target/lobo-debug" }
+    let home = "{root}/target/completion-driver-home"
+    fs_create_dir_all(home)?
+    let path = "{root}/target/completion-driver.out"
+    let output = fs_create(path)?
+    var args = List[str]()
+    (mut args).push("SHELL=/bin/sh")
+    (mut args).push("HOME={home}")
+    (mut args).push("python3")
+    (mut args).push("-I")
+    (mut args).push("{root}/tests/rig/completion_mix.py")
+    (mut args).push(bin)
+    var map = List[int]()
+    (mut map).push(1)
+    (mut map).push(output)
+    (mut map).push(2)
+    (mut map).push(output)
+    let child = os_spawn_fds("env", args, map)?
+    let rc = os_wait(child)?
+    fs_close(output) else |_| {}
+    let text = fs_read_text(path) else |_| "fixture output missing"
+    print(text)
+    assert(rc == 0, "completion behavior fixture exited {rc}: {text}")
+    0
+}
