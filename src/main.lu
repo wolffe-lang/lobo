@@ -4247,9 +4247,27 @@ fn serve_main(
                                         ),
                                     )
                                 }
+                                // Deliberately replay what the bonus just consumed.
+                                let replay = if resuming {
+                                    if carry_set {
+                                        carry_new
+                                    } else if clen0 == 0 {
+                                        ""
+                                    } else {
+                                        carry_str(cbufs[cbuf0], clen0)
+                                    }
+                                } else {
+                                    st.carry
+                                }
                                 carry_set = true
-                                carry_new = st.carry
-                                n_head = if st.has_head { 1 } else { 0 }
+                                carry_new = replay
+                                n_head = if resuming {
+                                    if serve.carry_has_head(carry_new) { 1 } else { 0 }
+                                } else if st.has_head {
+                                    1
+                                } else {
+                                    0
+                                }
                                 n_dst = st.disc_st
                                 n_dn = st.disc_n
                                 n_dt = st.disc_t
