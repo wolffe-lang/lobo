@@ -181,7 +181,7 @@ class Fixture:
         self.conf.write_text(
             f"pid {self.root}/logs/lobo.pid;\ncontrol unix:{self.root}/logs/c.sock;\n"
             f"worker_shutdown_timeout {self.shutdown};\nevents {{ worker_connections 64; }}\n"
-            "http {\nlog_format order '$request_uri $status rt=$request_time';\n"
+            "http {\nlog_format order '$request $status rt=$request_time';\n"
             f"access_log {self.root}/logs/access.log order;\nmetrics on;\n"
             f"server {{ listen 127.0.0.1:{port}; root {self.root}/{generation};\n"
             "keepalive_requests 10000;\n"
@@ -276,7 +276,7 @@ def pipeline(binary):
         got = [wire.message()[2], wire.message()[2]]
         require(got == [b"old-tail", b"/up/d="], "completion_pipeline_order: split head or final body corrupted")
         rows = f.access(6)
-        paths = [row.split()[0] for row in rows]
+        paths = [row.split()[1] for row in rows]
         require(paths.count("/up/gated-a") == paths.count("/up/b") == paths.count("/up/c") == paths.count("/up/d") == 1,
                 "completion_pipeline_order: an exchange was logged more or less than once")
         require(paths.count("/tail") == 2 and len(rows) == 6, "completion_pipeline_order: static accounting was duplicated")
