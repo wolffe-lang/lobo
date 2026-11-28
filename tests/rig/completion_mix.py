@@ -148,6 +148,8 @@ class Fixture:
             (self.root / part).mkdir()
         (self.root / "old/tail").write_bytes(b"old-tail")
         (self.root / "new/tail").write_bytes(b"new-tail")
+        (self.root / "old/old-only").write_bytes(b"old-only")
+        (self.root / "new/old-only").write_bytes(b"new-only")
         self.backend = Backend(delay)
         self.shutdown = shutdown
         self.conf = self.root / "lobo.conf"
@@ -304,6 +306,15 @@ def ready(binary):
         require(wire.message()[2] == b"old-tail", "split next head was lost")
         sock.shutdown(socket.SHUT_WR)
         require(sock.recv(1) == b"", "EOF did not take the ordinary close path")
+        partial = f.connect()
+        partial_wire = Wire(partial)
+        partial.sendall(request("/up/partial-close") + b"GET /tail HTTP/1.1\r\nHost:")
+        require(partial_wire.message()[2] == b"/up/partial-close=", "exchange before partial close failed")
+        partial.shutdown(socket.SHUT_WR)
+        tail = partial.recv(4096)
+        require(b"HTTP/1.1 200" not in tail, "a partial next request was answered as complete")
+        while tail:
+            tail = partial.recv(4096)
         f.success = True
     finally:
         f.close()
@@ -353,6 +364,7 @@ def mixed(binary, terminate=None):
         if terminate:
             require(max(counts) < total, "shutdown must be issued with traffic still active")
             f.control(terminate)
+            require(max(counts) < total, "shutdown acknowledgement waited for hot traffic to finish")
         for sock in quiet:
             sock.close()
         for thread in drivers:
@@ -375,7 +387,7 @@ def drain(binary, forced=False):
     try:
         sock = f.connect()
         wire = Wire(sock)
-        sock.sendall(request("/up/gated-old") + request("/tail"))
+        sock.sendall(request("/up/gated-old") + request("/old-only"))
         require(f.backend.seen_gate.wait(5), "old-generation exchange did not begin")
         f.write_conf("new")
         f.control("reload")
@@ -388,10 +400,37 @@ def drain(binary, forced=False):
             require(f.backend.disconnected.wait(5), "forced shutdown left the old upstream open")
             for _ in range(20):
                 require(f.get("/tail") == b"new-tail", "old completion was applied to a reused connection")
+            rows = f.access(21)
+            require(not any("/old-only" in row or "/up/gated-old" in row for row in rows),
+                    "a stopped exchange or its unserved carry was logged/counted as served")
         else:
             f.backend.release.set()
             require(wire.message()[2] == b"/up/gated-old=", "old exchange reply was lost")
-            require(wire.message()[2] == b"old-tail", "carried request borrowed the new generation")
+            require(wire.message()[2] == b"old-only", "carried request borrowed the new generation")
+        f.success = True
+    finally:
+        f.close()
+
+
+def owed(binary, chunked=False):
+    f = fixture(binary, "owed_chunked" if chunked else "owed_length")
+    try:
+        sock = f.connect()
+        wire = Wire(sock)
+        framing = b"Transfer-Encoding: chunked\r\n\r\n5\r\na" if chunked else b"Content-Length: 5\r\n\r\na"
+        sock.sendall(request("/up/gated-first") + b"POST /up/owed HTTP/1.1\r\nHost: t\r\n" + framing)
+        require(f.backend.seen_gate.wait(5), "first owed-body exchange did not begin")
+        f.backend.release.set()
+        require(wire.message()[2] == b"/up/gated-first=", "first reply was lost")
+        f.control("ping")
+        require(f.get("/tail") == b"old-tail", "resumed owed body blocked an unrelated client")
+        rest = b"bcde\r\n0\r\n\r\n" if chunked else b"bcde"
+        sock.sendall(rest + request("/tail", b"Connection: close\r\n"))
+        require(wire.message()[2] == b"/up/owed=abcde", "resumed owed body was corrupted")
+        require(wire.message()[2] == b"old-tail", "head following an owed body was lost")
+        rows = f.access(4)
+        require(len(rows) == 4 and sum("/up/owed" in row for row in rows) == 1,
+                "resumed owed body was charged or logged more than once")
         f.success = True
     finally:
         f.close()
@@ -403,6 +442,8 @@ def main():
     args = parser.parse_args()
     cases = [("completion_pipeline_order", lambda: pipeline(args.binary)),
              ("completion_ready_next", lambda: ready(args.binary)),
+             ("completion_owed_length", lambda: owed(args.binary)),
+             ("completion_owed_chunked", lambda: owed(args.binary, True)),
              ("completion_fairness", lambda: mixed(args.binary)),
              ("completion_control_stop", lambda: mixed(args.binary, "stop")),
              ("completion_control_quit", lambda: mixed(args.binary, "quit")),
