@@ -4526,6 +4526,31 @@ pub fn carry_has_head(carry: str) -> bool {
     head_cut(carry).ready
 }
 
+/// May this completed plaintext exchange compete for this pass's one
+/// extra step? The account must match its live exchange, and a closing,
+/// stopped or failed account never competes. `closing` also includes a
+/// generation whose shutdown deadline has passed. The cursor advances
+/// past the chosen row; earlier rows still take their ordinary next-pass
+/// steps. This does NOT grant readiness. Pure and total.
+pub fn completion_room(
+    expected: int,
+    reported: int,
+    ok: bool,
+    closing: bool,
+    plain: bool,
+    spent: bool,
+    row: int,
+    cursor: int,
+) -> bool {
+    expected > 0 && expected == reported && ok && !closing && plain && !spent && row >= cursor
+}
+
+/// A completion grants no permission to read. Only a whole carried head
+/// or genuine socket readiness can use the available bonus. Pure and total.
+pub fn completion_ready(room: bool, whole_head: bool, readable: bool) -> bool {
+    room && (whole_head || readable)
+}
+
 /// The step a connection takes when `net_wait` said it has nothing to
 /// read (ws17): nothing happened, nothing closed, the carry rides. It
 /// exists so a serving loop with readiness never has to ARM a deadline

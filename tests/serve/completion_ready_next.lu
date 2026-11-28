@@ -1,0 +1,90 @@
+//! check: run(exit=0, stdout="completion_ready_next: eligibility and readiness hold\ncompletion_fairness: one bonus and cursor progress hold\n")
+//! phase: run
+//! lanes: native checked
+//! stage-src: serve budget conn tls proxy http config obs metrics resolver
+//!
+//! A valid account only offers a bonus slot; it never authorizes a read.
+//! Keep the one-per-pass budget, live exchange identity and rotating
+//! row threshold independent of HTTP parsing and socket scheduling.
+//! Behavior preservation alone is not evidence that an outer pass was
+//! saved: the untimed transition census checks the production loop.
+
+use serve
+
+fn main() -> !int {
+    assert(
+        serve.completion_room(7, 7, true, false, true, false, 0, 0),
+        "valid plaintext account competes",
+    )
+    assert(
+        !serve.completion_room(-1, -1, true, false, true, false, 0, 0),
+        "a missing exchange cannot match",
+    )
+    assert(
+        !serve.completion_room(7, -1, true, false, true, false, 0, 0),
+        "a malformed id cannot match",
+    )
+    assert(
+        !serve.completion_room(7, 6, true, false, true, false, 0, 0),
+        "a stale exchange cannot match a reused socket",
+    )
+    assert(
+        !serve.completion_room(7, 7, false, false, true, false, 0, 0),
+        "a failed or malformed account cannot resume",
+    )
+    assert(
+        !serve.completion_room(7, 7, true, true, true, false, 0, 0),
+        "close, stop and forced shutdown cannot resume",
+    )
+    assert(
+        !serve.completion_room(7, 7, true, false, false, false, 0, 0),
+        "TLS and static streams are not plaintext exchanges",
+    )
+    assert(!serve.completion_ready(true, false, false), "completion alone must never permit a read")
+    assert(!serve.completion_ready(false, true, true), "readiness cannot override a refused slot")
+    assert(
+        serve.completion_ready(true, true, false),
+        "a complete carried head needs no socket probe",
+    )
+    assert(
+        serve.completion_ready(true, false, true),
+        "a readable next head or EOF takes the ordinary step",
+    )
+    assert(!serve.carry_has_head("GET /next HTTP/1.1\r\nHost:"), "a partial head is not ready")
+    assert(
+        serve.carry_has_head("GET /next HTTP/1.1\r\nHost: t\r\n\r\n"),
+        "a complete head is ready",
+    )
+    print("completion_ready_next: eligibility and readiness hold")
+
+    var spent = false
+    var bonuses = 0
+    var row = 0
+    while row < 32 {
+        let room = serve.completion_room(7, 7, true, false, true, spent, row, 0)
+        if serve.completion_ready(room, true, false) {
+            spent = true
+            bonuses = bonuses + 1
+        }
+        row = row + 1
+    }
+    assert(bonuses == 1, "completion_fairness: the entire pass permits one bonus, not {bonuses}")
+    assert(
+        !serve.completion_room(7, 7, true, false, true, false, 0, 1),
+        "the earliest hot row cannot always win",
+    )
+    assert(
+        serve.completion_room(7, 7, true, false, true, false, 1, 1),
+        "the next row competes next",
+    )
+    assert(
+        serve.completion_room(7, 7, true, false, true, false, 31, 1),
+        "later ready rows still compete",
+    )
+    assert(
+        !serve.completion_room(7, 7, true, false, true, true, 31, 1),
+        "a later completion cannot spend a second bonus",
+    )
+    print("completion_fairness: one bonus and cursor progress hold")
+    0
+}
