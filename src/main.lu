@@ -2234,6 +2234,8 @@ fn serve_main(
     // Location names
     var clst = List[int]()
     var crows: int = 0
+    // The next row offered the completion pass's single extra step.
+    var resume_cursor: int = 0
     var cbufs = List[List[byte]]()
     var cbwas = List[int]()
     var cbfree = List[int]()
@@ -3618,6 +3620,8 @@ fn serve_main(
                     var k: int = 0
                     var w: int = 0
                     let ktot = crows
+                    var bonus_used = false
+                    let bonus_from = if resume_cursor < ktot { resume_cursor } else { 0 }
                     while k < ktot {
                         let fd = cfds[k]
                         let cg = cgens[k]
@@ -3655,6 +3659,8 @@ fn serve_main(
                         // a close is accounted after the branches, once
                         var closed_now = false
                         var closed_abort = false
+                        var step_row = false
+                        var resuming = false
                         if fd < 0 {
                             // ws64: step 2 closed this row to make room, and
                             // told its generation; it leaves the table here
@@ -3772,14 +3778,20 @@ fn serve_main(
                                 var px_close = false
                                 var px_carry = ""
                                 var px_end = now
+                                var px_expected = -1
+                                var px_ok = false
+                                var px_stopping = false
                                 if pxw >= 0 {
                                     let rep = px_reply(pxw)
+                                    px_expected = pxs[pi].id
+                                    px_stopping = pxs[pi].stop_at > 0
                                     pxs[pi].sock = -1
                                     pxs[pi].id = 0
                                     pxs[pi].since = now
                                     pxs[pi].stop_at = 0
                                     pxlive = pxlive - 1
                                     let d = px_account(rep)
+                                    px_ok = d.ok && d.status != 497
                                     px_close = d.close || !d.ok
                                     px_carry = d.carry
                                     // ws69 (lobo#105): the request ends where the
@@ -3884,9 +3896,52 @@ fn serve_main(
                                         carry_new = "{was}{px_carry}"
                                         n_head = if serve.carry_has_head(carry_new) { 1 } else { 0 }
                                     }
+                                    // Account and merge before offering this row
+                                    // one ordinary step. A completion is NOT
+                                    // readiness, and this budget belongs to the
+                                    // entire pass, not to each completed row.
+                                    var shutdown = false
+                                    if any_drain {
+                                        let gi = index_of(gens, cg)
+                                        if gi >= 0 &&
+                                            gens[gi].state == "draining" &&
+                                            gens[gi].shut_ms > 0 &&
+                                            time_unix_ms() - gens[gi].since_ms >= gens[gi].shut_ms {
+                                            shutdown = true
+                                        }
+                                    }
+                                    let slot = serve.completion_room(
+                                        px_expected,
+                                        sr.4,
+                                        px_ok,
+                                        shutdown || px_stopping,
+                                        tsl < 0,
+                                        bonus_used,
+                                        k,
+                                        bonus_from,
+                                    )
+                                    if slot {
+                                        var readable = false
+                                        if n_head != 1 {
+                                            var probe = List[int]()
+                                            (mut probe).push(fd)
+                                            let next_ready = net_wait(probe, 0) else |_| {
+                                                List[int]()
+                                            }
+                                            readable = ready_has(next_ready, fd)
+                                        }
+                                        if serve.completion_ready(slot, n_head == 1, readable) {
+                                            bonus_used = true
+                                            step_row = true
+                                            resuming = true
+                                        }
+                                    }
                                 }
                             }
                         } else {
+                            step_row = true
+                        }
+                        if step_row {
                             // ws17: a connection is STEPPED only when the wait named
                             // it. A socket the poll did not name has nothing to read,
                             // so ws16's 12 ms deadline-and-read on it was the loop
@@ -3912,7 +3967,7 @@ fn serve_main(
                             // connection every pass and paid 12 ms each for the
                             // privilege. ws57: whether the carry holds a head is
                             // the row's own flag, set when the carry was stored.
-                            let must_step = wi0 >= 0 || hh0 == 1
+                            let must_step = resuming || n_wait >= 0 || n_head == 1
                             var close_it = false
                             var aborted_flag = false
                             var streaming_now = false
@@ -3923,7 +3978,12 @@ fn serve_main(
                             // ws69 (lobo#105): where this row's request started:
                             // a row with no carry read its first bytes in this
                             // pass's wait
-                            let cs_eff = if clen0 == 0 { tw } else { cs0 }
+                            let step_clen = if carry_set { carry_new.len } else { clen0 }
+                            let cs_eff = if step_clen == 0 { tw } else { n_start }
+                            // A resumed handoff reuses the completed row's
+                            // reservation. Other rows keep this pass's existing
+                            // conservative admission count.
+                            let step_inflight = if resuming { inflight - 1 } else { inflight }
                             // lobo#142: a TLS row's handshake has the read
                             // timeout from its accept, `tls.accept`'s deadline
                             // as it was, and is counted as its timeout; the
@@ -3951,7 +4011,9 @@ fn serve_main(
                                 // the `ConnStep` is copied out into the pass.
                                 let cci = conf_index(gens, cg)
                                 let st = copy region step {
-                                    let car = if clen0 == 0 {
+                                    let car = if carry_set {
+                                        carry_new
+                                    } else if clen0 == 0 {
                                         ""
                                     } else {
                                         carry_str(cbufs[cbuf0], clen0)
@@ -3985,7 +4047,7 @@ fn serve_main(
                                         )
                                         serve.tls_step_pack(take tr)
                                     } else {
-                                        let full = if inflight < room {
+                                        let full = if step_inflight < room {
                                             serve.conn_step(
                                                 fd,
                                                 gens[cci].conf,
@@ -4026,7 +4088,7 @@ fn serve_main(
                                         serve.step_pack(take full, !asinks.is_empty())
                                     }
                                 }
-                                if st.streaming || st.proxying {
+                                if (st.streaming || st.proxying) && !resuming {
                                     inflight = inflight + 1
                                 }
                                 close_it = st.close
@@ -4655,9 +4717,17 @@ fn serve_main(
                             tsfree[tsfree_n] = tsl
                             tsfree_n = tsfree_n + 1
                         }
+                        if resuming {
+                            // `w` is now the following row in the compacted
+                            // table, even when the bonus closed this one.
+                            resume_cursor = w
+                        }
                         k = k + 1
                     }
                     crows = w
+                    if !bonus_used || resume_cursor >= crows {
+                        resume_cursor = 0
+                    }
                     cdead = 0
 
                     // ws09: pump the pass's records through every access output
